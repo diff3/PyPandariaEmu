@@ -1,0 +1,19 @@
+[INFO] [06/07/2024 16:16:52] Mist of Pandaria 5.4.8 Authserver
+[INFO] [06/07/2024 16:16:52] Listening on port 3722
+[SUCCESS] [06/07/2024 16:17:07] Accepted connection from ('192.168.11.30', 56670)
+[INFO] [06/07/2024 16:17:07] Received AUTH_LOGON_CHALLENGE
+[DEBUG] [06/07/2024 16:17:07] AuthLogonChallengeC(cmd=0, error=8, size=34, gamename='WoW', version1=5, version2=4, version3=8, build=18414, platform='x86', os='Win', country='enGB', timezone_bias=60, ip='192.168.11.30', I_len=4, I='MAPE')
+[INFO] [06/07/2024 16:17:07] Sending AUTH_LOGON_CHALLENGE to client
+[DEBUG] [06/07/2024 16:17:07] flag= 0
+[DEBUG] [06/07/2024 16:17:07] v = 42056817983546093453784660706891819426739125358988168067690591070286645841754
+[DEBUG] [06/07/2024 16:17:07] N = 62100066509156017342069496140902949863249758336000796928566441170293728648119
+[DEBUG] [06/07/2024 16:17:07] b = 1225285761258695909887706688681894611810753528
+[DEBUG] [06/07/2024 16:17:07] g = 7
+[DEBUG] [06/07/2024 16:17:07] B = 23406251444264172380357038357184690629316927865611401263054080448252862214315
+[DEBUG] [06/07/2024 16:17:07] s_bytes = b'\xdc\xcb\x88\xfex\xd0oXE\x97\x86\x1a\xf3\x9c\xdf\xee\rO\xd5\xef\xb2\x96\x16\x15\xe9\x9f\xae\xab\n\xa1k\x93'
+[DEBUG] [06/07/2024 16:17:07] unk3 = 65567938774054513891282804371925768297
+[DEBUG] [06/07/2024 16:17:07] bytearray(b'\x00\x00\x003\xbfx\x067Lo\xce\xad\x0c\x85\x93`\xf4.X\x96\xb8\xc1\x1f\xf4\x0e\x13X\\]\xe6\xfe\xad\x1f0\xab\x01\x07 \x89Kd^\x89\xe1S[\xbd\xad[\x8b)\x06PS\x08\x01\xb1\x8e\xbf\xbf^\x8f\xab<\x82\x87*>\x9b\xb7\xdc\xcb\x88\xfex\xd0oXE\x97\x86\x1a\xf3\x9c\xdf\xee\rO\xd5\xef\xb2\x96\x16\x15\xe9\x9f\xae\xab\n\xa1k\x931S\xec\xf8\x8eq\xd3\xc6\x8b\x14\x8a\xa8\x8f<\x18i\x00')
+[INFO] [06/07/2024 16:17:07] Received AUTH_LOGON_PROOF
+[DEBUG] [06/07/2024 16:17:07] AuthLogonProofC(cmd=1, A=b' \xa7\\\xf9\xe5\xacx\xa6"N\x8d\x07\xc9j\xe4%k50R\xaa\xe0\x1a\xbd\xa3b=\xd6\x9b\xcd!(', M1=b'\xd2N\x8b\xb8\xdd78\xdb\xc5\x96i\\\x85\x87c\xbd\xbf\xda\xbd;', crc_hash=b'\xd8\x98\x9a\x97~\xee\x82\x07\x8c4\x08\xc0\xe6C60\xbb\xb6\xfd\xd7', number_of_keys=0, security_flags=0)
+[INFO] [06/07/2024 16:17:07] Sending AUTH_LOGON_PROOF to client
+[INFO] [06/07/2024 16:17:09] Closed connection from ('192.168.11.30', 56670)
