@@ -59,14 +59,4 @@ class AuthLogonProofC:
         
 
 if __name__ == "__main__":   
-    # AuthLogonChallengeC data (38 bytes)
-    bit_string = b'\x00\x08"\x00WoW\x00\x05\x04\x08\xeeG68x\x00niW\x00BGne<\x00\x00\x00\xc0\xa8\x0b\x1e\x04MAPE'
-    auth_logon_challenge = AuthLogonChallengeC.unpack(bit_string)
-    print(auth_logon_challenge)
-    print(auth_logon_challenge.platform)
-
-    # AuthLogonProofC data (75 bytes)
-    bit_string = b'\x01\xd2\x87\xe1\x8f\xafP\xd1\x1fH\xacw\xedJ\x8c\xf8\xdd/\x12\xc5}\xfd\x01N\xe1*\x9d\xef\xc9t=\xba\x7f\x95\x80S\xc2\x0f\xe72\x8b\x8c\xc6\x97F\x9e\xe0t\x13\x02\xc7\xbc\xbb|q\xdfC\xfd)!`\x17K\x17\xde\x1e\x0c"S-\xa7 f\x00\x00'
-    auth_logon_proof = AuthLogonProofC.unpack(bit_string)
-    print(auth_logon_proof)
-    print(auth_logon_proof.M1)
+    pass
