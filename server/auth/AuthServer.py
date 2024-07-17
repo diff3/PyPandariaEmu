@@ -55,11 +55,16 @@ class AuthServer:
                     client_socket.send(response)
                 elif opcode == "AUTH_LOGON_PROOF": 
                     Logger.info(f'Received AUTH_LOGON_PROOF')
-                    HandleProof.check_proof(username, global_B, global_b, decoded_data, data)
+                    decoded_data = AuthLogonProofC.unpack(data)
+                    
+                    Logger.info(f'Sending AUTH_LOGON_PROOF to client')
+                    response = HandleProof.check_proof(username, global_B, global_b, decoded_data)
+                    Logger.debug(f'{response}')
 
-                    # Logger.info(f'Sending AUTH_LOGON_PROOF to client')
+                    client_socket.send(response)
                 elif opcode == "REALM_LIST":
-                    pass
+                    data = b'\x101\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00Skyfire_MoP\x00192.168.11.30:8085\x00\x00\x00\x00\x00\x00\x01\x01\x10\x00'
+                    client_socket.send(data)
                 else:
                     Logger.error(f'Unknown opcode: {opcode}')
             

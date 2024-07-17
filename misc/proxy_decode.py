@@ -182,12 +182,6 @@ def get_auth_opcode_name(opcode):
     elif opcode == AUTH_RECONNECT_CHALLENGE:
         return "AUTH_RECONNECT_CHALLENGE"
     elif opcode == AUTH_RECONNECT_PROOF:
-        return "AUTH_RECONNECT_PROOF"
-    elif opcode == REALM_LIST:
-        return "REALM_LIST"
-    elif opcode == XFER_INITIATE:
-        return "XFER_INITIATE"
-    elif opcode == XFER_DATA:
         return "XFER_DATA"
     elif opcode == XFER_ACCEPT:
         return "XFER_ACCEPT"
@@ -195,6 +189,8 @@ def get_auth_opcode_name(opcode):
         return "XFER_RESUME"
     elif opcode == XFER_CANCEL:
         return "XFER_CANCEL"
+    elif opcode == REALM_LIST:
+        return "REALM_LIST"
     else:
         return f"Unknown Opcode: {opcode}"
 
