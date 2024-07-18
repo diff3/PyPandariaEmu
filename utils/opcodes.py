@@ -42,9 +42,9 @@ class AuthResult(IntEnum):
 
 
 class opcodes:
-    
+
     @staticmethod
-    def getCode(enum_class, enum_value):
+    def getCodeName(enum_class, enum_value):
         if isinstance(enum_class, type) and issubclass(enum_class, IntEnum):
             for name, member in enum_class.__members__.items():
                 if member.value == enum_value:

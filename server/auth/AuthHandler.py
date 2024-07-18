@@ -181,7 +181,7 @@ class HandleProof:
             digest = sha1.digest()
 
             data = {
-                'cmd': 1,
+                'cmd': AuthCode.AUTH_LOGON_PROOF,
                 'error': 0,
                 'M2': digest,
                 'unk1': 0x800000,

@@ -39,8 +39,12 @@ class Logger:
     init()
 
     @staticmethod
-    def _should_log(log_type: DebugLevel):
-        return config["Logging"]["logging_mask"] & log_type
+    def _should_log(log_type: DebugLevel, logging_mask=None):
+
+        if not logging_mask:
+            logging_mask = config['Logging']['logging_mask']
+
+        return logging_mask & log_type
 
     @staticmethod
     def _colorize_message(label, color, msg):
@@ -83,8 +87,11 @@ class Logger:
             print(Logger._colorize_message('[SCRIPT]', DebugColorLevel.SCRIPT, msg))
 
     @staticmethod
-    def package(data_str):
-        if Logger._should_log(DebugLevel.DEBUG):
+    def package(data_str, logging_mask=None):
+        if not logging_mask:
+            logging_mask = config["Logging"]["logging_mask"]
+    
+        if Logger._should_log(DebugLevel.DEBUG, logging_mask):
             data = eval(data_str)    
 
             class_name = data.__class__.__name__

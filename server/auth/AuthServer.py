@@ -24,7 +24,7 @@ class AuthServer:
                 if not data:
                     break
 
-                opcode = opcodes.getCode(AuthCode, data[0])
+                opcode = opcodes.getCodeName(AuthCode, data[0])
                 Logger.info(f'{opcode} ({client_socket.getpeername()[0]})')
 
                 if opcode == "AUTH_LOGON_CHALLENGE":
