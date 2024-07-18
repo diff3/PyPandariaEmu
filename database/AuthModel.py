@@ -1,4 +1,8 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Float
+from sqlalchemy.dialects.mysql import SMALLINT as Smallint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -32,3 +36,19 @@ class Account(Base):
     os = Column(String(10))
     recruiter = Column(Integer)
     hasBoost = Column(Boolean)
+
+class Realmlist(Base):
+    __tablename__ = 'realmlist'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(32), server_default="PyPandaria")
+    address = Column(String(255), server_default="127.0.0.1")
+    localAddress = Column(String(255), server_default="127.0.0.1")
+    localSubnetMask = Column(String(255), server_default="255.255.255.0")
+    port = Column(Smallint(5), server_default="8085")
+    icon = Column(Boolean, server_default="0")
+    flag = Column(Boolean, server_default="0")
+    timezone = Column(Boolean, server_default="1")
+    allowedSecurityLevel = Column(Boolean, server_default="0")
+    population = Column(Float, server_default="0")
+    gamebuild = Column(Integer, server_default="18414")

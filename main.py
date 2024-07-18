@@ -1,10 +1,9 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-import yaml
 
 from server.auth.AuthServer import AuthServer
 from utils.Logger import Logger
+import yaml
 
 
 with open("etc/config.yaml", 'r') as file:
@@ -12,4 +11,4 @@ with open("etc/config.yaml", 'r') as file:
 
 if __name__ == "__main__":   
     Logger.info(f'Mist of Pandaria 5.4.8 Authserver')
-    AuthServer.start(port=config['authserver']['port'])
+    AuthServer.start(host=config['authserver']['host'], port=config['authserver']['port'])

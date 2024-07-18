@@ -1,6 +1,6 @@
 import socket
 import threading
-from authcodes import AuthResult, LoginResult, is_accepted_client_build, get_build_info
+from utils.authcodes import AuthResult, LoginResult, is_accepted_client_build, get_build_info
 
 # Definiera autentiseringskoderna
 AUTH_LOGON_CHALLENGE = 0x00
@@ -111,9 +111,11 @@ def accept_connections(proxy_socket, remote_host, remote_port):
 
 if __name__ == "__main__":
     local_host = "0.0.0.0"
-    local_ports = [3722]
+    # local_ports = [3722]
+    local_ports = [8084]
     remote_host = "192.168.11.30"
-    remote_port = 3724
+    # remote_port = 3724
+    remote_port = 8085
     
     start_proxy(local_host, local_ports, remote_host, remote_port)
 

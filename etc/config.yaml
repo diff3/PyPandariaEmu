@@ -1,5 +1,5 @@
 authserver:
-  host: 192.168.11.30
+  host: 0.0.0.0
   port: 3724
 
 crypto:
@@ -13,6 +13,18 @@ database:
   password: pwd
   charset: utf8mb4
   
-logging:
-  level: DEBUG
-  file: app.log
+Logging:
+  # Debug level values (you can combine them as a mask):
+  # None = 0x00 (0)
+  # Success = 0x01 (1)
+  # Information = 0x02 (2)
+  # Anticheat = 0x04 (4)
+  # Warning = 0x08 (8)
+  # Error = 0x10 (16)
+  # Debug = 0x20 (32)
+  # Script = 0x40 (64)
+  #
+  # All = 0x7f (127, the sum of all)
+  logging_mask: 0x1F
+  auth_file: auth.log
+  world_file: world.log

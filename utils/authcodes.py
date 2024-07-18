@@ -118,21 +118,3 @@ PreBcAcceptedClientBuilds = [
     RealmBuildInfo(5875, 1, 12, 1, ' '),
     RealmBuildInfo(0, 0, 0, 0, ' ')  # terminator
 ]
-
-def is_pre_bc_accepted_client_build(build):
-    return any(info.build == build for info in PreBcAcceptedClientBuilds if info.build != 0)
-
-def is_post_bc_accepted_client_build(build):
-    return any(info.build == build for info in PostBcAcceptedClientBuilds if info.build != 0)
-
-def is_accepted_client_build(build):
-    return is_pre_bc_accepted_client_build(build) or is_post_bc_accepted_client_build(build)
-
-def get_build_info(build):
-    for info in PostBcAcceptedClientBuilds:
-        if info.build == build:
-            return info
-    for info in PreBcAcceptedClientBuilds:
-        if info.build == build:
-            return info
-    return None

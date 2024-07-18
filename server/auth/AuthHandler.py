@@ -1,59 +1,33 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-
-import hashlib
 from database.AuthModel import *
+from server.auth.AuthProtocol import AuthLogonChallengeServer, AuthLogonProofServer
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
-from utils.opcodes import *
-import yaml
-import random
 from utils.Logger import Logger
-import struct
+from utils.opcodes import AuthCode, AuthResult
+import hashlib
+import random
+import yaml
 
-from server.auth.Decoder import AuthLogonChallengeC, AuthLogonProofC
+from utils.opcodes import *
 
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
 
-realm_db_engine = create_engine(f'mysql+pymysql://{config["database"]["user"]}:{config["database"]["password"]}@{config["database"]["host"]}:{config["database"]["port"]}/auth?charset={config["database"]["charset"]}',
-                                pool_pre_ping=True)
+realm_db_engine = create_engine(
+        f'mysql+pymysql://{config["database"]["user"]}:{config["database"]["password"]}@{config["database"]["host"]}:{config["database"]["port"]}/auth?charset={config["database"]["charset"]}',
+        pool_pre_ping=True
+    )
 SessionHolder = scoped_session(sessionmaker(bind=realm_db_engine, autoflush=False))
 
 
 class AuthProofData:
-    def create_auth_proof(data):
-        """
-        Creates an authentication proof for the given data.
 
-        Args:
-            data (dict): A dictionary containing the following keys:
-                - 'I' (str): The username.
-
-        Returns:
-            bytearray: A bytearray representing the authentication proof.
-
-        Description:
-            This static method retrieves the account information from the database based on the provided username.
-            It then generates a random number 'b' and calculates 'gmod' using the formula ((v * 3) + gmod) % N.
-            The calculated 'B' is used to create the authentication proof, which is a bytearray containing the following fields:
-                - AUTH_LOGON_CHALLENGE (byte)
-                - 0x00 (byte)
-                - WOW_SUCCESS (byte)
-                - B (32 bytes)
-                - 1 (byte)
-                - g (byte)
-                - 32 (byte)
-                - N (32 bytes)
-                - s (32 bytes)
-                - unk3 (16 bytes)
-                - securityFlags (byte)
-
-            The authentication proof is returned as a bytearray.
-        """
-        
+    @staticmethod
+    def create_auth_proof(data):        
         auth_db_session = SessionHolder()
         account = auth_db_session.query(Account).filter_by(username=data.I).first()
         auth_db_session.close()
@@ -69,36 +43,35 @@ class AuthProofData:
         securityFlags = 0x00
 
         b = random.getrandbits(152)
-        # b = 3381075083266726368626876785455561395178425281
         g = int(config['crypto']['g'])
 
         gmod = pow(g, b, N)
         B = ((v * 3) + gmod) % N
 
         unk3 = random.getrandbits(128)
-        # unk3 = 190708628721133826782318909029779410613
 
-        pkt = bytearray()
-        pkt.append(AUTH_LOGON_CHALLENGE)
-        pkt.append(0x00)
-        pkt.append(WOW_SUCCESS)
-        pkt.extend(B.to_bytes(32, byteorder='little'))
-        pkt.append(1)
-        pkt.append(g)
-        pkt.append(32)
-        pkt.extend(N.to_bytes(32, byteorder='little'))
-        pkt.extend(s.to_bytes(32, byteorder='little'))
-        pkt.extend(unk3.to_bytes(16, byteorder='little'))
-        pkt.append(securityFlags)
+        data = {
+            'cmd': AuthCode.AUTH_LOGON_CHALLENGE,
+            'error': 0x00,
+            'success': AuthResult.WOW_SUCCESS,
+            'B': B.to_bytes(32, byteorder='little'),
+            'l': 1,
+            'g': g,
+            'blob': 32,
+            'N': N.to_bytes(32, byteorder='little'),
+            's': s.to_bytes(32, byteorder='little'),
+            'unk3': unk3.to_bytes(16, byteorder='little'),
+            'securityFlags': securityFlags
+        }
 
-        return pkt, b, B
+        return AuthLogonChallengeServer.pack(data), b, B
     
 class HandleProof:
+
     @staticmethod
     def check_proof(username, B, b, data):
         auth_db_session = SessionHolder()
         account = auth_db_session.query(Account).filter_by(username=username).first()
-        # auth_db_session.close()
 
         _login = account.username
 
@@ -113,13 +86,18 @@ class HandleProof:
         v = int(v_hex, 16)
         A = int(A_hex, 16)
 
+        # Cryptaded password from client
         M1 = data.M1[::-1].hex().upper()
 
-        # Calculate S
-        sha1 = hashlib.sha1()
-        sha1.update(bytes.fromhex(A_hex)[::-1])
-        sha1.update(bytes.fromhex(B_hex)[::-1])
-        u = int.from_bytes(sha1.digest(), byteorder='little')
+        # Calculate u for S calculation
+        try:
+            sha1 = hashlib.sha1()
+            sha1.update(bytes.fromhex(A_hex)[::-1])
+            sha1.update(bytes.fromhex(B_hex)[::-1])
+            u = int.from_bytes(sha1.digest(), byteorder='little')
+        except:
+            Logger.warning("A or B are not hex number")
+            return 0
 
         S = pow(A * pow(v, u, N), b, N)
 
@@ -127,8 +105,12 @@ class HandleProof:
         t1 = bytearray(16)
         t2 = bytearray(16)
 
-        S_hex = hex(S)[2:]
-        S_bytes = bytes.fromhex(S_hex)[::-1]
+        try:
+            S_hex = hex(S)[2:]
+            S_bytes = bytes.fromhex(S_hex)[::-1]
+        except:
+            Logger.warning("S is not a hex number")
+            return 0
 
         for i in range(16):
             t1[i] = S_bytes[i * 2]
@@ -183,43 +165,40 @@ class HandleProof:
         sha1.update(K_bytes[::-1])
         M_bytes = sha1.digest()[::-1]
 
-        # print(f'M     ={M_bytes.hex().upper()}')
-        # print(f'M1    ={M1.upper()}')
-
         if M_bytes.hex().upper() == M1:
-            # print("Found key")
+            Logger.debug("Found key")
 
+            # Update session for user
             account.sessionkey = K_bytes.hex()
             auth_db_session.commit()
             auth_db_session.close()
 
-
+            # Calculate M2
             sha1 = hashlib.sha1()
             sha1.update(A_bytes[::-1])
             sha1.update(M_bytes[::-1])
             sha1.update(K_bytes[::-1])
-
-            res = bytearray(32)
-            pos = 0
-
-            res[pos] = 1
-            pos += 1
-            res[pos] = 0
-            pos += 1
-
             digest = sha1.digest()
-            res[pos:pos+20] = digest
-            pos += 20
 
-            struct.pack_into('<I', res, pos, 0x800000)
-            pos += 4
-            struct.pack_into('<I', res, pos, 0)
-            pos += 4
-            struct.pack_into('<H', res, pos, 0)
-            pkt = bytes(res)
+            data = {
+                'cmd': 1,
+                'error': 0,
+                'M2': digest,
+                'unk1': 0x800000,
+                'unk2': 0,
+                'unk3': 0
+            }
 
-            return pkt
+            return AuthLogonProofServer.pack(data)
 
+
+class RealmList:
+
+    @staticmethod
+    def create_realmlist():
+        data = b'\x101\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00Skyfire_MoP\x00192.168.11.30:8085\x00\x00\x00\x00\x00\x00\x01\x01\x10\x00'
+
+        return data
 
 class Password:
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import struct
 import socket
 import threading
-from authcodes import AuthResult, LoginResult, is_accepted_client_build, get_build_info
+# from utils.authcodes import AuthResult, LoginResult, is_accepted_client_build, get_build_info
 
 
 @dataclass
@@ -217,9 +217,8 @@ def forward_data(source, destination, direction):
             decoded_data = AuthLogonProofC.unpack(data)
             print(f"   Decoded: {decoded_data}")
         elif direction == "Server to Client" and auth_opcode_name == "AUTH_LOGON_PROOF":
-            # decoded_data = AuthLogonProofS.unpack(data)
-            # print(f"   Decoded: {decoded_data}")
-            pass
+            decoded_data = AuthLogonProofS.unpack(data)
+            print(f"   Decoded: {decoded_data}")
         elif direction == "Client to Server" and auth_opcode_name == "REALM_LIST":
             decoded_data = RealmListC.unpack(data)
             print(f"   Decoded: {decoded_data}")

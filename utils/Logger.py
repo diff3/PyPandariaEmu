@@ -1,10 +1,16 @@
-from datetime import datetime
-from enum import Enum, IntEnum
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 from colorama import init
 from colorama import Fore, Style
+from datetime import datetime
+from enum import Enum, IntEnum
+from utils.auth.packets import AuthLogonChallengeC, AuthLogonChallengeS, AuthLogonProofC, AuthLogonProofS, RealmListC
+import yaml
 
-# from utils.ConfigManager import config
+
+with open("etc/config.yaml", 'r') as file:
+    config = yaml.safe_load(file)
 
 
 class DebugColorLevel(Enum):
@@ -14,6 +20,7 @@ class DebugColorLevel(Enum):
     WARNING = Fore.YELLOW + Style.BRIGHT
     ERROR = Fore.RED + Style.BRIGHT
     DEBUG = Fore.CYAN + Style.BRIGHT
+    SCRIPT = Fore.MAGENTA + Style.BRIGHT
 
 
 class DebugLevel(IntEnum):
@@ -24,9 +31,8 @@ class DebugLevel(IntEnum):
     WARNING = 0x08
     ERROR = 0x10
     DEBUG = 0x20
+    SCRIPT = 0x40
 
-
-logging_mask = 0x3f
 
 class Logger:
     # Initialize colorama.
@@ -34,7 +40,7 @@ class Logger:
 
     @staticmethod
     def _should_log(log_type: DebugLevel):
-        return logging_mask & log_type
+        return config["Logging"]["logging_mask"] & log_type
 
     @staticmethod
     def _colorize_message(label, color, msg):
@@ -70,6 +76,24 @@ class Logger:
     def anticheat(msg):
         if Logger._should_log(DebugLevel.ANTICHEAT):
             print(Logger._colorize_message('[ANTICHEAT]', DebugColorLevel.ANTICHEAT, msg))
+
+    @staticmethod
+    def script(msg):
+        if Logger._should_log(DebugLevel.SCRIPT):
+            print(Logger._colorize_message('[SCRIPT]', DebugColorLevel.SCRIPT, msg))
+
+    @staticmethod
+    def package(data_str):
+        if Logger._should_log(DebugLevel.DEBUG):
+            data = eval(data_str)    
+
+            class_name = data.__class__.__name__
+            formatted_message = f'\n{class_name}(\n'
+            for key, value in data.__dict__.items():
+                value_str = repr(value)
+                formatted_message += f'   {key}={value_str},\n'
+            formatted_message = formatted_message.rstrip(',\n') + '\n)'
+            print(Logger._colorize_message('[PACKAGE]', DebugColorLevel.DEBUG, formatted_message))
 
     # Additional methods
 
