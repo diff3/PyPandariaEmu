@@ -74,14 +74,14 @@ class AuthLogonProofServer:
 
     @classmethod
     def unpack(cls, data):
-        fixed_size_length = struct.calcsize(AuthLogonProofServer.fixed_size_format)
-        unpacked_data = list(struct.unpack(AuthLogonProofServer.fixed_size_format, data[:fixed_size_length]))
+        fixed_size_length = struct.calcsize(cls.fixed_size_format)
+        unpacked_data = list(struct.unpack(cls.fixed_size_format, data[:fixed_size_length]))
 
         return AuthLogonProofS(*unpacked_data)
 
     @classmethod
     def pack(cls, data):
-        pkt = struct.pack(AuthLogonProofServer.fixed_size_format,
+        pkt = struct.pack(cls.fixed_size_format,
                           data['cmd'],
                           data['error'],
                           data['M2'],
@@ -90,6 +90,14 @@ class AuthLogonProofServer:
                           data['unk3'])
                 
         return pkt     
+
+    @classmethod
+    def right_length(cls, data):
+        fixed_size_length = struct.calcsize(cls.fixed_size_format)
+        if len(data) != fixed_size_length:
+            return False
+
+        return True
 
 
 @dataclass

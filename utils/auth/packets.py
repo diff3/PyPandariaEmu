@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass
+from typing import bytes
 
 
 @dataclass
@@ -58,6 +59,38 @@ class AuthLogonProofS:
     unk3: int
 
 
+# 16s64sBIBIfI'
+@dataclass
+class Realm:
+    ExternalAddress: str
+    name: str
+    icon: int
+    flag: int
+    imezone: int
+    m_ID: int
+    allowedSecurityLevel: int
+    populationLevel: float
+    gamebuild: int
+
+
 @dataclass
 class RealmListC:
     cmd: int
+
+
+# BB5sQ16s
+@dataclass
+class Xfer_init:
+    cmd: int
+    fileNameLen: int
+    fileName: bytes
+    file_size: int
+    md5: bytes
+
+
+# BH1024s
+@dataclass
+class Xfer_data:
+    opcide: int
+    data_size: int
+    data: bytes

@@ -25,6 +25,6 @@ Logging:
   # Script = 0x40 (64)
   #
   # All = 0x7f (127, the sum of all)
-  logging_mask: 0x1F
+  logging_mask: 0x7f
   auth_file: auth.log
   world_file: world.log
