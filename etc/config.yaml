@@ -26,5 +26,5 @@ Logging:
   #
   # All = 0x7f (127, the sum of all)
   logging_mask: 0x7f
-  auth_file: auth.log
+  log_file: auth.log
   world_file: world.log

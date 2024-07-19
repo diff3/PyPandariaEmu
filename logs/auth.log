@@ -1,0 +1,81 @@
+[INFO] [19/07/2024 15:28:20] Mist of Pandaria 5.4.8 Authserver
+[INFO] [19/07/2024 15:28:20] Listening at 0.0.0.0:3724
+[INFO] [19/07/2024 15:28:27] Mist of Pandaria 5.4.8 Authserver
+[INFO] [19/07/2024 15:28:27] Listening at 0.0.0.0:3724
+[SUCCESS] [19/07/2024 15:28:57] Accepted connection from ('192.168.11.30', 37924)
+[INFO] [19/07/2024 15:28:57] AUTH_LOGON_CHALLENGE (192.168.11.30)
+[SUCCESS] [19/07/2024 15:28:57] Closed connection from ('192.168.11.30', 37924)
+[SUCCESS] [19/07/2024 15:29:14] Accepted connection from ('192.168.11.30', 56508)
+[INFO] [19/07/2024 15:29:14] AUTH_LOGON_CHALLENGE (192.168.11.30)
+[SUCCESS] [19/07/2024 15:29:14] Closed connection from ('192.168.11.30', 56508)
+[SUCCESS] [19/07/2024 15:29:17] Accepted connection from ('192.168.11.30', 56518)
+[INFO] [19/07/2024 15:29:17] AUTH_LOGON_CHALLENGE (192.168.11.30)
+[SUCCESS] [19/07/2024 15:29:17] Closed connection from ('192.168.11.30', 56518)
+[INFO] [19/07/2024 15:30:08] Mist of Pandaria 5.4.8 Authserver
+[INFO] [19/07/2024 15:30:08] Listening at 0.0.0.0:3724
+[SUCCESS] [19/07/2024 15:30:12] Accepted connection from ('192.168.11.30', 59870)
+[INFO] [19/07/2024 15:30:12] AUTH_LOGON_CHALLENGE (192.168.11.30)
+[SUCCESS] [19/07/2024 15:30:12] Closed connection from ('192.168.11.30', 59870)
+[INFO] [19/07/2024 15:30:37] Mist of Pandaria 5.4.8 Authserver
+[INFO] [19/07/2024 15:30:37] Listening at 0.0.0.0:3724
+[SUCCESS] [19/07/2024 15:30:43] Accepted connection from ('192.168.11.30', 39482)
+[INFO] [19/07/2024 15:30:43] AUTH_LOGON_CHALLENGE (192.168.11.30)
+[PACKAGE] [19/07/2024 15:30:43] 
+AuthLogonChallengeC(
+   cmd=0,
+   error=8,
+   size=34,
+   gamename='WoW',
+   version1=5,
+   version2=4,
+   version3=8,
+   build=18414,
+   platform='x86',
+   os='Win',
+   country='enGB',
+   timezone_bias=60,
+   ip='192.168.11.30',
+   I_len=4,
+   I='MAPE'
+)
+[PACKAGE] [19/07/2024 15:30:44] 
+AuthLogonChallengeS(
+   cmd=0,
+   error=0,
+   success=0,
+   B=b'\xc6g%\xfe\x93\xe5\x80\x9c\xdf\xd2/K\x17}\xb7:\xc6p\r\xa7\xec\xf0\x0b\xcd\r\x12\x84\xc5\xef\\\x964',
+   l=1,
+   g=7,
+   blob=32,
+   N=b'\xb7\x9b>*\x87\x82<\xab\x8f^\xbf\xbf\x8e\xb1\x01\x08SP\x06)\x8b[\xad\xbd[S\xe1\x89^dK\x89',
+   s=b'\xf7\xd3\\\x9a*\xeaJ<\xa2\xcf\xfa\x13\xaa1\xda\x17k\x95\xdf\xd6p\x9aKgP\xa10\x85\xdeU\xe3\xe4',
+   unk3=b'\xd0\x05\x15D\xfe\xe0\xc6\\?\x86J\xf0\xdekQ/',
+   securityFlags=0
+)
+[INFO] [19/07/2024 15:30:44] AUTH_LOGON_PROOF (192.168.11.30)
+[PACKAGE] [19/07/2024 15:30:44] 
+AuthLogonProofC(
+   cmd=1,
+   A=b'\xe9\x14B$WU\xbf>.\xbf\x94GI#\xaa\x15\xd3\xaf\xc7\x8a\x88\xf7\xad\xcd\xb4\x89\x15/T5\xfaS',
+   M1=b'\xaay\xdf<\x96\xa5&_\x19H\xc6K\x9e\x92\x90j\xdebt\xaf',
+   crc_hash=b"\xa0r\xc2'\x7f\x80\xb6\x9aMj\xbc\xb7\x88\xec=e\xc7\xdcH\xb6",
+   number_of_keys=0,
+   security_flags=0
+)
+[DEBUG] [19/07/2024 15:30:44] Found key
+[PACKAGE] [19/07/2024 15:30:44] 
+AuthLogonProofS(
+   cmd=1,
+   error=0,
+   M2=b'\xdd(k\xb8\xd8\xcd|\x08~_\x1aQ\xfd/\x17\x85K>}\xc3',
+   unk1=8388608,
+   unk2=0,
+   unk3=0
+)
+[INFO] [19/07/2024 15:30:44] REALM_LIST (192.168.11.30)
+[PACKAGE] [19/07/2024 15:30:44] 
+RealmListC(
+   cmd=16
+)
+[DEBUG] [19/07/2024 15:30:44] b'\x101\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00Skyfire_MoP\x00192.168.11.30:8085\x00\x00\x00\x00\x00\x00\x01\x01\x10\x00'
+[SUCCESS] [19/07/2024 15:30:46] Closed connection from ('192.168.11.30', 39482)
