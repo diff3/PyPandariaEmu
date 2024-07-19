@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass
-from typing import bytes
 
 
 @dataclass
@@ -85,7 +84,7 @@ class Xfer_init:
     fileNameLen: int
     fileName: bytes
     file_size: int
-    md5: bytes
+    md5: str
 
 
 # BH1024s
@@ -93,4 +92,4 @@ class Xfer_init:
 class Xfer_data:
     opcide: int
     data_size: int
-    data: bytes
+    data: str

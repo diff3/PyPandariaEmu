@@ -48,7 +48,7 @@ class AuthResult(IntEnum):
 
 class eStatus(IntEnum):
     STATUS_CONNECTED = 0
-    STATUS_AUTHED
+    STATUS_AUTHED = 0
 
 
 class LoginResult(IntEnum):
