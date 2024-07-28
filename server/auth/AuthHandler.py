@@ -9,9 +9,8 @@ from utils.Logger import Logger
 from utils.opcodes import AuthCode, AuthResult
 import hashlib
 import random
+import struct
 import yaml
-
-from utils.opcodes import *
 
 
 with open("etc/config.yaml", 'r') as file:
@@ -196,7 +195,38 @@ class RealmList:
 
     @staticmethod
     def create_realmlist():
-        data = b'\x101\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00Skyfire_MoP\x00192.168.11.30:8085\x00\x00\x00\x00\x00\x00\x01\x01\x10\x00'
+        auth_db_session = SessionHolder()
+        realmData = auth_db_session.query(Realmlist).first()
+        auth_db_session.close()
+
+        RealmListSize = 1
+
+        pkt = bytearray()
+        pkt.append(0x00)
+        pkt.append(realmData.icon) # Not working, only normal or pvp
+        pkt.append(realmData.allowedSecurityLevel) # It's lock or not lock to level.
+        pkt.append(realmData.flag) # Not sure, it's mark realm with red
+        pkt.extend(realmData.name.encode('utf-8') + b'\x00')
+        pkt.extend(f'{realmData.address}:{realmData.port}'.encode('utf-8') + b'\x00')
+   
+        pkt.extend(struct.pack('<f', realmData.population)) # Not working correct, it showing low on 1, medium on 2 and high above.
+        pkt.append(realmData.timezone) 
+        pkt.append(0x01) # View or hide realm
+        pkt.append(0x01) # Think it's mark realm
+        pkt.append(0x10) # Fix for 2.x and 3.x clients
+        pkt.append(0x00) # As above
+
+        header = bytearray()
+        header.append(AuthCode.REALM_LIST)  
+        realmlistsizebuffer = struct.pack('>i', RealmListSize)
+        header.extend(struct.pack('<h', len(pkt) + len(realmlistsizebuffer) + 1))
+        header.append(0x00) 
+        header.extend(struct.pack('>i', RealmListSize))
+
+        data = bytes(header + pkt)
+
+        # Test data
+        # data = b'\x101\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00Skyfire_MoP\x00192.168.11.30:8085\x00\x00\x00\x00\x00\x00\x01\x01\x10\x00'
 
         return data
 
