@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Float
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Float, SmallInteger
 from sqlalchemy.dialects.mysql import SMALLINT as Smallint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -36,6 +36,19 @@ class Account(Base):
     os = Column(String(10))
     recruiter = Column(Integer)
     hasBoost = Column(Boolean)
+
+
+class AccountBanned(Base):
+    __tablename__ = 'account_banned'
+    __table_args__ = {'comment': 'Ban List'}
+
+    id = Column(Integer, primary_key=True, autoincrement=False, nullable=False, default=0, comment='Account id')
+    bandate = Column(Integer, primary_key=True, nullable=False, default=0)
+    unbandate = Column(Integer, nullable=False, default=0)
+    bannedby = Column(String(50), nullable=False)
+    banreason = Column(String(255), nullable=False)
+    active = Column(SmallInteger, nullable=False, default=1)
+
 
 class Realmlist(Base):
     __tablename__ = 'realmlist'

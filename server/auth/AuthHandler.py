@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 
 from database.AuthModel import *
-from server.auth.AuthProtocol import AuthLogonChallengeServer, AuthLogonProofServer
+from server.auth.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from utils.Logger import Logger
-from utils.opcodes import AuthCode, AuthResult
+from utils.auth.opcodes import AuthCode, AuthResult
 import hashlib
 import random
 import struct
@@ -23,16 +24,118 @@ realm_db_engine = create_engine(
 SessionHolder = scoped_session(sessionmaker(bind=realm_db_engine, autoflush=False))
 
 
+class Handler:
+    global_b = None
+    global_B = None
+    username = None
+    
+    @staticmethod
+    def AuthLogonChallenge(data):
+        decoded_data = AuthLogonChallengeClient.unpack(data)
+        Logger.package(f'{decoded_data}')
+
+        if not decoded_data.build == 18414:
+            Logger.warning(f'AuthLogonChallenge: Wrong client ')
+            return 1, response
+    
+        response, Handler.global_b, Handler.global_B = AuthProofData.create_auth_proof(decoded_data)
+        Logger.package(f'{AuthLogonChallengeServer.unpack(response)}')
+
+        Handler.username = decoded_data.I
+
+        if response:
+            return 0, response
+
+    @staticmethod
+    def AuthLogonProof(data):
+        decoded_data = AuthLogonProofClient.unpack(data)
+        Logger.package(f'{decoded_data}')
+                    
+        response = HandleProof.check_proof(Handler.username, Handler.global_B, Handler.global_b, decoded_data)
+
+        if not AuthLogonProofServer.validate(response):
+            Logger.warning("AUTH_LOGON_PROOF: Server package not valid")    
+            return 1, response
+                        
+        Logger.package(f'{AuthLogonProofServer.unpack(response)}')
+
+        if response: 
+            return 0, response
+
+        return 1, response            
+
+    @staticmethod
+    def RealmList(data):
+        decoded_data = RealmListClient.unpack(data)
+        Logger.package(f'{decoded_data}')
+
+        if len(data) < 5:
+            Logger.warning(f'REALM_LIST: Client data got wrong size')
+            return 1, decoded_data
+
+        response = RealmList.create_realmlist()
+        Logger.debug(f'{response}')
+
+        if response: return 0, response
+
+    @staticmethod
+    def AuthReconnectChallange(data):
+        pass
+
+    @staticmethod
+    def AuthReconnectProof(data):
+        pass
+
+
 class AuthProofData:
 
     @staticmethod
     def create_auth_proof(data):        
         auth_db_session = SessionHolder()
         account = auth_db_session.query(Account).filter_by(username=data.I).first()
+        # banned = auth_db_session.query(AccountBanned).filter_by(account.id).first()
         auth_db_session.close()
 
-        v_hex = account.v
-        s_hex = account.s
+        error = AuthResult.WOW_SUCCESS
+
+        if not account:
+            Logger.warning("No account")
+            error = AuthResult.WOW_FAIL_UNKNOWN_ACCOUNT
+
+        if account.locked: 
+            Logger.warning("Account locked")
+            error = AuthResult.WOW_FAIL_LOCKED_ENFORCED
+
+        if not account.v or not account.s:
+            Logger.warning("Missing v or s")
+            error = AuthResult.WOW_FAIL_OTHER
+
+        if account.online:
+            Logger.warning("User is already online")
+            error = AuthResult.WOW_FAIL_ALREADY_ONLINE
+
+        #if banned.id:
+         #  Logger.warning("User is banned")
+          # error = AuthResult.WOW_FAIL_BANNED
+
+        v_hex = account.v if account else 0x00
+        s_hex = account.s if account else 0x00
+        N_hex = config['crypto']['N']
+
+        N = int(N_hex, 16)
+        v = int(v_hex, 16)
+        s = int(s_hex, 16)
+
+        securityFlags = 0x00
+
+        b = random.getrandbits(152)
+        g = int(config['crypto']['g'])
+
+        gmod = pow(g, b, N)
+        B = ((v * 3) + gmod) % N
+
+        v_hex = account.v if account else 0x00
+        s_hex = account.s if account else 0x00
         N_hex = config['crypto']['N']
 
         N = int(N_hex, 16)
@@ -51,7 +154,7 @@ class AuthProofData:
 
         data = {
             'cmd': AuthCode.AUTH_LOGON_CHALLENGE,
-            'error': 0x00,
+            'error': error,
             'success': AuthResult.WOW_SUCCESS,
             'B': B.to_bytes(32, byteorder='little'),
             'l': 1,
@@ -229,6 +332,7 @@ class RealmList:
         # data = b'\x101\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00Skyfire_MoP\x00192.168.11.30:8085\x00\x00\x00\x00\x00\x00\x01\x01\x10\x00'
 
         return data
+
 
 class Password:
 

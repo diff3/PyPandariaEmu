@@ -92,8 +92,12 @@ class AuthLogonProofServer:
         return pkt     
 
     @classmethod
-    def right_length(cls, data):
+    def validate(cls, data):
         fixed_size_length = struct.calcsize(cls.fixed_size_format)
+
+        print(len(data))
+        print(fixed_size_length)
+        print(data)
         if len(data) != fixed_size_length:
             return False
 

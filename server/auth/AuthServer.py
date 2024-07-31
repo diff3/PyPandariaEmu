@@ -1,69 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from server.auth.AuthHandler import AuthProofData, HandleProof, RealmList
-from server.auth.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient
+from server.auth.AuthHandler import Handler
 from utils.Logger import Logger
-from utils.opcodes import *
+from utils.auth.opcodes import *
 import socket
 import threading
 
 
-class AuthServer:    
+class AuthServer:
 
     @staticmethod
-    def handle_client(client_socket):
-        global_b = None
-        global_B = None
-        username = None
+    def client_handler(client_socket):
 
         try:
             while True:
                 data = client_socket.recv(1024)
-                
-                if not data:
-                    break
+
+                if not data: break
 
                 opcode = opcodes.getCodeName(AuthCode, data[0])
-                Logger.info(f'{opcode} ({client_socket.getpeername()[0]})')
+                handler = opcode_handlers.get(opcode, client_socket)
 
-                if opcode == "AUTH_LOGON_CHALLENGE":
-                    decoded_data = AuthLogonChallengeClient.unpack(data)
-                    Logger.package(f'{decoded_data}')
-    
-                    response, global_b, global_B = AuthProofData.create_auth_proof(decoded_data)
-                    Logger.package(f'{AuthLogonChallengeServer.unpack(response)}')
-
-                    if not decoded_data.I or len(decoded_data.I) <= 0:
-                        Logger.warning(f'{opcode}: user not found')
-                        break
-
-                    username = decoded_data.I
-
-                    if response: client_socket.send(response)
-                elif opcode == "AUTH_LOGON_PROOF": 
-                    decoded_data = AuthLogonProofClient.unpack(data)
-                    Logger.package(f'{decoded_data}')
-                    
-                    response = HandleProof.check_proof(username, global_B, global_b, decoded_data)
-                    Logger.package(f'{AuthLogonProofServer.unpack(response)}')
-
-                    if response: client_socket.send(response)
-                elif opcode == "REALM_LIST":
-                    decoded_data = RealmListClient.unpack(data)
-                    Logger.package(f'{decoded_data}')
-
-                    if len(data) < 5:
-                        Logger.warning(f'{opcode}: data got wrong size')
-                        break
-
-                    response = RealmList.create_realmlist()
-                    Logger.debug(f'{response}')
-
-                    if response: client_socket.send(response)
+                if handler:
+                    error, response = handler(data)
                 else:
-                    Logger.error(f'Unknown opcode: {opcode}')
-            
+                    Logger.warning(f'Opcode: {opcode} is unknown') 
+
+                if error:
+                    Logger.warning(f"Closed connection from {client_socket.getpeername()}")
+                    client_socket.close()
+
+                client_socket.send(response)
+        
+        except:
+            # Logger.warning(f'Unknown handler error')
+            pass
+        
         finally:
             Logger.success(f"Closed connection from {client_socket.getpeername()}")
             client_socket.close()
@@ -79,5 +52,14 @@ class AuthServer:
         while True:
             client_socket, addr = server.accept()
             Logger.success(f'Accepted connection from {addr}')
-            client_handler = threading.Thread(target=AuthServer.handle_client, args=(client_socket,))
+            client_handler = threading.Thread(target=AuthServer.client_handler, args=(client_socket,))
             client_handler.start()
+
+
+opcode_handlers = {
+    "AUTH_LOGON_CHALLENGE": Handler.AuthLogonChallenge,
+    "AUTH_LOGON_PROOF": Handler.AuthLogonProof,
+    "REALM_LIST": Handler.RealmList,
+    "AUTH_RECONNECT_CHALLENGE": Handler.AuthReconnectChallange,
+    "AUTH_RECONNECT_PROOF": Handler.AuthReconnectProof
+}
