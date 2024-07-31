@@ -45,6 +45,8 @@ class Handler:
 
         if response:
             return 0, response
+        
+        return 1, response   
 
     @staticmethod
     def AuthLogonProof(data):
@@ -69,14 +71,17 @@ class Handler:
         decoded_data = RealmListClient.unpack(data)
         Logger.package(f'{decoded_data}')
 
-        if len(data) < 5:
+        if 0 <= len(data) < 5:
             Logger.warning(f'REALM_LIST: Client data got wrong size')
             return 1, decoded_data
 
         response = RealmList.create_realmlist()
         Logger.debug(f'{response}')
 
-        if response: return 0, response
+        if response: 
+            return 0, response
+
+        return 1, response   
 
     @staticmethod
     def AuthReconnectChallange(data):
@@ -167,6 +172,7 @@ class AuthProofData:
         }
 
         return AuthLogonChallengeServer.pack(data), b, B
+    
     
 class HandleProof:
 
