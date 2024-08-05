@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from database.AuthModel import *
-from server.auth.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient
+from server.auth.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient, AuthRecconectProofClient
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
@@ -13,6 +13,11 @@ import random
 import struct
 import yaml
 
+import secrets
+import binascii
+
+
+from utils.auth.packets import *
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
@@ -28,14 +33,20 @@ class Handler:
     global_b = None
     global_B = None
     username = None
+    reconnectProof = None
+    K = None
     
     @staticmethod
     def AuthLogonChallenge(data):
+        if not AuthLogonChallengeClient.validate(data):
+            Logger.warning("AuthLogonChallenge: client data didn't validate.")
+            return 1, data
+
         decoded_data = AuthLogonChallengeClient.unpack(data)
         Logger.package(f'{decoded_data}')
 
         if not decoded_data.build == 18414:
-            Logger.warning(f'AuthLogonChallenge: Wrong client ')
+            Logger.warning(f'AuthLogonChallenge: Client build is not 18141 (Pandaria 5.4.8)')
             return 1, response
     
         response, Handler.global_b, Handler.global_B = AuthProofData.create_auth_proof(decoded_data)
@@ -50,15 +61,15 @@ class Handler:
 
     @staticmethod
     def AuthLogonProof(data):
+        if not AuthLogonProofClient.validate(data):
+            Logger.warning("AuthLogonProof: Client data didn't validate.")
+            return 1, data
+
         decoded_data = AuthLogonProofClient.unpack(data)
         Logger.package(f'{decoded_data}')
-                    
+        
         response = HandleProof.check_proof(Handler.username, Handler.global_B, Handler.global_b, decoded_data)
 
-        if not AuthLogonProofServer.validate(response):
-            Logger.warning("AUTH_LOGON_PROOF: Server package not valid")    
-            return 1, response
-                        
         Logger.package(f'{AuthLogonProofServer.unpack(response)}')
 
         if response: 
@@ -72,7 +83,7 @@ class Handler:
         Logger.package(f'{decoded_data}')
 
         if 0 <= len(data) < 5:
-            Logger.warning(f'REALM_LIST: Client data got wrong size')
+            Logger.warning(f'RealmList: Client data got wrong size')
             return 1, decoded_data
 
         response = RealmList.create_realmlist()
@@ -85,47 +96,138 @@ class Handler:
 
     @staticmethod
     def AuthReconnectChallange(data):
-        pass
+
+        if not data:
+            Logger.warning("AuthReconnectChallange didn't get any data")
+            return 1, data
+
+        try:
+            unpacked_data = AuthLogonChallengeClient.unpack(data)
+        except Exception as e:
+            Logger.warning(f"AuthLogonChallenge is not correct: {e}")
+            return 1
+
+        Logger.package(f'{unpacked_data}')
+
+        auth_db_session = SessionHolder()
+        account = auth_db_session.query(Account).filter_by(username=unpacked_data.I).first()
+        auth_db_session.close()
+
+        Handler.username = account.username
+        Handler.K = account.sessionkey
+
+        Handler.reconnectProof = random.getrandbits(128)
+
+        pkt = bytearray()
+        pkt.append(AuthCode.AUTH_RECONNECT_CHALLENGE)
+        pkt.append(0x00)
+        pkt.extend(Handler.reconnectProof.to_bytes(16, byteorder='big'))
+        pkt.extend(b'\x00' * 16)
+
+        return 0, pkt
+
 
     @staticmethod
     def AuthReconnectProof(data):
-        pass
+        if not data:
+            Logger.warning("AuthReconnectProof: Didn't get any data")
+            return 1, data
+        
+        if not Handler.username or not Handler.K or not Handler.reconnectProof:
+            Logger.warning("AuthReconnectProof: Session is invalid")
+            return 1, data
+
+        unpacked_data = AuthRecconectProofClient.unpack(data)
+        Logger.package(f'{unpacked_data}')
+        
+        t1 = unpacked_data.R1
+
+        # Skapa SHA-1 hash
+        sha1 = hashlib.sha1()
+        sha1.update(Handler.username.encode('utf-8'))
+        sha1.update(t1)
+        sha1.update(Handler.reconnectProof.to_bytes(16, byteorder='big'))
+        sha1.update(bytes.fromhex(Handler.K))
+
+        # Hämta digest och jämför
+        digest = sha1.digest()
+        print(f"Digest: {digest.hex()}")
+        print(f"    R2: {unpacked_data.R2.hex()}")
+        
+        if digest.hex() == unpacked_data.R2.hex():
+            pkt = bytearray()
+            pkt.append(AuthCode.AUTH_RECONNECT_PROOF)
+            pkt.append(0x00)
+            pkt.extend(b'\x00' * 2)
+
+            return 0, pkt
+        
+        Logger.warning("AuthReconnectProof: Session is invalid")
+        return 1, data
 
 
 class AuthProofData:
 
     @staticmethod
     def create_auth_proof(data):        
-        auth_db_session = SessionHolder()
-        account = auth_db_session.query(Account).filter_by(username=data.I).first()
-        # banned = auth_db_session.query(AccountBanned).filter_by(account.id).first()
-        auth_db_session.close()
+        account = None
+        banned = None
 
+        try:
+            auth_db_session = SessionHolder()
+            account = auth_db_session.query(Account).filter_by(username=data.I).first()
+            auth_db_session.close()
+
+            auth_db_session = SessionHolder()
+            banned = auth_db_session.query(AccountBanned).filter_by(id=account.id).first()
+            auth_db_session.close()
+        except:
+            Logger.warning("AuthProofData: Cannot connect to database")
+        
         error = AuthResult.WOW_SUCCESS
 
         if not account:
-            Logger.warning("No account")
+            Logger.warning("AuthProofData: No account")
             error = AuthResult.WOW_FAIL_UNKNOWN_ACCOUNT
 
         if account.locked: 
-            Logger.warning("Account locked")
+            Logger.warning("AuthProofData: Account locked")
             error = AuthResult.WOW_FAIL_LOCKED_ENFORCED
 
-        if not account.v or not account.s:
-            Logger.warning("Missing v or s")
-            error = AuthResult.WOW_FAIL_OTHER
-
         if account.online:
-            Logger.warning("User is already online")
+            Logger.warning("AuthProofData: User is already online")
             error = AuthResult.WOW_FAIL_ALREADY_ONLINE
 
-        #if banned.id:
-         #  Logger.warning("User is banned")
-          # error = AuthResult.WOW_FAIL_BANNED
+        if banned and banned.id:
+           Logger.warning("AuthProofData: User is banned")
+           error = AuthResult.WOW_FAIL_BANNED
 
-        v_hex = account.v if account else 0x00
-        s_hex = account.s if account else 0x00
+        v_hex = account.v
+        s_hex = account.s
         N_hex = config['crypto']['N']
+
+        if account.s and account.v:
+            v_hex = account.v
+            s_hex = account.s
+        else:
+            # Not working at the moment
+            Logger.info("Missing s and/ or v")
+
+            num_hex_chars = 64
+            random_bytes = secrets.token_bytes(num_hex_chars // 2)
+            v_hex = binascii.hexlify(random_bytes).decode('utf-8').upper()
+
+            num_hex_chars = 64
+            random_bytes = secrets.token_bytes(num_hex_chars // 2)
+            s_hex = binascii.hexlify(random_bytes).decode('utf-8').upper()
+
+            account.v = v_hex
+            account.s = s_hex
+
+            auth_db_session = SessionHolder()
+            auth_db_session.add(account)
+            auth_db_session.commit()
+            auth_db_session.close()
 
         N = int(N_hex, 16)
         v = int(v_hex, 16)
@@ -138,10 +240,6 @@ class AuthProofData:
 
         gmod = pow(g, b, N)
         B = ((v * 3) + gmod) % N
-
-        v_hex = account.v if account else 0x00
-        s_hex = account.s if account else 0x00
-        N_hex = config['crypto']['N']
 
         N = int(N_hex, 16)
         v = int(v_hex, 16)
@@ -173,13 +271,18 @@ class AuthProofData:
 
         return AuthLogonChallengeServer.pack(data), b, B
     
-    
+
 class HandleProof:
 
     @staticmethod
     def check_proof(username, B, b, data):
-        auth_db_session = SessionHolder()
-        account = auth_db_session.query(Account).filter_by(username=username).first()
+        try:
+            auth_db_session = SessionHolder()
+            account = auth_db_session.query(Account).filter_by(username=username).first()
+            auth_db_session.close()
+        except:
+            Logger.warning("check_proof: Cannot connect to database")
+            
 
         _login = account.username
 
@@ -188,6 +291,10 @@ class HandleProof:
         N_hex = config['crypto']['N']
         A_hex = data.A[::-1].hex().upper()
         B_hex = hex(B)[2:]
+
+        if not A_hex:
+            Logger.warning("Missing A")
+            return 0
         
         g = int(config['crypto']['g'])
         N = int(N_hex, 16)
@@ -204,7 +311,7 @@ class HandleProof:
             sha1.update(bytes.fromhex(B_hex)[::-1])
             u = int.from_bytes(sha1.digest(), byteorder='little')
         except:
-            Logger.warning("A or B are not hex number")
+            Logger.warning("check_proof: A or B are not hex number")
             return 0
 
         S = pow(A * pow(v, u, N), b, N)
@@ -217,7 +324,7 @@ class HandleProof:
             S_hex = hex(S)[2:]
             S_bytes = bytes.fromhex(S_hex)[::-1]
         except:
-            Logger.warning("S is not a hex number")
+            Logger.warning("check_proof: S is not a hex number")
             return 0
 
         for i in range(16):
@@ -276,11 +383,15 @@ class HandleProof:
         if M_bytes.hex().upper() == M1:
             Logger.debug("Found key")
 
-            # Update session for user
-            account.sessionkey = K_bytes.hex()
-            auth_db_session.commit()
-            auth_db_session.close()
-
+            try:
+                auth_db_session = SessionHolder()
+                account = auth_db_session.query(Account).filter_by(username=username).first()
+                account.sessionkey = K_bytes.hex()
+                auth_db_session.commit()
+                auth_db_session.close()
+            except Exception as e:
+                Logger.warning(f"Cannot connect to database: {e}")
+        
             # Calculate M2
             sha1 = hashlib.sha1()
             sha1.update(A_bytes[::-1])
@@ -323,7 +434,7 @@ class RealmList:
         pkt.append(0x01) # View or hide realm
         pkt.append(0x01) # Think it's mark realm
         pkt.append(0x10) # Fix for 2.x and 3.x clients
-        pkt.append(0x00) # As above
+        pkt.append(0x10) # As above
 
         header = bytearray()
         header.append(AuthCode.REALM_LIST)  
@@ -331,11 +442,7 @@ class RealmList:
         header.extend(struct.pack('<h', len(pkt) + len(realmlistsizebuffer) + 1))
         header.append(0x00) 
         header.extend(struct.pack('>i', RealmListSize))
-
         data = bytes(header + pkt)
-
-        # Test data
-        # data = b'\x101\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00Skyfire_MoP\x00192.168.11.30:8085\x00\x00\x00\x00\x00\x00\x01\x01\x10\x00'
 
         return data
 

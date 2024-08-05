@@ -5,7 +5,7 @@ from colorama import init
 from colorama import Fore, Style
 from datetime import datetime
 from enum import Enum, IntEnum
-from utils.auth.packets import AuthLogonChallengeC, AuthLogonChallengeS, AuthLogonProofC, AuthLogonProofS, RealmListC
+from utils.auth.packets import *
 import yaml
 
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 @dataclass
 class AuthLogonChallengeC:
+    # <BBH4sBBBH4s4s4sIIB
     cmd: int
     error: int
     size: int
@@ -21,10 +22,11 @@ class AuthLogonChallengeC:
     ip: str
     I_len: int
     I: str
-    
+
 
 @dataclass
 class AuthLogonChallengeS:
+    # BBB32sBBB32s32s16sB
     cmd: int
     error: int
     success: int
@@ -40,6 +42,7 @@ class AuthLogonChallengeS:
 
 @dataclass 
 class AuthLogonProofC:
+    # B32s20s20sBB
     cmd: int
     A: str
     M1: str
@@ -50,6 +53,7 @@ class AuthLogonProofC:
     
 @dataclass
 class AuthLogonProofS:
+    # >BB20sIIH
     cmd: int
     error: int
     M2: str
@@ -58,9 +62,28 @@ class AuthLogonProofS:
     unk3: int
 
 
-# 16s64sBIBIfI'
+@dataclass
+class AuthReconnectChallangeS:
+    # Length is defined in header, and contains AuthLogonChallengeC
+    # BIs?
+    cmd: int
+    header: int
+    packets: str
+
+
+@dataclass
+class AuthReconnectProofC:
+    # Bs16s20s20B
+    cmd: int
+    R1: str
+    R2: str
+    R3: str
+    number_of_keys: int
+
+
 @dataclass
 class Realm:
+    # 16s64sBIBIfI
     ExternalAddress: str
     name: str
     icon: int
@@ -74,12 +97,18 @@ class Realm:
 
 @dataclass
 class RealmListC:
+    # B
     cmd: int
 
 
-# BB5sQ16s
+@dataclass
+class RealmListS:
+    pass
+
+
 @dataclass
 class Xfer_init:
+    # BB5sQ16s
     cmd: int
     fileNameLen: int
     fileName: bytes
@@ -87,9 +116,9 @@ class Xfer_init:
     md5: str
 
 
-# BH1024s
 @dataclass
 class Xfer_data:
+    # BH1024s
     opcide: int
     data_size: int
     data: str

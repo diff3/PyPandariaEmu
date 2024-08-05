@@ -22,21 +22,23 @@ class AuthServer:
                 opcode = opcodes.getCodeName(AuthCode, data[0])
                 handler = opcode_handlers.get(opcode, client_socket)
 
+
                 if handler:
+                    Logger.info(f'{client_socket.getpeername()[0]}:{opcode}')
+                    Logger.info(f'{data}')
                     error, response = handler(data)
                 else:
                     Logger.warning(f'Opcode: {opcode} is unknown') 
 
-                if error:
+                if not error == 0:
                     Logger.warning(f"Closed connection from {client_socket.getpeername()}")
                     client_socket.close()
 
                 client_socket.send(response)
         
         except:
-            # Logger.warning(f'Unknown handler error')
-            pass
-        
+            Logger.warning(f'Unknown handler error')
+                    
         finally:
             Logger.success(f"Closed connection from {client_socket.getpeername()}")
             client_socket.close()
