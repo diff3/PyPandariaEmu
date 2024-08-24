@@ -4,7 +4,6 @@
 from dataclasses import dataclass
 from utils.Logger import Logger
 from utils.world.opcodes import *
-# from utils.opcodes import opcodes
 from server.auth.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient
 import socket
 import threading
@@ -19,8 +18,9 @@ def forward_data(source, destination, direction):
         if not data:
             break
 
-        opcode = data[:2]
+        opcode = data[:1]
         opcode_name = opcodes.getCodeName(WorldOpcodes, opcode)
+        opcode_name = opcodes.getCodeName(AuthCode, opcode)
 
         Logger.info(f"{direction}")
         Logger.info(f"   opcode: {opcode}")
