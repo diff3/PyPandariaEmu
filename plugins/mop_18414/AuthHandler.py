@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from database.AuthModel import *
-from server.auth.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient, AuthRecconectProofClient
+from plugins.mop_18414.database.AuthModel import *
+from plugins.mop_18414.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient, AuthRecconectProofClient
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from utils.Logger import Logger
-from utils.auth.opcodes import AuthCode, AuthResult
+from plugins.mop_18414.opcodes import AuthCode, AuthResult
 import hashlib
 import random
 import struct
@@ -17,7 +17,7 @@ import secrets
 import binascii
 
 
-from utils.auth.packets import *
+from plugins.mop_18414.packets import *
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
@@ -453,3 +453,12 @@ class Password:
     def create_pass(username, password):
         username_pass = username.upper() + ":" + password.upper()
         return hashlib.sha1(username_pass.encode()).hexdigest().upper()
+    
+
+opcode_handlers = {
+    "AUTH_LOGON_CHALLENGE": Handler.AuthLogonChallenge,
+    "AUTH_LOGON_PROOF": Handler.AuthLogonProof,
+    "REALM_LIST": Handler.RealmList,
+    "AUTH_RECONNECT_CHALLENGE": Handler.AuthReconnectChallange,
+    "AUTH_RECONNECT_PROOF": Handler.AuthReconnectProof
+}

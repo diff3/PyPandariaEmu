@@ -5,12 +5,18 @@ from colorama import init
 from colorama import Fore, Style
 from datetime import datetime
 from enum import Enum, IntEnum
-from utils.auth.packets import *
+# from utils.auth.packets import *
 import yaml
+# import importlib
 
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
+
+
+# plugin = config['authserver']['plugin']
+# opcode_handlers = importlib.import_module(f'plugins.{plugin}.AuthHandler')
+# opcodes = importlib.import_module(f'plugins.{plugin}.opcodes')
 
 
 class DebugColorLevel(Enum):

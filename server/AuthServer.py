@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from server.auth.AuthHandler import Handler
+# from server.auth.AuthHandler import Handler
 from utils.Logger import Logger
-from utils.auth.opcodes import *
+# from utils.auth.opcodes import *
 import socket
 import threading
+import importlib
+
+
+import yaml
+
+
+with open("etc/config.yaml", 'r') as file:
+    config = yaml.safe_load(file)
 
 
 class AuthServer:
 
     @staticmethod
     def client_handler(client_socket):
+
+        plugin = config['authserver']['plugin']
+        opcode_handlers = importlib.import_module(f'plugins.{plugin}.AuthHandler')
+        opcodes = importlib.import_module(f'plugins.{plugin}.opcodes')
+
 
         try:
             while True:
@@ -58,10 +71,3 @@ class AuthServer:
             client_handler.start()
 
 
-opcode_handlers = {
-    "AUTH_LOGON_CHALLENGE": Handler.AuthLogonChallenge,
-    "AUTH_LOGON_PROOF": Handler.AuthLogonProof,
-    "REALM_LIST": Handler.RealmList,
-    "AUTH_RECONNECT_CHALLENGE": Handler.AuthReconnectChallange,
-    "AUTH_RECONNECT_PROOF": Handler.AuthReconnectProof
-}
