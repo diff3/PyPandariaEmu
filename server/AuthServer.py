@@ -7,10 +7,7 @@ from utils.Logger import Logger
 import socket
 import threading
 import importlib
-
-
 import yaml
-
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
@@ -22,19 +19,19 @@ class AuthServer:
     def client_handler(client_socket):
 
         plugin = config['authserver']['plugin']
+        
         opcode_handlers = importlib.import_module(f'plugins.{plugin}.AuthHandler')
-        opcodes = importlib.import_module(f'plugins.{plugin}.opcodes')
+        opcode_handlers = opcode_handlers.opcode_handlers
 
+        opcodes = importlib.import_module(f'plugins.{plugin}.opcodes')
 
         try:
             while True:
                 data = client_socket.recv(1024)
 
                 if not data: break
-
-                opcode = opcodes.getCodeName(AuthCode, data[0])
+                opcode = opcodes.opcodes.getCodeName(opcodes.AuthCode, data[0])
                 handler = opcode_handlers.get(opcode, client_socket)
-
 
                 if handler:
                     Logger.info(f'{client_socket.getpeername()[0]}:{opcode}')

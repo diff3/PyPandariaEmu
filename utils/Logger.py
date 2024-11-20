@@ -5,18 +5,22 @@ from colorama import init
 from colorama import Fore, Style
 from datetime import datetime
 from enum import Enum, IntEnum
-# from utils.auth.packets import *
 import yaml
-# import importlib
-
+import importlib
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
 
 
-# plugin = config['authserver']['plugin']
-# opcode_handlers = importlib.import_module(f'plugins.{plugin}.AuthHandler')
-# opcodes = importlib.import_module(f'plugins.{plugin}.opcodes')
+# Dynamic load packets to global namespace.
+packets = importlib.import_module(f'plugins.{config['authserver']['plugin']}.packets')
+
+if "__all__" in packets.__dict__:
+    names = packets.__dict__["__all__"]
+else:
+    names = [x for x in packets.__dict__ if not x.startswith("_")]
+
+globals().update({k: getattr(packets, k) for k in names})
 
 
 class DebugColorLevel(Enum):
@@ -120,7 +124,11 @@ class Logger:
             class_name = data.__class__.__name__
             formatted_message = f'\n{class_name}(\n'
             for key, value in data.__dict__.items():
-                value_str = repr(value)
+                if isinstance(value, bytes):
+                    value_str = value[::-1].hex().upper() 
+                else:
+                    value_str = repr(value) 
+
                 formatted_message += f'   {key}={value_str},\n'
             formatted_message = formatted_message.rstrip(',\n') + '\n)'
             print(Logger._colorize_message('[PACKAGE]', DebugColorLevel.DEBUG, formatted_message))

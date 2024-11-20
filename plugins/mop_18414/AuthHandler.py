@@ -28,7 +28,6 @@ realm_db_engine = create_engine(
     )
 SessionHolder = scoped_session(sessionmaker(bind=realm_db_engine, autoflush=False))
 
-
 class Handler:
     global_b = None
     global_B = None
@@ -177,12 +176,8 @@ class AuthProofData:
             auth_db_session = SessionHolder()
             account = auth_db_session.query(Account).filter_by(username=data.I).first()
             auth_db_session.close()
-
-            auth_db_session = SessionHolder()
-            banned = auth_db_session.query(AccountBanned).filter_by(id=account.id).first()
-            auth_db_session.close()
-        except:
-            Logger.warning("AuthProofData: Cannot connect to database")
+        except Exception as e:
+                Logger.warning(f"AuthProofData: Cannot connect to database: {e}")
         
         error = AuthResult.WOW_SUCCESS
 
@@ -198,9 +193,9 @@ class AuthProofData:
             Logger.warning("AuthProofData: User is already online")
             error = AuthResult.WOW_FAIL_ALREADY_ONLINE
 
-        if banned and banned.id:
-           Logger.warning("AuthProofData: User is banned")
-           error = AuthResult.WOW_FAIL_BANNED
+        # if banned and banned.id:
+        #    Logger.warning("AuthProofData: User is banned")
+        #   error = AuthResult.WOW_FAIL_BANNED
 
         v_hex = account.v
         s_hex = account.s
@@ -363,7 +358,7 @@ class HandleProof:
 
         # Calculate t4
         sha1 = hashlib.sha1()
-        sha1.update(_login.encode('utf-8'))
+        sha1.update(_login.upper().encode('utf-8'))
         t4_bytes = sha1.digest()[::-1]
 
         # Calculate M
@@ -381,8 +376,6 @@ class HandleProof:
         M_bytes = sha1.digest()[::-1]
 
         if M_bytes.hex().upper() == M1:
-            Logger.debug("Found key")
-
             try:
                 auth_db_session = SessionHolder()
                 account = auth_db_session.query(Account).filter_by(username=username).first()
@@ -409,6 +402,9 @@ class HandleProof:
             }
 
             return AuthLogonProofServer.pack(data)
+
+        else:
+            print("no key")
 
 
 class RealmList:
