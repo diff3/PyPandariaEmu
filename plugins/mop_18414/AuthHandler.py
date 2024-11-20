@@ -112,7 +112,7 @@ class Handler:
         account = auth_db_session.query(Account).filter_by(username=unpacked_data.I).first()
         auth_db_session.close()
 
-        Handler.username = account.username
+        Handler.username = account.username.upper()
         Handler.K = account.sessionkey
 
         Handler.reconnectProof = random.getrandbits(128)
@@ -143,7 +143,7 @@ class Handler:
 
         # Skapa SHA-1 hash
         sha1 = hashlib.sha1()
-        sha1.update(Handler.username.encode('utf-8'))
+        sha1.update(Handler.username.upper().encode('utf-8'))
         sha1.update(t1)
         sha1.update(Handler.reconnectProof.to_bytes(16, byteorder='big'))
         sha1.update(bytes.fromhex(Handler.K))
