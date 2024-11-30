@@ -13,28 +13,39 @@ with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
 
 
-class AuthServer:
+class WorldServer:
 
     @staticmethod
     def client_handler(client_socket):
 
         plugin = config['wow']['plugin']
         
-        opcode_handlers = importlib.import_module(f'plugins.{plugin}.AuthHandler')
-        opcode_handlers = opcode_handlers.opcode_handlers
+        # opcode_handlers = importlib.import_module(f'plugins.{plugin}.AuthHandler')
+        # opcode_handlers = opcode_handlers.opcode_handlers
 
-        opcodes = importlib.import_module(f'plugins.{plugin}.opcodes')
+        # opcodes = importlib.import_module(f'plugins.{plugin}.opcodes')
 
+        # b'\x08\x00\xb3\x10\x00\x00\x0e\x00\x00\x00'
         try:
+
+            respons = b'0\x00WORLD OF WARCRAFT CONNECTION - SERVER TO CLIENT\x00'
+            client_socket.send(respons)
+
             while True:
                 data = client_socket.recv(1024)
 
                 if not data: break
-                
-                opcode = opcodes.opcodes.getCodeName(opcodes.AuthCode, data[0])
-                handler = opcode_handlers.get(opcode, client_socket)
+                print(data)
 
-                if handler:
+
+
+                # Data: b'0\x00WORLD OF WARCRAFT CONNECTION - CLIENT TO SERVER\x00'
+
+                
+                # opcode = opcodes.opcodes.getCodeName(opcodes.AuthCode, data[0])
+                # handler = opcode_handlers.get(opcode, client_socket)
+
+                """if handler:
                     Logger.info(f'{client_socket.getpeername()[0]}:{opcode}')
                     Logger.info(f'{data}')
                     error, response = handler(data)
@@ -45,7 +56,7 @@ class AuthServer:
                     Logger.warning(f"Closed connection from {client_socket.getpeername()}")
                     client_socket.close()
 
-                client_socket.send(response)
+                client_socket.send(response)"""
         
         except:
             Logger.warning(f'Unknown handler error')
@@ -65,7 +76,7 @@ class AuthServer:
         while True:
             client_socket, addr = server.accept()
             Logger.success(f'Accepted connection from {addr}')
-            client_handler = threading.Thread(target=AuthServer.client_handler, args=(client_socket,))
+            client_handler = threading.Thread(target=WorldServer.client_handler, args=(client_socket,))
             client_handler.start()
 
 

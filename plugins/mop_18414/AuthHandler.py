@@ -112,7 +112,7 @@ class Handler:
         account = auth_db_session.query(Account).filter_by(username=unpacked_data.I).first()
         auth_db_session.close()
 
-        Handler.username = account.username
+        Handler.username = account.username.upper()
         Handler.K = account.sessionkey
 
         Handler.reconnectProof = random.getrandbits(128)
@@ -143,7 +143,7 @@ class Handler:
 
         # Skapa SHA-1 hash
         sha1 = hashlib.sha1()
-        sha1.update(Handler.username.encode('utf-8'))
+        sha1.update(Handler.username.upper().encode('utf-8'))
         sha1.update(t1)
         sha1.update(Handler.reconnectProof.to_bytes(16, byteorder='big'))
         sha1.update(bytes.fromhex(Handler.K))
@@ -230,7 +230,8 @@ class AuthProofData:
 
         securityFlags = 0x00
 
-        b = random.getrandbits(152)
+        # b = random.getrandbits(152)
+        b = int("D3A78C95668EF675BB5D39D049809368B258B1", 16)
         g = int(config['crypto']['g'])
 
         gmod = pow(g, b, N)
@@ -248,7 +249,8 @@ class AuthProofData:
         gmod = pow(g, b, N)
         B = ((v * 3) + gmod) % N
 
-        unk3 = random.getrandbits(128)
+        # unk3 = random.getrandbits(128)
+        unk3 = int("F142670EFBC66C67CA3ECCEE5C824209", 16)
 
         data = {
             'cmd': AuthCode.AUTH_LOGON_CHALLENGE,
@@ -380,6 +382,7 @@ class HandleProof:
                 auth_db_session = SessionHolder()
                 account = auth_db_session.query(Account).filter_by(username=username).first()
                 account.sessionkey = K_bytes.hex()
+                print(f'K: {K_bytes.hex()}')
                 auth_db_session.commit()
                 auth_db_session.close()
             except Exception as e:
@@ -423,7 +426,8 @@ class RealmList:
         pkt.append(realmData.allowedSecurityLevel) # It's lock or not lock to level.
         pkt.append(realmData.flag) # Not sure, it's mark realm with red
         pkt.extend(realmData.name.encode('utf-8') + b'\x00')
-        pkt.extend(f'{realmData.address}:{realmData.port}'.encode('utf-8') + b'\x00')
+        # pkt.extend(f'{realmData.address}:{realmData.port}'.encode('utf-8') + b'\x00')
+        pkt.extend(f'{realmData.address}:8084'.encode('utf-8') + b'\x00')
    
         pkt.extend(struct.pack('<f', realmData.population)) # Not working correct, it showing low on 1, medium on 2 and high above.
         pkt.append(realmData.timezone) 

@@ -1,6 +1,30 @@
 import socket
 import threading
-from utils.authcodes import AuthResult, LoginResult, is_accepted_client_build, get_build_info
+import binascii
+import yaml
+from plugins.mop_18414.database.AuthModel import *
+
+from utils.Logger import Logger
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, scoped_session
+
+from misc.wow_mop_arc4 import *
+
+encoded_trafic = False
+
+with open("etc/config.yaml", 'r') as file:
+    config = yaml.safe_load(file)
+
+realm_db_engine = create_engine(
+        f'mysql+pymysql://{config["database"]["user"]}:{config["database"]["password"]}@{config["database"]["host"]}:{config["database"]["port"]}/auth?charset={config["database"]["charset"]}',
+        pool_pre_ping=True
+    )
+
+SessionHolder = scoped_session(sessionmaker(bind=realm_db_engine, autoflush=False))
+
+
+
 
 # Definiera autentiseringskoderna
 AUTH_LOGON_CHALLENGE = 0x00
@@ -47,32 +71,198 @@ def parse_data(data):
         text_data = repr(data)
     return text_data
 
-def get_build_version(data):
-    if len(data) > 4:
-        build = int.from_bytes(data[4:8], byteorder='little')
-        if is_accepted_client_build(build):
-            build_info = get_build_info(build)
-            return f"{build_info.major_version}.{build_info.minor_version}.{build_info.bugfix_version}{build_info.hotfix_version} (Build {build})"
-    return "Unknown Build"
+def getUserSession(username):
+    auth_db_session = SessionHolder()
+    account = auth_db_session.query(Account).filter_by(username=username).first()
+    auth_db_session.close()
+
+    # Logger.info(f"user{username}, K: {account.sessionkey}")
+
+    return bytes.fromhex(account.sessionkey)
+
+def save_to_file(filename, header_data=None, K_value=None):
+    with open(filename, "a") as file:
+        if K_value:
+            file.write(f"K content (hex): {K_value}\n")
+        
+        if header_data:
+            file.write(f"Header content (hex): {header_data}\n")
 
 def forward_data(source, destination, direction):
-    while True:
-        data = source.recv(4096)
-        if len(data) == 0:
-            break
-        opcode = data[0]
-        auth_opcode_name = get_auth_opcode_name(opcode)
-        text_data = parse_data(data)
-        build_version = get_build_version(data)
+    K = getUserSession("admin")[::-1].hex()
+    save_to_file("arc4_test_client_data.txt", None, K)
+    save_to_file("arc4_test_server_data.txt", None, K)
+
+    IH = handle_input_header()
+    IH.initArc4(K)
+
+    try:
+        while True:
+            global encoded_trafic
+            data = b''
+
+            while True:
+                chunk = source.recv(4096)
+                data += chunk
+                if len(chunk) < 4096:
+                    break  
+
+            if len(data) <= 0:
+                break
+
+            if direction == "Client --> Server":   
+
+                header_data = data[:4]
+               
+                if header_data.hex() == "a302b200":
+                    Logger.info("Initializing encryption")
+                    IH.initArc4(K)
+                    encoded_trafic = True
+                elif encoded_trafic:
+                    decrypted_header = IH.decryptRecv(header_data)
+                    header = IH.unpack_data(decrypted_header)
+
+                    if header.size + 4 == len(data):
+                        opname = IH.getOpCodeName(header.cmd)
+                        Logger.info(f"Client --> Server (hex): {header_data.hex()}, size: {header.size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
+                        if opname == "CMSG_MESSAGECHAT_YELL":
+                            start_index = data.find(b'\x0b')
+                            message = data[start_index + 1:]
+                            print(f'  Yell: {message}')
+                    else:
+                        data_multi_header = data
+                        headers_list = []
+
+                        size = header.size
+
+                        if len(data_multi_header) >= 4 + size:
+                                payload = data_multi_header[4:4+size]
+                        else:
+                            payload = None  
+
+                        headers_list.append((header_data.hex(), size, payload))
+                        data_multi_header = data_multi_header[4 + size:]
+
+                        while True:
+                            header_data = data_multi_header[:4]
+                            
+                            decrypted_header = IH.decryptRecv(header_data)
+                            header = IH.unpack_data(decrypted_header)
+                            
+                            size = header.size
+                            
+                            if len(data_multi_header) >= 4 + size:
+                                payload = data_multi_header[4:4+size]
+                            else:
+                                payload = None  
+                            
+                            headers_list.append((header_data.hex(), size, payload))
+
+                            data_multi_header = data_multi_header[4 + size:]
+
+                            if not data_multi_header:
+                                break
+
+                        for header_hex, size, payload in headers_list:
+                            header = IH.unpack_data(bytes.fromhex(header_hex)) 
+
+                            opname = IH.getOpCodeName(header.cmd) 
+                            Logger.info(f"Client --> Server [hex]: {header_hex}, size: {size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
+                else:
+                    print(data)  
+
+            if direction == "1Server --> Client":     
+                header_data = data[:4]
+               
+                if encoded_trafic:
+                    if not header_data:
+                        break
+
+                    decrypted_header = IH.encryptSend(header_data)
+                    header = IH.unpack_data(decrypted_header)
+
+                    if header.size + 4 == len(data):
+                        opname = IH.getOpCodeName(header.cmd)
+                        Logger.info(f"Client --> Server (hex): {header_data.hex()}, size: {header.size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
+                    else:
+                        data_multi_header = data
+                        headers_list = []
+
+                        size = header.size
+
+                        if len(data_multi_header) >= 4 + size:
+                                payload = data_multi_header[4:4+size]
+                        else:
+                            payload = None  
+
+                        headers_list.append((header_data.hex(), size, payload))
+                        data_multi_header = data_multi_header[4 + size:]
+
+                        while True:
+                            header_data = data_multi_header[:4]
+                            
+                            if not header_data:
+                                break
+                            decrypted_header = IH.decryptRecv(header_data)
+                            header = IH.unpack_data(decrypted_header)
+                            
+                            size = header.size
+                            
+                            if len(data_multi_header) >= 4 + size:
+                                payload = data_multi_header[4:4+size]
+                            else:
+                                payload = None  
+                            
+                            headers_list.append((header_data.hex(), size, payload))
+
+                            data_multi_header = data_multi_header[4 + size:]
+
+                            if not data_multi_header:
+                                break
+
+                        for header_hex, size, payload in headers_list:
+                            header = IH.unpack_data(bytes.fromhex(header_hex)) 
+
+                            opname = IH.getOpCodeName(header.cmd) 
+                            Logger.info(f"Client --> Server [hex]: {header_hex}, size: {size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
+                else:
+                    print(data)  
+
+
+                """
+                header_data = header['header']
+                print(header_data)
+            # header_data = data[:4]
         
-        # Print the structured output
-        # print(f"{direction}")
-        print(f"{direction} : OPCODE : {auth_opcode_name}")
-        print(f"   Data: {data}")
-#        print(f"   Decoded data: {text_data}")
-#        print(f"   Build version: {build_version}")
-        
-        destination.sendall(data)
+                if hex(header_data) == "a302b200":
+                    Logger.info("Initializing encryption")
+                    IH.initArc4(K)
+                    encoded_trafic = True
+                elif encoded_trafic:
+                    if direction == "Client --> Server":
+                        decrypted_header = IH.decryptRecv(header_data)
+                        header = IH.unpack_data(decrypted_header)
+                        opname = IH.getOpCodeName(header.cmd)
+                        Logger.info(f"Client --> Server (hex): {header_data.hex()}, size: {header.size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
+                        Logger.debug(f'data: {data.hex()}')
+                        save_to_file("arc4_test_client_data.txt", header_data.hex(), None)
+                    elif direction == "Server --> Client":
+                        decrypted_header = IH.encryptSend(header_data)
+                        header = IH.unpack_data(decrypted_header)
+                        opname = IH.getOpCodeName(header.cmd)
+                        # Logger.info(f"Server --> Client (hex): {header_data.hex()}, size: {header.size} CMD: {hex(header.cmd)[2:]}\t({header.cmd})   \t{opname}")
+                        save_to_file("arc4_test_server_data.txt", header_data.hex(), None)
+                else:
+                    opcode = data[:1]
+                    opname = get_auth_opcode_name(opcode)
+                    Logger.info(f'AuthCode: {opname}')"""
+
+            destination.sendall(data)
+    except KeyboardInterrupt:
+        print("Avslutar programmet...")    
+    
+        client_file.close()
+        server_file.close()
 
 def handle_client(client_socket, remote_host, remote_port):
     # Connect to the actual server
@@ -80,8 +270,8 @@ def handle_client(client_socket, remote_host, remote_port):
     server_socket.connect((remote_host, remote_port))
     
     # Create threads to forward data in both directions
-    client_to_server = threading.Thread(target=forward_data, args=(client_socket, server_socket, "Client to Server"))
-    server_to_client = threading.Thread(target=forward_data, args=(server_socket, client_socket, "Server to Client"))
+    client_to_server = threading.Thread(target=forward_data, args=(client_socket, server_socket, "Client --> Server"))
+    server_to_client = threading.Thread(target=forward_data, args=(server_socket, client_socket, "Server --> Client"))
     
     client_to_server.start()
     server_to_client.start()
@@ -92,29 +282,27 @@ def handle_client(client_socket, remote_host, remote_port):
     client_socket.close()
     server_socket.close()
 
-def start_proxy(local_host, local_ports, remote_host, remote_port):
-    for local_port in local_ports:
-        proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        proxy_socket.bind((local_host, local_port))
-        proxy_socket.listen(5)
+def start_proxy(local_host, local_port, remote_host, remote_port):
+    proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    proxy_socket.bind((local_host, local_port))
+    proxy_socket.listen(5)
         
-        print(f"Proxy listening on {local_host}:{local_port}")
+    Logger.info(f"Mist of Pandaria 5.4.8 ProxyServer")
+    Logger.info(f"Listening at {local_host}:{local_port}")
         
-        threading.Thread(target=accept_connections, args=(proxy_socket, remote_host, remote_port)).start()
+    threading.Thread(target=accept_connections, args=(proxy_socket, remote_host, remote_port)).start()
 
 def accept_connections(proxy_socket, remote_host, remote_port):
     while True:
         client_socket, addr = proxy_socket.accept()
-        print(f"Accepted connection from {addr}")
+        Logger.success(f"Accepted connection from {addr}")
         client_handler = threading.Thread(target=handle_client, args=(client_socket, remote_host, remote_port))
         client_handler.start()
 
 if __name__ == "__main__":
     local_host = "0.0.0.0"
-    # local_ports = [3722]
-    local_ports = [8084]
+    local_ports = 8084
     remote_host = "192.168.11.30"
-    # remote_port = 3724
     remote_port = 8085
     
     start_proxy(local_host, local_ports, remote_host, remote_port)

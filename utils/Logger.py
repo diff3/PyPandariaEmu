@@ -13,7 +13,7 @@ with open("etc/config.yaml", 'r') as file:
 
 
 # Dynamic load packets to global namespace.
-packets = importlib.import_module(f'plugins.{config['authserver']['plugin']}.packets')
+packets = importlib.import_module(f'plugins.{config['wow']['plugin']}.packets')
 
 if "__all__" in packets.__dict__:
     names = packets.__dict__["__all__"]
