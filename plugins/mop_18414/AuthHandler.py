@@ -141,14 +141,12 @@ class Handler:
         
         t1 = unpacked_data.R1
 
-        # Skapa SHA-1 hash
         sha1 = hashlib.sha1()
         sha1.update(Handler.username.upper().encode('utf-8'))
         sha1.update(t1)
         sha1.update(Handler.reconnectProof.to_bytes(16, byteorder='big'))
         sha1.update(bytes.fromhex(Handler.K))
 
-        # Hämta digest och jämför
         digest = sha1.digest()
         print(f"Digest: {digest.hex()}")
         print(f"    R2: {unpacked_data.R2.hex()}")
