@@ -1,29 +1,26 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import socket
 import threading
-import binascii
+# import binascii
 import yaml
+from misc.wow_mop_arc4 import *
 from plugins.mop_18414.database.AuthModel import *
-
 from utils.Logger import Logger
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 
-from misc.wow_mop_arc4 import *
-
-encoded_trafic = False
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
 
 realm_db_engine = create_engine(
-        f'mysql+pymysql://{config["database"]["user"]}:{config["database"]["password"]}@{config["database"]["host"]}:{config["database"]["port"]}/auth?charset={config["database"]["charset"]}',
+    f'mysql+pymysql://{config["database"]["user"]}:{config["database"]["password"]}@{config["database"]["host"]}:{config["database"]["port"]}/auth?charset={config["database"]["charset"]}',
         pool_pre_ping=True
     )
 
 SessionHolder = scoped_session(sessionmaker(bind=realm_db_engine, autoflush=False))
-
-
 
 
 # Definiera autentiseringskoderna
@@ -37,6 +34,7 @@ XFER_DATA = 0x31
 XFER_ACCEPT = 0x32
 XFER_RESUME = 0x33
 XFER_CANCEL = 0x34
+
 
 # Funktion för att få namn på autentiseringskoder
 def get_auth_opcode_name(opcode):
@@ -63,20 +61,10 @@ def get_auth_opcode_name(opcode):
     else:
         return f"Unknown Opcode: {opcode}"
 
-# Modifiera parse_data för att inkludera autentiseringskoder
-def parse_data(data):
-    try:
-        text_data = data.decode('utf-8', errors='ignore')
-    except UnicodeDecodeError:
-        text_data = repr(data)
-    return text_data
-
 def getUserSession(username):
     auth_db_session = SessionHolder()
     account = auth_db_session.query(Account).filter_by(username=username).first()
     auth_db_session.close()
-
-    # Logger.info(f"user{username}, K: {account.sessionkey}")
 
     return bytes.fromhex(account.sessionkey)
 
@@ -94,13 +82,17 @@ def forward_data(source, destination, direction):
     save_to_file("arc4_test_server_data.txt", None, K)
 
     IH = handle_input_header()
-    IH.initArc4(K)
+    
+    IH.initArc4(K, None)
+    encoded_trafic = False
 
     try:
+        headers_list = []
+        
         while True:
-            global encoded_trafic
+            
             data = b''
-
+            
             while True:
                 chunk = source.recv(4096)
                 data += chunk
@@ -110,152 +102,49 @@ def forward_data(source, destination, direction):
             if len(data) <= 0:
                 break
 
-            if direction == "Client --> Server":   
+            header_data = data[:4]
 
-                header_data = data[:4]
-               
-                if header_data.hex() == "a302b200":
-                    Logger.info("Initializing encryption")
-                    IH.initArc4(K)
-                    encoded_trafic = True
-                elif encoded_trafic:
-                    decrypted_header = IH.decryptRecv(header_data)
-                    header = IH.unpack_data(decrypted_header)
+            if header_data.hex() == "a302b200" or header_data.hex() == "29004909":
+                Logger.info("Initializing encryption")
+                IH.initArc4(K, direction)
+                encoded_trafic = True
+            elif encoded_trafic:
+                # elif encoded_trafic and not direction == 'Client --> Server':
+                # elif encoded_trafic and not direction == 'Server --> Client':
+                data_multi_header = data
 
-                    if header.size + 4 == len(data):
-                        opname = IH.getOpCodeName(header.cmd)
-                        Logger.info(f"Client --> Server (hex): {header_data.hex()}, size: {header.size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
-                        if opname == "CMSG_MESSAGECHAT_YELL":
-                            start_index = data.find(b'\x0b')
-                            message = data[start_index + 1:]
-                            print(f'  Yell: {message}')
-                    else:
-                        data_multi_header = data
-                        headers_list = []
+                while True:
+                    payload = None 
 
-                        size = header.size
+                    header_encryped = data_multi_header[:4]
 
-                        if len(data_multi_header) >= 4 + size:
-                                payload = data_multi_header[4:4+size]
+                    try:
+                        if direction == "Client --> Server":
+                            decrypted_header = IH.decryptRecv(header_encryped)
                         else:
-                            payload = None  
+                            decrypted_header = IH.encryptSend(header_encryped)
 
-                        headers_list.append((header_data.hex(), size, payload))
-                        data_multi_header = data_multi_header[4 + size:]
-
-                        while True:
-                            header_data = data_multi_header[:4]
-                            
-                            decrypted_header = IH.decryptRecv(header_data)
-                            header = IH.unpack_data(decrypted_header)
-                            
-                            size = header.size
-                            
-                            if len(data_multi_header) >= 4 + size:
-                                payload = data_multi_header[4:4+size]
-                            else:
-                                payload = None  
-                            
-                            headers_list.append((header_data.hex(), size, payload))
-
-                            data_multi_header = data_multi_header[4 + size:]
-
-                            if not data_multi_header:
-                                break
-
-                        for header_hex, size, payload in headers_list:
-                            header = IH.unpack_data(bytes.fromhex(header_hex)) 
-
-                            opname = IH.getOpCodeName(header.cmd) 
-                            Logger.info(f"Client --> Server [hex]: {header_hex}, size: {size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
-                else:
-                    print(data)  
-
-            if direction == "1Server --> Client":     
-                header_data = data[:4]
-               
-                if encoded_trafic:
-                    if not header_data:
+                        header = IH.unpack_data(decrypted_header)
+                    except Exception as e:
+                        print(f"Error processing data: {e}")
                         break
 
-                    decrypted_header = IH.encryptSend(header_data)
-                    header = IH.unpack_data(decrypted_header)
+                    if len(data_multi_header) == 4 + header.size:
+                        payload = data_multi_header[4:header.size]
+                
+                    headers_list.append((decrypted_header.hex(), header.size, payload))
+                    
+                    data_multi_header = data_multi_header[4 + header.size:]
+            
+                    if not data_multi_header:
+                        break
 
-                    if header.size + 4 == len(data):
-                        opname = IH.getOpCodeName(header.cmd)
-                        Logger.info(f"Client --> Server (hex): {header_data.hex()}, size: {header.size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
-                    else:
-                        data_multi_header = data
-                        headers_list = []
+                for header_hex, size, payload in headers_list:
+                    header = IH.unpack_data(bytes.fromhex(header_hex))
+                    opname = IH.getOpCodeName(header.cmd)
+                    print(f"{direction} [hex]: {header_hex}, size: {size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
 
-                        size = header.size
-
-                        if len(data_multi_header) >= 4 + size:
-                                payload = data_multi_header[4:4+size]
-                        else:
-                            payload = None  
-
-                        headers_list.append((header_data.hex(), size, payload))
-                        data_multi_header = data_multi_header[4 + size:]
-
-                        while True:
-                            header_data = data_multi_header[:4]
-                            
-                            if not header_data:
-                                break
-                            decrypted_header = IH.decryptRecv(header_data)
-                            header = IH.unpack_data(decrypted_header)
-                            
-                            size = header.size
-                            
-                            if len(data_multi_header) >= 4 + size:
-                                payload = data_multi_header[4:4+size]
-                            else:
-                                payload = None  
-                            
-                            headers_list.append((header_data.hex(), size, payload))
-
-                            data_multi_header = data_multi_header[4 + size:]
-
-                            if not data_multi_header:
-                                break
-
-                        for header_hex, size, payload in headers_list:
-                            header = IH.unpack_data(bytes.fromhex(header_hex)) 
-
-                            opname = IH.getOpCodeName(header.cmd) 
-                            Logger.info(f"Client --> Server [hex]: {header_hex}, size: {size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
-                else:
-                    print(data)  
-
-
-                """
-                header_data = header['header']
-                print(header_data)
-            # header_data = data[:4]
-        
-                if hex(header_data) == "a302b200":
-                    Logger.info("Initializing encryption")
-                    IH.initArc4(K)
-                    encoded_trafic = True
-                elif encoded_trafic:
-                    if direction == "Client --> Server":
-                        decrypted_header = IH.decryptRecv(header_data)
-                        header = IH.unpack_data(decrypted_header)
-                        opname = IH.getOpCodeName(header.cmd)
-                        Logger.info(f"Client --> Server (hex): {header_data.hex()}, size: {header.size} CMD: {hex(header.cmd)[2:]} ({header.cmd})   \t{opname}")
-                        Logger.debug(f'data: {data.hex()}')
-                        save_to_file("arc4_test_client_data.txt", header_data.hex(), None)
-                    elif direction == "Server --> Client":
-                        decrypted_header = IH.encryptSend(header_data)
-                        header = IH.unpack_data(decrypted_header)
-                        opname = IH.getOpCodeName(header.cmd)
-                        # Logger.info(f"Server --> Client (hex): {header_data.hex()}, size: {header.size} CMD: {hex(header.cmd)[2:]}\t({header.cmd})   \t{opname}")
-                        save_to_file("arc4_test_server_data.txt", header_data.hex(), None)
-                else:
-                    opcode = data[:1]
-                    opname = get_auth_opcode_name(opcode)
-                    Logger.info(f'AuthCode: {opname}')"""
+                headers_list = []
 
             destination.sendall(data)
     except KeyboardInterrupt:
@@ -299,6 +188,7 @@ def accept_connections(proxy_socket, remote_host, remote_port):
         client_handler = threading.Thread(target=handle_client, args=(client_socket, remote_host, remote_port))
         client_handler.start()
 
+
 if __name__ == "__main__":
     local_host = "0.0.0.0"
     local_ports = 8084
@@ -306,4 +196,3 @@ if __name__ == "__main__":
     remote_port = 8085
     
     start_proxy(local_host, local_ports, remote_host, remote_port)
-

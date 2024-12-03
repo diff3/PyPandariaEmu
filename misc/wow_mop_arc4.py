@@ -454,6 +454,7 @@ class handle_input_header:
     _clientDecrypt = None
 
     drop = 1024
+    offset = 0
 
     ServerEncryptionKey = bytes([
         0x08, 0xF1, 0x95, 0x9F, 0x47, 0xE5, 0xD2, 0xDB,
@@ -468,7 +469,8 @@ class handle_input_header:
     def __init__(self):
         pass
 
-    def initArc4(self, K):
+    def initArc4(self, K, Direction):
+        self.direction = Direction
         # K needs to be mirrored from database [::-1] 
         encrypt_hash = hmac.new(self.ServerEncryptionKey, bytes.fromhex(K), hashlib.sha1).digest()
         decrypt_hash = hmac.new(self.ServerDecryptionKey, bytes.fromhex(K), hashlib.sha1).digest()
@@ -480,6 +482,8 @@ class handle_input_header:
         self._clientDecrypt = ARC4.new(key=decrypt_hash, drop=self.drop)
 
     def decryptRecv(self, header):
+        self.offset += 4
+        # print(f'{self.direction}, Drop: {self.drop + self.offset}')
         return self._clientDecrypt.decrypt(header)
     
     def encryptSend(self, header):
