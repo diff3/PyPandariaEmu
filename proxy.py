@@ -3,7 +3,6 @@
 
 import socket
 import threading
-# import binascii
 import yaml
 from misc.wow_mop_arc4 import *
 from plugins.mop_18414.database.AuthModel import *
@@ -23,7 +22,7 @@ realm_db_engine = create_engine(
 SessionHolder = scoped_session(sessionmaker(bind=realm_db_engine, autoflush=False))
 
 
-# Definiera autentiseringskoderna
+# Define authcodes
 AUTH_LOGON_CHALLENGE = 0x00
 AUTH_LOGON_PROOF = 0x01
 AUTH_RECONNECT_CHALLENGE = 0x02
@@ -36,7 +35,6 @@ XFER_RESUME = 0x33
 XFER_CANCEL = 0x34
 
 
-# Funktion för att få namn på autentiseringskoder
 def get_auth_opcode_name(opcode):
     if opcode == AUTH_LOGON_CHALLENGE:
         return "AUTH_LOGON_CHALLENGE"
@@ -148,7 +146,7 @@ def forward_data(source, destination, direction):
 
             destination.sendall(data)
     except KeyboardInterrupt:
-        print("Avslutar programmet...")    
+        print("End program...")    
     
         client_file.close()
         server_file.close()
