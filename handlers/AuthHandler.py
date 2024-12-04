@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 from database.AuthModel import *
-from servers.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient, AuthRecconectProofClient
+from utils.opcodes.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient, AuthRecconectProofClient
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from utils.Logger import Logger
-from utils.opcodes.auth import AuthCode, AuthResult
+from utils.opcodes.AuthOpcodes import AuthCode, AuthResult
 import hashlib
 import random
 import struct
@@ -17,7 +17,7 @@ import secrets
 import binascii
 
 
-from utils.opcodes.packets import *
+from utils.opcodes.AuthPackets import *
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)

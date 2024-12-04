@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum, IntEnum
 import yaml
 
-from utils.opcodes.packets import *
+from utils.opcodes.AuthPackets import *
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)

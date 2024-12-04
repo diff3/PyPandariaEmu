@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 from utils.Logger import Logger
-from utils.opcodes.packets import AuthLogonChallengeC, AuthLogonChallengeS, AuthLogonProofC, AuthLogonProofS, RealmListC, AuthReconnectProofC
+from utils.opcodes.AuthPackets import AuthLogonChallengeC, AuthLogonChallengeS, AuthLogonProofC, AuthLogonProofS, RealmListC, AuthReconnectProofC
 import socket
 import struct
 

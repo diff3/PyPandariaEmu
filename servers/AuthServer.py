@@ -7,7 +7,7 @@ import threading
 import yaml
 
 from handlers.AuthHandler import *
-import utils.opcodes.auth as opcodes
+import utils.opcodes.AuthOpcodes as opcodes
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
