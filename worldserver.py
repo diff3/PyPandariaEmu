@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from server.WorldServer import WorldServer
+from servers.WorldServer import WorldServer
 from utils.Logger import Logger
 import yaml
 

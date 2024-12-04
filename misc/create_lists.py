@@ -22,8 +22,8 @@ def format_hex_codes(hex_codes):
     return formatted_list
 
 def main():
-    # filename = 'arc4_test_data.txt'
-    filename = '../arc4_test_client_data.txt'
+    filename = 'arc4_test_data.txt'
+    # filename = '../arc4_test_client_data.txt'
     hex_codes, K = extract_hex_codes(filename)
 
     formatted_list = format_hex_codes(hex_codes)

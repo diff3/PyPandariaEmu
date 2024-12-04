@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from server.AuthServer import AuthServer
+from servers.AuthServer import AuthServer
 from utils.Logger import Logger
 import yaml
 

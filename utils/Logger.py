@@ -6,21 +6,11 @@ from colorama import Fore, Style
 from datetime import datetime
 from enum import Enum, IntEnum
 import yaml
-import importlib
+
+from utils.opcodes.packets import *
 
 with open("etc/config.yaml", 'r') as file:
     config = yaml.safe_load(file)
-
-
-# Dynamic load packets to global namespace.
-packets = importlib.import_module(f'plugins.{config['wow']['plugin']}.packets')
-
-if "__all__" in packets.__dict__:
-    names = packets.__dict__["__all__"]
-else:
-    names = [x for x in packets.__dict__ if not x.startswith("_")]
-
-globals().update({k: getattr(packets, k) for k in names})
 
 
 class DebugColorLevel(Enum):

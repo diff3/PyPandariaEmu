@@ -535,10 +535,9 @@ if __name__ == "__main__":
                '5a394cb5', '77b9b6b2', '1844f257', 'f692dfe0', '34ea71bb', 
                '8cd6c338', '1953ad5f', '708247c8']
 
-    # Test data from Proxy
+    # Test data from Proxy, you can use create_list.py to generate data from logfiles.
 
-    headers = ['f595e5be', 'dfffdb32', 'a3b3a5a9', '756b985c', '3c620202', 'd79d4816', '98464e5c', '592221aa', 'bb74d135', 'e56857b6', '62b3e1fb', '455bf1fb', 'd85fa37d', '7c3a5407', '7651472f', '443ec196', 'a68bdf45', '1e835848', 'cc019343', '77ff2dc0', 'fb75b27a', '50c89dd5', 'cd362691', 'ac9f875d', '1b36fe7b', 'd1e65dc3', 'e20822e3', 'd63fdd31', '378762dc', '44aa38d7', '55d84b97', 'fb295b2b', 'eb330b10', '7fea01a7', '64388f75', 'd84d5fe9', 'ca50a004', '5f480bda', '3c6b7f2f', 'eca90b61', '4c917d74', '30a1c2ee', 'ba9556c1', '955f2a8a', 'b49c201a', '2a5d2cbe', 'e78f7e9d', '15263759', '87ac9b9c', '184e2428', '7183436d', '2e731ecb', 'a65aafe7', 'e8b425d0', '1066aac8', '5d6d1b56', 'b2389c96', 'b0ef81da', '741c8e9f', 'a7e849d7', '4f034d05', 'fd915609', '4d053cf5']
-    K = "54bd06ece726fd4e2c26673daaff033eb2ecc675a8caa71777c298bff836032f8efbf629b6cbecf4"
+
 
     IH = handle_input_header()
     IH.initArc4(K)
