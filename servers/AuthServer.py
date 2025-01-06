@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from utils.ConfigLoader import ConfigLoader
 from utils.Logger import Logger
 import socket
 import threading
-import yaml
 
 from handlers.AuthHandler import *
-import utils.opcodes.AuthOpcodes as opcodes
+from utils.opcodes.AuthOpcodes import *
 
-with open("etc/config.yaml", 'r') as file:
-    config = yaml.safe_load(file)
+config = ConfigLoader.load_config()
 
 
 class AuthServer:
@@ -24,7 +23,7 @@ class AuthServer:
 
                 if not data: break
                 
-                opcode = opcodes.opcodes.getCodeName(opcodes.AuthCode, data[0])
+                opcode = AuthOpcodes.getCodeName(AuthCode, data[0])
                 handler = opcode_handlers.get(opcode, client_socket)
 
                 if handler:
@@ -40,12 +39,8 @@ class AuthServer:
 
                 client_socket.send(response)
         
-        except:
-            Logger.warning(f'Unknown handler error')
-                    
-        finally:
-            Logger.success(f"Closed connection from {client_socket.getpeername()}")
-            client_socket.close()
+        except Exception as e:
+            Logger.warning(f'Unknown handler error {e}')
 
     @staticmethod
     def start(host, port):

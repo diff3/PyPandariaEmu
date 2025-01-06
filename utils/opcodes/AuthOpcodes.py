@@ -111,7 +111,7 @@ class RealmFlags(IntEnum):
     REALM_FLAG_FULL = 0x80
 
 
-class opcodes:
+class AuthOpcodes:
 
     @staticmethod
     def getCodeName(enum_class, enum_value):

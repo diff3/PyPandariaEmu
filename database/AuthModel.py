@@ -25,7 +25,7 @@ class Account(Base):
     last_ip = Column(String(15))
     failed_logins = Column(Integer)
     locked = Column(Boolean)
-    # lock_country = Column(String(2))
+    lock_country = Column(String(2))
     last_login = Column(DateTime)
     online = Column(Boolean)
     expansion = Column(Integer)
@@ -35,7 +35,15 @@ class Account(Base):
     locale = Column(String(4))
     os = Column(String(10))
     recruiter = Column(Integer)
-    # hasBoost = Column(Boolean)
+    hasBoost = Column(Boolean)
+
+
+class AccountAccess(Base):
+    __tablename__ = 'account_access'
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    gmlevel = Column(SmallInteger, nullable=False)
+    RealmID = Column(Integer,  primary_key=True, nullable=False, default=-1)
 
 
 class AccountBanned(Base):
@@ -50,7 +58,7 @@ class AccountBanned(Base):
     active = Column(SmallInteger, nullable=False, default=1)
 
 
-class Realmlist(Base):
+class RealmList(Base):
     __tablename__ = 'realmlist'
 
     id = Column(Integer, primary_key=True)
