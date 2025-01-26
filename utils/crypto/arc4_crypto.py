@@ -70,7 +70,20 @@ class Arc4CryptoHandler:
         except Exception as e:
             Logger.error(f"Encryption failed: {e}. Returning original header.")
             return header
-    
+
+
+    def pack_data(self, cmd, size):
+        try:
+            # Kombinera cmd och size till ett 32-bitars värde
+            value = (size << 13) | (cmd & 0x1FFF)
+            # Packa det kombinerade värdet till en bytearray i liten endian
+            packed_data = struct.pack('<I', value)
+            return packed_data
+        except Exception as e:
+            print(f"Error while packing: {e}")
+            return None
+
+
     def unpack_data(self, data: bytes) -> WorldClientPktHeader:
         """
         Unpacks a 32-bit value from the provided byte data to extract the command and size.

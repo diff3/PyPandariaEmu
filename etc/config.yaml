@@ -67,7 +67,7 @@ Logging:
   # Display raw data from opcpde(s)
   # Display client opcode yell and server respons.
   # ex.  4aa, 1a9a 
-  opcodes: 
+  opcodes: 160a, 1e1b, 11c3
   # opcodes: 4909, b200, 19c1, 31c, 18b2, 162b, 11c3
 
 opcodes:

@@ -230,8 +230,16 @@ class AuthProofData:
                     online=0,
                     v=v_hex,
                     s=s_hex,
+                    sessionkey="",
+                    token_key="",
                     failed_logins=0,
                     lock_country="00",
+                    email="",
+                    reg_mail="",
+                    last_ip=data.ip,
+                    mutereason="",
+                    muteby="",
+                    os=data.os,
                     expansion=4,
                     recruiter=0,
                     hasBoost=config['account']['has_boost'],
@@ -249,7 +257,7 @@ class AuthProofData:
                 DatabaseConnection.create_user_access(new_account_access)
                 print(f"Account '{data.I}' was created")
             except Exception as e:
-                auth_db_session.rollback()
+                # auth_db_session.rollback()
                 print(f"Error occurred: {e}")
 
             account = DatabaseConnection.get_user_by_username(username=data.I)
@@ -270,13 +278,38 @@ class AuthProofData:
             Logger.warning("AuthProofData: User is banned")
             error = AuthResult.WOW_FAIL_BANNED
 
-        v_hex = account.v
-        s_hex = account.s
         N_hex = config['crypto']['N']
 
         v_hex = account.v
         s_hex = account.s
-    
+
+        if not v_hex or not s_hex:
+            I = int(account.sha_pass_hash, 16)
+
+            s = os.urandom(32)
+            ss = s[::-1]
+
+            g = config['crypto']['g']
+            N = int(config['crypto']['N'], 16)
+
+            m_Digest = I.to_bytes((I.bit_length() + 7) // 8, byteorder='big')
+            m_Digest = m_Digest.rjust(20, b'\x00')
+
+            sha1 = hashlib.sha1()
+            sha1.update(ss)
+            sha1.update(m_Digest)
+            sha_digest = sha1.digest()
+
+            x = int.from_bytes(sha_digest, byteorder='little')
+        
+            v = pow(g, x, N)
+
+            v_hex = format(v, 'x').upper()
+            s_hex = s.hex().upper()
+
+            DatabaseConnection.update_vhex_and_shex(account, v_hex, s_hex)
+
+
         N = int(N_hex, 16)
         v = int(v_hex, 16)
         s = int(s_hex, 16)

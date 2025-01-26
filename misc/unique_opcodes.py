@@ -1,0 +1,263 @@
+import re
+
+log_data = """[INFO] [2025-01-18 22:36:59] Client --> Server [hex]: 898a9c72, size: 5      CMD: 1dbd (7613)	CMSG_LOADING_SCREEN_NOTIFY
+[INFO] [2025-01-18 22:37:00] Client --> Server [hex]: d44ebdc5, size: 1      CMD: 40   (64)	CMSG_VIOLENCE_LEVEL 
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: a9cc1edb, size: 6      CMD: 158f (5519)	CMSG_PLAYER_LOGIN   
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: e622b776, size: 437    CMD: 158d (5517)	CMSG_REQUEST_HOTFIX 
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 07b1bce6, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 3025774b, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 8b4e1ed2, size: 17     CMD: 10f2 (4338)	SMSG_SET_FLAT_SPELL_MODIFIER
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: f7fabcea, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: a1ff4ed8, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 44a2d49b, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 4cc39652, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 83a9f62e, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 46595d76, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: b3d842b6, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: fc1544ae, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 3c217e39, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 56b43c26, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 7e0d7032, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: d26f6635, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: ca534ae9, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: f478e471, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: edafb1cc, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: ae3e054a, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 9f802433, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 4a502361, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: bfc115a1, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 580f1ec7, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: f56501aa, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: e087364d, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: a6241117, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 890a07f9, size: 5      CMD: 1440 (5184)	SMSG_SET_PROFICIENCY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 2c3f223b, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: aa77a95b, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 53f9cdd8, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 0a03eab0, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: e4112864, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 3c8061eb, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 6ce5bec2, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 87c9d110, size: 4      CMD: 1283 (4739)	SMSG_SET_DUNGEON_DIFFICULTY
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: cb56503a, size: 20     CMD: 1c0f (7183)	SMSG_LOGIN_VERIFY_WORLD
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: b8666e6b, size: 41     CMD: 162b (5675)	SMSG_ACCOUNT_DATA_TIMES
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 27a4c449, size: 35     CMD: 16bb (5819)	SMSG_FEATURE_SYSTEM_STATUS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: ef77ee22, size: 30     CMD: 183b (6203)	SMSG_MOTD           
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 160552b9, size: 8      CMD: 69b  (1691)	SMSG_PVP_SEASON     
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: b49f5473, size: 16     CMD: 19c1 (6593)	SMSG_SET_TIME_ZONE_INFORMATION
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 3789c5e0, size: 3      CMD: 1eba (7866)	SMSG_HOTFIX_NOTIFY_BLOB
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 60f66d47, size: 8      CMD: 1f22 (7970)	SMSG_CONTACT_LIST   
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 4cdff2a7, size: 20     CMD: e3b  (3643)	SMSG_BIND_POINT_UPDATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 91b61bd4, size: 23     CMD: a9b  (2715)	SMSG_UPDATE_TALENT_DATA
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 9cd9c782, size: 10     CMD: 82   (130)	SMSG_WORLD_SERVER_INFO
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: d7678357, size: 207    CMD: 45a  (1114)	SMSG_SEND_KNOWN_SPELLS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: d1acfc4d, size: 3      CMD: 10f1 (4337)	SMSG_SEND_UNLEARN_SPELLS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: c378bcfd, size: 145    CMD: 81a  (2074)	SMSG_UPDATE_ACTION_BUTTONS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 57bf1464, size: 1312   CMD: aaa  (2730)	SMSG_INITIALIZE_FACTIONS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: a0239454, size: 528    CMD: 180a (6154)	SMSG_ALL_ACHIEVEMENT_DATA
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 07bf1ec9, size: 2      CMD: 18e2 (6370)	SMSG_LOAD_EQUIPMENT_SET
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 1c00280d, size: 20     CMD: 82b  (2091)	SMSG_LOGIN_SET_TIME_SPEED
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 4275457e, size: 1      CMD: 68f  (1679)	SMSG_SET_FORCED_REACTIONS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: d1d980f1, size: 34     CMD: 1a8b (6795)	SMSG_SETUP_CURRENCY 
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 7dd5e90a, size: 2      CMD: c6d  (3181)	SMSG_MOVE_SET_ACTIVE_MOVER
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: a0c1d7ce, size: 1272   CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 77ae8a1f, size: 6      CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 4e960729, size: 28     CMD: 2a2  (674)	SMSG_PHASE_SHIFT_CHANGE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 215856c3, size: 20820  CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 3507665a, size: 50     CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: b467ed6c, size: 69     CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 8ac480d2, size: 95     CMD: 1560 (5472)	SMSG_INIT_WORLD_STATES
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: e0085495, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 12277def, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: e3ab00bf, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 4af9db05, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: a9f51d1e, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 6d56240e, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: f8a677c4, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: c012a1a2, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 36c2a1ab, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 1bc6116d, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 048c028a, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: c295ebf7, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: b6fc6fe9, size: 9      CMD: 121b (4635)	SMSG_UPDATE_WORLD_STATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 4b8160ac, size: 30     CMD: 2a2  (674)	SMSG_PHASE_SHIFT_CHANGE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: fc95679c, size: 15048  CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 0a2478c6, size: 50     CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 10859aac, size: 9      CMD: 6ab  (1707)	SMSG_WEATHER        
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 5746096c, size: 4      CMD: 1a8f (6799)	SMSG_TIME_SYNC_REQUEST
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 6d565375, size: 29     CMD: e32  (3634)	SMSG_LOAD_CUF_PROFILES
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 3915fa09, size: 49     CMD: 9d8  (2520)	SMSG_SPELL_GO       
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 147be8ec, size: 9      CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: c16fbd96, size: 64     CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 193fea29, size: 16     CMD: 1542 (5442)	SMSG_BATTLE_PET_JOURNAL
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 7932aaa8, size: 0      CMD: 1a0f (6671)	SMSG_BATTLE_PET_JOURNAL_LOCK_ACQUIRED
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 312e634b, size: 25     CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 55d7973d, size: 45     CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 0ace93ac, size: 31     CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 238c49c4, size: 31     CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 5b77ab3c, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: f2edd4f3, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 933ef60b, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: f9ee40a8, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 449eeced, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: d91c31ef, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 7ca5d782, size: 4132   CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 4b3cdc38, size: 1115   CMD: 68   (104)	CMSG_UPDATE_ACCOUNT_DATA
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: e50c7ddc, size: 3      CMD: 9f0  (2544)	CMSG_SET_ACTIVE_MOVER
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 2f92c813, size: 1      CMD: 3f6  (1014)	CMSG_REQUEST_PLAYED_TIME
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: f3c629e9, size: 7      CMD: 328  (808)	CMSG_NAME_QUERY     
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 1838c2ac, size: 3      CMD: 9f0  (2544)	CMSG_SET_ACTIVE_MOVER
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 16250517, size: 0      CMD: 29f  (671)	CMSG_UNREGISTER_ALL_ADDON_PREFIXES
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: eee82ddc, size: 0      CMD: 640  (1600)	CMSG_QUERY_TIME     
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 2a2f9634, size: 204    CMD: 1dae (7598)	CMSG_QUEST_NPC_QUERY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 4124ea6c, size: 7      CMD: 10c2 (4290)	CMSG_QUEST_POI_QUERY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: d88ebaab, size: 0      CMD: 6f5  (1781)	CMSG_REQUEST_FORCED_REACTIONS
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 45eee731, size: 0      CMD: 77b  (1915)	CMSG_MAIL_QUERY_NEXT_TIME
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: e15468c3, size: 0      CMD: 1f9e (8094)	CMSG_BATTLEFIELD_STATUS
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 7cc86ad0, size: 4      CMD: 44e  (1102)	                    
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: ed426b3b, size: 0      CMD: 365  (869)	CMSG_REQUEST_CONQUEST_FORMULA_CONSTANTS
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: e8867d4e, size: 0      CMD: 32d  (813)	CMSG_LFG_GET_STATUS 
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 191d36d6, size: 2      CMD: 6b   (107)	CMSG_LFD_LOCK_INFO_REQUEST
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 9be7600e, size: 0      CMD: 14db (5339)	CMSG_GUILD_BANK_MONEY_WITHDRAWN_QUERY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 751f5577, size: 0      CMD: 813  (2067)	CMSG_CALENDAR_GET_NUM_PENDING
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: d0d5117c, size: 0      CMD: a23  (2595)	CMSG_BATTLE_PET_REQUEST_JOURNAL
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 9902e27b, size: 9      CMD: 11e2 (4578)	SMSG_PLAYED_TIME    
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 3438cb8e, size: 28     CMD: 169b (5787)	SMSG_QUERY_PLAYER_NAME_RESPONSE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: f8ad15a1, size: 8      CMD: 100f (4111)	SMSG_QUERY_TIME_RESPONSE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: b19ed18d, size: 3      CMD: 36d  (877)	SMSG_QUEST_NPC_QUERY_RESPONSE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: e084e721, size: 17     CMD: 67f  (1663)	SMSG_QUEST_POI_QUERY_RESPONSE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 2d9b2387, size: 1      CMD: 68f  (1679)	SMSG_SET_FORCED_REACTIONS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 002168c3, size: 20     CMD: eab  (3755)	SMSG_CONQUEST_FORMULA_CONSTANTS
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 4b972fe8, size: 1      CMD: 672  (1650)	CMSG_SET_ACTIONBAR_TOGGLES
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: ab846b15, size: 0      CMD: a87  (2695)	CMSG_REQUEST_RAID_INFO
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: a65d4810, size: 0      CMD: 1f89 (8073)	CMSG_GM_TICKET_GET_TICKET
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: de7d0510, size: 1      CMD: 15a9 (5545)	CMSG_VOICE_SESSION_ENABLE
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: f6271523, size: 3      CMD: cf0  (3312)	CMSG_GUILD_SET_ACHIEVEMENT_TRACKING
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: ee07b369, size: 0      CMD: 1203 (4611)	CMSG_REQUEST_CATEGORY_COOLDOWNS
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 08135aca, size: 5      CMD: 1dbd (7613)	CMSG_LOADING_SCREEN_NOTIFY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 733c63b9, size: 8      CMD: 36a  (874)	CMSG_QUEST_GIVER_STATUS_QUERY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 94e21508, size: 8      CMD: 36a  (874)	CMSG_QUEST_GIVER_STATUS_QUERY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 0697e16f, size: 8      CMD: 36a  (874)	CMSG_QUEST_GIVER_STATUS_QUERY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: e2d9d3a9, size: 8      CMD: 36a  (874)	CMSG_QUEST_GIVER_STATUS_QUERY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 28e808b1, size: 8      CMD: 36a  (874)	CMSG_QUEST_GIVER_STATUS_QUERY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: bfa2eb8a, size: 29     CMD: 6e6  (1766)	CMSG_SAVE_CUF_PROFILES
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: a55b9148, size: 51     CMD: 1f2  (498)	MSG_MOVE_HEARTBEAT  
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 54af5f55, size: 6      CMD: 150  (336)	CMSG_MOVE_TIME_SKIPPED
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 51aa0d87, size: 8      CMD: 1db  (475)	CMSG_TIME_SYNC_RESPONSE
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: e57f7c9f, size: 6      CMD: 150  (336)	CMSG_MOVE_TIME_SKIPPED
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: d712978a, size: 27     CMD: 158d (5517)	CMSG_REQUEST_HOTFIX 
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: b67bc264, size: 27     CMD: 158d (5517)	CMSG_REQUEST_HOTFIX 
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: d3a152aa, size: 0      CMD: 15a8 (5544)	CMSG_GM_TICKET_CASE_STATUS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: e41b1b6c, size: 3653   CMD: 1861 (6241)	SMSG_LFD_PLAYER_INFO
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 564fb60d, size: 0      CMD: 15ab (5547)	CMSG_WORLD_STATE_UI_TIMER_UPDATE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: b7026556, size: 4      CMD: a3f  (2623)	SMSG_CALENDAR_SEND_NUM_PENDING
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 5fd7bac8, size: 3      CMD: 16bf (5823)	SMSG_RAID_INSTANCE_INFO
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 5adcc23a, size: 8      CMD: 100f (4111)	SMSG_QUERY_TIME_RESPONSE
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: d9bbfba4, size: 5      CMD: 129b (4763)	SMSG_GM_TICKET_GET_TICKET
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: f99f3e86, size: 3      CMD: 1db  (475)	SMSG_CATEGORY_COOLDOWN
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 87ba83af, size: 12     CMD: 1275 (4725)	SMSG_QUESTGIVER_STATUS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: cad42b50, size: 12     CMD: 1275 (4725)	SMSG_QUESTGIVER_STATUS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 2886a132, size: 12     CMD: 1275 (4725)	SMSG_QUESTGIVER_STATUS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: eb538390, size: 12     CMD: 1275 (4725)	SMSG_QUESTGIVER_STATUS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 27d26774, size: 12     CMD: 1275 (4725)	SMSG_QUESTGIVER_STATUS
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 6b6fe2d1, size: 0      CMD: 2f1  (753)	CMSG_QUEST_GIVER_STATUS_MULTIPLE_QUERY
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 5a53edf3, size: 28     CMD: 8fa  (2298)	MSG_MOVE_FALL_LAND  
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 6b9b849b, size: 48     CMD: 103b (4155)	SMSG_DB_REPLY       
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 2880915e, size: 48     CMD: 103b (4155)	SMSG_DB_REPLY       
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 061bbf6b, size: 48     CMD: 103b (4155)	SMSG_DB_REPLY       
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: bfa95a3e, size: 48     CMD: 103b (4155)	SMSG_DB_REPLY       
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: efc8855b, size: 558    CMD: 103b (4155)	SMSG_DB_REPLY       
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 6b5506c4, size: 561    CMD: 103b (4155)	SMSG_DB_REPLY       
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 22723353, size: 562    CMD: 103b (4155)	SMSG_DB_REPLY       
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: b81d669a, size: 569    CMD: 103b (4155)	SMSG_DB_REPLY       
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 3360ee51, size: 11     CMD: 148e (5262)	SMSG_GM_TICKET_CASE_STATUS
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: 9e05351e, size: 4      CMD: 27   (39)	SMSG_UI_TIME        
+[INFO] [2025-01-18 22:37:02] Server --> Client [hex]: d9425928, size: 27     CMD: 6ce  (1742)	SMSG_QUEST_GIVER_STATUS_MULTIPLE
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: 80eb222d, size: 34     CMD: 148e (5262)	CMSG_CHAT_JOIN_CHANNEL
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: cea9b5f3, size: 32     CMD: 148e (5262)	CMSG_CHAT_JOIN_CHANNEL
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: ef0704b4, size: 39     CMD: 148e (5262)	CMSG_CHAT_JOIN_CHANNEL
+[INFO] [2025-01-18 22:37:02] Client --> Server [hex]: a6618494, size: 21     CMD: 148e (5262)	CMSG_CHAT_JOIN_CHANNEL
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: bab289e7, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: a05620e7, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 0df40afa, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 816f85bc, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: ac8823ea, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 4f596733, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: e8dad6b9, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 3419d212, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: a9599ee1, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 06a984f2, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 9254e81d, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: de4ff7f4, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 1a8abb4a, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 1419a84e, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Client --> Server [hex]: 73913634, size: 0      CMD: 6e4  (1764)	CMSG_REQUEST_CEMETERY_LIST
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: a82b645b, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: c90aa86c, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: c780a19b, size: 62     CMD: 9d8  (2520)	SMSG_SPELL_GO       
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 48ce0cf8, size: 46     CMD: 1450 (5200)	SMSG_SPELL_NON_MELEE_DAMAGE_LOG
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 8f123bd8, size: 12     CMD: 148b (5259)	SMSG_HEALTH_UPDATE  
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 7c7752f1, size: 15     CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 14d8b49d, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 25a94655, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: d01e5cf8, size: 62     CMD: 9d8  (2520)	SMSG_SPELL_GO       
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: a5930ab1, size: 46     CMD: 1450 (5200)	SMSG_SPELL_NON_MELEE_DAMAGE_LOG
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 9e76225c, size: 12     CMD: 148b (5259)	SMSG_HEALTH_UPDATE  
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: d8a60954, size: 15     CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 71ff1274, size: 132    CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 7157e6ca, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: f2c00b23, size: 12     CMD: 102a (4138)	SMSG_PLAY_SOUND     
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 223844ce, size: 62     CMD: 9d8  (2520)	SMSG_SPELL_GO       
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 7795f660, size: 46     CMD: 1450 (5200)	SMSG_SPELL_NON_MELEE_DAMAGE_LOG
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: aa90a391, size: 12     CMD: 148b (5259)	SMSG_HEALTH_UPDATE  
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: e485c2ae, size: 15     CMD: d8   (216)	SMSG_SPELL_EXECUTE_LOG
+[INFO] [2025-01-18 22:37:03] Server --> Client [hex]: 75079c31, size: 69     CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:04] Server --> Client [hex]: 660173e9, size: 12     CMD: 148b (5259)	SMSG_HEALTH_UPDATE  
+[INFO] [2025-01-18 22:37:04] Server --> Client [hex]: 8125742d, size: 12     CMD: 148b (5259)	SMSG_HEALTH_UPDATE  
+[INFO] [2025-01-18 22:37:04] Server --> Client [hex]: 71302a98, size: 12     CMD: 148b (5259)	SMSG_HEALTH_UPDATE  
+[INFO] [2025-01-18 22:37:04] Server --> Client [hex]: 5e9917e7, size: 195    CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:04] Server --> Client [hex]: 604e6782, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:04] Server --> Client [hex]: 566557a5, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: 9f7d85ee, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: 0d33fcfd, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: 52b03455, size: 12     CMD: 987  (2439)	SMSG_EMOTE          
+[INFO] [2025-01-18 22:37:05] Client --> Server [hex]: cc39b5b9, size: 0      CMD: 1349 (4937)	CMSG_LOGOUT_REQUEST 
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: e6566451, size: 5      CMD: 8f   (143)	SMSG_LOGOUT_RESPONSE
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: 9e4cca0d, size: 7      CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: fd1d0307, size: 587    CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: 692f4e12, size: 7      CMD: 72   (114)	SMSG_AURA_UPDATE    
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: d30b70a4, size: 17     CMD: 10f2 (4338)	SMSG_SET_FLAT_SPELL_MODIFIER
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: 2714fd79, size: 8      CMD: 534  (1332)	SMSG_CANCEL_COMBAT  
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: b8923916, size: 6      CMD: 1792 (6034)	SMSG_UPDATE_OBJECT  
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: 971317fa, size: 1      CMD: 142f (5167)	SMSG_LOGOUT_COMPLETE
+[INFO] [2025-01-18 22:37:05] Client --> Server [hex]: fe2b406f, size: 1      CMD: 115b (4443)	CMSG_DISCARDED_TIME_SYNC_ACKS
+[INFO] [2025-01-18 22:37:05] Client --> Server [hex]: 3913e342, size: 0      CMD: 1941 (6465)	CMSG_CANCEL_TRADE   
+[INFO] [2025-01-18 22:37:05] Client --> Server [hex]: fb3cd88f, size: 0      CMD: 1941 (6465)	CMSG_CANCEL_TRADE   
+[INFO] [2025-01-18 22:37:05] Client --> Server [hex]: 45635980, size: 0      CMD: 1941 (6465)	CMSG_CANCEL_TRADE   
+[INFO] [2025-01-18 22:37:05] Client --> Server [hex]: 83c05315, size: 0      CMD: 31c  (796)	CMSG_READY_FOR_ACCOUNT_DATA_TIMES
+[INFO] [2025-01-18 22:37:05] Client --> Server [hex]: dea0ff86, size: 0      CMD: e0   (224)	CMSG_ENUM_CHARACTERS
+[INFO] [2025-01-18 22:37:05] Client --> Server [hex]: cac99c42, size: 0      CMD: 18b2 (6322)	CMSG_BATTLE_PAY_GET_PURCHASE_LIST
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: f671d657, size: 41     CMD: 162b (5675)	SMSG_ACCOUNT_DATA_TIMES
+[INFO] [2025-01-18 22:37:05] Client --> Server [hex]: 75416e99, size: 4      CMD: 10b3 (4275)	CMSG_LOG_DISCONNECT 
+[INFO] [2025-01-18 22:37:05] Server --> Client [hex]: 1bb4c871, size: 282    CMD: 11c3 (4547)	SMSG_ENUM_CHARACTERS_RESULT"""
+
+
+
+
+# Regular expression to capture the CMD values
+
+cmd_pattern = r"CMD:\s([\da-f]+)"
+
+
+
+# Extract CMD values
+
+cmd_values = re.findall(cmd_pattern, log_data)
+
+
+
+# Count unique CMD values
+
+unique_cmd_count = len(set(cmd_values))
+
+print(unique_cmd_count)

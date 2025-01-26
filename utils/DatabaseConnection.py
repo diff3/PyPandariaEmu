@@ -129,6 +129,13 @@ class DatabaseConnection:
         session.commit()
 
     @staticmethod
+    def update_vhex_and_shex(account, vhex, shex):
+        session = DatabaseConnection.get_session()
+        account.v = vhex
+        account.s = shex
+        session.commit()
+
+    @staticmethod
     def create_user(new_account):
         session = DatabaseConnection.get_session() 
         session.add(new_account)

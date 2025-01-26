@@ -80,6 +80,8 @@ def parse_multi_header_payloads(data_multi_header, IH, encoded_trafic, direction
     return headers_list
 
 def authserver_forward_data(source, destination, direction):
+    global sessions
+
     while True:
         data = source.recv(4096)
 
@@ -93,6 +95,7 @@ def authserver_forward_data(source, destination, direction):
 
             username = decoded_data.I
             client_ip, _ = source.getpeername()
+            print(client_ip)
 
             clean_old_sessions()
 
@@ -100,6 +103,8 @@ def authserver_forward_data(source, destination, direction):
                 "username": username,
                 "timestamp": time.time()
             }
+            print(sessions)
+
 
             Logger.info(f'{direction} Login Challange')
             Logger.package(f'{decoded_data}')
@@ -146,8 +151,12 @@ def print_package_information(headers_list, direction):
                 Logger.debug(f"{payload}")
 
 def worldserver_forward_data(source, destination, direction):
+    global sessions
+
     client_ip, _ = source.getpeername() if direction == "Client --> Server" else destination.getpeername()
+    print(client_ip)
     clean_old_sessions()
+    print(sessions)
     
     if client_ip in sessions:
         username = sessions[client_ip]["username"]
@@ -173,7 +182,11 @@ def worldserver_forward_data(source, destination, direction):
 
             if len(data) <= 0:
                 break
+
         
+        if data:
+            print(data)
+
         headers_list = parse_multi_header_payloads(data, IH, encoded_trafic, direction)
         # print_package_information(headers_list, direction)
 
@@ -200,6 +213,7 @@ def worldserver_forward_data(source, destination, direction):
                 K = DatabaseConnection.get_mirrored_sessionkey_by_username(username=username)
                 Logger.info(f"Initializing encryption: Server --> Client")      
                 IH.init_arc4(K)
+                print(K)
                 encoded_trafic = True
             elif cmd == WorldClientOpcodes.CMSG_AUTH_SESSION:
                 K = DatabaseConnection.get_mirrored_sessionkey_by_username(username=username)
