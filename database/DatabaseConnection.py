@@ -6,7 +6,6 @@ from sqlalchemy.orm import scoped_session, sessionmaker
 from utils.ConfigLoader import ConfigLoader
 from database.AuthModel import Account, AccountAccess, RealmList
 
-
 class DatabaseConnection:
     """Handles database connection and session management."""
 

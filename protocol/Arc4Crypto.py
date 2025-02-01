@@ -16,7 +16,7 @@ import hmac
 import struct
 from Crypto.Cipher import ARC4
 from utils.Logger import Logger
-from utils.opcodes.WorldOpcodes import WorldClientPktHeader
+from protocol.opcodes.WorldOpcodes import WorldClientPktHeader
 
 
 class Arc4CryptoHandler:

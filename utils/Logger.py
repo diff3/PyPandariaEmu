@@ -4,10 +4,8 @@
 from colorama import init, Fore, Style
 from datetime import datetime
 from enum import Enum, IntEnum
-import yaml
 
-from utils.opcodes.AuthPackets import *
-
+from protocol.opcodes.AuthPackets import *
 from utils.ConfigLoader import ConfigLoader
 
 config = ConfigLoader.load_config()

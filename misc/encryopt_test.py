@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from utils.Logger import Logger
-from utils.crypto.arc4_crypto import Arc4CryptoHandler
+from protocol.Arc4Crypto import Arc4CryptoHandler
 from utils.opcodes.WorldOpcodes import *
 
 K = 'fe7d6dac6789c756db917e9b3856833bf3c629d60f4ff3ec58963b222f7aa90d324fe20f72a2e47c'

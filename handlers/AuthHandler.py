@@ -2,20 +2,20 @@
 # -*- coding: utf-8 -*-
 
 from database.AuthModel import *
-from utils.opcodes.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient, AuthRecconectProofClient
+from protocol.opcodes.AuthProtocol import AuthLogonChallengeClient, AuthLogonChallengeServer, AuthLogonProofClient, AuthLogonProofServer, RealmListClient, AuthRecconectProofClient
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from utils.ConfigLoader import ConfigLoader
 from utils.Logger import Logger
-from utils.opcodes.AuthOpcodes import AuthCode, AuthResult
+from protocol.opcodes.AuthOpcodes import AuthCode, AuthResult
 import hashlib
 import random
 import struct
-from utils.DatabaseConnection import DatabaseConnection
+from database.DatabaseConnection import DatabaseConnection
 import os
 
-from utils.opcodes.AuthPackets import *
+from protocol.opcodes.AuthPackets import *
 
 config = ConfigLoader.load_config()
 DatabaseConnection.initialize()

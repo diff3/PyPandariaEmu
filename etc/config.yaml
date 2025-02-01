@@ -22,6 +22,10 @@ proxyserver:
   world_remote_host: 192.168.11.30
   world_remote_port: 8085
 
+apiserver:
+  host: 0.0.0.0
+  port: 9002
+
 crypto:
   N: 894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7
   g: 7
@@ -67,7 +71,8 @@ Logging:
   # Display raw data from opcpde(s)
   # Display client opcode yell and server respons.
   # ex.  4aa, 1a9a 
-  opcodes: 160a, 1e1b, 11c3
+  opcodes:
+  # opcodes: 160a, 1e1b, 11c3
   # opcodes: 4909, b200, 19c1, 31c, 18b2, 162b, 11c3
 
 opcodes:

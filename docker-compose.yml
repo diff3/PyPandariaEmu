@@ -1,0 +1,65 @@
+x-service-base: &service_base
+  volumes:
+    - .:/app
+  env_file:
+    - .env
+  environment:
+    - TZ=${TZ}
+  networks:
+    - pandaria_network
+  tty: true
+
+services:
+  api:
+    <<: *service_base
+    container_name: ${SERVICE_API_NAME}-${NAME}
+    build:
+      context: .
+      dockerfile: etc/docker/apiserver/Dockerfile
+      args:
+        - OS=${OS}
+        - VERSION=${VERSION}
+    ports:
+      - "9002:9002"
+
+  auth:
+    <<: *service_base
+    container_name: ${SERVICE_AUTH_NAME}-${NAME}
+    build:
+      context: .
+      dockerfile: etc/docker/authserver/Dockerfile
+      args:
+        - OS=${OS}
+        - VERSION=${VERSION}
+    ports:
+      - "3724:3724"
+
+  world:
+    <<: *service_base
+    container_name: ${SERVICE_WORLD_NAME}-${NAME}
+    build:
+      context: .
+      dockerfile: etc/docker/worldserver/Dockerfile
+      args:
+        - OS=${OS}
+        - VERSION=${VERSION}
+
+    ports:
+      - "8086:8086"
+
+  proxy:
+    <<: *service_base
+    container_name: ${SERVICE_PROXY_NAME}-${NAME}
+    build:
+      context: .
+      dockerfile: etc/docker/proxyserver/Dockerfile
+      args:
+        - OS=${OS}
+        - VERSION=${VERSION}
+    ports:
+      - "3722:3722"
+      - "8084:8084"
+
+networks:
+  pandaria_network:
+    driver: bridge
