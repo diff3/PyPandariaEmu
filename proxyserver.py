@@ -24,7 +24,6 @@ from utils.ConfigLoader import ConfigLoader
 from utils.Logger import Logger
 
 
-
 config = ConfigLoader.load_config()
 DatabaseConnection.initialize()
 
@@ -57,7 +56,7 @@ class AuthProxy(BaseProxy):
                     (BaseProxy.DIRECTION_CLIENT_SERVER, "AUTH_LOGON_PROOF"): AuthLogonProofServer,
                     (BaseProxy.DIRECTION_SERVER_CLIENT, "AUTH_LOGON_PROOF"): AuthLogonProofServer,
                     (BaseProxy.DIRECTION_CLIENT_SERVER, "REALM_LIST"): RealmListClient,
-                    (BaseProxy.DIRECTION_SERVER_CLIENT, "REALM_LIST"): RealmListClient,
+                    # (BaseProxy.DIRECTION_SERVER_CLIENT, "REALM_LIST"): RealmListServer,
                 }
 
                 # Process known authentication packets
@@ -83,9 +82,6 @@ class WorldProxy(BaseProxy):
     Handles world server proxy communication between the client and world server.
     This class ensures proper encryption initialization and manages secure data transmission.
     """
-
-     
-   
     
     def initialize_encryption(
         self, 
@@ -207,9 +203,8 @@ class WorldProxy(BaseProxy):
                     f"{connection_direction} [hex]: {original_header.hex()}, size: {parsed_header.size:<6} "
                     f"CMD: {hex(parsed_header.cmd)[2:]:<4} ({parsed_header.cmd})\t{opcode_name: <20}"
                 )
-                
-                
-                
+
+                # Send Logger msg to API Server
                 asyncio.run(self.api_client.send_log("INFO",
                     f"{connection_direction} [hex]: {original_header.hex()}, size: {parsed_header.size:<6} CMD: {hex(parsed_header.cmd)[2:]:<4} ({parsed_header.cmd})\t{opcode_name: <20}"
                 ))
