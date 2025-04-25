@@ -105,5 +105,5 @@ class Arc4CryptoHandler:
             size = (value & 0xFFFFE000) >> 13
             return WorldClientPktHeader(cmd=cmd, size=size)
         except Exception as e:
-            logger.error(f"Failed to unpack data: {e}. Returning placeholder header.")
+            Logger.error(f"Failed to unpack data: {e}. Returning placeholder header.")
             return WorldClientPktHeader(cmd=0, size=0)
