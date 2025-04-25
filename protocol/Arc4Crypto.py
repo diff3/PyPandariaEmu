@@ -2,13 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-Mist of Pandaria header deciper
+This protocol uses a stream cipher (ARC4) where synchronization between client and server is essential.  
+To maintain proper decryption, headers must be decoded in the correct sequence.
 
-Since ARC4 is a stream cipher, it is crucial to remain synchronized with the server. Thus, decoding all
-headers in the correct order is necessary to avoid decoding errors.
-
-MoP uses ARC4 with a key derived from an HMAC-SHA1 hash. This hash combines a static key 
-with the session key (K) to perform encryption and decryption.
+Encryption is based on ARC4 with a key derived from an HMAC-SHA1 function.  
+The HMAC combines a static component with a session-specific key to initialize the cipher context.
 """
 
 import hashlib
