@@ -2,3 +2,7 @@
 !.keep
 **.log
 **.txt
+!arc4_test_data.txt
+doc
+tests
+.qodo

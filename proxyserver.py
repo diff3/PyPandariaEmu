@@ -15,7 +15,11 @@ from protocol.opcodes.AuthProtocol import (
     AuthLogonChallengeClient, 
     AuthLogonChallengeServer, 
     AuthLogonProofServer, 
-    RealmListClient)
+    AuthRecconectProofClient,
+    RealmListClient,
+    printDataRealm,
+    printData
+    )
 from manager.Sessions import SessionManager
 from protocol.opcodes.WorldOpcodes import WorldClientOpcodes, WorldOpcodes
 from utils.APISingleton import APISingleton
@@ -48,6 +52,7 @@ class AuthProxy(BaseProxy):
                 if not data:
                     break
 
+
                 auth_opcode_name = AuthOpcodes.getCodeName(AuthCode, data[0])
 
                 unpack_mapping = {
@@ -55,8 +60,10 @@ class AuthProxy(BaseProxy):
                     (BaseProxy.DIRECTION_SERVER_CLIENT, "AUTH_LOGON_CHALLENGE"): AuthLogonChallengeServer,
                     (BaseProxy.DIRECTION_CLIENT_SERVER, "AUTH_LOGON_PROOF"): AuthLogonProofServer,
                     (BaseProxy.DIRECTION_SERVER_CLIENT, "AUTH_LOGON_PROOF"): AuthLogonProofServer,
+                    (BaseProxy.DIRECTION_CLIENT_SERVER, "AUTH_RECONNECT_CHALLENGE"): printData,
+                    (BaseProxy.DIRECTION_SERVER_CLIENT, "AUTH_RECONNECT_CHALLENGE"): printData,
                     (BaseProxy.DIRECTION_CLIENT_SERVER, "REALM_LIST"): RealmListClient,
-                    # (BaseProxy.DIRECTION_SERVER_CLIENT, "REALM_LIST"): RealmListServer,
+                    (BaseProxy.DIRECTION_SERVER_CLIENT, "REALM_LIST"): printDataRealm,
                 }
 
                 # Process known authentication packets
@@ -65,7 +72,9 @@ class AuthProxy(BaseProxy):
                     decoded_data = handler_class.unpack(data)
 
                     Logger.info(f'{direction} {auth_opcode_name}')
-                    Logger.package(f'{decoded_data}')
+                    
+                    if decoded_data:
+                        Logger.package(f'{decoded_data}')
                 else:
                     Logger.warning(f'Unknown auth_opcode_name: {auth_opcode_name} for direction {direction}')
 
@@ -210,6 +219,8 @@ class WorldProxy(BaseProxy):
                 ))
 
                 if config['Logging']['opcodes'] and hex(parsed_header.cmd)[2:] in config['Logging']['opcodes']:
+                    Logger.debug(f"{payload}")
+                elif config['Logging']['opcodes'] == 'all':
                     Logger.debug(f"{payload}")
 
             return headers_list

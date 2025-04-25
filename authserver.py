@@ -31,6 +31,8 @@ class AuthServer(BaseServer):
                     break
 
                 opcode = AuthOpcodes.getCodeName(AuthCode, data[0])
+                print(data[0])
+                print(opcode)
                 handler = opcode_handlers.get(opcode)
 
                 if handler:

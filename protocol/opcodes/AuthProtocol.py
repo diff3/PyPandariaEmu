@@ -168,3 +168,22 @@ class RealmListClient:
         unpacked_data = list(struct.unpack(cls.fixed_size_format, data[:cls.fixed_size_length]))
 
         return RealmListC(*unpacked_data)
+
+@dataclass
+class printData:
+
+    @classmethod
+    def unpack(cls, data):
+        print("HÄR")
+        print(data)
+        return None
+    
+@dataclass
+class printDataRealm:
+
+    @classmethod
+    def unpack(cls, data):
+        print("DIRECTION_SERVER_CLIENT, REALM_LIST")
+        print(data)
+        return None
+    
