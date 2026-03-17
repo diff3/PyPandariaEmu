@@ -1,0 +1,10 @@
+# AUTH_LOGON_PROOF_S - Done
+endian: little
+header:
+    cmd: B
+data:
+    error: B
+    M2: 20s
+    unk1: I
+    unk2: I
+    unk3: H

@@ -1,0 +1,14 @@
+# SMSG_INIT_WORLD_STATES – Partial, needs testing
+endian: little
+header:
+data:
+    map_id: I
+    zone_id: I
+    area_id: I
+    _unk0: H  # verkar 0 i sniff
+
+    loop until_end to states:
+        value: I
+        state_id: I
+
+    _: B

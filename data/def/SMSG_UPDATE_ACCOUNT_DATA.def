@@ -1,0 +1,5 @@
+# SMSG_UPDATE_ACCOUNT_DATA
+endian: little
+header:
+data:
+    raw: R, r

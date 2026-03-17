@@ -1,0 +1,46 @@
+# CMSG_REORDER_CHARACTERS - Done
+endian: little
+header:
+data:
+    count: bits, 9BI
+
+    loop €count to entries_meta:
+        guid_3_mask: bits, 1BI
+        guid_7_mask: bits, 1BI
+        guid_4_mask: bits, 1BI
+        guid_1_mask: bits, 1BI
+        guid_0_mask: bits, 1BI
+        guid_5_mask: bits, 1BI
+        guid_2_mask: bits, 1BI
+        guid_6_mask: bits, 1BI
+
+    padding 0
+
+    loop €count to entries:
+        if €entries_meta[i].guid_4_mask:
+            guid_4: B
+
+        if €entries_meta[i].guid_7_mask:
+            guid_7: B
+
+        if €entries_meta[i].guid_0_mask:
+            guid_0: B
+
+        if €entries_meta[i].guid_2_mask:
+            guid_2: B
+
+        slot: B
+
+        if €entries_meta[i].guid_6_mask:
+            guid_6: B
+
+        if €entries_meta[i].guid_3_mask:
+            guid_3: B
+
+        if €entries_meta[i].guid_1_mask:
+            guid_1: B
+
+        if €entries_meta[i].guid_5_mask:
+            guid_5: B
+
+        guid: combine guid_mask

@@ -1,0 +1,5 @@
+# SMSG_CHAR_DELETE - Partial, needs testing
+endian: little
+header:
+data:
+    result: B   # 0x48 i capen

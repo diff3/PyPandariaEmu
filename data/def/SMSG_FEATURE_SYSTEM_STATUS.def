@@ -1,0 +1,15 @@
+# SMSG_FEATURE_SYSTEM_STATUS - Partial, needs testing
+endian: little
+header:
+data:
+    voice:        I
+    browser:      I
+    scroll:       I
+    mountpreview: I
+
+    complaint1:   I
+    complaint2:   I
+
+    flags1:       I
+    flags2:       I
+    flags3:       3B, I

@@ -1,0 +1,7 @@
+# CMSG_LOADING_SCREEN_NOTIFY - Partial, needs testing
+endian: little
+header:
+data:
+    mapId: bits, 31bI
+    showing: bits, 1bI
+    unk: B        

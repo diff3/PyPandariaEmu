@@ -1,0 +1,9 @@
+# SMSG_LOGIN_VERIFY_WORLD - Done
+endian: little
+header:
+data:
+    x: f
+    facing: f
+    y: f
+    map: I
+    z: f

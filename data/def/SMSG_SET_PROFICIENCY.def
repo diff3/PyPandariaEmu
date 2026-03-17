@@ -1,0 +1,6 @@
+# SMSG_SET_PROFICIENCY - Partial, needs testing 
+endian: little
+header:
+data:
+    proficiencyMask: I
+    subMask: B

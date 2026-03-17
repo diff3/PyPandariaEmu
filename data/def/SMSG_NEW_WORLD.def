@@ -1,0 +1,9 @@
+# SMSG_NEW_WORLD
+endian: little
+header:
+data:
+    map_id: I
+    x: f
+    y: f
+    z: f
+    orientation: f

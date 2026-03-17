@@ -1,0 +1,18 @@
+# SMSG_PHASE_SHIFT_CHANGE - Minimal
+endian: little
+
+data:
+    phase_mask: I            # usually 1
+    terrain_swap: I          # 0 = none
+    phase_count: I
+
+    loop €phase_count to phase_ids:
+        phase_id: I
+
+    visible_map_count: I
+    loop €visible_map_count to visible_map_ids:
+        map_id: I
+
+    ui_map_phase_count: I
+    loop €ui_map_phase_count to ui_map_phase_ids:
+        ui_map_phase_id: I

@@ -1,0 +1,5 @@
+# SMSG_CLIENTCACHE_VERSION - Done
+endian: little
+header: 
+data:
+   version: I, I

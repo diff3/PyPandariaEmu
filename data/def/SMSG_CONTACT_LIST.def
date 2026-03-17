@@ -1,0 +1,17 @@
+# SMSG_CONTACT_LIST - Minimal
+endian: little
+header:
+data:
+    flags: I
+    count: I
+
+    loop €count to contacts:
+        guid: G, packed_guid
+        realm_id_1: I
+        realm_id_2: I
+        contact_flags: I
+        note: C
+        status: B
+        area: I
+        level: I
+        class_id: I

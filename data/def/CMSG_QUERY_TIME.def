@@ -1,0 +1,5 @@
+# CMSG_QUERY_TIME - Done
+# Just a marker
+endian: little
+header:
+data:

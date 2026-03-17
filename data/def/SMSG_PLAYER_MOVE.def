@@ -1,0 +1,13 @@
+# SMSG_PLAYER_MOVE – preliminary, mirrors client move stop/start layout
+endian: little
+header:
+data:
+    moverGUID: packed_guid      # expected but not present in sample; adjust if capture grows
+    move_flags: I
+    move_flags2: I
+    time: I                     # server timestamp/sequence
+
+    x: f
+    y: f
+    z: f
+    facing: f

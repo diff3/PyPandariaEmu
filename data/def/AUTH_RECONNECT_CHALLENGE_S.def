@@ -1,0 +1,8 @@
+# AUTH_RECONNECT_CHALLENGE_S - Done
+endian: little
+header:
+data:
+   cmd: B      
+   _: B       
+   reconnectProof: 16s
+   _: 16s

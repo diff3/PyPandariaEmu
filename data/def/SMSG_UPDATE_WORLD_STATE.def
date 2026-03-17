@@ -1,0 +1,7 @@
+# SMSG_UPDATE_WORLD_STATE - MoP 5.4.x
+endian: little
+
+data:
+    hidden: B
+    value: I
+    state_id: I

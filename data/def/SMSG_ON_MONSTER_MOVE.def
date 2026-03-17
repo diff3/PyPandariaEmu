@@ -1,0 +1,48 @@
+# SMSG_ON_MONSTER_MOVE - Partial (focus-based)
+endian: little
+header:
+data:
+    z: f
+    x: f
+    spline_id: I
+    y: f
+    trans_offset_y: f
+    trans_offset_z: f
+    trans_offset_x: f
+
+    mover_guid: Q, YG
+
+    move_flags_low: H
+    move_flags_high: H
+
+    bitmask 24
+        spline_anim_id: bits, 3bI
+        spline_unknown0: bits, 1bI
+        spline_falling_slow: bits, 1bI
+        spline_done: bits, 1bI
+        spline_falling: bits, 1bI
+        spline_no_spline: bits, 1bI
+        spline_unknown2: bits, 1bI
+        spline_flying: bits, 1bI
+        spline_orientation_fixed: bits, 1bI
+        spline_catmullrom: bits, 1bI
+        spline_cyclic: bits, 1bI
+        spline_enter_cycle: bits, 1bI
+        spline_frozen: bits, 1bI
+        spline_transport_enter: bits, 1bI
+        spline_transport_exit: bits, 1bI
+        spline_unknown3: bits, 1bI
+        spline_unknown4: bits, 1bI
+        spline_orientation_inversed: bits, 1bI
+        spline_smooth_ground_path: bits, 1bI
+        spline_walkmode: bits, 1bI
+        spline_uncompressed_path: bits, 1bI
+        spline_unknown6: bits, 1bI
+
+    dest_z: f
+    dest_y: f
+    dest_x: f
+    spline_mode: B
+    spline_const_300000: I
+    spline_speed_scaled: f
+    move_time_ms: I

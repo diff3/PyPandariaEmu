@@ -1,0 +1,30 @@
+endian: little
+data:
+    bitmask 8
+        guid_3_mask: bits, 1BI
+        guid_5_mask: bits, 1BI
+        guid_6_mask: bits, 1BI
+        guid_0_mask: bits, 1BI
+        guid_1_mask: bits, 1BI
+        guid_2_mask: bits, 1BI
+        guid_7_mask: bits, 1BI
+        guid_4_mask: bits, 1BI
+
+    if €guid_0_mask:
+        guid_0: B, YI
+    if €guid_6_mask:
+        guid_6: B, YI
+    if €guid_5_mask:
+        guid_5: B, YI
+    if €guid_7_mask:
+        guid_7: B, YI
+    if €guid_2_mask:
+        guid_2: B, YI
+    if €guid_1_mask:
+        guid_1: B, YI
+    if €guid_3_mask:
+        guid_3: B, YI
+    if €guid_4_mask:
+        guid_4: B, YI
+
+    guid: combine guid_mask

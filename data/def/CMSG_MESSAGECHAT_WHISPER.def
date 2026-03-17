@@ -1,0 +1,9 @@
+# CMSG_MESSAGECHAT_WHISPER
+endian: little
+header:
+data:
+    language: I
+    msg_len: bits, 8
+    target_len: bits, 9
+    msg: €msg_len's
+    target: €target_len's

@@ -1,0 +1,6 @@
+# SMSG_ALL_ACHIEVEMENT_DATA - Minimal
+endian: little
+header:
+data:
+    criteria_count: bits, 19BI
+    achievement_count: bits, 20BI

@@ -1,0 +1,15 @@
+# AUTH_LOGON_CHALLENGE_C - Done
+endian: little
+header: 
+    cmd: B
+    error: B
+data:
+    success: B
+    B: 32s
+    l: B
+    g: B
+    blob: B
+    N: 32s
+    s: 32s
+    unk3: 16s
+    securityFlags: B

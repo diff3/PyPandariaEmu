@@ -1,0 +1,5 @@
+# CMSG_VIOLENCE_LEVEL - Done
+endian: little
+header:
+data:
+    violence_level: B

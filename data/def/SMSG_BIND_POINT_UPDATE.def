@@ -1,0 +1,9 @@
+# SMSG_BIND_POINT_UPDATE - Done
+endian: little
+header:
+data:
+    x: f
+    y: f
+    z: f
+    map_id: I
+    area_id: I

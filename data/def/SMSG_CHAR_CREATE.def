@@ -1,0 +1,5 @@
+# SMSG_CHAR_CREATE - Partial, needs testing 
+endian: little
+header:
+data:
+    result: B

@@ -1,0 +1,6 @@
+# SMSG_LOGOUT_RESPONSE - Done
+endian: little
+header:
+data:
+    logout_result: I
+    instant_logout: B

@@ -1,0 +1,7 @@
+# SMSG_PLAYED_TIME - Done
+endian: little
+header:
+data:
+    total_time: I 
+    level_time: I 
+    show_in_chat: B

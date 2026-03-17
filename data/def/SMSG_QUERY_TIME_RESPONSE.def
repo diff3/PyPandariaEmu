@@ -1,0 +1,6 @@
+# SMSG_QUERY_TIME_RESPONSE - Done
+endian: little
+header:
+data:
+    server_time: I
+    unk: I

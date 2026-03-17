@@ -1,0 +1,9 @@
+# SMSG_LOGIN_SET_TIME_SPEED - Done
+endian: little
+header:
+data:
+    unk_1: I
+    game_time_1: I
+    unk_2: I
+    game_time_2: I
+    time_speed: f

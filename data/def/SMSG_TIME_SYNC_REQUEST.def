@@ -1,0 +1,5 @@
+# SMSG_TIME_SYNC_REQUEST - Done
+endian: little
+header:
+data:
+    sequence_id: I

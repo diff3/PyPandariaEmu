@@ -1,0 +1,8 @@
+# CMSG_REQUEST_HOTFIX - Partial (needs more samples)
+endian: little
+header:
+data:
+    seed: Q
+    # _: 85B    # observed zero padding before IDs
+    loop until_end to ids_list:
+        ids: I

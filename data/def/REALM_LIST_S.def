@@ -1,0 +1,20 @@
+# REALM_LIST_S - Done
+endian: little
+header:
+    cmd: B
+    size: H
+    unk1: I
+    realm_list_size: H
+data:
+    loop €realm_list_size to €realmlist:
+        icon: B
+        lock: B
+        flag: B
+        name: S | Q
+        address: S | Q
+        pop: f
+        characters: B
+        timezone: B
+        realmid: B
+    unk2: B
+    unk3: B

@@ -1,0 +1,9 @@
+endian: little
+
+data:
+    is_microdungeon: bits, 1BI
+    count: bits, 22BI
+    padding 0
+
+    loop €count to cemetery_ids:
+        cemetery_id: I

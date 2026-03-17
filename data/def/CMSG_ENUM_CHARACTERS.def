@@ -1,0 +1,5 @@
+# CMSG_ENUM_CHARACTERS - Done
+# Just a marker
+endian: little
+header:
+data:

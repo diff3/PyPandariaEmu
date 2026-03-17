@@ -1,0 +1,5 @@
+# SMSG_TUTORIAL_FLAGS - Done
+endian: little
+header:
+data:
+    list: 16H

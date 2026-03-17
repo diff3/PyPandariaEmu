@@ -1,0 +1,5 @@
+# SMSG_LOAD_EQUIPMENT_SET - Minimal
+endian: little
+header:
+data:
+    set_count: bits, 19BI

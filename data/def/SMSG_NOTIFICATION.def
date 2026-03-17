@@ -1,0 +1,6 @@
+# SMSG_NOTIFICATION
+endian: little
+header:
+data:
+    code: H
+    message: R, s

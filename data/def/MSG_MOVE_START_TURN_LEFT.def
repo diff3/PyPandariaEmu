@@ -1,0 +1,5 @@
+# MSG_MOVE_START_TURN_LEFT
+endian: little
+header:
+data:
+    raw: R, r

@@ -1,0 +1,5 @@
+# CMSG_BATTLE_PAY_GET_PURCHASE_LIST - Done
+# Just a marker
+endian: little
+header:
+data:

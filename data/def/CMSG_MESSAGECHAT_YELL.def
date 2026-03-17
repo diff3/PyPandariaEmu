@@ -1,0 +1,7 @@
+# CMSG_MESSAGECHAT_YELL
+endian: little
+header:
+data:
+    language: I
+    msg_len: B
+    msg: €msg_len's

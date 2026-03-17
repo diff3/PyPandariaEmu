@@ -1,0 +1,7 @@
+# SMSG_SPELL_EXECUTE_LOG – Partial, needs testing
+endian: little
+header:
+data:
+    casterGUID: I
+    spellID: I
+    flags: B
