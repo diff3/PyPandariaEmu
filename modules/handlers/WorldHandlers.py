@@ -28,6 +28,7 @@ import time
 import zlib
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
+from server.modules.PacketContext import PacketContext
 from server.modules.handlers.worldLogin.context import WorldLoginContext
 
 from DSL.modules.EncoderHandler import EncoderHandler
@@ -46,14 +47,13 @@ from server.modules.handlers.characters.characters import (
     handle_CMSG_REORDER_CHARACTERS,
 )
 
-from shared.PathUtils import get_captures_root, get_json_root
+from shared.PathUtils import get_captures_root, get_dbc_root, get_json_root
 
 _LOGIN_UPDATE_OBJECT_CAPTURE_DIR = get_captures_root(focus=True) / "debug"
 
 from server.modules.dbc import read_dbc
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
 # from red.utils.OpcodeLoader import load_world_opcodes
-from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
 from server.modules.guid import GuidHelper, HighGuid
 
@@ -519,8 +519,12 @@ def _debug_log_player_movement_flags(payload: bytes, *, update_index: int | None
     )
 
 
-def parse_movement_info(opcode_name: str, payload: bytes) -> Optional[tuple[float, float, float, float]]:
-    decoded = dsl_decode(opcode_name, payload, silent=True)
+def parse_movement_info(
+    opcode_name: str,
+    payload: bytes,
+    decoded: dict[str, Any] | None = None,
+) -> Optional[tuple[float, float, float, float]]:
+    decoded = decoded or {}
     movement = _extract_movement_from_decoded(decoded)
     if movement is not None:
         return movement
@@ -893,11 +897,12 @@ def _decode_loading_screen_showing(decoded: dict[str, Any], payload: bytes) -> i
     return 0
 
 
-def _decode_chat_message(opcode_name: str, payload: bytes) -> dict[str, Any]:
-    try:
-        decoded = dsl_decode(opcode_name, payload, silent=True) or {}
-    except Exception:
-        decoded = {}
+def _decode_chat_message(
+    opcode_name: str,
+    payload: bytes,
+    decoded: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    decoded = decoded or {}
 
     message = str(decoded.get("msg") or "").strip()
     language = int(decoded.get("language") or 0)
@@ -1184,9 +1189,8 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
     ]
 
 
-def _handle_chat_message(opcode_name: str, payload: bytes):
-
-    chat = _decode_chat_message(opcode_name, payload)
+def _handle_chat_message(ctx: PacketContext):
+    chat = _decode_chat_message(ctx.name, ctx.payload, ctx.decoded)
     message = chat["message"]
     if not message:
         return 0, None
@@ -1207,12 +1211,6 @@ def _handle_chat_message(opcode_name: str, payload: bytes):
     )
 
     return 0, [("SMSG_MESSAGECHAT", payload_out)]
-
-# -----------------------------------------------------------------------------
-# Config / opcode maps
-# -----------------------------------------------------------------------------
-
-cfg = ConfigLoader.load_config()
 
 # WORLD_CLIENT_OPCODES, WORLD_SERVER_OPCODES, _ = load_world_opcodes()
 SERVER_OPCODE_BY_NAME = {name: code for code, name in WORLD_SERVER_OPCODES.items()}
@@ -1245,14 +1243,10 @@ def _load_template(case_name: str) -> dict:
 # Decode helpers
 # -----------------------------------------------------------------------------
 
-def _log_cmsg(name: str, payload: bytes) -> dict:
-    try:
-        decoded = dsl_decode(name, payload, silent=True) or {}
-        Logger.success(f"[CMSG] {name}\n{json.dumps(to_safe_json(decoded), indent=2)}")
-        return decoded
-    except Exception as exc:
-        Logger.error(f"[CMSG] decode {name} failed: {exc}")
-        return {}
+def _log_cmsg(ctx: PacketContext) -> dict:
+    decoded = ctx.decoded or {}
+    Logger.success(f"[CMSG] {ctx.name}\n{json.dumps(to_safe_json(decoded), indent=2)}")
+    return decoded
 
 def _parse_guid(value: Any) -> Optional[int]:
     if value is None:
@@ -1839,14 +1833,7 @@ def _equipment_is_empty(entries: list[dict]) -> bool:
     return (not entries) or all((e.get("display_id") or 0) == 0 for e in entries)
 
 def _resolve_dbc_root() -> Optional[Path]:
-    dbc_root = cfg.get("dbc_path")
-    if not dbc_root:
-        dbc_root = (cfg.get("client") or {}).get("dbc_path")
-    if not dbc_root:
-        game_root = (cfg.get("client") or {}).get("game_root")
-        if game_root:
-            dbc_root = Path(game_root) / "Data" / "DBFilesClient"
-    return Path(dbc_root) if dbc_root else None
+    return get_dbc_root()
 
 def _load_char_start_outfit() -> dict[tuple[int, int, int], list[int]]:
     global _DBC_CHAR_START_OUTFIT_CACHE, _DBC_CHAR_START_OUTFIT_MERGED
@@ -2008,8 +1995,8 @@ def preload_cache() -> None:
 # CMSG handlers
 # -----------------------------------------------------------------------------
 
-def handle_CMSG_PING(sock: Any, opcode: int, payload: bytes) -> Tuple[int, Optional[bytes]]:
-    decoded = _log_cmsg("CMSG_PING", payload)
+def handle_CMSG_PING(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
+    decoded = _log_cmsg(ctx)
     ping_val = int(decoded.get("ping_id", 0) or 0)
     try:
         pong_payload = EncoderHandler.encode_packet("SMSG_PONG", {"ping_id": ping_val})
@@ -2020,11 +2007,9 @@ def handle_CMSG_PING(sock: Any, opcode: int, payload: bytes) -> Tuple[int, Optio
 
 
 def handle_CMSG_LOGOUT_REQUEST(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    _log_cmsg("CMSG_LOGOUT_REQUEST", payload)
+    _log_cmsg(ctx)
     Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
 
     try:
@@ -2045,8 +2030,8 @@ def handle_CMSG_LOGOUT_REQUEST(
     ]
 
 
-def handle_CMSG_AUTH_SESSION(sock, opcode: int, payload: bytes):
-    decoded = _log_cmsg("CMSG_AUTH_SESSION", payload)
+def handle_CMSG_AUTH_SESSION(ctx: PacketContext):
+    decoded = _log_cmsg(ctx)
 
     # --- resolve account name ---
     session.account_name = (
@@ -2086,7 +2071,7 @@ def handle_CMSG_AUTH_SESSION(sock, opcode: int, payload: bytes):
     ctx = _build_world_login_context()
     return 0, build_char_screen_packets(ctx)
 
-def handle_CMSG_ENUM_CHARACTERS(sock, opcode, payload):
+def handle_CMSG_ENUM_CHARACTERS(ctx: PacketContext):
     account_id = session.account_id
     realm_id = session.realm_id
 
@@ -2114,12 +2099,10 @@ def handle_CMSG_ENUM_CHARACTERS(sock, opcode, payload):
         )
         raise
 def handle_CMSG_PLAYER_LOGIN(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-
-    decoded = _log_cmsg("CMSG_PLAYER_LOGIN", payload)
+    payload = ctx.payload
+    decoded = _log_cmsg(ctx)
 
     login_guid = None
     if len(payload) == 6:
@@ -2276,9 +2259,9 @@ def handle_CMSG_PLAYER_LOGIN(
     Logger.info("[WorldHandlers] PLAYER_LOGIN queued player login bundle")
     return 0, responses
 
-def handle_CMSG_LOADING_SCREEN_NOTIFY(sock: Any, opcode: int, payload: bytes) -> Tuple[int, Optional[bytes]]:
-    decoded = _log_cmsg("CMSG_LOADING_SCREEN_NOTIFY", payload)
-    showing = _decode_loading_screen_showing(decoded, payload)
+def handle_CMSG_LOADING_SCREEN_NOTIFY(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
+    decoded = _log_cmsg(ctx)
+    showing = _decode_loading_screen_showing(decoded, ctx.payload)
     _resolve_session_ids()
 
     session.loading_screen_visible = bool(showing)
@@ -2326,8 +2309,8 @@ def handle_CMSG_LOADING_SCREEN_NOTIFY(sock: Any, opcode: int, payload: bytes) ->
     responses = _queue_world_bootstrap_transition(ctx)
     return 0, responses
 
-def handle_CMSG_TIME_SYNC_RESPONSE(sock, opcode, payload):
-    decoded = dsl_decode("CMSG_TIME_SYNC_RESPONSE", payload, silent=True)
+def handle_CMSG_TIME_SYNC_RESPONSE(ctx: PacketContext):
+    decoded = ctx.decoded or {}
 
     seq = decoded.get("sequence_id", 0)
     client_ticks = decoded.get("client_ticks", 0)
@@ -2352,12 +2335,12 @@ def handle_CMSG_TIME_SYNC_RESPONSE(sock, opcode, payload):
 
     return 0, None
 
-def handle_CMSG_DISCARDED_TIME_SYNC_ACKS(sock, opcode, payload):
+def handle_CMSG_DISCARDED_TIME_SYNC_ACKS(ctx: PacketContext):
     Logger.info("[TIME_SYNC] Client discarded pending time sync ACKs")
     return 0, None
 
-def handle_CMSG_OBJECT_UPDATE_FAILED(sock, opcode, payload):
-    decoded = _log_cmsg("CMSG_OBJECT_UPDATE_FAILED", payload)
+def handle_CMSG_OBJECT_UPDATE_FAILED(ctx: PacketContext):
+    decoded = _log_cmsg(ctx)
     guid = _parse_guid(decoded.get("guid"))
     if guid in (None, 0):
         guid = 0
@@ -2368,8 +2351,8 @@ def handle_CMSG_OBJECT_UPDATE_FAILED(sock, opcode, payload):
     Logger.info(f"[WorldHandlers] OBJECT_UPDATE_FAILED guid=0x{int(guid):X}")
     return 0, None
 
-def handle_CMSG_CREATURE_QUERY(sock: Any, opcode: int, payload: bytes) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    decoded = _log_cmsg("CMSG_CREATURE_QUERY", payload)
+def handle_CMSG_CREATURE_QUERY(ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    decoded = _log_cmsg(ctx)
     entry = int(decoded.get("entry") or 0)
     if entry <= 0:
         return 0, None
@@ -2390,8 +2373,8 @@ def handle_CMSG_CREATURE_QUERY(sock: Any, opcode: int, payload: bytes) -> Tuple[
     return 0, [("SMSG_CREATURE_QUERY_RESPONSE", response)]
 
 
-def handle_CMSG_REQUEST_ACCOUNT_DATA(sock, opcode, payload):
-    data_type = payload[0]
+def handle_CMSG_REQUEST_ACCOUNT_DATA(ctx: PacketContext):
+    data_type = ctx.payload[0]
 
     Logger.info(f"[ACCOUNT_DATA] request type={data_type}")
 
@@ -2408,9 +2391,7 @@ def handle_CMSG_REQUEST_ACCOUNT_DATA(sock, opcode, payload):
     return 0, [("SMSG_UPDATE_ACCOUNT_DATA", response)]
 
 def handle_CMSG_REQUEST_CEMETERY_LIST(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     Logger.info("[WorldHandlers] CMSG_REQUEST_CEMETERY_LIST")
     response = _build_request_cemetery_list_response_payload([])
@@ -2418,9 +2399,7 @@ def handle_CMSG_REQUEST_CEMETERY_LIST(
 
 
 def handle_CMSG_REQUEST_PLAYED_TIME(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     row = None
     if session.char_guid is not None and session.realm_id is not None:
@@ -2447,9 +2426,7 @@ def handle_CMSG_REQUEST_PLAYED_TIME(
 
 
 def handle_CMSG_QUERY_TIME(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     Logger.info("[WorldHandlers] CMSG_QUERY_TIME")
     response = build_login_packet("SMSG_QUERY_TIME_RESPONSE", _build_world_login_context())
@@ -2460,9 +2437,7 @@ def handle_CMSG_QUERY_TIME(
 
 
 def handle_CMSG_REQUEST_FORCED_REACTIONS(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     Logger.info("[WorldHandlers] CMSG_REQUEST_FORCED_REACTIONS")
     response = build_login_packet("SMSG_SET_FORCED_REACTIONS", _build_world_login_context())
@@ -2473,9 +2448,7 @@ def handle_CMSG_REQUEST_FORCED_REACTIONS(
 
 
 def handle_CMSG_WORLD_STATE_UI_TIMER_UPDATE(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     Logger.info("[WorldHandlers] CMSG_WORLD_STATE_UI_TIMER_UPDATE")
     response = build_login_packet("SMSG_UI_TIME", _build_world_login_context())
@@ -2486,11 +2459,9 @@ def handle_CMSG_WORLD_STATE_UI_TIMER_UPDATE(
 
 
 def handle_CMSG_NAME_QUERY(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    Logger.info(f"[WorldHandlers] CMSG_NAME_QUERY payload={payload.hex(' ')}")
+    Logger.info(f"[WorldHandlers] CMSG_NAME_QUERY payload={ctx.payload.hex(' ')}")
     world_guid = int(session.world_guid or 0)
     player_name = (
         str(getattr(session, "player_name", "") or "").strip()
@@ -2512,11 +2483,9 @@ def handle_CMSG_NAME_QUERY(
 
 
 def handle_CMSG_QUEST_GIVER_STATUS_QUERY(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    guid = _decode_quest_giver_status_query_guid(payload)
+    guid = _decode_quest_giver_status_query_guid(ctx.payload)
     Logger.info(
         f"[WorldHandlers] CMSG_QUEST_GIVER_STATUS_QUERY guid="
         f"0x{int(guid or 0):016X}"
@@ -2525,11 +2494,9 @@ def handle_CMSG_QUEST_GIVER_STATUS_QUERY(
     return 0, [("SMSG_QUESTGIVER_STATUS", response)]
 
 def handle_CMSG_MESSAGECHAT_SAY_old(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    return _handle_chat_message("CMSG_MESSAGECHAT_SAY", payload)
+    return _handle_chat_message(ctx)
 
 def build_query_player_name_response(guid: int) -> bytes:
     """
@@ -2559,9 +2526,8 @@ def build_query_player_name_response(guid: int) -> bytes:
 
     return payload
 
-def handle_CMSG_MESSAGECHAT_SAY(sock, opcode, payload):
-
-    chat = _decode_chat_message("CMSG_MESSAGECHAT_SAY", payload)
+def handle_CMSG_MESSAGECHAT_SAY(ctx: PacketContext):
+    chat = _decode_chat_message(ctx.name, ctx.payload, ctx.decoded)
     message = chat["message"]
 
     if not message:
@@ -2607,25 +2573,21 @@ def build_smsg_messagechat_say(message: str) -> bytes:
 
     return bytes(payload)
 def handle_CMSG_MESSAGECHAT_YELL(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    return _handle_chat_message("CMSG_MESSAGECHAT_YELL", payload)
+    return _handle_chat_message(ctx)
 
 
 def handle_CMSG_MESSAGECHAT_WHISPER(
-    sock: Any,
-    opcode: int,
-    payload: bytes,
+    ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    return _handle_chat_message("CMSG_MESSAGECHAT_WHISPER", payload)
+    return _handle_chat_message(ctx)
 
 def handle_disconnect() -> None:
     _reset_login_flow_state()
 
 
-def handle_CMSG_REQUEST_HOTFIX(sock, opcode, payload):
+def handle_CMSG_REQUEST_HOTFIX(ctx: PacketContext):
     # Suppressed during minimal login debugging to keep the bootstrap surface small.
     if session.login_state != LoginState.IN_WORLD:
         Logger.info(
@@ -2633,9 +2595,9 @@ def handle_CMSG_REQUEST_HOTFIX(sock, opcode, payload):
             f"(state={session.login_state.value if session.login_state else 'None'})"
         )
         return 0, None
-    return _handle_CMSG_REQUEST_HOTFIX(sock, opcode, payload)
+    return _handle_CMSG_REQUEST_HOTFIX(ctx)
 
-def handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(sock, opcode: int, payload: bytes):
+def handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(ctx: PacketContext):
     Logger.info("[WORLD] Client ready for account data times")
 
     payload = EncoderHandler.encode_packet(
@@ -2652,15 +2614,15 @@ def handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(sock, opcode: int, payload: bytes):
 
     return 0, [("SMSG_ACCOUNT_DATA_TIMES", payload)]
 
-def handle_CMSG_UPDATE_ACCOUNT_DATA(sock, opcode, payload):
-    _log_cmsg("CMSG_UPDATE_ACCOUNT_DATA", payload)
+def handle_CMSG_UPDATE_ACCOUNT_DATA(ctx: PacketContext):
+    _log_cmsg(ctx)
     return 0, None
 
 
 # -----------------------------------------------------------------------------
 # Opcode routing table
 # -----------------------------------------------------------------------------
-def handle_CMSG_SET_ACTIVE_MOVER(sock, opcode, payload):
+def handle_CMSG_SET_ACTIVE_MOVER(ctx: PacketContext):
     """
     Client tells server which unit is the active mover.
     WorldHandlers owns the final world bootstrap transition.
@@ -2687,13 +2649,13 @@ def handle_CMSG_SET_ACTIVE_MOVER(sock, opcode, payload):
     return 0, None
 
 
-def handle_movement_packet(sock: Any, opcode: int, payload: bytes) -> Tuple[int, Optional[bytes]]:
-    opcode_name = WORLD_CLIENT_OPCODES.get(opcode, f"0x{opcode:04X}")
-    movement = parse_movement_info(opcode_name, payload)
+def handle_movement_packet(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
+    opcode_name = WORLD_CLIENT_OPCODES.get(ctx.opcode, f"0x{ctx.opcode:04X}")
+    movement = parse_movement_info(opcode_name, ctx.payload, ctx.decoded)
     if movement is None:
         Logger.warning(
             f"[Movement] failed to parse {opcode_name} guid=0x{int(session.world_guid or session.player_guid or 0):X} "
-            f"payload_len={len(payload)}"
+            f"payload_len={len(ctx.payload)}"
         )
         return 0, None
 
@@ -2710,7 +2672,7 @@ def handle_movement_packet(sock: Any, opcode: int, payload: bytes) -> Tuple[int,
     return 0, None
 
 
-opcode_handlers: Dict[str, Callable[[object, int, bytes], Tuple[int, Optional[bytes]]]] = {
+opcode_handlers: Dict[str, Callable[[PacketContext], Tuple[int, Optional[bytes]]]] = {
     "CMSG_PING": handle_CMSG_PING,
     "CMSG_LOGOUT_REQUEST": handle_CMSG_LOGOUT_REQUEST,
     "CMSG_AUTH_SESSION": handle_CMSG_AUTH_SESSION,

@@ -10,6 +10,7 @@ from enum import Enum, auto
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
 from shared.PathUtils import get_data_root
+from server.modules.PacketContext import PacketContext
 from server.modules.interpretation.EncryptedWorldStream import EncryptedWorldStream
 from server.modules.interpretation.OpcodeResolver import OpcodeResolver
 from server.modules.interpretation.PacketInterpreter import (
@@ -339,14 +340,23 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                 if not handler:
                     continue
 
-                err, response = handler(sock, opcode, payload)
+                decoded = dsl_decode(name, payload, silent=True) or {}
+                ctx = PacketContext(
+                    sock=sock,
+                    direction="C",
+                    opcode=opcode,
+                    name=name,
+                    payload=payload,
+                    decoded=decoded,
+                )
+
+                err, response = handler(ctx)
                 if err or not response:
                     continue
 
                 # ---- INIT ARC4 AFTER HANDLER RAN ----
                 if auth_session_seen:
                     try:
-                        decoded = dsl_decode("CMSG_AUTH_SESSION", payload, silent=True)
                         account = (
                             decoded.get("account")
                             or decoded.get("username")

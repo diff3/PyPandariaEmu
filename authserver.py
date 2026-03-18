@@ -9,9 +9,13 @@ import threading
 from DSL.modules.DslRuntime import DslRuntime
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
+from server.modules.PacketContext import PacketContext
 
 from server.modules.database.DatabaseConnection import DatabaseConnection
-from server.modules.handlers.AuthHandlers import opcode_handlers as AUTH_HANDLERS
+from server.modules.handlers.AuthHandlers import (
+    opcode_handlers as AUTH_HANDLERS,
+    set_srp6_mode,
+)
 from server.modules.opcodes.AuthOpcodes import AUTH_CLIENT_OPCODES, AUTH_SERVER_OPCODES
 
 
@@ -37,16 +41,17 @@ def sigint(sig, frame):
 
 # ---- Utility helpers ----------------------------------------------------
 
-def safe_decode(direction: str, name: str, payload: bytes):
+def safe_decode(direction: str, name: str, payload: bytes) -> dict:
     """Decode DSL packets without crashing handler logic."""
     if runtime is None:
-        return
+        return {}
 
     try:
-        runtime.decode(name, payload, silent=True)
+        return runtime.decode(name, payload, silent=True) or {}
     except Exception as exc:
         Logger.error(f"{direction}: decode failed for {name}: {exc}")
         Logger.error(traceback.format_exc())
+        return {}
 
 
 # ---- Client session handler ---------------------------------------------
@@ -72,7 +77,7 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                 Logger.warning(f"{addr}: Unknown opcode 0x{opcode:02X}")
                 break
 
-            safe_decode("Client", opcode_name, data)
+            decoded = safe_decode("Client", opcode_name, data)
 
             handler = AUTH_HANDLERS.get(opcode_name)
             if handler is None:
@@ -80,7 +85,15 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                 break
 
             try:
-                err, response = handler(sock, opcode, data)
+                ctx = PacketContext(
+                    sock=sock,
+                    direction="C",
+                    opcode=opcode,
+                    name=opcode_name,
+                    payload=data,
+                    decoded=decoded,
+                )
+                err, response = handler(ctx)
             except Exception as exc:
                 Logger.error(f"{addr}: Handler crash: {exc}")
                 Logger.error(traceback.format_exc())
@@ -156,6 +169,7 @@ def run_auth():
 
     signal.signal(signal.SIGINT, sigint)
     signal.signal(signal.SIGTERM, sigint)
+    set_srp6_mode(config.get("crypto", {}).get("srp6_mode", "skyfire"))
 
     try:
         runtime = DslRuntime(watch=False)

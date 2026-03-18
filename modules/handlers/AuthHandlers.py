@@ -18,23 +18,15 @@ import socket
 import traceback
 
 from shared.Logger import Logger
-from shared.ConfigLoader import ConfigLoader
+from server.modules.PacketContext import PacketContext
 # from server.modules.OpcodeLoader import load_auth_opcodes
 from server.modules.opcodes.AuthOpcodes import (
-    AUTH_CLIENT_OPCODES,
     AUTH_SERVER_OPCODES,
-    lookup as auth_lookup,
 )
-
-from DSL.modules.DecoderHandler import DecoderHandler
 from DSL.modules.EncoderHandler import EncoderHandler
-from DSL.modules.NodeTreeParser import NodeTreeParser
-from DSL.modules.Processor import load_case
-from DSL.modules.Session import get_session
 
 from server.modules.crypto.SRP6Session import SRP6Session
 from server.modules.database.DatabaseConnection import DatabaseConnection
-from server.modules.interpretation.utils import _get_dsl_runtime
 
 
 # ---- Global state ---------------------------------------------------------
@@ -45,32 +37,19 @@ authenticated_users: dict[int, str] = {}
 # Opcode maps: int → name (per direction) + reverse for convenience
 # AUTH_CLIENT_OPCODES, AUTH_SERVER_OPCODES, _ = load_auth_opcodes()
 AUTH_SERVER_OPCODE_BY_NAME = {name: code for code, name in AUTH_SERVER_OPCODES.items()}
+_srp6_mode = "skyfire"
 
 
-# ---- DSL decoding ---------------------------------------------------------
-
-from server.modules.interpretation.utils import _get_dsl_runtime
-
-def dsl_decode(def_name: str, payload: bytes, silent: bool = False) -> dict:
-    try:
-        rt = _get_dsl_runtime()
-        return rt.decode(def_name, payload, silent=silent)
-    except Exception as exc:
-        if not silent:
-            Logger.error(f"[{def_name}] Decode failed: {exc}")
-        raise
+def set_srp6_mode(mode: str) -> None:
+    global _srp6_mode
+    _srp6_mode = str(mode or "skyfire")
 
 
 # ---- AUTH_LOGON_CHALLENGE ----------------------------------------------
 
-def handle_AUTH_LOGON_CHALLENGE_C(client_socket, opcode, data: bytes):
-    cfg = ConfigLoader.load_config()
-
-    try:
-        decoded = dsl_decode("AUTH_LOGON_CHALLENGE_C", data, silent=True)
-    except Exception as exc:
-        Logger.error(f"[AUTH_LOGON_CHALLENGE_C] Decode failed: {exc}")
-        return 1, None
+def handle_AUTH_LOGON_CHALLENGE_C(ctx: PacketContext):
+    client_socket = ctx.sock
+    decoded = ctx.decoded or {}
 
     username = (decoded.get("I") or decoded.get("username") or "").upper()
     if not username:
@@ -92,8 +71,7 @@ def handle_AUTH_LOGON_CHALLENGE_C(client_socket, opcode, data: bytes):
             "AUTH_LOGON_CHALLENGE_S", {"cmd": 0, "error": 2}
         )
 
-    srp_mode = cfg.get("crypto", {}).get("srp6_mode", "skyfire")
-    session = SRP6Session(username, salt, verifier, mode=srp_mode)
+    session = SRP6Session(username, salt, verifier, mode=_srp6_mode)
     fd = client_socket.fileno()
     srp6_sessions[fd] = session
 
@@ -137,13 +115,10 @@ def build_AUTH_LOGON_CHALLENGE_S(fields: dict) -> bytes:
 
 # ---- AUTH_LOGON_PROOF --------------------------------------------------
 
-def handle_AUTH_LOGON_PROOF_C(client_socket, opcode, data: bytes):
-    try:
-        decoded = dsl_decode("AUTH_LOGON_PROOF_C", data, silent=True)
-        Logger.success("AUTH_LOGON_PROOF_C\n" + json.dumps(decoded, indent=4))
-    except Exception as exc:
-        Logger.error(f"[AUTH_LOGON_PROOF_C] Decode failed: {exc}")
-        return 1, None
+def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
+    client_socket = ctx.sock
+    decoded = ctx.decoded or {}
+    Logger.success("AUTH_LOGON_PROOF_C\n" + json.dumps(decoded, indent=4))
 
     fd = client_socket.fileno()
     session = srp6_sessions.get(fd)
@@ -261,12 +236,11 @@ def build_realmlist_entries(realms, account_id):
 
     return entries
 
-def handle_REALM_LIST_C(client_socket, opcode, data: bytes):
-    try:
-        decoded = dsl_decode("REALM_LIST_C", data, silent=True)
+def handle_REALM_LIST_C(ctx: PacketContext):
+    client_socket = ctx.sock
+    decoded = ctx.decoded or {}
+    if decoded:
         Logger.info(f"[REALM_LIST_C] {decoded}")
-    except Exception:
-        pass
 
     fd = client_socket.fileno()
     username = authenticated_users.get(fd)
@@ -309,17 +283,15 @@ def build_REALM_LIST_S(realm_entries) -> bytes:
 
 # ---- AUTH_RECONNECT_CHALLENGE -----------------------------------------
 
-def handle_AUTH_RECONNECT_CHALLENGE_C(client_socket, opcode, data: bytes):
+def handle_AUTH_RECONNECT_CHALLENGE_C(ctx: PacketContext):
     """
     Handle AUTH_RECONNECT_CHALLENGE_C.
     Input: client socket, opcode byte, raw payload.
     Output: (err, response_bytes) tuple built from DSL encoder.
     """
-    try:
-        decoded = dsl_decode("AUTH_RECONNECT_CHALLENGE_C", data, silent=True)
+    decoded = ctx.decoded or {}
+    if decoded:
         Logger.info(f"[AUTH_RECONNECT_CHALLENGE_C] {decoded}")
-    except Exception:
-        pass
 
     try:
         out = build_AUTH_RECONNECT_CHALLENGE_S()

@@ -21,6 +21,7 @@ import json
 import struct
 from DSL.modules.EncoderHandler import EncoderHandler
 from DSL.modules.bitsHandler import BitWriter
+from server.modules.PacketContext import PacketContext
 from shared.Logger import Logger
 
 from .constants import RACES_MOP, CLASSES_MOP
@@ -1390,7 +1391,7 @@ def build_SMSG_INIT_WORLD_STATES(_ctx=None) -> bytes:
     })
 
 
-def handle_CMSG_REQUEST_HOTFIX(sock, opcode, payload):
+def handle_CMSG_REQUEST_HOTFIX(ctx: PacketContext):
     captured = _load_payload_packet("SMSG_HOTFIX_NOTIFY_BLOB")
     if captured is not None:
         return 0, ("SMSG_HOTFIX_NOTIFY_BLOB", captured)

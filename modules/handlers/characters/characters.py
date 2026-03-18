@@ -16,11 +16,10 @@ from DSL.modules.EncoderHandler import EncoderHandler
 from DSL.modules.NodeTreeParser import NodeTreeParser
 from DSL.modules.Processor import load_case
 from DSL.modules.Session import get_session
-from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
-from shared.PathUtils import get_captures_root, get_json_root
+from shared.PathUtils import get_captures_root, get_dbc_root, get_json_root
 # from server.modules.OpcodeLoader import load_world_opcodes
-from server.modules.interpretation.utils import dsl_decode, to_safe_json
+from server.modules.interpretation.utils import to_safe_json
 from server.modules.dbc import read_dbc
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.database.CharactersModel import (
@@ -33,6 +32,7 @@ from server.modules.opcodes.WorldOpcodes import (
     WORLD_CLIENT_OPCODES,
     WORLD_SERVER_OPCODES,
 )
+from server.modules.PacketContext import PacketContext
 
 session = WorldSession()
 # Lookup maps (opcode int -> name)
@@ -99,8 +99,6 @@ _GUILD_MASK_KEYS = [
     "guildguid_7_mask",
 ]
 
-cfg = ConfigLoader.load_config()
-
 def load_expected(case_name: str) -> dict:
     path = get_json_root() / f"{case_name}.json"
 
@@ -133,16 +131,7 @@ def _default_known_titles() -> str:
     return _DEFAULT_KNOWN_TITLES
 
 def _resolve_dbc_root() -> Optional[Path]:
-    dbc_root = cfg.get("dbc_path")
-    if not dbc_root:
-        dbc_root = (cfg.get("client") or {}).get("dbc_path")
-    if not dbc_root:
-        game_root = (cfg.get("client") or {}).get("game_root")
-        if game_root:
-            dbc_root = Path(game_root) / "Data" / "DBFilesClient"
-    if not dbc_root:
-        return None
-    return Path(dbc_root)
+    return get_dbc_root()
 
 
 
@@ -516,14 +505,6 @@ def _parse_equipment_cache(cache: str) -> Optional[list[dict]]:
 def _default_taximask() -> str:
     return " ".join(["0"] * 16)
 
-def _decode_payload(name: str, payload: bytes) -> dict:
-    try:
-        return dsl_decode(name, payload, silent=True) or {}
-    except Exception as exc:
-        Logger.error(f"[CMSG] decode {name} failed: {exc}")
-        return {}
-
-
 def _next_character_guid(session) -> int:
     row = session.query(Characters.guid).order_by(Characters.guid.desc()).first()
     if row and row[0]:
@@ -781,22 +762,17 @@ def _coerce_guid_int(value) -> Optional[int]:
     except Exception:
         return None
     
-def _log_cmsg(name: str, payload: bytes) -> None:
-    """Decode and log client payload in JSON form."""
-    try:
-        decoded = dsl_decode(name, payload, silent=True)
-        safe = to_safe_json(decoded)
-        Logger.success(f"[CMSG] {name}\n{json.dumps(safe, indent=2)}")
-    except Exception as exc:
-        Logger.error(f"[CMSG] decode {name} failed: {exc}")
+def _log_ctx(ctx: PacketContext) -> dict:
+    decoded = ctx.decoded or {}
+    Logger.success(f"[CMSG] {ctx.name}\n{json.dumps(to_safe_json(decoded), indent=2)}")
+    return decoded
 
-def handle_CMSG_CHAR_DELETE(sock, opcode: int, payload: bytes):
-    _log_cmsg("CMSG_CHAR_DELETE", payload)
+def handle_CMSG_CHAR_DELETE(ctx: PacketContext):
+    decoded = _log_ctx(ctx)
 
     CHAR_DELETE_SUCCESS = 0x47
     CHAR_DELETE_FAILED = 0x48
 
-    decoded = _decode_payload("CMSG_CHAR_DELETE", payload) or {}
     Logger.info(f"[CHAR DELETE] decoded={to_safe_json(decoded)}")
 
     # --------------------------------------------------
@@ -920,10 +896,9 @@ def handle_CMSG_CHAR_DELETE(sock, opcode: int, payload: bytes):
     return 0, responses
 
 
-def handle_CMSG_REORDER_CHARACTERS(sock, opcode: int, payload: bytes):
-    _log_cmsg("CMSG_REORDER_CHARACTERS", payload)
+def handle_CMSG_REORDER_CHARACTERS(ctx: PacketContext):
+    decoded = _log_ctx(ctx)
 
-    decoded = _decode_payload("CMSG_REORDER_CHARACTERS", payload) or {}
     Logger.info(f"[CHAR REORDER] decoded={to_safe_json(decoded)}")
 
     entries = decoded.get("entries") or []
@@ -997,8 +972,8 @@ def handle_CMSG_REORDER_CHARACTERS(sock, opcode: int, payload: bytes):
     return 0, None
 
 
-def handle_CMSG_CHAR_CREATE(sock, opcode: int, payload: bytes):
-    _log_cmsg("CMSG_CHAR_CREATE", payload)
+def handle_CMSG_CHAR_CREATE(ctx: PacketContext):
+    data = _log_ctx(ctx)
 
     # WoW ResponseCode values for character creation.
     CHAR_CREATE_SUCCESS = 0x2F
@@ -1010,7 +985,6 @@ def handle_CMSG_CHAR_CREATE(sock, opcode: int, payload: bytes):
     # --------------------------------------------------
     # Decode
     # --------------------------------------------------
-    data = _decode_payload("CMSG_CHAR_CREATE", payload) or {}
     Logger.info(f"[CHAR CREATE] decoded={to_safe_json(data)}")
 
     name = data.get("name")
