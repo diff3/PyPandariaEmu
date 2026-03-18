@@ -1,5 +1,0 @@
-# SMSG_PONG - Done
-endian: little
-header:
-data:
-    ping_id: I

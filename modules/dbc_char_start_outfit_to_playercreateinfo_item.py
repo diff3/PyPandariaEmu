@@ -61,14 +61,7 @@ def _resolve_dbc_path(dbc_path: str | None, game_root: str | None) -> Path:
 
 
 def _get_db_module():
-    cfg = ConfigLoader.load_config()
-    program = cfg["program"]
-    version = cfg["version"]
-    expansion = cfg.get("expansion")
-
-    mod = importlib.import_module(
-        f"protocols.{program}.{expansion}.{version}.modules.database.DatabaseConnection"
-    )
+    mod = importlib.import_module("server.modules.database.DatabaseConnection")
     mod.DatabaseConnection.initialize()
     return mod
 

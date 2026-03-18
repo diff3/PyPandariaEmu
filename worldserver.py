@@ -9,7 +9,7 @@ import traceback
 from enum import Enum, auto
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
-# from utils.ProtocolBootstrap import load_bootstrap
+from shared.PathUtils import get_data_root
 from server.modules.interpretation.EncryptedWorldStream import EncryptedWorldStream
 from server.modules.interpretation.OpcodeResolver import OpcodeResolver
 from server.modules.interpretation.PacketInterpreter import (
@@ -21,16 +21,25 @@ from server.modules.interpretation.PacketInterpreter import (
 )
 from server.modules.interpretation.parser import parse_plain_packets
 from server.modules.interpretation.utils import dsl_decode, build_world_header_plain
+from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler as WorldCryptoHandler
 
+try:
+    from server.modules.handlers.WorldHandlers import (
+        opcode_handlers,
+        get_auth_challenge,
+        reset_state as reset_handler_state,
+        preload_cache as preload_handler_cache,
+    )
+except Exception:
+    opcode_handlers = {}
+    get_auth_challenge = None
+    reset_handler_state = None
+    preload_handler_cache = None
 
 # ---- Configuration ------------------------------------------------------
 
 config = ConfigLoader.load_config()
 config["Logging"]["logging_levels"] = "Information, Success, Error"
-
-program = config["program"]
-expansion = config.get("expansion")
-version = config["version"]
 
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.opcodes.WorldOpcodes import (
@@ -73,70 +82,23 @@ AUTH_RESPONSE_OPCODE = EncryptedWorldStream.AUTH_RESPONSE_OPCODE
 WORLD_HANDLERS = opcode_handlers
 
 
-# ---- Optional handler hooks ----
-# (matchar bootstrap-strukturen)
-# sätt None om de inte finns i din fil
 try:
     preload_cache()
 except Exception:
     pass
-
-
-# bootstrap = load_bootstrap()
-# DatabaseConnection = bootstrap.load_database()
-# DatabaseConnection.initialize()
-# DatabaseConnection.preload_world_cache()
-# PacketDump = bootstrap.get_packet_dump()
 
 HOST = config["worldserver"]["host"]
 PORT = config["worldserver"]["port"]
 running = True
 
 
-# ---- Opcodes/handlers ---------------------------------------------------
-
-# WORLD_CLIENT_OPCODES, WORLD_SERVER_OPCODES, world_lookup = bootstrap.load_world_opcodes()
-# SERVER_OPCODE_BY_NAME = {name: code for code, name in WORLD_SERVER_OPCODES.items()}
-
-# opcode_resolver = OpcodeResolver(WORLD_CLIENT_OPCODES, WORLD_SERVER_OPCODES, world_lookup)
-
-# try:
-    # AUTH_SESSION_OPCODE = world_lookup.WorldClientOpcodes.CMSG_AUTH_SESSION.value
-#except Exception:
-   # AUTH_SESSION_OPCODE = 0x00B2  # MoP fallback
-
-# AUTH_RESPONSE_OPCODE = EncryptedWorldStream.AUTH_RESPONSE_OPCODE
-
-# handlers = bootstrap.load_world_handlers()
 from server.modules.handlers.WorldHandlers import opcode_handlers
-
-# try:
- #   handlers = bootstrap.load_world_handlers()
-  #  opcode_handlers = handlers.get("opcode_handlers", {})
-   # get_auth_challenge = handlers.get("get_auth_challenge")
- #   reset_handler_state = handlers.get("reset_state")
- #   preload_handler_cache = handlers.get("preload_cache")
- #   Logger.info("[WorldServer] Loaded world opcode handlers")
-
-  #  Logger.info(f"get_auth_challenge={get_auth_challenge}")
-  #  Logger.info(f"callable={callable(get_auth_challenge)}")
-#except Exception:
- #   opcode_handlers = {}
-  #  get_auth_challenge = None
-   # reset_handler_state = None
- #   preload_handler_cache = None
-  #  Logger.info("[WorldServer] No WorldHandlers found, raw fallback only")
-
-#if preload_handler_cache:
- #   try:
-  #      preload_handler_cache()
-   # except Exception as exc:
-    #    Logger.warning(f"[WorldServer] Handler cache preload failed: {exc}")
 
 
 # ---- Interpretation helpers --------------------------------------------
 
-packet_dumper = PacketDump(f"protocols/{program}/{expansion}/{version}/data")
+packet_dumper = PacketDump(get_data_root())
+
 interpreter = PacketInterpreter(
     decoder=DslDecoder(),
     normalizer=JsonNormalizer(),
@@ -144,11 +106,6 @@ interpreter = PacketInterpreter(
     dumper=PacketDumper(packet_dumper),
 )
 
-
-# ---- Constants ----------------------------------------------------------
-
-# HANDSHAKE_SERVER, HANDSHAKE_CLIENT = bootstrap.get_world_handshake()
-# WorldCryptoHandler = bootstrap.get_world_crypto()
 
 HANDSHAKE_SERVER = b"0\x00WORLD OF WARCRAFT CONNECTION - SERVER TO CLIENT\x00"
 HANDSHAKE_CLIENT = b"0\x00WORLD OF WARCRAFT CONNECTION - CLIENT TO SERVER\x00"
@@ -460,8 +417,8 @@ def run_world() -> None:
     signal.signal(signal.SIGINT, sigint)
 
     Logger.info(
-        f"{config['friendly_name']} "
-        f"({config['program']}:{config.get('expansion')}:{config['version']}) WorldServer (Minimal Mode)"
+        f"{config.get('friendly_name', 'Server')} "
+        f"({config.get('program')}:{config.get('expansion')}:{config.get('version')}) WorldServer (Minimal Mode)"
     )
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

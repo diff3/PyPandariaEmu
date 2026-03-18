@@ -1,5 +1,0 @@
-# CMSG_SET_ACTIVE_MOVER - Raw capture only, decode TBD
-endian: little
-header:
-data:
-    raw: R, r

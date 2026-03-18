@@ -9,7 +9,7 @@ from threading import Lock
 from datetime import datetime
 from utils.ConfigLoader import ConfigLoader
 from utils.PathUtils import get_captures_root
-from protocols.wow.shared.modules.crypto.ARC4Crypto import Arc4CryptoHandler
+from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler
 
 
 _focus_capture_counter = count(1)

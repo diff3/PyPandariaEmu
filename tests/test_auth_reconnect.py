@@ -1,7 +1,7 @@
 import json
 import unittest
 from pathlib import Path
-from utils.ConfigLoader import ConfigLoader
+from shared.ConfigLoader import ConfigLoader
 
 import yaml
 cfg = ConfigLoader.get_config()

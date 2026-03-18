@@ -115,8 +115,6 @@ class PacketDump:
 
     def __init__(self, root):
         self.root = Path(root)
-        (self.root / "json").mkdir(parents=True, exist_ok=True)
-        (self.root / "debug").mkdir(parents=True, exist_ok=True)
 
         cfg = ConfigLoader.load_config()
         self.program = cfg.get("program")
@@ -191,7 +189,7 @@ class PacketDump:
     # -----------------------------------------------------
     def dump_fixed(self, case_name: str, raw_header: bytes, payload: bytes, decoded: dict):
         """
-        Write expected JSON/debug under protocols/... (no timestamps).
+        Write expected JSON/debug under the configured runtime data root (no timestamps).
         """
         # bin (disabled)
         bin_path = None
@@ -248,7 +246,7 @@ class PacketDump:
 
 
 # ==============================================================
-# CAPTURE DUMPER — writes into protocol-specific captures
+# CAPTURE DUMPER — writes into configured captures
 # ==============================================================
 
 def dump_capture(
@@ -261,8 +259,6 @@ def dump_capture(
     debug_only: bool = False,
 ):
     root = Path(root) if root else get_captures_root()
-    (root / "json").mkdir(parents=True, exist_ok=True)
-    (root / "debug").mkdir(parents=True, exist_ok=True)
 
     full = raw_header + payload
     header_info = parse_world_header(raw_header, len(payload))

@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 from server.modules.handlers.worldLogin.context import WorldLoginContext
 
-from DSL.modules.dsl.EncoderHandler import EncoderHandler
-from DSL.modules.dsl.bitsHandler import BitWriter
+from DSL.modules.EncoderHandler import EncoderHandler
+from DSL.modules.bitsHandler import BitWriter
 from server.modules.handlers.worldLogin.packets import (
     build_ENUM_CHARACTERS_RESULT,
     build_login_packet,
@@ -45,6 +45,10 @@ from server.modules.handlers.characters.characters import (
     handle_CMSG_CHAR_CREATE,
     handle_CMSG_REORDER_CHARACTERS,
 )
+
+from shared.PathUtils import get_captures_root, get_json_root
+
+_LOGIN_UPDATE_OBJECT_CAPTURE_DIR = get_captures_root(focus=True) / "debug"
 
 from server.modules.dbc import read_dbc
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
@@ -67,8 +71,15 @@ from server.modules.opcodes.WorldOpcodes import (
     lookup as world_lookup,  # om du använder den
 )
 
-_LOGIN_UPDATE_OBJECT_CAPTURE_DIR = Path(__file__).resolve().parents[2] / "captures" / "focus" / "debug"
-_ACCOUNT_DATA_CAPTURE_DIR = Path(__file__).resolve().parents[2] / "captures" / "focus" / "debug"
+# _LOGIN_UPDATE_OBJECT_CAPTURE_DIR = Path(__file__).resolve().parents[2] / "captures" / "focus" / "debug"
+# _ACCOUNT_DATA_CAPTURE_DIR = Path(__file__).resolve().parents[2] / "captures" / "focus" / "debug"
+# _ACCOUNT_DATA_CAPTURE_DIR = Path(__file__).resolve().parents[2] / "captures" / "focus" / "debug"
+
+CAPTURE_DIR = get_captures_root()
+
+_LOGIN_UPDATE_OBJECT_CAPTURE_DIR = get_captures_root(focus=True) / "debug"
+_ACCOUNT_DATA_CAPTURE_DIR = get_captures_root(focus=True) / "debug"
+
 _ACCOUNT_DATA_BINDINGS_CAPTURE = _ACCOUNT_DATA_CAPTURE_DIR / "SMSG_UPDATE_ACCOUNT_DATA_1773657568_0001.json"
 _ACCOUNT_DATA_CAPTURE_GLOB = "SMSG_UPDATE_ACCOUNT_DATA_*.json"
 LOGIN_REPLAY_PLAYER_GUID = 0x03000100000002
@@ -602,7 +613,7 @@ def _build_exact_update_object_packet(path: Path, *, update_index: int) -> tuple
     return _make_update_object_response(payload, update_index=update_index)
 
 
-def replay_movement_focus_sequence(session: WorldSession) -> list[tuple[str, bytes]]:
+def replay_movement_focus_sequence_old(session: WorldSession) -> list[tuple[str, bytes]]:
     entries = [
         (opcode_name, _LOGIN_UPDATE_OBJECT_CAPTURE_DIR / filename)
         for opcode_name, filename in MOVEMENT_FOCUS_SEQUENCE
@@ -656,7 +667,7 @@ def replay_movement_focus_sequence(session: WorldSession) -> list[tuple[str, byt
     return responses
 
 
-def replay_update_object_sequence(session: WorldSession) -> list[tuple[str, bytes]]:
+def replay_update_object_sequence_old(session: WorldSession) -> list[tuple[str, bytes]]:
     paths = [
         _LOGIN_UPDATE_OBJECT_CAPTURE_DIR / filename
         for filename in LOGIN_UPDATE_SEQUENCE
@@ -685,6 +696,98 @@ def replay_update_object_sequence(session: WorldSession) -> list[tuple[str, byte
         )
     return responses
 
+_CAPTURE_DIR = get_captures_root(focus=True) / "debug"
+
+
+def replay_movement_focus_sequence(session: WorldSession) -> list[tuple[str, bytes]]:
+    entries = [
+        (opcode_name, _CAPTURE_DIR / filename)
+        for opcode_name, filename in MOVEMENT_FOCUS_SEQUENCE
+    ]
+
+    # ---- Validate required files ----
+    required = []
+    if USE_RAW_ACTIVE_MOVER:
+        required.append(entries[0])
+    required.extend(entries[1:])
+
+    missing = [path for _, path in required if not path.exists()]
+    if missing:
+        raise RuntimeError(
+            f"Missing movement focus captures in {_CAPTURE_DIR}: "
+            + ", ".join(p.name for p in missing)
+        )
+
+    session.player_object_sent = True
+    responses: list[tuple[str, bytes]] = []
+
+    # ---- Active mover ----
+    if USE_RAW_ACTIVE_MOVER:
+        opcode_name, path = entries[0]
+        Logger.info("[ACTIVE_MOVER MODE] raw")
+        responses.append(send_raw_sniff_packet(session, opcode_name, path))
+    else:
+        responses.append(_build_dynamic_active_mover_packet())
+
+    # ---- UPDATE_OBJECT sequence ----
+    update_entries = entries[1:]
+    total = len(update_entries)
+
+    Logger.info("[UPDATE_OBJECT MODE] raw")
+
+    for index, (opcode_name, path) in enumerate(update_entries, start=1):
+        Logger.info(
+            f"[WorldLoginReplay] packet {index}/{total} opcode={opcode_name}"
+        )
+
+        if path.name in EXACT_UPDATE_OBJECT_BUILDERS:
+            responses.append(
+                _build_exact_update_object_packet(path, update_index=index)
+            )
+        else:
+            responses.append(
+                send_raw_sniff_packet(
+                    session,
+                    opcode_name,
+                    path,
+                    update_index=index,
+                )
+            )
+
+    return responses
+
+
+def replay_update_object_sequence(session: WorldSession) -> list[tuple[str, bytes]]:
+    paths = [_CAPTURE_DIR / filename for filename in LOGIN_UPDATE_SEQUENCE]
+
+    # ---- Validate ----
+    missing = [p for p in paths if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            f"Missing login UPDATE_OBJECT captures in {_CAPTURE_DIR}: "
+            + ", ".join(p.name for p in missing)
+        )
+
+    session.player_object_sent = True
+    responses: list[tuple[str, bytes]] = []
+
+    total = len(paths)
+
+    for index, path in enumerate(paths, start=1):
+        Logger.info(
+            f"[WorldLoginReplay] UPDATE_OBJECT {index}/{total}"
+        )
+
+        responses.append(
+            send_raw_sniff_packet(   # <-- FIX: samma funktion som ovan
+                session,
+                "SMSG_UPDATE_OBJECT",
+                path,
+                update_index=index,
+            )
+        )
+
+    return responses
 
 def _is_pre_player_login_state(state: Optional[LoginState]) -> bool:
     return state in {None, LoginState.AUTHED, LoginState.CHAR_SCREEN}
@@ -1110,9 +1213,6 @@ def _handle_chat_message(opcode_name: str, payload: bytes):
 # -----------------------------------------------------------------------------
 
 cfg = ConfigLoader.load_config()
-program = cfg["program"]
-expansion = cfg.get("expansion")
-version = cfg["version"]
 
 # WORLD_CLIENT_OPCODES, WORLD_SERVER_OPCODES, _ = load_world_opcodes()
 SERVER_OPCODE_BY_NAME = {name: code for code, name in WORLD_SERVER_OPCODES.items()}
@@ -1125,10 +1225,10 @@ MAX_CREATURE_QUEST_ITEMS = 6
 # -----------------------------------------------------------------------------
 
 def load_expected(case_name: str) -> dict:
-    path = Path(f"protocols/{program}/{expansion}/{version}/data/json/{case_name}.json")
+    path = get_json_root() / f"{case_name}.json"
+
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
 def _load_template(case_name: str) -> dict:
     try:
         return load_expected(case_name)

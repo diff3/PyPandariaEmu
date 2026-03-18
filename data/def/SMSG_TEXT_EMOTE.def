@@ -1,6 +1,0 @@
-# SMSG_TEXT_EMOTE – raw
-endian: little
-header:
-data:
-    _: 6B
-    raw: R, r

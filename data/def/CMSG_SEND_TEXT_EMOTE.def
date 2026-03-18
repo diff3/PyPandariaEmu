@@ -1,6 +1,0 @@
-# CMSG_SEND_TEXT_EMOTE
-endian: little
-header:
-data:
-    emote_id: I
-    target_guid: Q

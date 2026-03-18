@@ -1,5 +1,0 @@
-# SMSG_UI_TIME - Done
-endian: little
-header:
-data:
-    server_time: I

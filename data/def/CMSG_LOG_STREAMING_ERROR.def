@@ -1,7 +1,0 @@
-# CMSG_LOG_STREAMING_ERROR – Partial, needs testing
-endian: little
-header:
-data:
-    unk1: B
-    unk2: B
-    msg: R

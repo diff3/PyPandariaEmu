@@ -3,7 +3,7 @@
 
 import unittest
 
-from protocols.wow.shared.utils.guid import (
+from server.modules.guid import (
     GuidHelper,
     HighGuid,
     PlayerGuid,

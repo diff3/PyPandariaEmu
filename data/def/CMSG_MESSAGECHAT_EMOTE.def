@@ -1,5 +1,0 @@
-# # CMSG_MESSAGECHAT_SAY
-endian: little
-header:
-data:
-    raw: R, r

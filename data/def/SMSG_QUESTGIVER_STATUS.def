@@ -1,6 +1,0 @@
-# SMSG_QUESTGIVER_STATUS
-endian: little
-header:
-data:
-    npcGUID: packed_guid, mask=0xEB
-    status: I

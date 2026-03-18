@@ -1,6 +1,0 @@
-# SMSG_QUERY_PLAYER_NAME_RESPONSE
-endian: little
-header:
-data:
-    guid: packed_guid
-    raw: R, r

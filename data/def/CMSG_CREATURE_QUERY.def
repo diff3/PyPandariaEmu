@@ -1,5 +1,0 @@
-# CMSG_CREATURE_QUERY - Minimal
-endian: little
-header:
-data:
-    entry: I

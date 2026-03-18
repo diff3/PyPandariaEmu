@@ -11,14 +11,14 @@ import time
 from pathlib import Path
 from typing import Dict, Callable, Tuple, Optional
 
-from DSL.modules.dsl.DecoderHandler import DecoderHandler
-from DSL.modules.dsl.EncoderHandler import EncoderHandler
-from DSL.modules.dsl.NodeTreeParser import NodeTreeParser
-from DSL.modules.dsl.Processor import load_case
-from DSL.modules.dsl.Session import get_session
+from DSL.modules.DecoderHandler import DecoderHandler
+from DSL.modules.EncoderHandler import EncoderHandler
+from DSL.modules.NodeTreeParser import NodeTreeParser
+from DSL.modules.Processor import load_case
+from DSL.modules.Session import get_session
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
-from shared.PathUtils import get_captures_root, get_protocol_root
+from shared.PathUtils import get_captures_root, get_json_root
 # from server.modules.OpcodeLoader import load_world_opcodes
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
 from server.modules.dbc import read_dbc
@@ -100,17 +100,12 @@ _GUILD_MASK_KEYS = [
 ]
 
 cfg = ConfigLoader.load_config()
-program = cfg["program"]
-expansion = cfg.get("expansion")
-version = cfg["version"]
 
 def load_expected(case_name: str) -> dict:
-    path = Path(
-        f"protocols/{program}/{expansion}/{version}/data/json/{case_name}.json"
-    )
+    path = get_json_root() / f"{case_name}.json"
+
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
 
 def _load_template(case_name: str) -> dict:
     try:
@@ -118,6 +113,14 @@ def _load_template(case_name: str) -> dict:
     except Exception as exc:
         Logger.error(f"[WorldHandlers] Missing template {case_name}: {exc}")
         return {}
+
+
+def _get_shared_world_session():
+    try:
+        from server.modules.handlers import WorldHandlers as world_handlers
+    except Exception:
+        return None
+    return getattr(world_handlers, "session", None)
 
 
 def _get_auth_response_template() -> dict:
@@ -836,15 +839,10 @@ def handle_CMSG_CHAR_DELETE(sock, opcode: int, payload: bytes):
         account_id = None
         realm_id = None
 
-        try:
-            from protocols.wow.mop.v18414.modules.handlers import WorldHandlers as world_handlers
-
-            shared_session = getattr(world_handlers, "session", None)
-            if shared_session is not None:
-                account_id = getattr(shared_session, "account_id", None)
-                realm_id = getattr(shared_session, "realm_id", None)
-        except Exception:
-            pass
+        shared_session = _get_shared_world_session()
+        if shared_session is not None:
+            account_id = getattr(shared_session, "account_id", None)
+            realm_id = getattr(shared_session, "realm_id", None)
 
         if account_id is None or realm_id is None:
             account_id, realm_id = _resolve_session_ids()
@@ -935,15 +933,10 @@ def handle_CMSG_REORDER_CHARACTERS(sock, opcode: int, payload: bytes):
     account_id = None
     realm_id = None
 
-    try:
-        from protocols.wow.mop.v18414.modules.handlers import WorldHandlers as world_handlers
-
-        shared_session = getattr(world_handlers, "session", None)
-        if shared_session is not None:
-            account_id = getattr(shared_session, "account_id", None)
-            realm_id = getattr(shared_session, "realm_id", None)
-    except Exception:
-        pass
+    shared_session = _get_shared_world_session()
+    if shared_session is not None:
+        account_id = getattr(shared_session, "account_id", None)
+        realm_id = getattr(shared_session, "realm_id", None)
 
     if account_id is None or realm_id is None:
         account_id, realm_id = _resolve_session_ids()
@@ -1046,15 +1039,10 @@ def handle_CMSG_CHAR_CREATE(sock, opcode: int, payload: bytes):
     account_id = None
     realm_id = None
 
-    try:
-        from protocols.wow.mop.v18414.modules.handlers import WorldHandlers as world_handlers
-
-        shared_session = getattr(world_handlers, "session", None)
-        if shared_session is not None:
-            account_id = getattr(shared_session, "account_id", None)
-            realm_id = getattr(shared_session, "realm_id", None)
-    except Exception:
-        pass
+    shared_session = _get_shared_world_session()
+    if shared_session is not None:
+        account_id = getattr(shared_session, "account_id", None)
+        realm_id = getattr(shared_session, "realm_id", None)
 
     if account_id is None or realm_id is None:
         account_id, realm_id = _resolve_session_ids()

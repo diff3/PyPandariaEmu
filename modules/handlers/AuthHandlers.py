@@ -26,14 +26,15 @@ from server.modules.opcodes.AuthOpcodes import (
     lookup as auth_lookup,
 )
 
-from DSL.modules.dsl.DecoderHandler import DecoderHandler
-from DSL.modules.dsl.EncoderHandler import EncoderHandler
-from DSL.modules.dsl.NodeTreeParser import NodeTreeParser
-from DSL.modules.dsl.Processor import load_case
-from DSL.modules.dsl.Session import get_session
+from DSL.modules.DecoderHandler import DecoderHandler
+from DSL.modules.EncoderHandler import EncoderHandler
+from DSL.modules.NodeTreeParser import NodeTreeParser
+from DSL.modules.Processor import load_case
+from DSL.modules.Session import get_session
 
 from server.modules.crypto.SRP6Session import SRP6Session
 from server.modules.database.DatabaseConnection import DatabaseConnection
+from server.modules.interpretation.utils import _get_dsl_runtime
 
 
 # ---- Global state ---------------------------------------------------------
@@ -48,24 +49,16 @@ AUTH_SERVER_OPCODE_BY_NAME = {name: code for code, name in AUTH_SERVER_OPCODES.i
 
 # ---- DSL decoding ---------------------------------------------------------
 
+from server.modules.interpretation.utils import _get_dsl_runtime
+
 def dsl_decode(def_name: str, payload: bytes, silent: bool = False) -> dict:
-    cfg = ConfigLoader.load_config()
-    program = cfg["program"]
-    expansion = cfg.get("expansion")
-    version = cfg["version"]
-
-    name, lines, _, expected, _ = load_case(
-        program,
-        version,
-        def_name,
-        expansion=expansion,
-    )
-
-    session = get_session()
-    session.reset()
-
-    NodeTreeParser.parse((name, lines, payload, expected))
-    return DecoderHandler.decode((name, lines, payload, expected), silent=silent)
+    try:
+        rt = _get_dsl_runtime()
+        return rt.decode(def_name, payload, silent=silent)
+    except Exception as exc:
+        if not silent:
+            Logger.error(f"[{def_name}] Decode failed: {exc}")
+        raise
 
 
 # ---- AUTH_LOGON_CHALLENGE ----------------------------------------------

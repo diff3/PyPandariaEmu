@@ -1,7 +1,0 @@
-# AUTH_RECONNECT_PROOF_S - Done
-endian: little
-header:
-data:
-    cmd: B
-    error: B
-    unk0: H 

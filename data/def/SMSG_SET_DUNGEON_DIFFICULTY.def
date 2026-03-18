@@ -1,5 +1,0 @@
-# SMSG_SET_DUNGEON_DIFFICULTY - Done
-endian: little
-header:
-data:
-    difficultyID: I

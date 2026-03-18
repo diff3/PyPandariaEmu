@@ -1,9 +1,0 @@
-# SMSG_SEND_KNOWN_SPELLS - Minimal
-endian: little
-header:
-data:
-    initial_login: bits, 1BI
-    spell_count: bits, 22BI
-
-    loop €spell_count to spells:
-        spell_id: I

@@ -4,13 +4,14 @@ import sys
 from pathlib import Path
 import unittest
 
-from modules.dsl.DecoderHandler import DecoderHandler
-from modules.dsl.EncoderHandler import EncoderHandler
-from modules.dsl.NodeTreeParser import NodeTreeParser
-from modules.dsl.Processor import load_all_cases
-from modules.dsl.Session import get_session
-from utils.ConfigLoader import ConfigLoader
-from utils.Logger import Logger
+from DSL.modules.DecoderHandler import DecoderHandler
+from DSL.modules.EncoderHandler import EncoderHandler
+from DSL.modules.NodeTreeParser import NodeTreeParser
+from DSL.modules.Processor import load_all_cases
+from DSL.modules.Session import get_session
+from server.modules.handlers.WorldHandlers import BASE_DIR
+from shared.ConfigLoader import ConfigLoader
+from shared.Logger import Logger
 
 args = sys.argv[1:]
 VERBOSE_LEVEL = 2 if "-vv" in args else (1 if any(a in ("-v", "--verbose") for a in args) else 0)
@@ -98,22 +99,21 @@ class TestEncodeRoundtrip(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cfg = ConfigLoader.load_config()
-        cfg["program"] = "wow"
-        cfg["expansion"] = "mop"
-        cfg["version"] = "v18414"
         cfg["Logging"]["logging_levels"] = "Error, Success"
         Logger.reset_log()
         cls.session = get_session()
         cls.session.reset()
 
-        cls.program = cfg["program"]
-        cls.expansion = cfg.get("expansion")
-        cls.version = cfg["version"]
+        BASE_DIR = Path(__file__).resolve().parents[2]
+
+        cls.DEF_DIR = BASE_DIR / "server" / "data" / "def"
+        cls.JSON_DIR = BASE_DIR / "captures" / "json"
+        cls.DEBUG_DIR = BASE_DIR / "captures" / "debug"
+
         cls.all_cases = load_all_cases(
-            cls.program,
-            cls.version,
+            def_dir=cls.DEF_DIR,
+            json_dir=cls.JSON_DIR,
             respect_ignored=False,
-            expansion=cls.expansion,
         )
 
     def test_encode_decode_roundtrip(self):
@@ -124,9 +124,11 @@ class TestEncodeRoundtrip(unittest.TestCase):
             with self.subTest(case=case_name):
                 if not isinstance(expected, dict) or not expected:
                     processed += 1
-                    debug_path = Path(
-                        f"protocols/{self.program}/{self.expansion}/{self.version}/data/debug/{case_name}.json"
-                    )
+                    debug_path = self.DEBUG_DIR / f"{case_name}.json"
+                    #debug_path = Path(
+                     #   debug_path = self.DEBUG_DIR / f"{case_name}.json"
+                         # f"protocols/{self.program}/{self.expansion}/{self.version}/data/debug/{case_name}.json"
+                   # )
                     debug_ok = False
                     if debug_path.exists():
                         try:

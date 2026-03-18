@@ -19,12 +19,12 @@ from typing import Dict, Any, Optional
 import time
 import json
 import struct
-from DSL.modules.dsl.EncoderHandler import EncoderHandler
-from DSL.modules.dsl.bitsHandler import BitWriter
+from DSL.modules.EncoderHandler import EncoderHandler
+from DSL.modules.bitsHandler import BitWriter
 from shared.Logger import Logger
 
 from .constants import RACES_MOP, CLASSES_MOP
-from shared.PathUtils import get_captures_root, get_protocol_root
+from shared.PathUtils import get_captures_root, get_debug_root
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.equipment import _parse_equipment_cache
 from server.modules.player import _decode_player_bytes
@@ -96,16 +96,11 @@ def _load_raw_packet(opcode_name: str) -> Optional[bytes]:
     Load raw (header+payload) bytes for a server opcode from debug or captures.
     Includes focus captures if present.
     """
-    paths = []
-    proto_root = get_protocol_root()
-    if proto_root:
-        paths.append(proto_root / "data" / "debug" / f"{opcode_name}.json")
-    paths.extend(
-        [
-            get_captures_root() / "debug" / f"{opcode_name}.json",
-            get_captures_root(focus=True) / "debug" / f"{opcode_name}.json",
-        ]
-    )
+    paths = [
+        get_debug_root() / f"{opcode_name}.json",
+        get_captures_root() / "debug" / f"{opcode_name}.json",
+        get_captures_root(focus=True) / "debug" / f"{opcode_name}.json",
+    ]
 
     for path in paths:
         if not path.exists():
@@ -121,16 +116,9 @@ def _load_raw_packet_focus(opcode_name: str) -> Optional[bytes]:
     Load raw (header+payload) bytes for a server opcode from debug or captures.
     Includes focus captures if present.
     """
-    paths = []
-    proto_root = get_protocol_root()
-    if proto_root:
-        paths.append(proto_root / "captures" / "focus" / "debug" / f"{opcode_name}.json")
-    paths.extend(
-        [
-            get_captures_root() / "captures" / "focus" / "debug" / f"{opcode_name}.json",
-            get_captures_root(focus=True) / "captures" / "focus" / "debug" / f"{opcode_name}.json",
-        ]
-    )
+    paths = [
+        get_captures_root(focus=True) / "debug" / f"{opcode_name}.json",
+    ]
 
     for path in paths:
         if not path.exists():
@@ -144,16 +132,9 @@ def _load_raw_packet_focus(opcode_name: str) -> Optional[bytes]:
 
 def _load_payload_packet_focus(opcode_name: str) -> Optional[bytes]:
     """Load payload-only bytes from a focus capture JSON."""
-    paths = []
-    proto_root = get_protocol_root()
-    if proto_root:
-        paths.append(proto_root / "captures" / "focus" / "debug" / f"{opcode_name}.json")
-    paths.extend(
-        [
-            get_captures_root() / "captures" / "focus" / "debug" / f"{opcode_name}.json",
-            get_captures_root(focus=True) / "captures" / "focus" / "debug" / f"{opcode_name}.json",
-        ]
-    )
+    paths = [
+        get_captures_root(focus=True) / "debug" / f"{opcode_name}.json",
+    ]
 
     for path in paths:
         if not path.exists():
@@ -164,28 +145,34 @@ def _load_payload_packet_focus(opcode_name: str) -> Optional[bytes]:
 
     return None
 
+
+def _load_payload_packet_old(opcode_name: str) -> Optional[bytes]:
+    """Load payload-only bytes for a server opcode from debug/captures."""
+    paths = [
+        get_debug_root() / f"{opcode_name}.json",
+        get_captures_root() / "debug" / f"{opcode_name}.json",
+        get_captures_root(focus=True) / "debug" / f"{opcode_name}.json",
+    ]
+
+    for path in paths:
+        if not path.exists():
+            continue
+        payload = _load_payload_from_path(path)
+        if payload is not None:
+            return payload
+
+    return None
+
+CAPTURE_DIR = get_captures_root(focus=True) / "debug"
 
 def _load_payload_packet(opcode_name: str) -> Optional[bytes]:
-    """Load payload-only bytes for a server opcode from debug/captures."""
-    paths = []
-    proto_root = get_protocol_root()
-    if proto_root:
-        paths.append(proto_root / "data" / "debug" / f"{opcode_name}.json")
-    paths.extend(
-        [
-            get_captures_root() / "debug" / f"{opcode_name}.json",
-            get_captures_root(focus=True) / "debug" / f"{opcode_name}.json",
-        ]
-    )
+    """Load payload-only bytes for a server opcode from captures."""
+    path = CAPTURE_DIR / f"{opcode_name}.json"
 
-    for path in paths:
-        if not path.exists():
-            continue
-        payload = _load_payload_from_path(path)
-        if payload is not None:
-            return payload
+    if not path.exists():
+        return None
 
-    return None
+    return _load_payload_from_path(path)
 
 
 # ---------------------------------------------------------------------
@@ -1002,10 +989,7 @@ def _build_live_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
 
 
 def load_first_login_update_object_capture() -> bytes:
-    proto_root = get_protocol_root()
-    if proto_root is None:
-        raise RuntimeError("Protocol root unavailable")
-    path = proto_root / "captures" / "focus" / "debug" / _FIRST_LOGIN_UPDATE_OBJECT_CAPTURE_NAME
+    path = get_captures_root(focus=True) / "debug" / _FIRST_LOGIN_UPDATE_OBJECT_CAPTURE_NAME
     payload = _load_payload_from_path(path)
     if payload is None:
         raise RuntimeError(f"Missing capture payload for {_FIRST_LOGIN_UPDATE_OBJECT_CAPTURE_NAME}")

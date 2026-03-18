@@ -1,8 +1,0 @@
-# SMSG_WORLD_SERVER_INFO - Done
-endian: little 
-header:
-data:
-    is_tournament_realm: B
-    unk0: B
-    weekly_reset_time: I
-    flags: I

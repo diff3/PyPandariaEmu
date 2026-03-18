@@ -1,6 +1,0 @@
-# SMSG_CREATURE_QUERY_RESPONSE - Minimal
-endian: little
-header:
-data:
-    entry: I
-    has_data: bits, 1BI

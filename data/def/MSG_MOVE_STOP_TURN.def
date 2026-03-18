@@ -1,5 +1,0 @@
-# MSG_MOVE_STOP_TURN
-endian: little
-header:
-data:
-    raw: R, r

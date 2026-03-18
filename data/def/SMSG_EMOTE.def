@@ -1,6 +1,0 @@
-# SMSG_EMOTE
-endian: little
-header:
-data:
-    emote_id: I
-    guid: Q

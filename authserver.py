@@ -6,7 +6,7 @@ import signal
 import traceback
 import threading
 
-from DSL.modules.dsl.DslRuntime import DslRuntime
+from DSL.modules.DslRuntime import DslRuntime
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
 
@@ -158,12 +158,7 @@ def run_auth():
     signal.signal(signal.SIGTERM, sigint)
 
     try:
-        runtime = DslRuntime(
-            config["program"],
-            config["version"],
-            watch=False,
-            expansion=config.get("expansion"),
-        )
+        runtime = DslRuntime(watch=False)
         runtime.load_runtime_all()
         Logger.info("[AuthServer] DSL runtime ready (runtime mode, no JSON)")
     except Exception as exc:
@@ -172,9 +167,7 @@ def run_auth():
         raise
 
     Logger.info(
-        f"{config['friendly_name']} "
-        f"({config['program']}:{config.get('expansion')}:{config['version']}) "
-        f"AuthServer (Minimal Mode)"
+        f"{config.get('friendly_name', 'Unknown')} AuthServer (Minimal Mode)"
     )
 
     start_server()

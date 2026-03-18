@@ -1,6 +1,0 @@
-# SMSG_PVP_SEASON - Minimal
-endian: little
-header:
-data:
-    current_season: I
-    previous_season: I

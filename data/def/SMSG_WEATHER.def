@@ -1,7 +1,0 @@
-# SMSG_WEATHER - Done
-endian: little
-header:
-data:
-    weather_type: I
-    density:      f
-    abrupt:       B

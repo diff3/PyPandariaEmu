@@ -1,9 +1,0 @@
-# AUTH_RECONNECT_PROOF_C - Done
-endian: little
-header:
-data:
-    cmd: B
-    R1: 16s
-    R2: 20s
-    R3: 20s
-    number_of_keys: B

@@ -1,7 +1,0 @@
-# HANDSHAKE_WORLD_S - Done
-endian: little
-header:
-data:
-    magic0: B
-    null0: B
-    banner: S

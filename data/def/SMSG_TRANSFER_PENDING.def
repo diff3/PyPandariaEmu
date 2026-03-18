@@ -1,5 +1,0 @@
-# SMSG_TRANSFER_PENDING
-endian: little
-header:
-data:
-    map_id: I

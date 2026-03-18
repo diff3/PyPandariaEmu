@@ -1,5 +1,0 @@
-# SMSG_MOVE_SET_ACTIVE_MOVER
-endian: little
-header:
-data:
-    raw: R, r

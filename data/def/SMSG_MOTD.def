@@ -1,6 +1,0 @@
-# SMSG_MOTD - raw line_count + null-terminated lines
-endian: little
-header:
-data:
-    line_count: I
-    lines_raw: R, r

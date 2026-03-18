@@ -1,7 +1,0 @@
-# CMSG_MESSAGECHAT_SAY
-endian: little
-header:
-data:
-    language: I        # uint32, ex 0 = LANG_UNIVERSAL
-    msg_len: B
-    msg: €msg_len's

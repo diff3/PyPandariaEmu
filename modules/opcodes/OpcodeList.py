@@ -4,20 +4,11 @@
 import pathlib
 import re
 
-from shared.ConfigLoader import ConfigLoader
-from shared.PathUtils import get_protocol_root
+from shared.PathUtils import get_def_root
 
 
 def _get_def_dir() -> pathlib.Path | None:
-    cfg = ConfigLoader.load_config()
-    base = get_protocol_root(
-        program=cfg.get("program"),
-        expansion=cfg.get("expansion"),
-        version=cfg.get("version"),
-    )
-    if base is None:
-        return None
-    return base / "data" / "def"
+    return get_def_root()
 
 
 def load_def_files():

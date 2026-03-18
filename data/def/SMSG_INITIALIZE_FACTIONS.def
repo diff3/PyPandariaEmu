@@ -1,9 +1,0 @@
-# SMSG_INITIALIZE_FACTIONS – Partial, needs testing
-endian: little
-header:
-data:
-    count: I          # verkar inte matcha den faktiska listlängden, men bevaras
-    loop 163 to factions:   # 163 par får plats om man lämnar 4 bytes padding
-        flags: I
-        standing: i
-    padding 4B        # suger upp sista 4 byten i payloaden

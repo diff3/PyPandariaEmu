@@ -1,6 +1,0 @@
-# CMSG_PLAYER_LOGIN - Minimal retail-friendly decode
-endian: little
-header:
-data:
-    unk_float: f
-    guid_blob: R, r

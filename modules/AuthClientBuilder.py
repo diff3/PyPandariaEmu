@@ -6,7 +6,7 @@ from __future__ import annotations
 import socket
 from typing import Dict
 
-from DSL.modules.dsl.EncoderHandler import EncoderHandler
+from DSL.modules.EncoderHandler import EncoderHandler
 from server.modules.crypto.SRP6Client import H, SRP6Client
 
 

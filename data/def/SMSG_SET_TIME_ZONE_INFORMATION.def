@@ -1,8 +1,0 @@
-# SMSG_SET_TIME_ZONE_INFORMATION - Done
-endian: little
-header:
-data:
-    len1: bits, 7BI | Q
-    len2: bits, 7BI | Q
-    time_zone1: €len1's | MQ
-    time_zone2: €len2's | MQ

@@ -1,6 +1,6 @@
 import unittest
 import os
-from protocols.wow.shared.modules.crypto.SRP6Crypto import SRP6Crypto
+from server.modules.crypto.SRP6Crypto import SRP6Crypto
 
 
 class TestSRP6Crypto(unittest.TestCase):

@@ -1,5 +1,0 @@
-# MSG_MOVE_START_TURN_RIGHT
-endian: little
-header:
-data:
-    raw: R, r

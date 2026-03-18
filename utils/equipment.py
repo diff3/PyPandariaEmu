@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from protocols.wow.mop.v18414.modules.database.DatabaseConnection import DatabaseConnection
+from server.modules.database.DatabaseConnection import DatabaseConnection
 from typing import Optional
 
 import re

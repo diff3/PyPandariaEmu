@@ -1,9 +1,0 @@
-# SMSG_SET_FORCED_REACTIONS - Minimal
-endian: little
-header:
-data:
-    faction_count: bits, 6BI
-
-    loop €faction_count to reactions:
-        faction_id: I
-        reputation_rank: I

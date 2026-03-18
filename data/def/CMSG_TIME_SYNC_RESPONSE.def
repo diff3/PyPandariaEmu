@@ -1,6 +1,0 @@
-# CMSG_TIME_SYNC_RESPONSE - Done
-endian: little
-header:
-data:
-    sequence_id: I
-    client_ticks: I
