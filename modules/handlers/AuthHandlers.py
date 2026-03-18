@@ -13,7 +13,6 @@ Used by AuthServer to process DSL-decoded packets.
 """
 
 import os
-import json
 import socket
 import traceback
 
@@ -118,7 +117,6 @@ def build_AUTH_LOGON_CHALLENGE_S(fields: dict) -> bytes:
 def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
     client_socket = ctx.sock
     decoded = ctx.decoded or {}
-    Logger.success("AUTH_LOGON_PROOF_C\n" + json.dumps(decoded, indent=4))
 
     fd = client_socket.fileno()
     session = srp6_sessions.get(fd)
@@ -238,9 +236,6 @@ def build_realmlist_entries(realms, account_id):
 
 def handle_REALM_LIST_C(ctx: PacketContext):
     client_socket = ctx.sock
-    decoded = ctx.decoded or {}
-    if decoded:
-        Logger.info(f"[REALM_LIST_C] {decoded}")
 
     fd = client_socket.fileno()
     username = authenticated_users.get(fd)
@@ -261,7 +256,6 @@ def handle_REALM_LIST_C(ctx: PacketContext):
 
     try:
         out = build_REALM_LIST_S(realm_entries)
-        Logger.info(f"REALM_LIST_S raw: {out.hex().upper()}")
         return 0, out
     except Exception as exc:
         Logger.error(f"[REALM_LIST_S] Encoding failed: {exc}")
@@ -289,10 +283,6 @@ def handle_AUTH_RECONNECT_CHALLENGE_C(ctx: PacketContext):
     Input: client socket, opcode byte, raw payload.
     Output: (err, response_bytes) tuple built from DSL encoder.
     """
-    decoded = ctx.decoded or {}
-    if decoded:
-        Logger.info(f"[AUTH_RECONNECT_CHALLENGE_C] {decoded}")
-
     try:
         out = build_AUTH_RECONNECT_CHALLENGE_S()
         return 0, out

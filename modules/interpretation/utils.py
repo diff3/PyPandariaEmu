@@ -7,12 +7,12 @@ from typing import Any, Dict, Optional
 
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
+from server.modules.ServerOutput import dsl_warnings_enabled
 from server.modules.PacketDump import dump_capture
 from DSL.modules.DslRuntime import DslRuntime
 
 
 cfg = ConfigLoader.load_config()
-cfg["Logging"]["logging_levels"] = "Information, Success, Script, Error"
 
 _dsl_runtime: Optional[DslRuntime] = None
 
@@ -27,22 +27,34 @@ def set_dsl_runtime(runtime: Optional[DslRuntime]) -> None:
     _dsl_runtime = runtime
 
 
+def initialize_dsl_runtime(*, watch: bool = True) -> tuple[int, int]:
+    """Initialize and cache the shared DSL runtime once."""
+    global _dsl_runtime
+
+    if _dsl_runtime is not None:
+        total = len(getattr(_dsl_runtime, "cache", {}) or {})
+        return total, total
+
+    try:
+        rt = DslRuntime(watch=watch)
+        loaded, total = rt.load_runtime_all()
+        _dsl_runtime = rt
+        return loaded, total
+    except Exception as exc:
+        if watch:
+            Logger.error(f"[DSL] Runtime init failed (watch disabled): {exc}")
+        rt = DslRuntime(watch=False)
+        loaded, total = rt.load_runtime_all()
+        _dsl_runtime = rt
+        return loaded, total
+
+
 def _get_dsl_runtime() -> DslRuntime:
     """Lazy init of DSL runtime."""
     global _dsl_runtime
 
     if _dsl_runtime is None:
-        try:
-            # No program/version dependency anymore
-            rt = DslRuntime(watch=True)
-            rt.load_runtime_all()
-            _dsl_runtime = rt
-            Logger.info("[DSL] Runtime ready (watch enabled)")
-        except Exception as exc:
-            Logger.error(f"[DSL] Runtime init failed (watch disabled): {exc}")
-            rt = DslRuntime(watch=False)
-            rt.load_runtime_all()
-            _dsl_runtime = rt
+        initialize_dsl_runtime(watch=True)
 
     return _dsl_runtime
 
@@ -51,11 +63,13 @@ def _get_dsl_runtime() -> DslRuntime:
 # DSL DECODE
 # ------------------------------------------------------------------
 
-def dsl_decode(def_name: str, payload: bytes, silent: bool = False) -> Dict[str, Any]:
+def dsl_decode(def_name: str, payload: bytes, silent: bool = False, warn: bool | None = None) -> Dict[str, Any]:
     """Safe DSL decode."""
     try:
         rt = _get_dsl_runtime()
-        return rt.decode(def_name, payload, silent=silent)
+        if warn is None:
+            warn = dsl_warnings_enabled("worldserver")
+        return rt.decode(def_name, payload, silent=silent, warn=warn)
     except Exception as exc:
         if not silent:
             Logger.error(f"[DSL] decode {def_name} failed: {exc}")

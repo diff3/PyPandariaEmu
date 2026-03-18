@@ -1,97 +1,88 @@
-# PyPandaria Server
+# Server
 
-Minimal World/Auth server implementation using BinaryPacketsDSL.
+AuthServer and WorldServer for the current `PyPandariaEmu` workspace.
 
 ## Overview
 
-This server handles:
+This repository contains:
 
-- Authentication (AuthServer)
-- World connections (WorldServer)
-- Game logic (handlers, movement, chat, etc.)
+- `authserver` for SRP/login flow and realm list
+- `worldserver` for world login, packet handling and game-side logic
+- shared handler, opcode, database and crypto code under `server/modules`
 
-It is designed to work together with external components and is NOT standalone.
+The servers use the in-repo DSL runtime for packet decode/encode. They no longer depend on dynamic protocol/bootstrap loading.
 
----
+## Configuration
 
-## ⚠️ Requirements
+Shared defaults:
 
-This project depends on other repositories:
+- [/home/magnus/projects/PyPandariaEmu/config/default.yaml](/home/magnus/projects/PyPandariaEmu/config/default.yaml)
 
-- BinaryPacketsDSL (DSL engine)
-- SwitchboardProxy (network proxy)
-- shared (common utilities)
+Auth server:
 
-You MUST install all components via the template project.
+- [/home/magnus/projects/PyPandariaEmu/config/authserver.yaml](/home/magnus/projects/PyPandariaEmu/config/authserver.yaml)
 
----
+World server:
 
-## Recommended Setup
+- [/home/magnus/projects/PyPandariaEmu/config/worldserver.yaml](/home/magnus/projects/PyPandariaEmu/config/worldserver.yaml)
 
-Use the template repository:
+Key output settings for both auth and world:
 
-    git clone https://github.com/diff3/template.git MyProject
-    cd MyProject
+- `output.raw`
+- `output.decode`
+- `output.dsl_warnings`
+- `output.blacklist`
 
-Then install dependencies:
+`blacklist` only hides output. It does not block packet handling.
 
-    git clone https://github.com/diff3/BinaryPacketsDSL.git DSL
-    git clone https://github.com/diff3/SwitchboardProxy.git proxy
-    git clone https://github.com/diff3/PyPandaria.git server
-    git clone https://github.com/diff3/shared.git shared
+## Data Paths
 
----
+The runtime data layout is now centralized under project `data/`:
 
-## Structure
+- `data/def`
+- `data/json`
+- `data/debug`
+- `data/captures`
 
-    server/
-    ├── authserver.py
-    ├── worldserver.py
-    ├── data/
-    │   └── def/        # DSL definitions (used by runtime)
-    ├── modules/
-    │   ├── handlers/   # Opcode handlers
-    │   ├── opcodes/    # Opcode maps
-    │   ├── database/   # DB layer
-    │   └── ...
-    └── session/
+AuthServer and WorldServer both use config-driven paths through shared path helpers.
 
----
+## Logging
 
-## Running
+Each server has its own log file and startup resets it:
 
-From the template root:
+- authserver -> `authserver.log`
+- worldserver -> `worldserver.log`
+- shared DSL file logging -> `dsl.log`
 
-    source .env
+These are controlled from config:
 
-Start servers:
+- `authserver.logging.write_to_log`
+- `authserver.logging.log_file`
+- `worldserver.logging.write_to_log`
+- `worldserver.logging.log_file`
+- `dsl.write_to_log`
+- `dsl.log_file`
 
-    ./authserver.py
-    ./worldserver.py
+## Startup
 
-Proxy (recommended):
+Run from project root:
 
-    ./proxyserver.py
+```bash
+python authserver.py
+python worldserver.py
+```
 
----
+Current startup style is intentionally concise:
+
+- banner first
+- DSL watcher / runtime status
+- database init
+- cache preload
+- listen socket
 
 ## Notes
 
-- DSL definitions are loaded from:
-
-      server/data/def
-
-- The server does NOT use dynamic protocol loading anymore.
-- All protocol-specific logic lives inside this repository.
-- Proxy can be used to inspect and modify traffic in real time.
-
----
-
-## Philosophy
-
-- DSL = parsing/encoding engine
-- server = game logic
-- proxy = network control
-- shared = reusable utilities
-
-This separation keeps each component simple, modular, and replaceable.
+- DSL runtime load now reports a final ready line instead of per-definition spam
+- DSL internal debug output is disabled by default
+- DSL warnings can be shown or hidden per server with `output.dsl_warnings`
+- missing `.def` messages are shortened to filename form, for example `Missing file MSG_MOVE_FALL_LAND.def`

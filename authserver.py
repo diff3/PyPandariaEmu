@@ -10,6 +10,13 @@ from DSL.modules.DslRuntime import DslRuntime
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
 from server.modules.PacketContext import PacketContext
+from server.modules.ServerOutput import (
+    dsl_warnings_enabled,
+    project_name,
+    log_decoded_packet,
+    log_raw_packet,
+    should_log_packet,
+)
 
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.AuthHandlers import (
@@ -20,9 +27,6 @@ from server.modules.opcodes.AuthOpcodes import AUTH_CLIENT_OPCODES, AUTH_SERVER_
 
 
 config = ConfigLoader.load_config()
-config["Logging"]["logging_levels"] = "Information, Success, Error"
-
-DatabaseConnection.initialize()
 
 HOST = config["authserver"]["host"]
 PORT = config["authserver"]["port"]
@@ -47,7 +51,12 @@ def safe_decode(direction: str, name: str, payload: bytes) -> dict:
         return {}
 
     try:
-        return runtime.decode(name, payload, silent=True) or {}
+        return runtime.decode(
+            name,
+            payload,
+            silent=True,
+            warn=dsl_warnings_enabled("authserver"),
+        ) or {}
     except Exception as exc:
         Logger.error(f"{direction}: decode failed for {name}: {exc}")
         Logger.error(traceback.format_exc())
@@ -70,14 +79,16 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
             opcode = data[0]
             opcode_name = AUTH_CLIENT_OPCODES.get(opcode)
 
-            Logger.info("Direction: Client --> Server")
-            Logger.info(f"Raw: {data.hex().upper()}")
-
             if opcode_name is None:
                 Logger.warning(f"{addr}: Unknown opcode 0x{opcode:02X}")
                 break
 
+            if should_log_packet("authserver", opcode_name):
+                Logger.info(f"[AuthServer] C→S {opcode_name}")
+            log_raw_packet("authserver", opcode_name, "Raw", data)
+
             decoded = safe_decode("Client", opcode_name, data)
+            log_decoded_packet("authserver", opcode_name, decoded, label=opcode_name)
 
             handler = AUTH_HANDLERS.get(opcode_name)
             if handler is None:
@@ -110,11 +121,16 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
             server_op = response[0]
             server_name = AUTH_SERVER_OPCODES.get(server_op)
 
-            Logger.info("Direction: Client <-- Server")
-            Logger.info(f"Raw: {response.hex().upper()}")
-
             if server_name:
-                safe_decode("Server", server_name, response)
+                if should_log_packet("authserver", server_name):
+                    Logger.info(f"[AuthServer] S→C {server_name}")
+                log_raw_packet("authserver", server_name, "Raw", response)
+                log_decoded_packet(
+                    "authserver",
+                    server_name,
+                    safe_decode("Server", server_name, response),
+                    label=server_name,
+                )
 
             try:
                 sock.send(response)
@@ -167,22 +183,23 @@ def start_server() -> None:
 def run_auth():
     global runtime
 
+    Logger.configure(scope="dsl", reset=True)
+    Logger.configure(scope="authserver", reset=True)
     signal.signal(signal.SIGINT, sigint)
     signal.signal(signal.SIGTERM, sigint)
+    Logger.info(f"{project_name()} AuthServer")
+    DatabaseConnection.initialize()
     set_srp6_mode(config.get("crypto", {}).get("srp6_mode", "skyfire"))
 
     try:
         runtime = DslRuntime(watch=False)
-        runtime.load_runtime_all()
-        Logger.info("[AuthServer] DSL runtime ready (runtime mode, no JSON)")
+        loaded, total = runtime.load_runtime_all()
+        pct = int((loaded * 100 / total)) if total else 0
+        Logger.info(f"DSL runtime ready [{loaded}/{total}] {pct}%")
     except Exception as exc:
         Logger.error(f"[AuthServer] Runtime init failed: {exc}")
         Logger.error(traceback.format_exc())
         raise
-
-    Logger.info(
-        f"{config.get('friendly_name', 'Unknown')} AuthServer (Minimal Mode)"
-    )
 
     start_server()
 

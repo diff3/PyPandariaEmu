@@ -9,19 +9,17 @@ import traceback
 from enum import Enum, auto
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
-from shared.PathUtils import get_data_root
 from server.modules.PacketContext import PacketContext
+from server.modules.ServerOutput import (
+    project_name,
+    log_raw_packet,
+    should_log_packet,
+)
 from server.modules.interpretation.EncryptedWorldStream import EncryptedWorldStream
 from server.modules.interpretation.OpcodeResolver import OpcodeResolver
-from server.modules.interpretation.PacketInterpreter import (
-    DumpPolicy,
-    DslDecoder,
-    JsonNormalizer,
-    PacketDumper,
-    PacketInterpreter,
-)
 from server.modules.interpretation.parser import parse_plain_packets
 from server.modules.interpretation.utils import dsl_decode, build_world_header_plain
+from server.modules.interpretation.utils import initialize_dsl_runtime
 from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler as WorldCryptoHandler
 
 try:
@@ -40,7 +38,6 @@ except Exception:
 # ---- Configuration ------------------------------------------------------
 
 config = ConfigLoader.load_config()
-config["Logging"]["logging_levels"] = "Information, Success, Error"
 
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.opcodes.WorldOpcodes import (
@@ -49,12 +46,6 @@ from server.modules.opcodes.WorldOpcodes import (
     lookup as world_lookup,
 )
 from server.modules.handlers.WorldHandlers import opcode_handlers, get_auth_challenge, reset_state, preload_cache
-from server.modules.PacketDump import PacketDump
-
-
-# ---- Database ----
-DatabaseConnection.initialize()
-DatabaseConnection.preload_world_cache()
 
 
 # ---- Opcodes ----
@@ -83,29 +74,9 @@ AUTH_RESPONSE_OPCODE = EncryptedWorldStream.AUTH_RESPONSE_OPCODE
 WORLD_HANDLERS = opcode_handlers
 
 
-try:
-    preload_cache()
-except Exception:
-    pass
-
 HOST = config["worldserver"]["host"]
 PORT = config["worldserver"]["port"]
 running = True
-
-
-from server.modules.handlers.WorldHandlers import opcode_handlers
-
-
-# ---- Interpretation helpers --------------------------------------------
-
-packet_dumper = PacketDump(get_data_root())
-
-interpreter = PacketInterpreter(
-    decoder=DslDecoder(),
-    normalizer=JsonNormalizer(),
-    policy=DumpPolicy(dump=False, update=False),
-    dumper=PacketDumper(packet_dumper),
-)
 
 
 HANDSHAKE_SERVER = b"0\x00WORLD OF WARCRAFT CONNECTION - SERVER TO CLIENT\x00"
@@ -327,7 +298,9 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
                 # ---- NORMAL CLIENT PACKET ----
                 name = opcode_resolver.decode_opcode(opcode, "C")
-                Logger.info(f"[WorldServer] C→S {name}")
+                if should_log_packet("worldserver", name):
+                    Logger.info(f"[WorldServer] C→S {name}")
+                log_raw_packet("worldserver", name, f"[WorldServer] C→S RAW {name}", raw_header + payload)
 
                 # ---- DETECT AUTH_SESSION (BUT DO NOT HANDLE IT) ----
                 auth_session_seen = (
@@ -387,9 +360,11 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                         opcode_name, payload, is_raw = item
 
                     if is_raw:
-                        Logger.info(
-                            f"[WorldServer] S→C {opcode_name} (RAW passthrough, size={len(payload)})"
-                        )
+                        if should_log_packet("worldserver", opcode_name):
+                            Logger.info(
+                                f"[WorldServer] S→C {opcode_name} (RAW passthrough, size={len(payload)})"
+                            )
+                        log_raw_packet("worldserver", opcode_name, f"[WorldServer] S→C RAW {opcode_name}", payload)
                         sock.sendall(payload)
                         continue
 
@@ -406,10 +381,12 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                     else:
                         header = build_world_header_plain(opcode_s, payload)
 
-                    Logger.info(
-                        f"[WorldServer] S→C {opcode_name} "
-                        f"(0x{opcode_s:04X}) encrypted={encrypted} size={len(payload)}"
-                    )
+                    if should_log_packet("worldserver", opcode_name):
+                        Logger.info(
+                            f"[WorldServer] S→C {opcode_name} "
+                            f"(0x{opcode_s:04X}) encrypted={encrypted} size={len(payload)}"
+                        )
+                    log_raw_packet("worldserver", opcode_name, f"[WorldServer] S→C RAW {opcode_name}", header + payload)
 
                     sock.sendall(header)
                     sock.sendall(payload)
@@ -424,19 +401,26 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 # ---- Server loop --------------------------------------------------------
 
 def run_world() -> None:
+    Logger.configure(scope="worldserver", reset=True)
     signal.signal(signal.SIGINT, sigint)
 
-    Logger.info(
-        f"{config.get('friendly_name', 'Server')} "
-        f"({config.get('program')}:{config.get('expansion')}:{config.get('version')}) WorldServer (Minimal Mode)"
-    )
+    Logger.info(f"{project_name()} WorldServer")
+    loaded, total = initialize_dsl_runtime(watch=True)
+    pct = int((loaded * 100 / total)) if total else 0
+    Logger.info(f"DSL runtime ready [{loaded}/{total}] {pct}%")
+    DatabaseConnection.initialize()
+    DatabaseConnection.preload_world_cache()
+    try:
+        preload_cache()
+    except Exception:
+        pass
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((HOST, PORT))
     srv.listen(5)
 
-    Logger.info(f"[WorldServer] Listening on {HOST}:{PORT}")
+    Logger.info(f"WorldServer listening on {HOST}:{PORT}")
 
     while running:
         try:

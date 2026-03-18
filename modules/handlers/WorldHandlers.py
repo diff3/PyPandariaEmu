@@ -55,6 +55,7 @@ from server.modules.dbc import read_dbc
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
 # from red.utils.OpcodeLoader import load_world_opcodes
 from shared.Logger import Logger
+from server.modules.ServerOutput import log_decoded_packet
 from server.modules.guid import GuidHelper, HighGuid
 
 from server.modules.handlers.worldLogin import (
@@ -1245,7 +1246,7 @@ def _load_template(case_name: str) -> dict:
 
 def _log_cmsg(ctx: PacketContext) -> dict:
     decoded = ctx.decoded or {}
-    Logger.success(f"[CMSG] {ctx.name}\n{json.dumps(to_safe_json(decoded), indent=2)}")
+    log_decoded_packet("worldserver", ctx.name, to_safe_json(decoded), label=f"[CMSG] {ctx.name}")
     return decoded
 
 def _parse_guid(value: Any) -> Optional[int]:
@@ -1878,7 +1879,7 @@ def _load_char_start_outfit() -> dict[tuple[int, int, int], list[int]]:
 
     _DBC_CHAR_START_OUTFIT_CACHE = outfits
     _DBC_CHAR_START_OUTFIT_MERGED = {k: sorted(v) for k, v in merged.items()}
-    Logger.info(f"[WorldHandlers] Loaded CharStartOutfit entries: {len(outfits)}")
+    Logger.info(f"Loaded CharStartOutfit entries: {len(outfits)}")
     return _DBC_CHAR_START_OUTFIT_CACHE
 
 def _get_outfit_items(race: int, class_: int, gender: int | None = None) -> list[int]:

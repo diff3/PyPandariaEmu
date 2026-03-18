@@ -6,7 +6,7 @@
 import time
 from typing import Any, Iterable, Optional
 
-from server.modules.interpretation.utils import dump_capture, to_safe_json, dsl_decode
+from server.modules.interpretation.utils import dump_capture, to_safe_json, dsl_decode, initialize_dsl_runtime
 from shared.PathUtils import get_captures_root
 
 
@@ -92,7 +92,7 @@ class DslDecoder:
     """
 
     def __init__(self):
-        dsl_decode("__INIT__", b"", silent=True)
+        initialize_dsl_runtime(watch=True)
 
     def decode(self, name: str, payload: bytes) -> dict:
         return dsl_decode(name, payload, silent=True) or {}

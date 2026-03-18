@@ -193,7 +193,7 @@ class DatabaseConnection:
             DatabaseConnection.get_item_template_map(list(item_entries))
 
         DatabaseConnection._world_cache_loaded = True
-        Logger.info("[DB] World cache preloaded")
+        Logger.info("Database cache preloaded")
 
     @staticmethod
     def reload_world_cache() -> None:

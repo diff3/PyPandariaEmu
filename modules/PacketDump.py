@@ -9,7 +9,6 @@ from threading import Lock
 from datetime import datetime
 from shared.ConfigLoader import ConfigLoader
 from shared.PathUtils import get_captures_root
-from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler
 
 
 _focus_capture_counter = count(1)
@@ -78,6 +77,8 @@ def parse_world_header(raw_header: bytes, payload_len: int = None):
     opcode_plain = int.from_bytes(raw_header[2:4], "little")
 
     try:
+        from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler
+
         unpacked = Arc4CryptoHandler().unpack_data(raw_header)
         opcode_packed = unpacked.cmd
         size_packed = unpacked.size
@@ -259,6 +260,8 @@ def dump_capture(
     debug_only: bool = False,
 ):
     root = Path(root) if root else get_captures_root()
+    (root / "json").mkdir(parents=True, exist_ok=True)
+    (root / "debug").mkdir(parents=True, exist_ok=True)
 
     full = raw_header + payload
     header_info = parse_world_header(raw_header, len(payload))
