@@ -40,7 +40,8 @@ from server.modules.handlers.worldLogin.packets import (
     _load_payload_packet,
 )
 from server.modules.database.DatabaseConnection import DatabaseConnection
-from server.session.world_session import LoginState, WorldSession
+from server.session.world_session import LoginState
+from server.session.runtime import session
 from server.modules.handlers.characters.characters import (
     handle_CMSG_CHAR_DELETE,
     handle_CMSG_CHAR_CREATE,
@@ -238,7 +239,7 @@ LOGIN_UPDATE_SEQUENCE = (
 )
 
 _POSITION_SAVE_INTERVAL_SECONDS = 60.0
-_POSITION_SAVE_Z_OFFSET = 2.0
+_POSITION_SAVE_Z_OFFSET = 0.0
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
 _MAX_MOVEMENT_Z_DELTA = 100.0
 CHAT_MSG_SAY = 1
@@ -1598,6 +1599,39 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
         ]
 
     # -----------------------------
+    # SAVE COMMAND
+    # -----------------------------
+    if command.lower() == ".save":
+        _capture_persist_position_from_session()
+        _mark_position_dirty()
+        ok = _save_session_position(online=1, force=True)
+
+        map_id = int(getattr(session, "persist_map_id", 0) or 0)
+        zone = int(getattr(session, "persist_zone", 0) or 0)
+        x = float(getattr(session, "persist_x", 0.0) or 0.0)
+        y = float(getattr(session, "persist_y", 0.0) or 0.0)
+        z = float(getattr(session, "persist_z", 0.0) or 0.0)
+        orientation = float(getattr(session, "persist_orientation", 0.0) or 0.0)
+        player_name = (
+            str(getattr(session, "player_name", "") or "").strip()
+            or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
+        )
+
+        if ok:
+            message = (
+                f"[Save] {player_name} map={map_id} zone={zone} "
+                f"x={x:.2f} y={y:.2f} z={z:.2f} o={orientation:.2f}"
+            )
+            Logger.info(message)
+        else:
+            message = f"[Save] failed for {player_name}"
+            Logger.warning(message)
+
+        return [
+            ("SMSG_NOTIFICATION", _build_motd_notification_payload(message)),
+        ]
+
+    # -----------------------------
     # TELEPORT XYZ
     # -----------------------------
     if command.lower().startswith(".telxyz"):
@@ -1649,7 +1683,7 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
 
         return [
             ("SMSG_TRANSFER_PENDING", _build_transfer_pending_payload(map_id)),
-            ("SMSG_NEW_WORLD", _build_new_world_payload(map_id, x, y, z + _POSITION_SAVE_Z_OFFSET, orientation)),
+            ("SMSG_NEW_WORLD", _build_new_world_payload(map_id, x, y, z, orientation)),
         ]
 
     # -----------------------------
@@ -1783,7 +1817,6 @@ def _handle_chat_message(ctx: PacketContext):
 # WORLD_CLIENT_OPCODES, WORLD_SERVER_OPCODES, _ = load_world_opcodes()
 SERVER_OPCODE_BY_NAME = {name: code for code, name in WORLD_SERVER_OPCODES.items()}
 
-session = WorldSession()
 MAX_CREATURE_QUEST_ITEMS = 6
 
 # -----------------------------------------------------------------------------
@@ -2824,16 +2857,38 @@ def _save_session_position(*, online: int | None = None, force: bool = False) ->
     if not force and not getattr(session, "position_dirty", False):
         return False
 
+    persist_map_id = int(getattr(session, "persist_map_id", 0) or 0)
+    persist_zone = int(getattr(session, "persist_zone", 0) or 0)
+    persist_instance_id = int(getattr(session, "persist_instance_id", 0) or 0)
+    persist_x = float(getattr(session, "persist_x", 0.0) or 0.0)
+    persist_y = float(getattr(session, "persist_y", 0.0) or 0.0)
+    persist_z = float(getattr(session, "persist_z", 0.0) or 0.0)
+    persist_orientation = float(getattr(session, "persist_orientation", 0.0) or 0.0)
+
+    Logger.info(
+        "[Position] save guid=%s name=%s map=%s zone=%s x=%.3f y=%.3f z=%.3f o=%.3f online=%s force=%s",
+        int(session.char_guid),
+        str(getattr(session, "player_name", "") or ""),
+        persist_map_id,
+        persist_zone,
+        persist_x,
+        persist_y,
+        persist_z,
+        persist_orientation,
+        online,
+        force,
+    )
+
     ok = DatabaseConnection.save_character_position(
         int(session.char_guid),
         int(session.realm_id),
-        map_id=int(getattr(session, "persist_map_id", 0) or 0),
-        zone=int(getattr(session, "persist_zone", 0) or 0),
-        instance_id=int(getattr(session, "persist_instance_id", 0) or 0),
-        x=float(getattr(session, "persist_x", 0.0) or 0.0),
-        y=float(getattr(session, "persist_y", 0.0) or 0.0),
-        z=float(getattr(session, "persist_z", 0.0) or 0.0) + _POSITION_SAVE_Z_OFFSET,
-        orientation=float(getattr(session, "persist_orientation", 0.0) or 0.0),
+        map_id=persist_map_id,
+        zone=persist_zone,
+        instance_id=persist_instance_id,
+        x=persist_x,
+        y=persist_y,
+        z=persist_z + _POSITION_SAVE_Z_OFFSET,
+        orientation=persist_orientation,
         online=online,
         logout_time=int(now) if online == 0 else None,
     )
@@ -3045,8 +3100,19 @@ def handle_CMSG_PLAYER_LOGIN(
     session.x = float(row.position_x or 0.0)
     session.y = float(row.position_y or 0.0)
     stored_z = float(row.position_z or 0.0)
-    session.z = stored_z - _POSITION_SAVE_Z_OFFSET if stored_z else 0.0
+    session.z = stored_z
     session.orientation = float(row.orientation or 0.0)
+    Logger.info(
+        "[Position] load guid=%s name=%s map=%s zone=%s x=%.3f y=%.3f z=%.3f o=%.3f",
+        int(char_guid),
+        selected_name,
+        int(session.map_id),
+        int(session.zone),
+        float(session.x),
+        float(session.y),
+        float(session.z),
+        float(session.orientation),
+    )
     _capture_persist_position_from_session()
     _remember_saved_position()
     DatabaseConnection.save_character_position(
@@ -3057,7 +3123,7 @@ def handle_CMSG_PLAYER_LOGIN(
         instance_id=int(session.persist_instance_id),
         x=float(session.persist_x),
         y=float(session.persist_y),
-        z=float(session.persist_z) + _POSITION_SAVE_Z_OFFSET,
+        z=float(session.persist_z),
         orientation=float(session.persist_orientation),
         online=1,
     )

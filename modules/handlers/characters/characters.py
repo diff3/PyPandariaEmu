@@ -27,14 +27,13 @@ from server.modules.database.CharactersModel import (
     CharacterAction,
     CharacterSpell,
 )
-from server.session.world_session import WorldSession
+from server.session.runtime import session
 from server.modules.opcodes.WorldOpcodes import (
     WORLD_CLIENT_OPCODES,
     WORLD_SERVER_OPCODES,
 )
 from server.modules.PacketContext import PacketContext
 
-session = WorldSession()
 # Lookup maps (opcode int -> name)
 # WORLD_CLIENT_OPCODES, WORLD_SERVER_OPCODES, _ = load_world_opcodes()
 # Reverse map for server opcodes: name -> opcode int
@@ -787,17 +786,18 @@ def handle_CMSG_CHAR_DELETE(ctx: PacketContext):
                 break
 
     if guid is None:
-        guid_bytes = []
+        guid_bytes = [0] * 8
+        found_guid_parts = False
         for i in range(8):
             key = f"guid_{i}"
             if key in decoded:
                 try:
-                    guid_bytes.append(int(decoded.get(key)) & 0xFF)
+                    guid_bytes[i] = int(decoded.get(key)) & 0xFF
+                    found_guid_parts = True
                 except Exception:
-                    guid_bytes.append(0)
-        if guid_bytes:
-            guid_bytes.extend([0] * (8 - len(guid_bytes)))
-            guid = int.from_bytes(bytes(guid_bytes[:8]), "little")
+                    guid_bytes[i] = 0
+        if found_guid_parts:
+            guid = int.from_bytes(bytes(guid_bytes), "little")
 
     if guid is None:
         Logger.error(f"[CHAR DELETE] Failed to decode GUID from payload: {decoded}")

@@ -21,6 +21,8 @@ from server.modules.interpretation.parser import parse_plain_packets
 from server.modules.interpretation.utils import dsl_decode, build_world_header_plain
 from server.modules.interpretation.utils import initialize_dsl_runtime
 from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler as WorldCryptoHandler
+from server.session.world_session import WorldSession
+from server.session.runtime import bind_world_session, clear_world_session
 
 try:
     from server.modules.handlers.WorldHandlers import (
@@ -226,6 +228,9 @@ class WorldState(Enum):
 def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
     Logger.info(f"[WorldServer] New connection from {addr}")
 
+    conn_session = WorldSession()
+    bind_world_session(conn_session)
+
     if reset_handler_state:
         reset_handler_state()
 
@@ -321,6 +326,9 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                     name=name,
                     payload=payload,
                     decoded=decoded,
+                    session=conn_session,
+                    account_id=getattr(conn_session, "account_id", None),
+                    realm_id=getattr(conn_session, "realm_id", None),
                 )
 
                 err, response = handler(ctx)
@@ -399,6 +407,7 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
             handle_disconnect()
         except Exception as exc:
             Logger.warning(f"[WorldServer] disconnect handler failed: {exc}")
+        clear_world_session()
         sock.close()
         Logger.info(f"[WorldServer] Closed connection from {addr}")
 
