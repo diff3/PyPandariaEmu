@@ -28,6 +28,7 @@ class WorldSession:
     account_data: Dict = field(default_factory=dict)
     account_data_mask: int = 0
     server_time: int = 0
+    game_time: int = 0
     motd = "Hello World"
 
     
@@ -115,6 +116,7 @@ class WorldSession:
     player_bytes: int = 0
     player_bytes2: int = 0
     player_flags: int = 0
+    equipment_cache_raw: List[int] = field(default_factory=list)
 
     known_spells: List[int] = field(default_factory=list)
     action_buttons: List[int] = field(default_factory=lambda: [0] * 120)

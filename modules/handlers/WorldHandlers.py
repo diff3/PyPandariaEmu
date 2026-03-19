@@ -83,7 +83,98 @@ _ACCOUNT_DATA_CAPTURE_DIR = get_captures_root(focus=True) / "debug"
 
 _ACCOUNT_DATA_BINDINGS_CAPTURE = _ACCOUNT_DATA_CAPTURE_DIR / "SMSG_UPDATE_ACCOUNT_DATA_1773657568_0001.json"
 _ACCOUNT_DATA_CAPTURE_GLOB = "SMSG_UPDATE_ACCOUNT_DATA_*.json"
-LOGIN_REPLAY_PLAYER_GUID = 0x03000100000002
+WEATHER_TYPES: dict[str, int] = {
+    "clear": 0,
+    "fine": 0,
+    "sun": 0,
+    "fog": 1,
+    "rain": 4,
+    "snow": 7,
+    "sand": 41,
+    "sandstorm": 41,
+    "storm": 86,
+    "thunder": 86,
+}
+_LANGUAGE_SPELL_IDS = (668, 669, 108127)
+_RACE_LANGUAGE_SPELL_BY_RACE = {
+    3: 672,       # Dwarf -> Dwarvish
+    4: 671,       # Night Elf -> Darnassian
+    5: 17737,     # Undead -> Gutterspeak
+    6: 670,       # Tauren -> Taurahe
+    7: 7340,      # Gnome -> Gnomish
+    8: 7341,      # Troll -> Troll
+    10: 813,      # Blood Elf -> Thalassian
+    11: 29932,    # Draenei -> Draenei
+    22: 69269,    # Goblin -> Goblin
+    24: 108127,   # Pandaren Neutral
+    25: 108130,   # Pandaren Alliance
+    26: 108131,   # Pandaren Horde
+}
+RAW_REPLAY_SAY_CHAT_PROFILE = None
+USE_SYSTEM_CHAT_FALLBACK = True
+TEXT_EMOTE_TO_ANIM_EMOTE: dict[int, int] = {
+    5: 5,      # gasp
+    34: 10,    # dance
+    41: 0,     # talkq
+    72: 25,    # point
+    77: 14,    # rude
+    84: 24,    # shy
+    86: 12,    # sleep
+    87: 13,    # sit
+    93: 1,     # talk
+    97: 0,     # thank
+    100: 4,    # victory
+    101: 3,    # wave
+    102: 3,    # welcome
+    141: 26,   # stand
+}
+
+
+def _resolve_weather_type(weather_key: str, density: float) -> int:
+    key = str(weather_key or "").strip().lower()
+    if key in ("clear", "fine", "sun"):
+        return 0
+    if key == "fog":
+        return 1
+    if key == "rain":
+        if density >= 0.66:
+            return 5
+        if density >= 0.33:
+            return 4
+        return 3
+    if key == "snow":
+        if density >= 0.66:
+            return 8
+        if density >= 0.33:
+            return 7
+        return 6
+    if key in ("sand", "sandstorm"):
+        if density >= 0.66:
+            return 42
+        if density >= 0.33:
+            return 41
+        return 22
+    if key in ("storm", "thunder"):
+        return 86
+    return WEATHER_TYPES.get(key, -1)
+
+
+def _pack_wow_game_time(epoch_seconds: int) -> int:
+    lt = time.localtime(int(epoch_seconds))
+    year = max(0, int(lt.tm_year) - 2000)
+    month = max(0, int(lt.tm_mon) - 1)
+    day = max(0, int(lt.tm_mday) - 1)
+    weekday = (int(lt.tm_wday) + 1) % 7
+    hour = int(lt.tm_hour)
+    minute = int(lt.tm_min)
+    return (
+        ((year & 0xFF) << 24)
+        | ((month & 0x0F) << 20)
+        | ((day & 0x3F) << 14)
+        | ((weekday & 0x07) << 11)
+        | ((hour & 0x1F) << 6)
+        | (minute & 0x3F)
+    )
 TELEPORT_DESTINATIONS: dict[str, dict[str, float | int]] = {
     "dustquillravine": {"map_id": 530, "x": -758.534, "y": 4401.98, "z": 79.563, "orientation": 2.88658},
     "dustfirevalley": {"map_id": 0, "x": -6440.73, "y": -1987.77, "z": 244.718, "orientation": 0.464476},
@@ -103,6 +194,9 @@ TELEPORT_DESTINATIONS: dict[str, dict[str, float | int]] = {
     "fireplumeridge": {"map_id": 1, "x": -7500.44, "y": -1045.33, "z": -273.11, "orientation": 5.12},
     "gadgetzan": {"map_id": 1, "x": -7146.45, "y": -3745.91, "z": 8.75, "orientation": 0.45},
     "gilneas": {"map_id": 0, "x": -1460.1, "y": 1665.34, "z": 20.21, "orientation": 1.73},
+    "gmisland": {"map_id": 1, "zone": 876, "x": 16226.2, "y": 16257.0, "z": 13.2022, "orientation": 1.65007},
+    "gm_island": {"map_id": 1, "zone": 876, "x": 16226.2, "y": 16257.0, "z": 13.2022, "orientation": 1.65007},
+    "gmisle": {"map_id": 1, "zone": 876, "x": 16226.2, "y": 16257.0, "z": 13.2022, "orientation": 1.65007},
     "goldshire": {"map_id": 0, "x": -9464.0, "y": 62.32, "z": 56.77, "orientation": 2.89},
     "grimtotempost": {"map_id": 1, "x": -4695.2, "y": -1725.11, "z": 86.33, "orientation": 0.45},
     "hammerfall": {"map_id": 0, "x": -918.22, "y": -3538.45, "z": 72.21, "orientation": 1.93},
@@ -148,6 +242,7 @@ _POSITION_SAVE_Z_OFFSET = 2.0
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
 _MAX_MOVEMENT_Z_DELTA = 100.0
 CHAT_MSG_SAY = 1
+CHAT_MSG_SYSTEM = 0
 CHAT_MSG_YELL = 6
 CHAT_MSG_WHISPER = 7
 _CHAT_TYPE_BY_OPCODE = {
@@ -165,6 +260,21 @@ MOVEMENT_FOCUS_SEQUENCE = (
     ("SMSG_UPDATE_OBJECT", "SMSG_UPDATE_OBJECT_1773613205_0007.json"),
 )
 USE_RAW_ACTIVE_MOVER = False
+USE_EXACT_UPDATE_OBJECT_REPLAY = True
+USE_RAW_UPDATE_OBJECT_FALLBACK = False
+USE_MINIMAL_UPDATE_OBJECT_REPLAY = True
+USE_MINIMAL_PLAYER_VALUE_UPDATE_REPLAY = True
+USE_AIO_SIMPLE_SAY_CHAT = False
+UPDATE_OBJECT_1773613176_0002_MODE = "barncastle"
+STATIC_UPDATE_OBJECT_CAPTURE_NAMES = {
+    "SMSG_UPDATE_OBJECT_1773613176_0003.json",
+    "SMSG_UPDATE_OBJECT_1773613181_0005.json",
+    "SMSG_UPDATE_OBJECT_1773613205_0007.json",
+}
+MINIMAL_PLAYER_VALUE_UPDATE_CAPTURE_NAMES = {
+    "SMSG_UPDATE_OBJECT_1773613176_0004.json",
+    "SMSG_UPDATE_OBJECT_1773613185_0006.json",
+}
 EXACT_UPDATE_OBJECT_BUILDERS = {
     "SMSG_UPDATE_OBJECT_1773613176_0002.json": "SMSG_UPDATE_OBJECT_1773613176_0002",
     "SMSG_UPDATE_OBJECT_1773613176_0003.json": "SMSG_UPDATE_OBJECT_1773613176_0003",
@@ -196,6 +306,7 @@ def _reset_login_flow_state(*, preserve_loading_screen_done: bool = False) -> No
     session.loading_screen_visible = False
     if not preserve_loading_screen_done:
         session.loading_screen_done = False
+    session.chat_motd_sent = False
     session.post_loading_sent = False
     session.player_object_sent = False
     session.pending_account_data_requests = []
@@ -215,7 +326,28 @@ def _is_skyfire_gmisland_session() -> bool:
 
 
 def _build_world_login_context() -> WorldLoginContext:
-    return WorldLoginContext.from_session(session)
+    ctx = WorldLoginContext.from_session(session)
+    ctx.exact_0002_mode = str(UPDATE_OBJECT_1773613176_0002_MODE or "barncastle")
+    return ctx
+
+
+def _ensure_language_spells_known() -> None:
+    spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
+    changed = False
+    for spell_id in _LANGUAGE_SPELL_IDS:
+        if int(spell_id) not in spells:
+            spells.append(int(spell_id))
+            changed = True
+    race_spell = int(_RACE_LANGUAGE_SPELL_BY_RACE.get(int(getattr(session, "race", 0) or 0), 0) or 0)
+    if race_spell and race_spell not in spells:
+        spells.append(race_spell)
+        changed = True
+    if changed:
+        session.known_spells = spells
+        Logger.info(
+            f"[Language] ensured known spells: "
+            f"{', '.join(str(spell) for spell in spells if spell in set(_LANGUAGE_SPELL_IDS) | ({race_spell} if race_spell else set()))}"
+        )
 
 
 def unpack_guid(mask: int, data: bytes) -> int:
@@ -632,6 +764,26 @@ def send_raw_sniff_packet(
     return opcode_name, payload
 
 
+def _build_raw_replay_messagechat_packet(*, profile: str | None) -> Optional[tuple[str, bytes]]:
+    profile_name = str(profile or "").strip()
+    if not profile_name:
+        return None
+
+    path = get_captures_root(profile=profile_name) / "debug" / "SMSG_MESSAGECHAT.json"
+    if not path.exists():
+        Logger.info(
+            f"[CHAT][RAW] missing capture profile={profile_name!r} path={path}"
+        )
+        return None
+
+    payload = load_sniff_payload(path)
+    Logger.info(
+        f"[CHAT][RAW] replaying SMSG_MESSAGECHAT profile={profile_name!r} "
+        f"payload={len(payload)} source={path.name}"
+    )
+    return "SMSG_MESSAGECHAT", payload
+
+
 def _build_dynamic_active_mover_packet() -> tuple[str, bytes]:
     Logger.info("[ACTIVE_MOVER MODE] dynamic")
     payload = build_login_packet("SMSG_MOVE_SET_ACTIVE_MOVER", _build_world_login_context())
@@ -651,6 +803,41 @@ def _build_exact_update_object_packet(path: Path, *, update_index: int) -> tuple
         f"[UPDATE_OBJECT MODE] exact source={path.name} payload={len(payload)} bytes"
     )
     return _make_update_object_response(payload, update_index=update_index)
+
+
+def _should_skip_static_update_object_capture(path: Path) -> bool:
+    if not USE_MINIMAL_UPDATE_OBJECT_REPLAY:
+        return False
+    if path.name in STATIC_UPDATE_OBJECT_CAPTURE_NAMES:
+        return True
+    if (
+        USE_MINIMAL_PLAYER_VALUE_UPDATE_REPLAY
+        and path.name in MINIMAL_PLAYER_VALUE_UPDATE_CAPTURE_NAMES
+    ):
+        return True
+    return False
+
+
+def _build_replayed_update_object_packet(
+    session: WorldSession,
+    opcode_name: str,
+    path: Path,
+    *,
+    update_index: int,
+) -> tuple[str, bytes]:
+    if path.name in EXACT_UPDATE_OBJECT_BUILDERS:
+        return _build_exact_update_object_packet(path, update_index=update_index)
+    if not USE_RAW_UPDATE_OBJECT_FALLBACK:
+        raise RuntimeError(
+            f"Missing exact UPDATE_OBJECT builder for {path.name} while "
+            "USE_RAW_UPDATE_OBJECT_FALLBACK is disabled"
+        )
+    return send_raw_sniff_packet(
+        session,
+        opcode_name,
+        path,
+        update_index=update_index,
+    )
 
 
 def replay_movement_focus_sequence_old(session: WorldSession) -> list[tuple[str, bytes]]:
@@ -773,26 +960,28 @@ def replay_movement_focus_sequence(session: WorldSession) -> list[tuple[str, byt
     update_entries = entries[1:]
     total = len(update_entries)
 
-    Logger.info("[UPDATE_OBJECT MODE] raw")
+    if USE_RAW_UPDATE_OBJECT_FALLBACK:
+        Logger.info("[UPDATE_OBJECT MODE] exact-with-raw-fallback")
+    else:
+        Logger.info("[UPDATE_OBJECT MODE] exact-only")
 
     for index, (opcode_name, path) in enumerate(update_entries, start=1):
         Logger.info(
             f"[WorldLoginReplay] packet {index}/{total} opcode={opcode_name}"
         )
-
-        if path.name in EXACT_UPDATE_OBJECT_BUILDERS:
-            responses.append(
-                _build_exact_update_object_packet(path, update_index=index)
+        if _should_skip_static_update_object_capture(path):
+            Logger.info(
+                f"[UPDATE_OBJECT MODE] minimal-skip source={path.name}"
             )
-        else:
-            responses.append(
-                send_raw_sniff_packet(
-                    session,
-                    opcode_name,
-                    path,
-                    update_index=index,
-                )
+            continue
+        responses.append(
+            _build_replayed_update_object_packet(
+                session,
+                opcode_name,
+                path,
+                update_index=index,
             )
+        )
 
     return responses
 
@@ -812,14 +1001,23 @@ def replay_update_object_sequence(session: WorldSession) -> list[tuple[str, byte
     responses: list[tuple[str, bytes]] = []
 
     total = len(paths)
+    if USE_RAW_UPDATE_OBJECT_FALLBACK:
+        Logger.info("[UPDATE_OBJECT MODE] exact-with-raw-fallback")
+    else:
+        Logger.info("[UPDATE_OBJECT MODE] exact-only")
 
     for index, path in enumerate(paths, start=1):
         Logger.info(
             f"[WorldLoginReplay] UPDATE_OBJECT {index}/{total}"
         )
+        if _should_skip_static_update_object_capture(path):
+            Logger.info(
+                f"[UPDATE_OBJECT MODE] minimal-skip source={path.name}"
+            )
+            continue
 
         responses.append(
-            send_raw_sniff_packet(   # <-- FIX: samma funktion som ovan
+            _build_replayed_update_object_packet(
                 session,
                 "SMSG_UPDATE_OBJECT",
                 path,
@@ -967,6 +1165,191 @@ def _pack_sized_cstring(value: str) -> bytes:
     return struct.pack("<I", len(text)) + text
 
 
+def _chat_guid_bytes_for_messagechat(guid: int) -> bytes:
+    """Return the chat GUID bytes used by SkyFire's messagechat packet.
+
+    SkyFire uses the full ObjectGuid bytes for sender and receiver in
+    ChatHandler::BuildChatPacket. For player say packets it passes `this, this`,
+    so both senderGUID and receiverGUID are the player's full world guid.
+    """
+    return struct.pack("<Q", int(guid or 0) & 0xFFFFFFFFFFFFFFFF)
+
+
+
+def _write_guid_mask_bits(bits: BitWriter, raw_guid: bytes, order: tuple[int, ...]) -> None:
+    for index in order:
+        bits.write_bits(1 if raw_guid[index] else 0, 1)
+
+
+
+def _append_guid_byte_seq(payload: bytearray, raw_guid: bytes, order: tuple[int, ...]) -> None:
+    for index in order:
+        value = raw_guid[index]
+        if value:
+            payload.append((value ^ 1) & 0xFF)
+
+
+def _encode_text_emote_payload(*, player_guid: int, target_guid: int, text_emote: int, emote_num: int) -> bytes:
+    player_raw = struct.pack("<Q", int(player_guid or 0) & 0xFFFFFFFFFFFFFFFF)
+    target_raw = struct.pack("<Q", int(target_guid or 0) & 0xFFFFFFFFFFFFFFFF)
+
+    bits = BitWriter()
+    for raw, index in (
+        (player_raw, 1),
+        (target_raw, 7),
+        (player_raw, 6),
+        (target_raw, 5),
+        (player_raw, 3),
+        (target_raw, 6),
+        (target_raw, 2),
+        (player_raw, 7),
+        (target_raw, 0),
+        (target_raw, 1),
+        (player_raw, 4),
+        (player_raw, 2),
+        (target_raw, 3),
+        (target_raw, 4),
+        (player_raw, 0),
+        (player_raw, 5),
+    ):
+        bits.write_bits(1 if raw[index] else 0, 1)
+
+    payload = bytearray(bits.getvalue())
+    _append_guid_byte_seq(payload, target_raw, (2, 1))
+    _append_guid_byte_seq(payload, player_raw, (7, 4))
+    _append_guid_byte_seq(payload, target_raw, (7,))
+    _append_guid_byte_seq(payload, player_raw, (5, 2))
+    payload += struct.pack("<I", int(text_emote) & 0xFFFFFFFF)
+    _append_guid_byte_seq(payload, player_raw, (6,))
+    _append_guid_byte_seq(payload, target_raw, (0,))
+    _append_guid_byte_seq(payload, player_raw, (3, 1))
+    _append_guid_byte_seq(payload, target_raw, (6,))
+    _append_guid_byte_seq(payload, player_raw, (0,))
+    _append_guid_byte_seq(payload, target_raw, (3, 5, 4))
+    payload += struct.pack("<I", int(emote_num) & 0xFFFFFFFF)
+    return bytes(payload)
+
+
+def _build_single_u32_update_object_payload(*, map_id: int, guid: int, field_index: int, value: int) -> bytes:
+    mask_words = (int(field_index) // 32) + 1
+    mask = bytearray(mask_words * 4)
+    mask_word = int(field_index) // 32
+    mask_bit = int(field_index) % 32
+    struct.pack_into("<I", mask, mask_word * 4, 1 << mask_bit)
+
+    payload = bytearray()
+    payload += struct.pack("<HI", int(map_id) & 0xFFFF, 1)
+    payload += struct.pack("<B", 0)
+    payload += GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)
+    payload += struct.pack("<B", mask_words)
+    payload += bytes(mask)
+    payload += struct.pack("<I", int(value) & 0xFFFFFFFF)
+    payload += struct.pack("<B", 0)
+    return bytes(payload)
+
+
+def _encode_skyfire_messagechat_payload(
+    message: str,
+    *,
+    chat_type: int,
+    sender_guid: int = 0,
+    receiver_guid: int = 0,
+    language: int = 0,
+) -> bytes:
+    """Build SMSG_MESSAGECHAT using the SkyFire BuildChatPacket bit/byte order."""
+    message_bytes = str(message or '').encode('utf-8', errors='strict')
+    sender_raw = _chat_guid_bytes_for_messagechat(sender_guid)
+    receiver_raw = _chat_guid_bytes_for_messagechat(receiver_guid)
+    group_raw = b'\x00' * 8
+    guild_raw = b'\x00' * 8
+    has_language = int(language or 0) > 0
+
+    bits = BitWriter()
+    bits.write_bits(1, 1)  # !hasSenderName
+    bits.write_bits(0, 1)  # HideInChatLog
+    bits.write_bits(0, 1)  # Fake Bit
+    bits.write_bits(1, 1)  # !hasChannelName
+    bits.write_bits(0, 1)  # Unk
+    bits.write_bits(1, 1)  # SendFakeTime
+    bits.write_bits(1, 1)  # !chatTag
+    bits.write_bits(1, 1)  # RealmID?
+
+    _write_guid_mask_bits(bits, group_raw, (0, 1, 5, 4, 3, 2, 6, 7))
+
+    bits.write_bits(0, 1)  # Fake Bit
+    _write_guid_mask_bits(bits, receiver_raw, (7, 6, 1, 4, 0, 2, 3, 5))
+
+    bits.write_bits(0, 1)  # Fake Bit
+    bits.write_bits(0 if has_language else 1, 1)  # !hasLanguage
+    bits.write_bits(1, 1)  # !hasPrefix
+
+    _write_guid_mask_bits(bits, sender_raw, (0, 3, 7, 2, 1, 5, 4, 6))
+
+    bits.write_bits(1, 1)  # !hasAchievementId
+    bits.write_bits(0 if message_bytes else 1, 1)  # !message.length()
+
+    if message_bytes:
+        bits.write_bits(len(message_bytes), 12)
+
+    bits.write_bits(1, 1)  # !hasReceiverName
+    bits.write_bits(1, 1)  # RealmID?
+    bits.write_bits(0, 1)  # Fake Bit
+
+    _write_guid_mask_bits(bits, guild_raw, (2, 5, 7, 4, 0, 1, 3, 6))
+
+    payload = bytearray(bits.getvalue())
+
+    _append_guid_byte_seq(payload, guild_raw, (4, 5, 7, 3, 2, 6, 0, 1))
+    _append_guid_byte_seq(payload, sender_raw, (4, 7, 1, 5, 0, 6, 2, 3))
+
+    payload.append(int(chat_type) & 0xFF)
+
+    _append_guid_byte_seq(payload, group_raw, (1, 3, 4, 6, 0, 2, 5, 7))
+    _append_guid_byte_seq(payload, receiver_raw, (2, 5, 3, 6, 7, 4, 1, 0))
+
+    if has_language:
+        payload.append(int(language) & 0xFF)
+
+    if message_bytes:
+        payload.extend(message_bytes)
+
+    return bytes(payload)
+
+
+def _encode_skyfire_messagechat_say_payload(message: str, sender_guid: int = 0, language: int = 0) -> bytes:
+    return _encode_skyfire_messagechat_payload(
+        message,
+        chat_type=CHAT_MSG_SAY,
+        sender_guid=sender_guid,
+        receiver_guid=sender_guid,
+        language=language,
+    )
+
+
+def _encode_skyfire_messagechat_system_payload(message: str) -> bytes:
+    return _encode_skyfire_messagechat_payload(
+        message,
+        chat_type=CHAT_MSG_SYSTEM,
+        sender_guid=0,
+        receiver_guid=0,
+        language=0,
+    )
+
+
+def _encode_aio_simple_messagechat_say_payload(message: str, sender_guid: int = 0) -> bytes:
+    """Use the smallest tolerated MoP SAY form for AIO-style chat experiments."""
+    payload = _encode_skyfire_messagechat_say_payload(
+        message,
+        sender_guid=int(sender_guid or 0),
+        language=0,
+    )
+    Logger.info(
+        f"[CHAT][SEND] guid=0x{int(sender_guid or 0):016X} "
+        f"bytes={len(payload)} message={message!r} mode=aio-simple-say"
+    )
+    return payload
+
+
 def _encode_messagechat_payload(
     *,
     chat_type: int,
@@ -977,6 +1360,15 @@ def _encode_messagechat_payload(
     target_name: str,
     message: str,
 ) -> bytes:
+    if int(chat_type) == CHAT_MSG_SAY and int(target_guid) == 0 and not str(target_name or ""):
+        payload = _encode_skyfire_messagechat_say_payload(message, sender_guid=int(sender_guid or 0), language=int(language or 0))
+        Logger.info(
+            f"[CHAT][SEND] type={int(chat_type)} sender={sender_name or ''} "
+            f"target={target_name or ''} guid=0x{int(sender_guid or 0):016X} "
+            f"bytes={len(payload)} message={message!r} mode=skyfire-say"
+        )
+        return payload
+
     sender_name_bytes = str(sender_name or "").encode("utf-8", errors="strict") + b"\x00"
     target_name_bytes = str(target_name or "").encode("utf-8", errors="strict") + b"\x00"
     message_bytes = str(message or "").encode("utf-8", errors="strict") + b"\x00"
@@ -1002,6 +1394,13 @@ def _encode_messagechat_payload(
         f"target={target_name or ''} bytes={len(payload)} message={message!r}"
     )
     return payload
+
+
+def _build_motd_notification_payload(message: str) -> bytes:
+    message_bytes = str(message or "").encode("utf-8", errors="strict")
+    bits = BitWriter()
+    bits.write_bits(len(message_bytes) & 0xFFF, 12)
+    return bits.getvalue() + message_bytes
 
 
 def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
@@ -1084,6 +1483,119 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
 
         Logger.info("[Fly] Usage: .fly on|off")
         return []
+
+    # -----------------------------
+    # WEATHER COMMAND
+    # -----------------------------
+    if command.lower().startswith(".weather"):
+        parts = command.split()
+
+        if len(parts) not in (2, 3):
+            Logger.info("[Weather] Usage: .weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
+            return []
+
+        weather_key = parts[1].strip().lower()
+        density = 0.0 if weather_key in ("clear", "fine", "sun") else 0.5
+        if len(parts) == 3:
+            try:
+                density = max(0.0, min(1.0, float(parts[2])))
+            except ValueError:
+                Logger.info(f"[Weather] Invalid density command={command!r}")
+                return []
+
+        try:
+            weather_type = int(weather_key)
+        except ValueError:
+            weather_type = _resolve_weather_type(weather_key, density)
+
+        if weather_type < 0:
+            Logger.info(f"[Weather] Unknown weather command={command!r}")
+            return []
+
+        session.weather = {
+            "weather_type": int(weather_type),
+            "density": float(density),
+            "abrupt": 0,
+        }
+        Logger.info(
+            f"[Weather] type={int(weather_type)} density={float(density):.2f} abrupt=0"
+        )
+        return [
+            (
+                "SMSG_WEATHER",
+                build_login_packet(
+                    "SMSG_WEATHER",
+                    type(
+                        "Ctx",
+                        (),
+                        {
+                            "weather_type": int(weather_type),
+                            "density": float(density),
+                            "abrupt": 0,
+                        },
+                    )(),
+                ),
+            )
+        ]
+
+    # -----------------------------
+    # TIME COMMAND
+    # -----------------------------
+    if command.lower().startswith(".time"):
+        parts = command.split(maxsplit=1)
+
+        if len(parts) != 2:
+            Logger.info("[Time] Usage: .time <HH:MM|day|night|dawn|dusk|noon|midnight>")
+            return []
+
+        arg = parts[1].strip().lower()
+        presets = {
+            "day": (12, 0),
+            "noon": (12, 0),
+            "night": (0, 0),
+            "midnight": (0, 0),
+            "dawn": (6, 0),
+            "dusk": (18, 0),
+            "sunrise": (6, 0),
+            "sunset": (18, 0),
+        }
+
+        if arg in presets:
+            hour, minute = presets[arg]
+        else:
+            time_parts = arg.split(":", 1)
+            if len(time_parts) != 2:
+                Logger.info(f"[Time] Invalid time command={command!r}")
+                return []
+            try:
+                hour = int(time_parts[0])
+                minute = int(time_parts[1])
+            except ValueError:
+                Logger.info(f"[Time] Invalid time command={command!r}")
+                return []
+
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                Logger.info(f"[Time] Out-of-range time command={command!r}")
+                return []
+
+        now = int(time.time())
+        lt = time.localtime(now)
+        current_seconds = int(lt.tm_hour) * 3600 + int(lt.tm_min) * 60 + int(lt.tm_sec)
+        target_seconds = int(hour) * 3600 + int(minute) * 60 + int(lt.tm_sec)
+
+        session.server_time = now
+        session.time_offset = target_seconds - current_seconds
+        session.time_speed = 0.01666667
+        session.game_time = _pack_wow_game_time(session.server_time + session.time_offset)
+
+        Logger.info(
+            f"[Time] hour={hour:02d} minute={minute:02d} "
+            f"offset={int(session.time_offset)} packed=0x{int(session.game_time):08X}"
+        )
+
+        return [
+            ("SMSG_LOGIN_SET_TIME_SPEED", build_login_packet("SMSG_LOGIN_SET_TIME_SPEED", _build_world_login_context())),
+        ]
 
     # -----------------------------
     # TELEPORT XYZ
@@ -1221,22 +1733,52 @@ def _handle_chat_message(ctx: PacketContext):
     if not message:
         return 0, None
 
+    command_responses = _handle_chat_command(message)
+    if command_responses is not None:
+        return 0, command_responses if command_responses else None
+
     player_name = session.player_name
-    sender_guid = session.player_guid
+    sender_guid = int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    language = int(chat.get("language") or 0)
 
     Logger.info(f"[CHAT] {player_name}: {message}")
 
-    payload_out = _encode_messagechat_payload(
-        chat_type=CHAT_MSG_SAY,
-        language=1,
-        sender_guid=sender_guid,
-        sender_name=player_name,
-        target_guid=0,
-        target_name="",
-        message=message,
-    )
+    common_name_kwargs = {
+        "name": player_name,
+        "realm_name": _get_realm_name(),
+        "race": int(getattr(session, "race", 0) or 0),
+        "gender": int(getattr(session, "gender", 0) or 0),
+        "class_id": int(getattr(session, "class_id", 0) or 0),
+    }
 
-    return 0, [("SMSG_MESSAGECHAT", payload_out)]
+    if USE_SYSTEM_CHAT_FALLBACK:
+        payload_out = _encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")
+        Logger.info(
+            f"[CHAT][FALLBACK] mode=system player={player_name!r} bytes={len(payload_out)} message={message!r}"
+        )
+    else:
+        payload_out = _encode_messagechat_payload(
+            chat_type=CHAT_MSG_SAY,
+            language=language,
+            sender_guid=sender_guid,
+            sender_name=player_name,
+            target_guid=0,
+            target_name="",
+            message=message,
+        )
+    notification_payload = _build_motd_notification_payload(message)
+    responses: list[tuple[str, bytes]] = [
+        ("SMSG_MESSAGECHAT", payload_out),
+        ("SMSG_NOTIFICATION", notification_payload),
+    ]
+
+    raw_replay_messagechat = _build_raw_replay_messagechat_packet(
+        profile=RAW_REPLAY_SAY_CHAT_PROFILE,
+    )
+    if raw_replay_messagechat is not None:
+        responses.append(raw_replay_messagechat)
+
+    return 0, responses
 
 # WORLD_CLIENT_OPCODES, WORLD_SERVER_OPCODES, _ = load_world_opcodes()
 SERVER_OPCODE_BY_NAME = {name: code for code, name in WORLD_SERVER_OPCODES.items()}
@@ -1389,24 +1931,138 @@ def _decode_simple_query_type(payload: bytes) -> int:
     return 0
 
 
-def _build_update_account_data_payload(data_type: int, account_data: str = "") -> bytes:
-    raw_guid = b"\x00" * 8
-    text = (account_data or "").encode("utf-8")
+def _decode_account_data_request_type(payload: bytes) -> int:
+    if not payload:
+        return 0
+    return int(payload[0]) & 0x07
+
+
+def _decode_account_data_update_payload(payload: bytes) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "type": 0,
+        "timestamp": 0,
+        "decompressed_size": 0,
+        "compressed_size": 0,
+        "account_data": "",
+    }
+
+    if len(payload) < 12:
+        return result
+
+    decompressed_size, timestamp, compressed_size = struct.unpack_from("<III", payload, 0)
+    result["timestamp"] = int(timestamp)
+    result["decompressed_size"] = int(decompressed_size)
+    result["compressed_size"] = int(compressed_size)
+
+    compressed_offset = 12
+    compressed_end = min(len(payload), compressed_offset + int(compressed_size))
+    compressed_blob = payload[compressed_offset:compressed_end]
+
+    type_offset = compressed_offset + int(compressed_size)
+    if type_offset < len(payload):
+        result["type"] = int(payload[type_offset]) & 0x07
+
+    if int(decompressed_size) == 0:
+        return result
+
+    if len(compressed_blob) != int(compressed_size):
+        result["error"] = "truncated_compressed_blob"
+        return result
+
+    try:
+        inflated = zlib.decompress(compressed_blob)
+    except Exception as exc:
+        result["error"] = f"decompress_failed:{exc}"
+        return result
+
+    if len(inflated) != int(decompressed_size):
+        result["warning"] = "decompressed_size_mismatch"
+
+    result["account_data"] = inflated.decode("utf-8", errors="replace")
+    return result
+
+
+_ACCOUNT_DATA_TYPE_1_DEFAULT = (
+    'SET autoQuestPopUps "v\\x01"\\r\\n'
+    'SET trackedQuests "v\\x01"\\r\\n'
+    'SET trackedAchievements "v\\x01"\\r\\n'
+    'SET cameraSavedDistance "5.550000"\\r\\n'
+    'SET cameraSavedPitch "10.000000"\\r\\n'
+    'SET minimapTrackedInfov2 "229384"\\r\\n'
+    'SET minimapShapeshiftTracking "v\\x01"\\r\\n'
+    'SET reputationsCollapsed "v\\x01##$"\\r\\n'
+    'SET activeCUFProfile "Primary"\\r\\n'
+    'SET EJLootClass "4"\\r\\n'
+)
+
+
+_ACCOUNT_DATA_TYPE_7_DEFAULT = """VERSION 5
+
+ADDEDVERSION 19
+
+CHANNELS
+END
+
+ZONECHANNELS 35651587
+
+COLORS
+
+SYSTEM 255 255 0 N
+SAY 255 255 255 N
+PARTY 170 170 255 N
+GUILD 64 255 64 N
+WHISPER 255 128 255 N
+CHANNEL 255 192 192 N
+END
+
+WINDOW 1
+NAME General
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 1
+SHOWN 1
+MESSAGES
+SYSTEM
+SAY
+PARTY
+GUILD
+WHISPER
+CHANNEL
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 2097155
+
+END
+"""
+
+
+def _build_update_account_data_payload(
+    data_type: int,
+    account_data: str = "",
+    *,
+    timestamp: Optional[int] = None,
+    guid: int = 0,
+) -> bytes:
+    raw_guid = struct.pack("<Q", int(guid or 0))
+    text = (account_data or "").encode("utf-8", errors="strict")
     compressed = zlib.compress(text)
-    payload = bytearray()
-    payload.extend(_guid_mask_bits(raw_guid, (5, 1, 3, 7, 0, 4, 2, 6)))
 
-    payload.extend(struct.pack("<i", len(text)))
-    payload.extend(struct.pack("<i", len(compressed)))
-    payload.extend(compressed)
-    payload.extend(struct.pack("<I", int(time.time())))
-
-    # Overwrite the first 3 bits with the requested account-data type.
     bits = BitWriter()
     bits.write_bits(int(data_type) & 0x07, 3)
-    bits.write_bits(0, 8)
-    prefix = bits.getvalue()
-    payload[0 : len(prefix)] = prefix
+    _write_guid_mask_bits(bits, raw_guid, (5, 1, 3, 7, 0, 4, 2, 6))
+
+    payload = bytearray(bits.getvalue())
+    _append_guid_byte_seq(payload, raw_guid, (3, 1, 5))
+    payload.extend(struct.pack("<I", len(text)))
+    payload.extend(struct.pack("<I", len(compressed)))
+    payload.extend(compressed)
+    _append_guid_byte_seq(payload, raw_guid, (7, 4, 0, 6, 2))
+    payload.extend(struct.pack("<I", int(timestamp if timestamp is not None else time.time())))
     return bytes(payload)
 
 
@@ -1426,7 +2082,11 @@ def _load_sniffed_update_account_data_payloads() -> list[tuple[str, bytes]]:
 
 
 def _account_data_text_for_type(data_type: int, account_name: str = "") -> str:
-    if int(data_type) in (0, 1):
+    if int(data_type) == 1:
+        return _ACCOUNT_DATA_TYPE_1_DEFAULT
+    if int(data_type) == 7:
+        return _ACCOUNT_DATA_TYPE_7_DEFAULT
+    if int(data_type) in (0,):
         name = str(account_name or "").strip() or "sandbox"
         safe_name = name.replace("\\", "\\\\").replace('"', '\\"')
         return f'SET accountName "{safe_name}"'
@@ -1465,20 +2125,21 @@ def _build_update_account_data_payload_target_len(target_len: int, data_type: in
 
 
 def _build_minimal_post_timesync_account_packets() -> list[tuple[str, bytes]]:
+    account_name = str(session.account_name or "")
     responses: list[tuple[str, bytes]] = [
         (
             "SMSG_UPDATE_ACCOUNT_DATA",
-            EncoderHandler.encode_packet(
-                "SMSG_UPDATE_ACCOUNT_DATA",
-                {"raw": _build_update_account_data_payload_target_len(214, 0)},
+            _build_update_account_data_payload(
+                1,
+                _account_data_text_for_type(1, account_name),
             ),
         )
     ]
     responses.append((
         "SMSG_UPDATE_ACCOUNT_DATA",
-        EncoderHandler.encode_packet(
-            "SMSG_UPDATE_ACCOUNT_DATA",
-            {"raw": _build_update_account_data_payload_target_len(967, 0)},
+        _build_update_account_data_payload(
+            7,
+            _account_data_text_for_type(7, account_name),
         ),
     ))
     Logger.info(
@@ -1607,7 +2268,16 @@ def _resolve_login_character_guid(
     payload: bytes,
     account_id: Optional[int],
     realm_id: Optional[int],
+    account_name: Optional[str] = None,
 ) -> Optional[int]:
+    def _log_match(candidate: int, row: object) -> None:
+        player_name = str(getattr(row, "name", "") or f"Player{candidate}")
+        account_label = str(account_name or account_id or "?")
+        Logger.info(
+            f"[WorldHandlers] PLAYER_LOGIN selected player={player_name} "
+            f"account={account_label} char_guid={candidate}"
+        )
+
     def _decode_bitpacked_guid(
         body: bytes,
         *,
@@ -1669,10 +2339,7 @@ def _resolve_login_character_guid(
         try:
             row = DatabaseConnection.get_character(candidate, realm_id)
             if row and (account_id is None or int(row.account) == int(account_id)):
-                Logger.info(
-                    f"[WorldHandlers] PLAYER_LOGIN resolved char_guid={candidate} "
-                    f"from login_guid=0x{int(login_guid or 0):X}"
-                )
+                _log_match(int(candidate), row)
                 return int(candidate)
         except Exception:
             continue
@@ -1708,10 +2375,9 @@ def _resolve_login_character_guid(
                 candidate_login_guid = None
             if candidate_login_guid in row_by_login_guid:
                 candidate = row_by_login_guid[candidate_login_guid]
-                Logger.info(
-                    f"[WorldHandlers] PLAYER_LOGIN resolved char_guid={candidate} "
-                    f"from raw 48-bit login guid"
-                )
+                row = DatabaseConnection.get_character(candidate, realm_id)
+                if row:
+                    _log_match(candidate, row)
                 return candidate
 
         # Retail MoP format: float + XOR-bitpacked full player guid.
@@ -1727,10 +2393,9 @@ def _resolve_login_character_guid(
             )
             if candidate_world_guid in row_by_world_guid:
                 candidate = row_by_world_guid[candidate_world_guid]
-                Logger.info(
-                    f"[WorldHandlers] PLAYER_LOGIN resolved char_guid={candidate} "
-                    f"from {label} packed world guid 0x{candidate_world_guid:016X}"
-                )
+                row = DatabaseConnection.get_character(candidate, realm_id)
+                if row:
+                    _log_match(candidate, row)
                 return candidate
 
         # Observed retail client variant in proxy:
@@ -1753,10 +2418,7 @@ def _resolve_login_character_guid(
                     continue
                 row = DatabaseConnection.get_character(candidate, realm_id)
                 if row and int(row.account) == int(account_id):
-                    Logger.info(
-                        f"[WorldHandlers] PLAYER_LOGIN resolved char_guid={candidate} "
-                        f"from compact retail guid blob {compact.hex(' ')}"
-                    )
+                    _log_match(candidate, row)
                     return candidate
 
     if account_id is not None and realm_id is not None:
@@ -1769,9 +2431,7 @@ def _resolve_login_character_guid(
                     high=HighGuid.PLAYER,
                 )
                 if int(expected) == int(login_guid):
-                    Logger.info(
-                        f"[WorldHandlers] PLAYER_LOGIN matched login GUID to char_guid={row.guid}"
-                    )
+                    _log_match(int(row.guid), row)
                     return int(row.guid)
         except Exception:
             pass
@@ -1851,6 +2511,54 @@ _DBC_CHAR_START_OUTFIT_FMT = (
 )
 _DBC_CHAR_START_OUTFIT_CACHE: Optional[dict[tuple[int, int, int], list[int]]] = None
 _DBC_CHAR_START_OUTFIT_MERGED: Optional[dict[tuple[int, int], list[int]]] = None
+_PLAYER_FACTION_TEMPLATE_BY_RACE = {
+    1: 1,
+    2: 2,
+    3: 3,
+    4: 4,
+    5: 5,
+    6: 6,
+    7: 115,
+    8: 116,
+    9: 2204,
+    10: 1610,
+    11: 1629,
+    12: 1,
+    13: 1,
+    14: 1,
+    15: 1,
+    16: 1,
+    17: 1,
+    18: 1,
+    19: 1,
+    20: 1,
+    21: 1,
+    22: 2203,
+    23: 1,
+    24: 2395,
+    25: 2401,
+    26: 2402,
+}
+_PLAYER_DISPLAY_POWER_BY_CLASS = {
+    1: 1,   # Warrior -> rage
+    2: 0,   # Paladin -> mana
+    3: 2,   # Hunter -> focus
+    4: 3,   # Rogue -> energy
+    5: 0,   # Priest -> mana
+    6: 6,   # Death Knight -> runic power
+    7: 0,   # Shaman -> mana
+    8: 0,   # Mage -> mana
+    9: 0,   # Warlock -> mana
+    10: 3,  # Monk -> energy on login in common specs
+    11: 0,  # Druid -> mana in base form
+}
+_DEFAULT_MAX_PRIMARY_POWER_BY_DISPLAY = {
+    0: 100,
+    1: 100,
+    2: 100,
+    3: 100,
+    6: 100,
+}
 
 def _default_equipment() -> list[dict]:
     return [{"enchant": 0, "int_type": 0, "display_id": 0} for _ in range(_EQUIPMENT_SLOTS)]
@@ -1961,6 +2669,26 @@ def _build_equipment_from_starting_items(race: int, class_: int, gender: int | N
     if _equipment_is_empty(equipment):
         return None
     return equipment
+
+
+def _resolve_display_power_for_class(class_id: int) -> int:
+    return int(_PLAYER_DISPLAY_POWER_BY_CLASS.get(int(class_id) or 0, 0))
+
+
+def _resolve_primary_power_for_row(row, class_id: int) -> tuple[int, int, int]:
+    display_power = _resolve_display_power_for_class(class_id)
+    power_field = {
+        0: "power1",
+        1: "power2",
+        2: "power3",
+        3: "power4",
+        6: "power5",
+    }.get(display_power, "power1")
+    current = int(getattr(row, power_field, 0) or 0)
+    default_max = int(_DEFAULT_MAX_PRIMARY_POWER_BY_DISPLAY.get(display_power, 100))
+    if current <= 0:
+        current = default_max
+    return display_power, current, max(current, default_max)
 
 def get_auth_challenge() -> Optional[tuple[str, bytes]]:
     """
@@ -2258,6 +2986,7 @@ def handle_CMSG_PLAYER_LOGIN(
         payload=payload,
         account_id=session.account_id,
         realm_id=session.realm_id,
+        account_name=getattr(session, "account_name", None),
     )
     if char_guid is None:
         Logger.error("[WorldHandlers] CMSG_PLAYER_LOGIN could not resolve selected character")
@@ -2284,15 +3013,9 @@ def handle_CMSG_PLAYER_LOGIN(
     Logger.info(
         "[GUID MODE]\n"
         f"selected_guid = 0x{selected_world_guid:X}\n"
-        f"replay_guid = 0x{int(LOGIN_REPLAY_PLAYER_GUID):X}\n"
         f"session_guid = 0x{int(session.world_guid or 0):X}"
     )
     Logger.info(f"[GUID MODE ACTIVE] player_guid=0x{int(session.player_guid or 0):X}")
-    if selected_world_guid != int(LOGIN_REPLAY_PLAYER_GUID):
-        Logger.warning(
-            "[GUID MODE] raw UPDATE_OBJECT replay still targets replay_guid; "
-            "selected character GUID differs from sniffed player GUID"
-        )
 
     # --------------------------------------------------
     # Load character from DB (LIVE DATA)
@@ -2303,6 +3026,11 @@ def handle_CMSG_PLAYER_LOGIN(
             f"[WorldHandlers] Character not found guid={char_guid} realm={realm_id}"
         )
         return 1, None
+    selected_name = str(getattr(row, "name", "") or f"Player{char_guid}")
+    Logger.info(
+        f"[WorldHandlers] PLAYER_LOGIN selected name={selected_name} "
+        f"char_guid={char_guid} realm={realm_id}"
+    )
 
     # --------------------------------------------------
     # Map / zone / instance
@@ -2316,7 +3044,8 @@ def handle_CMSG_PLAYER_LOGIN(
     # --------------------------------------------------
     session.x = float(row.position_x or 0.0)
     session.y = float(row.position_y or 0.0)
-    session.z = float(row.position_z or 0.0)
+    stored_z = float(row.position_z or 0.0)
+    session.z = stored_z - _POSITION_SAVE_Z_OFFSET if stored_z else 0.0
     session.orientation = float(row.orientation or 0.0)
     _capture_persist_position_from_session()
     _remember_saved_position()
@@ -2356,15 +3085,26 @@ def handle_CMSG_PLAYER_LOGIN(
 
     session.money = int(row.money or 0)
     session.health = int(row.health or 1)
+    session.display_power, session.power_primary, session.max_power_primary = _resolve_primary_power_for_row(
+        row,
+        session.class_id,
+    )
+    session.faction_template = int(_PLAYER_FACTION_TEMPLATE_BY_RACE.get(session.race, 0))
     session.player_bytes = int(row.playerBytes or 0)
     session.player_bytes2 = int(row.playerBytes2 or 0)
     session.player_flags = int(row.playerFlags or 0)
-    session.player_name = str(getattr(row, "name", "") or f"Player{char_guid}")
+    session.equipment_cache_raw = [
+        int(value)
+        for value in str(getattr(row, "equipmentCache", "") or "").split()
+        if value.strip()
+    ]
+    session.player_name = selected_name
 
     # --------------------------------------------------
     # Spells / actions (create info)
     # --------------------------------------------------
     session.known_spells = DatabaseConnection.get_character_spells(char_guid)
+    _ensure_language_spells_known()
     session.action_buttons = DatabaseConnection.get_character_action_buttons(char_guid)
 
     # --------------------------------------------------
@@ -2379,6 +3119,8 @@ def handle_CMSG_PLAYER_LOGIN(
     # Time sync
     # --------------------------------------------------
     session.server_time = int(time.time())
+    session.game_time = _pack_wow_game_time(session.server_time + int(getattr(session, "time_offset", 0) or 0))
+    session.time_speed = float(getattr(session, "time_speed", 0.01666667) or 0.01666667)
     session.time_sync_seq = 0
     _reset_login_flow_state(preserve_loading_screen_done=bool(getattr(session, "loading_screen_done", False)))
 
@@ -2386,8 +3128,8 @@ def handle_CMSG_PLAYER_LOGIN(
     _set_login_state(LoginState.PLAYER_LOGIN)
 
     Logger.success(
-        f"[WorldHandlers] PLAYER_LOGIN char_guid={char_guid} "
-        f"map={session.map_id} zone={session.zone} realm={realm_id}"
+        f"[WorldHandlers] PLAYER_LOGIN name={session.player_name} "
+        f"char_guid={char_guid} map={session.map_id} zone={session.zone} realm={realm_id}"
     )
 
     # --------------------------------------------------
@@ -2521,18 +3263,19 @@ def handle_CMSG_CREATURE_QUERY(ctx: PacketContext) -> Tuple[int, Optional[list[t
 
 
 def handle_CMSG_REQUEST_ACCOUNT_DATA(ctx: PacketContext):
-    data_type = ctx.payload[0]
+    data_type = _decode_account_data_request_type(ctx.payload)
 
     Logger.info(f"[ACCOUNT_DATA] request type={data_type}")
 
-    response = EncoderHandler.encode_packet(
-        "SMSG_UPDATE_ACCOUNT_DATA",
-        {
-            "type": data_type,
-            "timestamp": 0,
-            "size": 0,
-            "data": b"",
-        },
+    stored_text = session.account_data.get(int(data_type))
+    if stored_text is None:
+        stored_text = _account_data_text_for_type(int(data_type), str(session.account_name or ""))
+
+    stored_timestamp = session.account_data_times.get(int(data_type))
+    response = _build_update_account_data_payload(
+        int(data_type),
+        str(stored_text or ""),
+        timestamp=int(stored_timestamp) if stored_timestamp is not None else None,
     )
 
     return 0, [("SMSG_UPDATE_ACCOUNT_DATA", response)]
@@ -2610,23 +3353,24 @@ def handle_CMSG_NAME_QUERY(
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     Logger.info(f"[WorldHandlers] CMSG_NAME_QUERY payload={ctx.payload.hex(' ')}")
     world_guid = int(session.world_guid or 0)
+    low_guid = int(getattr(session, "char_guid", 0) or 0)
     player_name = (
         str(getattr(session, "player_name", "") or "").strip()
         or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
     )
-    response = _build_name_query_response(
-        world_guid,
-        name=player_name,
-        realm_name=_get_realm_name(),
-        race=int(getattr(session, "race", 0) or 0),
-        gender=int(getattr(session, "gender", 0) or 0),
-        class_id=int(getattr(session, "class_id", 0) or 0),
-    )
+    common_kwargs = {
+        "name": player_name,
+        "realm_name": _get_realm_name(),
+        "race": int(getattr(session, "race", 0) or 0),
+        "gender": int(getattr(session, "gender", 0) or 0),
+        "class_id": int(getattr(session, "class_id", 0) or 0),
+    }
+    world_response = _build_name_query_response(world_guid, **common_kwargs)
     Logger.info(
         f"[WorldHandlers] SMSG_QUERY_PLAYER_NAME_RESPONSE guid=0x{world_guid:016X} "
-        f"name={player_name!r} size={len(response)}"
+        f"name={player_name!r} size={len(world_response)}"
     )
-    return 0, [("SMSG_QUERY_PLAYER_NAME_RESPONSE", response)]
+    return 0, [("SMSG_QUERY_PLAYER_NAME_RESPONSE", world_response)]
 
 
 def handle_CMSG_QUEST_GIVER_STATUS_QUERY(
@@ -2674,28 +3418,7 @@ def build_query_player_name_response(guid: int) -> bytes:
     return payload
 
 def handle_CMSG_MESSAGECHAT_SAY(ctx: PacketContext):
-    chat = _decode_chat_message(ctx.name, ctx.payload, ctx.decoded)
-    message = chat["message"]
-
-    if not message:
-        return 0, None
-
-    # run chat commands
-    command_result = _handle_chat_command(message)
-    if command_result is not None:
-        return 0, command_result
-
-    chat_payload = _encode_messagechat_payload(
-        chat_type=CHAT_MSG_SAY,
-        language=1,
-        sender_guid=session.player_guid,
-        sender_name=session.player_name,
-        target_guid=0,
-        target_name="",
-        message=message,
-    )
-
-    return 0, [("SMSG_MESSAGECHAT", chat_payload)]
+    return _handle_chat_message(ctx)
 def handle_CMSG_MESSAGECHAT_YELL(
     ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
@@ -2706,6 +3429,77 @@ def handle_CMSG_MESSAGECHAT_WHISPER(
     ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     return _handle_chat_message(ctx)
+
+
+def handle_CMSG_SEND_TEXT_EMOTE(
+    ctx: PacketContext,
+) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    decoded = _log_cmsg(ctx)
+    emote_id = int((decoded or {}).get("emote_id") or 0)
+    emote_num = int((decoded or {}).get("emote_num") or 0)
+    target_guid = int((decoded or {}).get("target_guid") or 0)
+    player_guid = int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    anim_emote = int(TEXT_EMOTE_TO_ANIM_EMOTE.get(emote_id, 0) or 0)
+
+    Logger.info(
+        f"[EMOTE][TEXT] emote_id={emote_id} emote_num={emote_num} anim_emote={anim_emote} "
+        f"player_guid=0x{player_guid:016X} target_guid=0x{target_guid:016X}"
+    )
+
+    responses: list[tuple[str, bytes]] = [
+        (
+            "SMSG_TEXT_EMOTE",
+            _encode_text_emote_payload(
+                player_guid=player_guid,
+                target_guid=target_guid,
+                text_emote=emote_id,
+                emote_num=emote_num,
+            ),
+        )
+    ]
+
+    if anim_emote == 10:
+        responses.append(
+            (
+                "SMSG_UPDATE_OBJECT",
+                _build_single_u32_update_object_payload(
+                    map_id=int(getattr(session, "map_id", 0) or 0),
+                    guid=player_guid,
+                    field_index=0x59,  # UNIT_FIELD_NPC_EMOTESTATE
+                    value=10,
+                ),
+            )
+        )
+    elif anim_emote > 0:
+        emote_payload = EncoderHandler.encode_packet(
+            "SMSG_EMOTE",
+            {
+                "emote_id": anim_emote,
+                "guid": player_guid,
+            },
+        )
+        responses.append(("SMSG_EMOTE", emote_payload))
+
+    return 0, responses
+
+
+def handle_CMSG_EMOTE(
+    ctx: PacketContext,
+) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    decoded = _log_cmsg(ctx)
+    emote_id = int((decoded or {}).get("emote_id") or 0)
+    player_guid = int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    Logger.info(
+        f"[EMOTE] emote_id={emote_id} player_guid=0x{player_guid:016X}"
+    )
+    payload = EncoderHandler.encode_packet(
+        "SMSG_EMOTE",
+        {
+            "emote_id": emote_id,
+            "guid": player_guid,
+        },
+    )
+    return 0, [("SMSG_EMOTE", payload)]
 
 
 def handle_CMSG_CHAT_JOIN_CHANNEL(
@@ -2736,13 +3530,10 @@ def handle_disconnect() -> None:
 
 
 def handle_CMSG_REQUEST_HOTFIX(ctx: PacketContext):
-    # Suppressed during minimal login debugging to keep the bootstrap surface small.
-    if session.login_state != LoginState.IN_WORLD:
-        Logger.info(
-            f"[WorldHandlers] CMSG_REQUEST_HOTFIX suppressed during login "
-            f"(state={session.login_state.value if session.login_state else 'None'})"
-        )
-        return 0, None
+    Logger.info(
+        f"[WorldHandlers] CMSG_REQUEST_HOTFIX passthrough "
+        f"(state={session.login_state.value if session.login_state else 'None'})"
+    )
     return _handle_CMSG_REQUEST_HOTFIX(ctx)
 
 def handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(ctx: PacketContext):
@@ -2751,7 +3542,7 @@ def handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(ctx: PacketContext):
     payload = EncoderHandler.encode_packet(
         "SMSG_ACCOUNT_DATA_TIMES",
         {
-            "flag": 0,
+            "has_account_data_times": 1,
             "timestamps": [0] * 8,
             "mask": 0,
             "server_time": int(time.time()),
@@ -2764,6 +3555,35 @@ def handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(ctx: PacketContext):
 
 def handle_CMSG_UPDATE_ACCOUNT_DATA(ctx: PacketContext):
     _log_cmsg(ctx)
+    parsed = _decode_account_data_update_payload(ctx.payload)
+
+    data_type = int(parsed.get("type") or 0)
+    timestamp = int(parsed.get("timestamp") or 0)
+    account_text = str(parsed.get("account_data") or "")
+
+    if 0 <= data_type < 8:
+        session.account_data[data_type] = account_text
+        session.account_data_times[data_type] = timestamp
+        if account_text:
+            session.account_data_mask |= (1 << data_type)
+        else:
+            session.account_data_mask &= ~(1 << data_type)
+
+    preview = account_text[:120].replace("\r", "\\r").replace("\n", "\\n")
+    Logger.info(
+        f"[ACCOUNT_DATA] update type={data_type} timestamp={timestamp} "
+        f"decompressed_size={int(parsed.get('decompressed_size') or 0)} "
+        f"compressed_size={int(parsed.get('compressed_size') or 0)} "
+        f"stored_len={len(account_text)} preview={preview!r}"
+    )
+
+    error = parsed.get("error")
+    if error:
+        Logger.warning(f"[ACCOUNT_DATA] update parse warning={error}")
+    warning = parsed.get("warning")
+    if warning:
+        Logger.warning(f"[ACCOUNT_DATA] update parse warning={warning}")
+
     return 0, None
 
 
@@ -2793,6 +3613,26 @@ def handle_CMSG_SET_ACTIVE_MOVER(ctx: PacketContext):
     #     ...
     _assert_player_object_sent()
     _set_login_state(LoginState.IN_WORLD)
+    responses: list[tuple[str, bytes]] = []
+    motd = str(getattr(_build_world_login_context(), "motd", "") or "").strip()
+    if motd and not session.chat_motd_sent:
+        session.chat_motd_sent = True
+        notification_payload = _build_motd_notification_payload(motd)
+        Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; sending MOTD notification fallback")
+        responses.append(("SMSG_NOTIFICATION", notification_payload))
+
+    if not getattr(session, "account_settings_sent", False):
+        session.account_settings_sent = True
+        responses.extend(_build_minimal_post_timesync_account_packets())
+        Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; sending minimal account settings packets")
+
+    _ensure_language_spells_known()
+    responses.append(("SMSG_SEND_KNOWN_SPELLS", build_login_packet("SMSG_SEND_KNOWN_SPELLS", _build_world_login_context())))
+    Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; resending known spells including language spells")
+
+    if responses:
+        return 0, responses
+
     Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; no additional bootstrap packets sent")
     return 0, None
 
@@ -2839,6 +3679,8 @@ opcode_handlers: Dict[str, Callable[[PacketContext], Tuple[int, Optional[bytes]]
     "CMSG_MESSAGECHAT_SAY": handle_CMSG_MESSAGECHAT_SAY,
     "CMSG_MESSAGECHAT_YELL": handle_CMSG_MESSAGECHAT_YELL,
     "CMSG_MESSAGECHAT_WHISPER": handle_CMSG_MESSAGECHAT_WHISPER,
+    "CMSG_SEND_TEXT_EMOTE": handle_CMSG_SEND_TEXT_EMOTE,
+    "CMSG_EMOTE": handle_CMSG_EMOTE,
     "CMSG_READY_FOR_ACCOUNT_DATA_TIMES": handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES, 
     "CMSG_UPDATE_ACCOUNT_DATA": handle_CMSG_UPDATE_ACCOUNT_DATA,
     "CMSG_REQUEST_HOTFIX": handle_CMSG_REQUEST_HOTFIX,
@@ -2846,7 +3688,7 @@ opcode_handlers: Dict[str, Callable[[PacketContext], Tuple[int, Optional[bytes]]
     "CMSG_DISCARDED_TIME_SYNC_ACKS": handle_CMSG_DISCARDED_TIME_SYNC_ACKS,
     "CMSG_OBJECT_UPDATE_FAILED": handle_CMSG_OBJECT_UPDATE_FAILED,
     "CMSG_CREATURE_QUERY": handle_CMSG_CREATURE_QUERY,
-  #  "CMSG_REQUEST_ACCOUNT_DATA": handle_CMSG_REQUEST_ACCOUNT_DATA,
+    "CMSG_REQUEST_ACCOUNT_DATA": handle_CMSG_REQUEST_ACCOUNT_DATA,
     "CMSG_REQUEST_CEMETERY_LIST": handle_CMSG_REQUEST_CEMETERY_LIST,
     "CMSG_REQUEST_PLAYED_TIME": handle_CMSG_REQUEST_PLAYED_TIME,
     "CMSG_QUERY_TIME": handle_CMSG_QUERY_TIME,

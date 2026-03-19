@@ -229,7 +229,7 @@ def build_SMSG_SET_DUNGEON_DIFFICULTY(ctx) -> bytes:
 def build_SMSG_ACCOUNT_DATA_TIMES_old(ctx) -> bytes:
     now = int(time.time())
     return _encode("SMSG_ACCOUNT_DATA_TIMES", {
-        "flag": 0x80,
+        "has_account_data_times": 1,
         "mask": 0,
         "timestamps": [now] * 8,
         "server_time": now,
@@ -240,7 +240,7 @@ def build_SMSG_ACCOUNT_DATA_TIMES(_ctx=None) -> bytes:
     now = int(time.time())
     Logger.info(f"[ACCOUNT DATA] server_time={now}")
     payload = _encode("SMSG_ACCOUNT_DATA_TIMES", {
-        "flag": 0x80,
+        "has_account_data_times": 1,
         "mask": 0,
         "timestamps": [now] * 8,
         "server_time": now,
@@ -268,23 +268,51 @@ def build_SMSG_TUTORIAL_FLAGS(ctx) -> bytes:
 
 
 def build_SMSG_FEATURE_SYSTEM_STATUS(ctx) -> bytes:
-    # Preserve the packet structure and known-good login values while keeping
-    # the complaint / customer-support fields disabled.
-    payload = struct.pack(
-        "<IIIIIIII3B",
-        0,  # voice
-        0,  # browser
-        0,  # scroll
-        1,  # mountpreview
-        0,  # complaint1
-        0,  # complaint2
-        0,  # flags1
-        0,  # flags2
-        0, 0, 0,  # flags3[3]
-    )
-    if len(payload) != 35:
-        raise AssertionError(f"SMSG_FEATURE_SYSTEM_STATUS malformed length: {len(payload)} != 35")
-    return payload
+    info = dict(getattr(ctx, "feature_system_status", {}) or {})
+    feedback_system = int(info.get("feedback_system_enabled", 1 if info == {} else 0))
+    excessive_warning = int(info.get("excessive_warning", 0))
+
+    payload = bytearray()
+    payload.extend(struct.pack(
+        "<IIIBI",
+        int(info.get("scroll_resurrection_per_day", 0)),
+        int(info.get("scroll_resurrection_current", 0)),
+        int(info.get("unk_u32_08", 0)),
+        int(info.get("mount_preview_mode", 2)),
+        int(info.get("unk_u32_0D", 0)),
+    ))
+
+    bits = BitWriter()
+    bits.write_bits(int(info.get("unk_bit_00", 0)), 1)
+    bits.write_bits(int(info.get("in_game_shop_enabled", 1)), 1)
+    bits.write_bits(int(info.get("unk_bit_02", 0)), 1)
+    bits.write_bits(int(info.get("recruit_a_friend_enabled", 0)), 1)
+    bits.write_bits(int(info.get("voice_chat_enabled", 0)), 1)
+    bits.write_bits(int(info.get("show_in_game_shop_icon", 1)), 1)
+    bits.write_bits(int(info.get("scroll_of_resurrection_enabled", 0)), 1)
+    bits.write_bits(excessive_warning, 1)
+    bits.write_bits(int(info.get("parental_controls_enabled", 0)), 1)
+    bits.write_bits(feedback_system, 1)
+    payload.extend(bits.getvalue())
+
+    if excessive_warning:
+        payload.extend(struct.pack(
+            '<III',
+            int(info.get('excessive_warning_after_seconds', 0)),
+            int(info.get('excessive_warning_display_seconds', 0)),
+            int(info.get('excessive_warning_cooldown_seconds', 0)),
+        ))
+
+    if feedback_system:
+        payload.extend(struct.pack(
+            '<IIII',
+            int(info.get('feedback_unk_0', 0)),
+            int(info.get('feedback_unk_1', 1)),
+            int(info.get('feedback_unk_2', 10)),
+            int(info.get('feedback_unk_3', 60000)),
+        ))
+
+    return bytes(payload)
 
 
 def build_SMSG_MOTD_old(ctx) -> bytes:
@@ -294,20 +322,21 @@ def build_SMSG_MOTD_old(ctx) -> bytes:
 
 def build_SMSG_MOTD(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {"motd": "Welcome to PyPandaria"})()
-    motd = getattr(ctx, "motd", "Welcome to PyPandaria")
-    if motd is None:
-        motd = ""
-    motd = str(motd)
-    # MoP-safe MOTD: uint32 line_count followed by null-terminated strings.
-    lines = [motd if motd else ""]
-    payload = bytearray()
-    payload += struct.pack("<I", len(lines))
+    motd = str(getattr(ctx, "motd", "Welcome to PyPandaria") or "")
+    lines = [part for part in motd.split("@") if part] or [""]
+
+    bits = BitWriter()
+    bits.write_bits(len(lines) & 0x0F, 4)
     for line in lines:
-        payload += line.encode("utf-8", errors="strict") + b"\x00"
+        encoded = str(line).encode("utf-8", errors="strict")
+        bits.write_bits(len(encoded) & 0x7F, 7)
+
+    payload = bytearray(bits.getvalue())
+    for line in lines:
+        payload.extend(str(line).encode("utf-8", errors="strict"))
+
     payload = bytes(payload)
-    Logger.info(f"[MOP DEBUG] MOTD lines={len(lines)} size={len(payload)}")
-    if len(payload) < 5:
-        raise AssertionError(f"SMSG_MOTD malformed length: {len(payload)} < 5")
+    Logger.info(f"[MOP DEBUG] MOTD lines={len(lines)} size={len(payload)} mode=skyfire")
     return payload
 
 
@@ -370,19 +399,67 @@ def build_SMSG_WORLD_SERVER_INFO_old(ctx) -> bytes:
 def build_SMSG_WORLD_SERVER_INFO(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {"world_server_info": {}})()
     info = dict(getattr(ctx, "world_server_info", {}) or {})
-    return _encode("SMSG_WORLD_SERVER_INFO", {
-        "is_tournament_realm": int(info.get("is_tournament_realm", 0)),
-        "unk0": int(info.get("unk0", 0)),
-        "weekly_reset_time": int(info.get("weekly_reset_time", 0)),
-        "flags": int(info.get("flags", 0)),
-    })
+
+    has_group_size = int(info.get("has_group_size", 1 if int(info.get("group_size", 0) or 0) > 0 else 0))
+    ineligible_for_loot = int(info.get("ineligible_for_loot", 0))
+    has_restricted_level = int(info.get("has_restricted_level", 0))
+    has_restricted_money = int(info.get("has_restricted_money", 0))
+
+    bits = BitWriter()
+    bits.write_bits(has_group_size, 1)
+    bits.write_bits(ineligible_for_loot, 1)
+    bits.write_bits(has_restricted_level, 1)
+    bits.write_bits(has_restricted_money, 1)
+
+    payload = bytearray(bits.getvalue())
+    payload.extend(struct.pack(
+        '<BII',
+        int(info.get('is_tournament_realm', 0)),
+        int(info.get('last_weekly_reset', info.get('weekly_reset_time', 0))),
+        int(info.get('map_difficulty', info.get('flags', 0))),
+    ))
+
+    if has_group_size:
+        payload.extend(struct.pack('<I', int(info.get('group_size', 0))))
+    if has_restricted_level:
+        payload.extend(struct.pack('<I', int(info.get('restricted_level', 0))))
+    if ineligible_for_loot:
+        payload.extend(struct.pack('<I', int(info.get('encounter_mask', 0))))
+    if has_restricted_money:
+        payload.extend(struct.pack('<I', int(info.get('restricted_money', 0))))
+
+    return bytes(payload)
 
 
 def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
+    spells = list(getattr(ctx, "known_spells", []) or [])
+    # Mirror the lightweight MoP sandbox behavior and ensure chat/language
+    # support is present even if the character spell rows are incomplete.
+    for spell_id in (668, 669, 108127):
+        if int(spell_id) not in spells:
+            spells.append(int(spell_id))
+    race = int(getattr(ctx, "race", 0) or 0)
+    race_language_spell = {
+        3: 672,       # Dwarf -> Dwarvish
+        4: 671,       # Night Elf -> Darnassian
+        5: 17737,     # Undead -> Gutterspeak
+        6: 670,       # Tauren -> Taurahe
+        7: 7340,      # Gnome -> Gnomish
+        8: 7341,      # Troll -> Troll
+        10: 813,      # Blood Elf -> Thalassian
+        11: 29932,    # Draenei -> Draenei
+        22: 69269,    # Goblin -> Goblin
+        24: 108127,   # Pandaren Neutral
+        25: 108130,   # Pandaren Alliance
+        26: 108131,   # Pandaren Horde
+    }.get(race, 0)
+    if int(race_language_spell or 0) and int(race_language_spell) not in spells:
+        spells.append(int(race_language_spell))
+
     return _encode("SMSG_SEND_KNOWN_SPELLS", {
         "initial_login": 1,
-        "spell_count": len(getattr(ctx, "known_spells", []) or []),
-        "spells": [{"spell_id": int(spell)} for spell in (getattr(ctx, "known_spells", []) or [])],
+        "spell_count": len(spells),
+        "spells": [{"spell_id": int(spell)} for spell in spells],
     })
 
 
@@ -394,8 +471,20 @@ def build_SMSG_SEND_UNLEARN_SPELLS(ctx) -> bytes:
 
 
 def build_SMSG_UPDATE_ACTION_BUTTONS(ctx) -> bytes:
-    # MoP 5.4.x uses a bitpacked/XOR'd 132-entry action bar payload.
-    # We build it manually here until a proper DSL case exists.
+    # Prefer the captured payload for now. The speculative fixed-size builder
+    # produces a packet the client accepts on wire level, but the action bar
+    # UI stops rendering buttons. Keep the manual path as fallback while we
+    # revisit the real format later.
+    captured = _load_payload_packet("SMSG_UPDATE_ACTION_BUTTONS")
+    use_capture = (
+        captured is not None
+        and int(getattr(ctx, "char_guid", 0) or 0) == 2
+    )
+    if use_capture:
+        Logger.info("[ACTION_BUTTONS MODE] capture")
+        return captured
+
+    Logger.info("[ACTION_BUTTONS MODE] manual-fallback")
     button_count = 132
     packet_type = 1
     source_buttons = list(getattr(ctx, "action_buttons", []) or [])
@@ -421,10 +510,14 @@ def build_SMSG_UPDATE_ACTION_BUTTONS(ctx) -> bytes:
 
     for byte_index in (0, 1, 4, 6, 7, 2, 5, 3):
         for raw in button_bytes:
-            if raw[byte_index]:
-                payload.append(raw[byte_index] ^ 0x01)
+            payload.append(raw[byte_index] ^ 0x01)
 
     payload.append(packet_type & 0xFF)
+    expected_len = 132 + (button_count * 8) + 1
+    if len(payload) != expected_len:
+        raise AssertionError(
+            f"SMSG_UPDATE_ACTION_BUTTONS malformed length: {len(payload)} != {expected_len}"
+        )
     return bytes(payload)
 
 
@@ -689,6 +782,62 @@ _EXACT_UPDATE_OBJECT_1773613176_0003_DEFAULT_ENTRIES = (
     },
 )
 _FIRST_LOGIN_UPDATE_OBJECT_CAPTURE_NAME = "SMSG_UPDATE_OBJECT_1773613176_0002.json"
+DEFAULT_EXACT_UPDATE_OBJECT_1773613176_0002_MODE = "barncastle"
+_MINIMAL_UPDATE_OBJECT_1773613176_0002_ENTRY_OFFSET = 477
+_MINIMAL_UPDATE_OBJECT_1773613176_0002_OFFSET_ADJUST = (
+    _MINIMAL_UPDATE_OBJECT_1773613176_0002_ENTRY_OFFSET - 6
+)
+_PLAYER_DISPLAY_IDS = {
+    1: {0: 49, 1: 50},
+    2: {0: 51, 1: 52},
+    3: {0: 53, 1: 54},
+    4: {0: 55, 1: 56},
+    5: {0: 57, 1: 58},
+    6: {0: 59, 1: 60},
+    7: {0: 1563, 1: 1564},
+    8: {0: 1478, 1: 1479},
+    9: {0: 6894, 1: 6895},
+    10: {0: 15476, 1: 15475},
+    11: {0: 16125, 1: 16126},
+}
+_PLAYER_FACTION_TEMPLATE_IDS = {
+    1: 1,
+    2: 2,
+    3: 3,
+    4: 4,
+    5: 5,
+    6: 6,
+    7: 115,
+    8: 116,
+    9: 2204,
+    10: 1610,
+    11: 1629,
+    12: 1,
+    13: 1,
+    14: 1,
+    15: 1,
+    16: 1,
+    17: 1,
+    18: 1,
+    19: 1,
+    20: 1,
+    21: 1,
+    22: 2203,
+    23: 1,
+    24: 2395,
+    25: 2401,
+    26: 2402,
+}
+_EXACT_UPDATE_OBJECT_1773613176_0002_MOVEMENT_TEMPLATE = bytes.fromhex(
+    "200000004009080000080000490000e040e00f494000009040c3f54840ec8f7d46c7c28a4000002040608b7e460000904003000020400000e040711c9740b5b7fd41"
+)
+_EXACT_UPDATE_OBJECT_1773613176_0002_MASK_BYTES = bytes.fromhex(
+    "d10000dc8a028062ff0f1e7c0002008022060004c02900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a200800202601e007800780000000000000000000000000000000080ff010000000000000000000000000000fe010000000000000000000000000000fe0100000000000000000000000000000000000000000000007c7f01000001000010000000000000000000000000000000000000e807fc2f0100000008000000000080003f00000000000000"
+)
+_EXACT_UPDATE_OBJECT_1773613176_0002_FIELD_TEMPLATE = bytes.fromhex(
+    "0200000019000000000000000000803f0000000000000000000000000a0400010300000067000000640000006700000064000000010000004a06000008000000000800006c07000040060000d0070000022bc73e0000c03f733c0000733c000000000000c82df740a88322418e265040587c85400000803f0000803f0000803f0000803f12000000190000001400000018000000130000002100000053000000260000001000000025495240922489400000803f01070300080000010100000085200000020000007ee30000a0510000a2510000f151000089c30000010000000e00000000000040100000000000004012000000000000400c00000000000040140000000000004016000000000000402100000000000040c8000000900100002b002c002d002e0036005f006d0076008900a200ad00e2009e019f01d90199030100010001000100010001002c0101002c0101000100010001000100010005000500050005000500050005002c0105002c01050005000500010001000500050051f896410000a040553e2e41553e2e41553e2e4152491d3b52491d3b52491d3b52491d3b52491d3b52491d3b1e0000000000004108000000004000002c0100000e0000000e0000000e0000000e0000000e0000000e0000000000803f0000803f0000803f0000803f0000803f0000803f0000803f0e0000000000803f0000803f0000803f0000803fffffffff5a00000015000000160000001700000018000000190000001a000000"
+)
+_EXACT_UPDATE_OBJECT_1773613176_0002_DYNAMIC_MASK_BLOCKS = 0
 _EXACT_UPDATE_OBJECT_1773613176_0004_DEFAULT = bytes.fromhex(
     "0100010000000001023F4000001C00000080E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000733C0000733C00000000000000"
 )
@@ -699,6 +848,7 @@ _EXACT_UPDATE_OBJECT_1773613205_0007_DEFAULT = bytes.fromhex(
     "0100010000000307000000C104C01FC106C01FC107C01FC108C01FC114C01FC117C01FC118C01F"
 )
 _EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS = {
+    "object_guid_low_u32": 800,
     "last_entry_packed_guid_low": 479,
     "fly_speed": 494,
     "turn_speed": 498,
@@ -713,14 +863,24 @@ _EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS = {
     "run_speed": 535,
     "swim_back_speed": 539,
     "pos_z": 543,
-    "guid1_0": 553,
+    "guid1_0": 530,
+    "display_power": 832,
+    "faction_template": 856,
+    "display_id": 888,
+    "native_display_id": 892,
     "health": 836,
     "power_primary": 840,
     "max_health": 844,
     "max_power_primary": 848,
     "level": 852,
+    "appearance_block": 828,
     "player_bytes": 980,
     "player_bytes2": 984,
+    "equipment_slot_8": 1000,
+    "equipment_slot_12": 1004,
+    "equipment_slot_14": 1008,
+    "equipment_slot_30": 1012,
+    "equipment_slot_32": 1016,
 }
 
 
@@ -786,7 +946,7 @@ def _build_exact_update_object_1773613181_0005_body(
 
 def build_SMSG_UPDATE_OBJECT_1773613181_0005(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
-    map_id = int(getattr(ctx, "exact_0005_map_id", getattr(ctx, "map_id", 1)) or 1)
+    map_id = _ctx_int_preserve_zero(ctx, "exact_0005_map_id", int(getattr(ctx, "map_id", 1)))
     guid = int(getattr(ctx, "exact_0005_guid", 0x1FC0000000000004))
     object_type = int(getattr(ctx, "exact_0005_object_type", 5) or 5)
     create_flags = bytes(
@@ -836,7 +996,7 @@ def build_SMSG_UPDATE_OBJECT_1773613181_0005(_ctx=None) -> bytes:
 
 def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
-    map_id = int(getattr(ctx, "exact_0004_map_id", getattr(ctx, "map_id", 1)) or 1)
+    map_id = _ctx_int_preserve_zero(ctx, "exact_0004_map_id", int(getattr(ctx, "map_id", 1)))
     guid = int(getattr(ctx, "exact_0004_guid", _resolve_update_world_guid(ctx)))
     mask_bytes = bytes(
         getattr(
@@ -874,7 +1034,7 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
 
 def build_SMSG_UPDATE_OBJECT_1773613176_0003(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
-    map_id = int(getattr(ctx, "exact_0003_map_id", getattr(ctx, "map_id", 1)) or 1)
+    map_id = _ctx_int_preserve_zero(ctx, "exact_0003_map_id", int(getattr(ctx, "map_id", 1)))
     entries = tuple(getattr(ctx, "exact_0003_entries", _EXACT_UPDATE_OBJECT_1773613176_0003_DEFAULT_ENTRIES))
 
     payload = bytearray()
@@ -907,16 +1067,31 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0003(_ctx=None) -> bytes:
 
 def build_SMSG_UPDATE_OBJECT_1773613176_0002(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
+    mode = str(
+        getattr(
+            ctx,
+            "exact_0002_mode",
+            DEFAULT_EXACT_UPDATE_OBJECT_1773613176_0002_MODE,
+        )
+        or DEFAULT_EXACT_UPDATE_OBJECT_1773613176_0002_MODE
+    ).strip().lower()
     if hasattr(ctx, "exact_0002_payload"):
         built = bytearray(bytes(getattr(ctx, "exact_0002_payload")))
-        map_id = int(getattr(ctx, "exact_0002_map_id", getattr(ctx, "map_id", struct.unpack_from("<H", built, 0)[0])) or 1)
+        default_map_id = int(getattr(ctx, "map_id", struct.unpack_from("<H", built, 0)[0]))
+        map_id = _ctx_int_preserve_zero(ctx, "exact_0002_map_id", default_map_id)
         struct.pack_into("<H", built, 0, map_id)
         built = bytes(built)
+        active_mode = "custom"
+    if mode == "barncastle":
+        built = _build_barncastle_update_object_1773613176_0002_payload(ctx)
+        map_id = struct.unpack_from("<H", built, 0)[0]
+        active_mode = "barncastle"
     else:
         built = _build_live_update_object_1773613176_0002_payload(ctx)
         map_id = struct.unpack_from("<H", built, 0)[0]
+        active_mode = "full-capture"
     Logger.info(
-        f"[UPDATE_OBJECT BUILD] 0002 map_id={map_id} packet_size={len(built)}"
+        f"[UPDATE_OBJECT BUILD] 0002 mode={active_mode} map_id={map_id} packet_size={len(built)}"
     )
     return built
 
@@ -939,16 +1114,31 @@ def _patch_f32(payload: bytearray, offset: int, value: float) -> None:
     struct.pack_into("<f", payload, int(offset), float(value))
 
 
-def _build_live_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
-    payload = bytearray(load_first_login_update_object_capture())
-    offsets = _EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS
+def _ctx_int_preserve_zero(ctx: Any, primary_key: str, fallback: int) -> int:
+    value = getattr(ctx, primary_key, None)
+    if value is None:
+        return int(fallback)
+    return int(value)
 
-    map_id = int(getattr(ctx, "exact_0002_map_id", getattr(ctx, "map_id", struct.unpack_from("<H", payload, 0)[0])) or 1)
-    struct.pack_into("<H", payload, 0, map_id)
 
+def _resolve_player_display_id(race: int, gender: int, fallback: int = 15475) -> int:
+    gender_map = _PLAYER_DISPLAY_IDS.get(int(race) or 0)
+    if not gender_map:
+        return int(fallback)
+    return int(gender_map.get(int(gender) or 0, fallback))
+
+
+def _resolve_player_faction_template(race: int, fallback: int = 1610) -> int:
+    return int(_PLAYER_FACTION_TEMPLATE_IDS.get(int(race) or 0, fallback))
+
+
+def _patch_live_update_object_1773613176_0002_fields(ctx: Any, payload: bytearray, *, offset_adjust: int = 0) -> None:
+    offsets = {key: value - offset_adjust for key, value in _EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS.items()}
     low_guid = int(getattr(ctx, "exact_0002_low_guid", getattr(ctx, "char_guid", 2)) or 2) & 0xFF
+    if offsets["object_guid_low_u32"] >= 0:
+        _patch_u32(payload, offsets["object_guid_low_u32"], low_guid)
     payload[offsets["last_entry_packed_guid_low"]] = low_guid
-    payload[offsets["guid1_0"]] = low_guid
+    payload[offsets["guid1_0"]] = low_guid ^ 0x01
 
     dynamic_floats = {
         "fly_speed": float(getattr(ctx, "fly_speed", 7.0) or 7.0),
@@ -968,6 +1158,7 @@ def _build_live_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
     for key, value in dynamic_floats.items():
         _patch_f32(payload, offsets[key], value)
 
+    display_power = int(getattr(ctx, "display_power", 0) or 0)
     current_health = int(getattr(ctx, "health", 103) or 103)
     max_health = int(getattr(ctx, "max_health", current_health) or current_health)
     primary_power = int(getattr(ctx, "power_primary", 100) or 100)
@@ -976,13 +1167,99 @@ def _build_live_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
     player_bytes = int(getattr(ctx, "player_bytes", 198401) or 198401)
     player_bytes2 = int(getattr(ctx, "player_bytes2", 16777224) or 16777224)
 
+    _patch_u32(payload, offsets["display_power"], display_power)
     _patch_u32(payload, offsets["health"], current_health)
     _patch_u32(payload, offsets["power_primary"], primary_power)
     _patch_u32(payload, offsets["max_health"], max_health)
     _patch_u32(payload, offsets["max_power_primary"], max_primary_power)
+    race = int(getattr(ctx, "race", 0) or 0)
+    class_id = int(getattr(ctx, "class_id", 0) or 0)
+    gender = int(getattr(ctx, "gender", 0) or 0)
+    faction_template = int(
+        getattr(
+            ctx,
+            "faction_template",
+            _resolve_player_faction_template(race),
+        )
+        or _resolve_player_faction_template(race)
+    )
+    display_id = int(
+        getattr(
+            ctx,
+            "display_id",
+            _resolve_player_display_id(race, gender),
+        )
+        or _resolve_player_display_id(race, gender)
+    )
+    payload[offsets["appearance_block"]:offsets["appearance_block"]+4] = bytes((race & 0xFF, class_id & 0xFF, 0x00, gender & 0xFF))
+    _patch_u32(payload, offsets["faction_template"], faction_template)
+    _patch_u32(payload, offsets["display_id"], display_id)
+    _patch_u32(payload, offsets["native_display_id"], display_id)
+
     _patch_u32(payload, offsets["level"], level)
     _patch_u32(payload, offsets["player_bytes"], player_bytes)
     _patch_u32(payload, offsets["player_bytes2"], player_bytes2)
+
+    # These sparse player fields in the Barncastle 0002 template were still
+    # carrying Selene's raw equipment cache values. Patch them from the
+    # logged-in character's own equipmentCache so visible login gear follows
+    # the selected character instead of the template character.
+    equipment_cache_raw = list(getattr(ctx, "equipment_cache_raw", []) or [])
+    equipment_field_map = {
+        "equipment_slot_8": 8,
+        "equipment_slot_12": 12,
+        "equipment_slot_14": 14,
+        "equipment_slot_30": 30,
+        "equipment_slot_32": 32,
+    }
+    for offset_key, raw_index in equipment_field_map.items():
+        if raw_index < len(equipment_cache_raw):
+            _patch_u32(payload, offsets[offset_key], int(equipment_cache_raw[raw_index]) & 0xFFFFFFFF)
+
+
+def _build_barncastle_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
+    """
+    Build a player-create UPDATE_OBJECT from fixed MoP templates plus live data.
+
+    This is the active working login path for 0002.
+    """
+    map_id = _ctx_int_preserve_zero(
+        ctx,
+        "exact_0002_map_id",
+        int(getattr(ctx, "map_id", 0) or 0),
+    )
+    low_guid = int(getattr(ctx, "exact_0002_low_guid", getattr(ctx, "char_guid", 2)) or 2) & 0xFF
+
+    entry = bytearray()
+    entry.append(2)  # player create/update_type
+    entry += GuidHelper.pack(low_guid)
+    entry.append(4)  # object_type = Player
+    entry += _EXACT_UPDATE_OBJECT_1773613176_0002_MOVEMENT_TEMPLATE
+    entry.append(len(_EXACT_UPDATE_OBJECT_1773613176_0002_MASK_BYTES) // 4)
+    entry += _EXACT_UPDATE_OBJECT_1773613176_0002_MASK_BYTES
+    entry += _EXACT_UPDATE_OBJECT_1773613176_0002_FIELD_TEMPLATE
+    entry.append(_EXACT_UPDATE_OBJECT_1773613176_0002_DYNAMIC_MASK_BLOCKS)
+
+    payload = bytearray()
+    payload += _build_update_object_packet_prefix(map_id, 1)
+    payload += entry
+    _patch_live_update_object_1773613176_0002_fields(
+        ctx,
+        payload,
+        offset_adjust=_MINIMAL_UPDATE_OBJECT_1773613176_0002_OFFSET_ADJUST,
+    )
+    return bytes(payload)
+
+
+def _build_live_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
+    payload = bytearray(load_first_login_update_object_capture())
+    offsets = _EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS
+
+    default_map_id = int(getattr(ctx, "map_id", struct.unpack_from("<H", payload, 0)[0]))
+    map_id = _ctx_int_preserve_zero(ctx, "exact_0002_map_id", default_map_id)
+    struct.pack_into("<H", payload, 0, map_id)
+
+    _patch_live_update_object_1773613176_0002_fields(ctx, payload)
 
     return bytes(payload)
 
@@ -1230,7 +1507,7 @@ def format_update_object_player_create_diff_with_expected(session: Any, *, limit
 
 def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
-    map_id = int(getattr(ctx, "exact_0006_map_id", getattr(ctx, "map_id", 1)) or 1)
+    map_id = _ctx_int_preserve_zero(ctx, "exact_0006_map_id", int(getattr(ctx, "map_id", 1)))
     guid = int(getattr(ctx, "exact_0006_guid", _resolve_update_world_guid(ctx)))
     mask_bytes = bytes(
         getattr(
@@ -1276,7 +1553,7 @@ def _build_exact_update_object_out_of_range_entry(guid_list: list[int]) -> bytes
 
 def build_SMSG_UPDATE_OBJECT_1773613205_0007(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
-    map_id = int(getattr(ctx, "exact_0007_map_id", getattr(ctx, "map_id", 1)) or 1)
+    map_id = _ctx_int_preserve_zero(ctx, "exact_0007_map_id", int(getattr(ctx, "map_id", 1)))
     guid_list = list(
         getattr(
             ctx,
@@ -1316,12 +1593,23 @@ def _resolve_update_world_guid(ctx: Any) -> int:
 
 def _build_manual_active_mover_payload(mover_guid: int) -> bytes:
     raw = int(mover_guid).to_bytes(8, "little", signed=False)
-    payload = bytes([raw[0], raw[6]])
-    if len(payload) != 2:
+    present = {index for index, value in enumerate(raw) if value}
+    bits = BitWriter()
+    for index in (5, 1, 4, 2, 3, 7, 0, 6):
+        bits.write_bits(1 if raw[index] else 0, 1)
+
+    payload = bytearray(bits.getvalue())
+    for index in (4, 6, 2, 0, 3, 7, 5, 1):
+        if index not in present:
+            continue
+        payload.append((raw[index] ^ 0x01) & 0xFF)
+
+    expected_len = 1 + len(present)
+    if len(payload) != expected_len:
         raise AssertionError(
-            f"SMSG_MOVE_SET_ACTIVE_MOVER manual payload length mismatch: {len(payload)} != 2"
+            f"SMSG_MOVE_SET_ACTIVE_MOVER manual payload length mismatch: {len(payload)} != {expected_len}"
         )
-    return payload
+    return bytes(payload)
 
 def build_SMSG_PHASE_SHIFT_CHANGE_old(ctx) -> bytes:
     return _encode("SMSG_PHASE_SHIFT_CHANGE", {
@@ -1380,13 +1668,22 @@ def build_SMSG_INIT_WORLD_STATES_old(ctx) -> bytes:
 
 def build_SMSG_INIT_WORLD_STATES(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {"map_id": 0, "zone": 0})()
-    return _encode("SMSG_INIT_WORLD_STATES", {
-        "map_id": int(getattr(ctx, "map_id", 0)),
-        "zone_id": int(getattr(ctx, "zone", 0)),
-        "area_id": int(getattr(ctx, "zone", 0)),
-        "states": [],
-        "_": 0,
-    })
+    states = list(getattr(ctx, 'states', []) or [])
+
+    bits = BitWriter()
+    bits.write_bits(len(states) & 0x1FFFFF, 21)
+
+    payload = bytearray()
+    payload.extend(struct.pack('<I', int(getattr(ctx, 'map_id', 0))))
+    payload.extend(struct.pack('<I', int(getattr(ctx, 'zone', 0))))
+    payload.extend(struct.pack('<I', int(getattr(ctx, 'zone', 0))))
+    payload.extend(bits.getvalue())
+
+    for state in states:
+        payload.extend(struct.pack('<I', int(state.get('value', 0))))
+        payload.extend(struct.pack('<I', int(state.get('state_id', state.get('field', 0)))))
+
+    return bytes(payload)
 
 
 def handle_CMSG_REQUEST_HOTFIX(ctx: PacketContext):
@@ -1406,9 +1703,9 @@ def build_SMSG_UPDATE_WORLD_STATE(ctx) -> bytes:
 
 def build_SMSG_WEATHER(ctx) -> bytes:
     return _encode("SMSG_WEATHER", {
-        "weather_id": 0,   # clear
-        "intensity": 0.0,
-        "abrupt": 0,
+        "weather_type": int(getattr(ctx, "weather_type", getattr(ctx, "weather_id", 0)) or 0),
+        "density": float(getattr(ctx, "density", getattr(ctx, "intensity", 0.0)) or 0.0),
+        "abrupt": int(getattr(ctx, "abrupt", 0) or 0),
     })
 def build_SMSG_HOTFIX_NOTIFY_BLOB(_ctx=None) -> bytes:
     return _encode("SMSG_HOTFIX_NOTIFY_BLOB", {
@@ -1519,14 +1816,16 @@ CHAR_META_MASK_FIELDS = (
 
 def build_SMSG_MOVE_SET_ACTIVE_MOVER(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {"world_guid": None, "realm_id": 0, "char_guid": 0})()
-    mover_guid = _resolve_update_world_guid(ctx)
+    mover_world_guid = _resolve_update_world_guid(ctx)
+    mover_guid = int(getattr(ctx, "char_guid", 0) or 0)
+    if mover_guid <= 0:
+        mover_guid = int(mover_world_guid) & 0xFFFFFFFF
     mover_guid_mask = GuidHelper.pack(mover_guid)[0]
     Logger.info(
-        f"[ACTIVE_MOVER DEBUG] guid={hex(int(mover_guid))} mask=0x{mover_guid_mask:02X}"
+        f"[ACTIVE_MOVER DEBUG] world_guid={hex(int(mover_world_guid))} "
+        f"active_mover_guid={hex(int(mover_guid))} mask=0x{mover_guid_mask:02X}"
     )
-    return _encode("SMSG_MOVE_SET_ACTIVE_MOVER", {
-        "raw": _build_manual_active_mover_payload(mover_guid),
-    })
+    return _build_manual_active_mover_payload(mover_guid)
 
 def build_SMSG_MOVE_SET_ACTIVE_MOVER_old(ctx) -> bytes:
     mover_guid = GuidHelper.make(

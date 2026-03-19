@@ -38,6 +38,7 @@ class WorldLoginContext:
 
     server_time: int = field(default_factory=lambda: int(time.time()))
     game_time: int = field(default_factory=lambda: int(time.time()))
+    time_speed: float = 0.01666667
 
     # --------------------------------------------------
     # Feature / system flags
@@ -101,9 +102,14 @@ class WorldLoginContext:
 
     money: int = 0
     health: int = 1
+    display_power: int = 0
+    power_primary: int = 0
+    max_power_primary: int = 0
+    faction_template: int = 0
     player_bytes: int = 0
     player_bytes2: int = 0
     player_flags: int = 0
+    equipment_cache_raw: list[int] = field(default_factory=list)
 
     known_spells: list = field(default_factory=list)
     action_buttons: list = field(default_factory=lambda: [0] * 120)
@@ -146,6 +152,8 @@ class WorldLoginContext:
             orientation=session.orientation,
 
             server_time=session.server_time,
+            game_time=getattr(session, "game_time", int(time.time())),
+            time_speed=getattr(session, "time_speed", 0.01666667),
 
             walk_speed=session.walk_speed,
             run_speed=session.run_speed,
@@ -164,9 +172,14 @@ class WorldLoginContext:
 
             money=session.money,
             health=session.health,
+            display_power=getattr(session, "display_power", 0),
+            power_primary=getattr(session, "power_primary", 0),
+            max_power_primary=getattr(session, "max_power_primary", 0),
+            faction_template=getattr(session, "faction_template", 0),
             player_bytes=session.player_bytes,
             player_bytes2=session.player_bytes2,
             player_flags=session.player_flags,
+            equipment_cache_raw=list(getattr(session, "equipment_cache_raw", []) or []),
 
             known_spells=session.known_spells,
             action_buttons=session.action_buttons,
