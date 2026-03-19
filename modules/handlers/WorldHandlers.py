@@ -113,6 +113,8 @@ _RACE_LANGUAGE_SPELL_BY_RACE = {
 }
 RAW_REPLAY_SAY_CHAT_PROFILE = None
 USE_SYSTEM_CHAT_FALLBACK = True
+SEND_ACCOUNT_DATA_TO_CLIENT = True
+RAW_REPLAY_ACCOUNT_DATA_PROFILE = "skyfire2"
 TEXT_EMOTE_TO_ANIM_EMOTE: dict[int, int] = {
     5: 5,      # gasp
     34: 10,    # dance
@@ -501,6 +503,20 @@ def _extract_movement_from_decoded(decoded: dict[str, Any]) -> Optional[tuple[fl
     if orientation is None:
         orientation = _coerce_float(decoded.get("orientation"))
 
+    # Some MoP movement decodes appear to label the actual facing angle as
+    # `jump_cos`, while `facing` contains cos(angle). Prefer the angle when
+    # the cosine relation matches.
+    jump_cos = _coerce_float(decoded.get("jump_cos"))
+    if (
+        orientation is not None
+        and jump_cos is not None
+        and math.isfinite(orientation)
+        and math.isfinite(jump_cos)
+        and -math.pi * 4 <= jump_cos <= math.pi * 4
+        and abs(math.cos(jump_cos) - orientation) <= 0.02
+    ):
+        orientation = jump_cos
+
     if orientation is None:
         return None
 
@@ -539,6 +555,23 @@ def _score_movement_candidate(
     return score
 
 
+def _normalize_orientation(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        orientation = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(orientation):
+        return None
+    if abs(orientation) > (math.pi * 4):
+        return None
+    orientation = math.fmod(orientation, math.tau)
+    if orientation < 0.0:
+        orientation += math.tau
+    return orientation
+
+
 def _extract_movement_from_payload(payload: bytes) -> Optional[tuple[float, float, float, float]]:
     if len(payload) < 16:
         return None
@@ -566,7 +599,7 @@ def _accept_movement_update(
     z: float,
     orientation: float,
 ) -> bool:
-    if not all(math.isfinite(value) for value in (x, y, z, orientation)):
+    if not all(math.isfinite(value) for value in (x, y, z)):
         return False
 
     current_x = float(getattr(session, "x", 0.0) or 0.0)
@@ -1052,6 +1085,9 @@ def _queue_world_bootstrap_transition(ctx: WorldLoginContext) -> list[tuple[str,
     ]
 
     for opcode_name, payload in pre_update_packets:
+        if not SEND_ACCOUNT_DATA_TO_CLIENT and opcode_name == "SMSG_ACCOUNT_DATA_TIMES":
+            Logger.info("[WorldLogin] suppressing SMSG_ACCOUNT_DATA_TIMES")
+            continue
         Logger.info(f"[WorldLogin] sending {opcode_name}")
         if opcode_name == "SMSG_LOGIN_SET_TIME_SPEED":
             Logger.info("[WorldLogin] sending SMSG_LOGIN_SETTIMESPEED")
@@ -2114,6 +2150,57 @@ def _load_sniffed_update_account_data_payloads() -> list[tuple[str, bytes]]:
     return results
 
 
+def _load_raw_account_data_times_payload(profile_name: str | None = None) -> bytes | None:
+    if not profile_name:
+        return None
+    path = get_captures_root(profile=profile_name) / "debug" / "SMSG_ACCOUNT_DATA_TIMES.json"
+    if not path.exists():
+        Logger.info(
+            f"[ACCOUNT_DATA][RAW] missing SMSG_ACCOUNT_DATA_TIMES profile={profile_name!r} path={path}"
+        )
+        return None
+    payload = load_sniff_payload(path)
+    Logger.info(
+        f"[ACCOUNT_DATA][RAW] loaded SMSG_ACCOUNT_DATA_TIMES profile={profile_name!r} size={len(payload)}"
+    )
+    return payload
+
+
+def _load_raw_update_account_data_payload(
+    data_type: int,
+    profile_name: str | None = None,
+) -> bytes | None:
+    if not profile_name:
+        return None
+    json_path = get_captures_root(profile=profile_name) / "json" / "SMSG_UPDATE_ACCOUNT_DATA.json"
+    debug_path = get_captures_root(profile=profile_name) / "debug" / "SMSG_UPDATE_ACCOUNT_DATA.json"
+    if not json_path.exists() or not debug_path.exists():
+        Logger.info(
+            f"[ACCOUNT_DATA][RAW] missing SMSG_UPDATE_ACCOUNT_DATA profile={profile_name!r}"
+        )
+        return None
+    try:
+        decoded = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        Logger.warning(
+            f"[ACCOUNT_DATA][RAW] failed to read {json_path}: {exc}"
+        )
+        return None
+    captured_type = int(decoded.get("type") or 0)
+    if captured_type != int(data_type):
+        Logger.info(
+            f"[ACCOUNT_DATA][RAW] no replay for type={data_type}; "
+            f"profile={profile_name!r} only has type={captured_type}"
+        )
+        return None
+    payload = load_sniff_payload(debug_path)
+    Logger.info(
+        f"[ACCOUNT_DATA][RAW] loaded SMSG_UPDATE_ACCOUNT_DATA type={data_type} "
+        f"profile={profile_name!r} size={len(payload)}"
+    )
+    return payload
+
+
 def _account_data_text_for_type(data_type: int, account_name: str = "") -> str:
     if int(data_type) == 1:
         return _ACCOUNT_DATA_TYPE_1_DEFAULT
@@ -2159,6 +2246,7 @@ def _build_update_account_data_payload_target_len(target_len: int, data_type: in
 
 def _build_minimal_post_timesync_account_packets() -> list[tuple[str, bytes]]:
     account_name = str(session.account_name or "")
+    raw_type_7 = _load_raw_update_account_data_payload(7, RAW_REPLAY_ACCOUNT_DATA_PROFILE)
     responses: list[tuple[str, bytes]] = [
         (
             "SMSG_UPDATE_ACCOUNT_DATA",
@@ -2170,7 +2258,7 @@ def _build_minimal_post_timesync_account_packets() -> list[tuple[str, bytes]]:
     ]
     responses.append((
         "SMSG_UPDATE_ACCOUNT_DATA",
-        _build_update_account_data_payload(
+        raw_type_7 if raw_type_7 is not None else _build_update_account_data_payload(
             7,
             _account_data_text_for_type(7, account_name),
         ),
@@ -3333,6 +3421,14 @@ def handle_CMSG_REQUEST_ACCOUNT_DATA(ctx: PacketContext):
 
     Logger.info(f"[ACCOUNT_DATA] request type={data_type}")
 
+    if not SEND_ACCOUNT_DATA_TO_CLIENT:
+        Logger.info(f"[ACCOUNT_DATA] suppressing SMSG_UPDATE_ACCOUNT_DATA type={data_type}")
+        return 0, None
+
+    raw_payload = _load_raw_update_account_data_payload(int(data_type), RAW_REPLAY_ACCOUNT_DATA_PROFILE)
+    if raw_payload is not None:
+        return 0, [("SMSG_UPDATE_ACCOUNT_DATA", raw_payload)]
+
     stored_text = session.account_data.get(int(data_type))
     if stored_text is None:
         stored_text = _account_data_text_for_type(int(data_type), str(session.account_name or ""))
@@ -3605,6 +3701,15 @@ def handle_CMSG_REQUEST_HOTFIX(ctx: PacketContext):
 def handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(ctx: PacketContext):
     Logger.info("[WORLD] Client ready for account data times")
 
+    if not SEND_ACCOUNT_DATA_TO_CLIENT:
+        Logger.info("[WORLD] suppressing SMSG_ACCOUNT_DATA_TIMES")
+        return 0, None
+
+    raw_payload = _load_raw_account_data_times_payload(RAW_REPLAY_ACCOUNT_DATA_PROFILE)
+    if raw_payload is not None:
+        session.account_data_times_sent = True
+        return 0, [("SMSG_ACCOUNT_DATA_TIMES", raw_payload)]
+
     payload = EncoderHandler.encode_packet(
         "SMSG_ACCOUNT_DATA_TIMES",
         {
@@ -3689,8 +3794,11 @@ def handle_CMSG_SET_ACTIVE_MOVER(ctx: PacketContext):
 
     if not getattr(session, "account_settings_sent", False):
         session.account_settings_sent = True
-        responses.extend(_build_minimal_post_timesync_account_packets())
-        Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; sending minimal account settings packets")
+        if SEND_ACCOUNT_DATA_TO_CLIENT:
+            responses.extend(_build_minimal_post_timesync_account_packets())
+            Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; sending minimal account settings packets")
+        else:
+            Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; suppressing account settings packets")
 
     _ensure_language_spells_known()
     responses.append(("SMSG_SEND_KNOWN_SPELLS", build_login_packet("SMSG_SEND_KNOWN_SPELLS", _build_world_login_context())))
@@ -3717,10 +3825,18 @@ def handle_movement_packet(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     if not _accept_movement_update(opcode_name, x, y, z, orientation):
         return 0, None
 
+    normalized_orientation = _normalize_orientation(orientation)
+    if normalized_orientation is None:
+        Logger.warning(
+            f"[Movement] ignoring implausible orientation from {opcode_name}: {orientation!r}; "
+            "keeping previous facing"
+        )
+        normalized_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+
     session.x = float(x)
     session.y = float(y)
     session.z = float(z)
-    session.orientation = float(orientation)
+    session.orientation = float(normalized_orientation)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _capture_persist_position_from_session()
         _mark_position_dirty()
@@ -3729,6 +3845,37 @@ def handle_movement_packet(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     Logger.info(
         f"[Movement] opcode={opcode_name} guid=0x{int(session.world_guid or session.player_guid or 0):X} "
         f"x={session.x:.3f} y={session.y:.3f} z={session.z:.3f} facing={session.orientation:.3f}"
+    )
+    return 0, None
+
+
+def handle_MSG_MOVE_SET_FACING(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
+    payload = bytes(ctx.payload or b"")
+    if len(payload) < 4:
+        Logger.warning("[Movement] MSG_MOVE_SET_FACING payload too short")
+        return 0, None
+
+    try:
+        orientation = struct.unpack_from("<f", payload, len(payload) - 4)[0]
+    except struct.error:
+        Logger.warning("[Movement] MSG_MOVE_SET_FACING unpack failed")
+        return 0, None
+
+    normalized_orientation = _normalize_orientation(orientation)
+    if normalized_orientation is None:
+        Logger.warning(
+            f"[Movement] ignoring implausible MSG_MOVE_SET_FACING orientation: {orientation!r}"
+        )
+        return 0, None
+
+    session.orientation = float(normalized_orientation)
+    _capture_persist_position_from_session()
+    _mark_position_dirty()
+    _maybe_periodic_position_save()
+
+    Logger.info(
+        f"[Movement] opcode=MSG_MOVE_SET_FACING guid=0x{int(session.world_guid or session.player_guid or 0):X} "
+        f"facing={session.orientation:.3f}"
     )
     return 0, None
 
@@ -3772,5 +3919,6 @@ opcode_handlers: Dict[str, Callable[[PacketContext], Tuple[int, Optional[bytes]]
     "MSG_MOVE_START_TURN_LEFT": handle_movement_packet,
     "MSG_MOVE_START_TURN_RIGHT": handle_movement_packet,
     "MSG_MOVE_STOP_TURN": handle_movement_packet,
+    "MSG_MOVE_SET_FACING": handle_MSG_MOVE_SET_FACING,
     "MSG_MOVE_FALL_LAND": handle_movement_packet,
 }
