@@ -311,6 +311,60 @@ class DatabaseConnection:
             raise
 
     @staticmethod
+    def save_character_position(
+        char_guid: int,
+        realm_id: int,
+        *,
+        map_id: int,
+        zone: int,
+        instance_id: int,
+        x: float,
+        y: float,
+        z: float,
+        orientation: float,
+        online: int | None = None,
+        logout_time: int | None = None,
+    ) -> bool:
+        """Persist character world position and optional online/logout state."""
+        session = DatabaseConnection.chars()
+        try:
+            row = (
+                session.query(Characters)
+                .filter(
+                    Characters.guid == int(char_guid),
+                    Characters.realm == int(realm_id),
+                )
+                .one_or_none()
+            )
+            if row is None:
+                Logger.warning(
+                    f"[DB] save_character_position missing character guid={char_guid} realm={realm_id}"
+                )
+                return False
+
+            row.map = int(map_id or 0)
+            row.zone = int(zone or 0)
+            row.instance_id = int(instance_id or 0)
+            row.position_x = float(x or 0.0)
+            row.position_y = float(y or 0.0)
+            row.position_z = float(z or 0.0)
+            row.orientation = float(orientation or 0.0)
+
+            if online is not None:
+                row.online = int(online)
+            if logout_time is not None:
+                row.logout_time = int(logout_time)
+
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(
+                f"[DB] save_character_position failed guid={char_guid} realm={realm_id}: {exc}"
+            )
+            return False
+
+    @staticmethod
     def get_item_template_map(entries: list[int]) -> dict[int, tuple[int, int]]:
         if not entries:
             return {}

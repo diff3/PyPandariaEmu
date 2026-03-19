@@ -268,9 +268,8 @@ def build_SMSG_TUTORIAL_FLAGS(ctx) -> bytes:
 
 
 def build_SMSG_FEATURE_SYSTEM_STATUS(ctx) -> bytes:
-    # Minimal Blizzard-safe MoP payload: keep all feature flags disabled except
-    # mount preview. Build this packet raw to avoid any accidental flag
-    # derivation from context or stale captures.
+    # Preserve the packet structure and known-good login values while keeping
+    # the complaint / customer-support fields disabled.
     payload = struct.pack(
         "<IIIIIIII3B",
         0,  # voice
@@ -283,7 +282,6 @@ def build_SMSG_FEATURE_SYSTEM_STATUS(ctx) -> bytes:
         0,  # flags2
         0, 0, 0,  # flags3[3]
     )
-    Logger.info(f"[MOP DEBUG] FEATURE_SYSTEM_STATUS size={len(payload)}")
     if len(payload) != 35:
         raise AssertionError(f"SMSG_FEATURE_SYSTEM_STATUS malformed length: {len(payload)} != 35")
     return payload

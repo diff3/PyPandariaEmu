@@ -10,6 +10,7 @@ Goals:
 """
 
 import getpass
+import importlib
 import os
 import random
 import socket
@@ -19,35 +20,29 @@ import select
 import sys
 import argparse
 
-from utils.ConfigLoader import ConfigLoader
-from utils.Logger import Logger
-from protocols.wow.shared.utils.OpcodeLoader import load_world_opcodes
+from shared.ConfigLoader import ConfigLoader
+from shared.Logger import Logger
+from proxy.utils.config_loader import ConfigLoader as ProxyStateConfigLoader
 
-from modules.dsl.EncoderHandler import EncoderHandler
-from protocols.wow.shared.modules.crypto.ARC4Crypto import Arc4CryptoHandler
-from protocols.wow.shared.modules.crypto.SRP6Client import SRP6Client
-from protocols.wow.shared.modules.crypto.SRP6Crypto import SRP6Crypto
-from protocols.wow.shared.modules.AddonsBuilder import AddonsBuilder
-from protocols.wow.shared.modules.AuthClientBuilder import AuthClientBuilder
-from protocols.wow.shared.utils.guid import GuidHelper, HighGuid
+from DSL.modules.EncoderHandler import EncoderHandler
+from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler
+from server.modules.crypto.SRP6Client import SRP6Client
+from server.modules.crypto.SRP6Crypto import SRP6Crypto
+from server.modules.AddonsBuilder import AddonsBuilder
+from server.modules.AuthClientBuilder import AuthClientBuilder
+from server.modules.guid import GuidHelper, HighGuid
+from server.modules.OpcodeLoader import load_world_opcodes
 
-cfg = ConfigLoader.load_config()
-world_opcode_module = (
-    f"protocols.{cfg['program']}.{cfg.get('expansion')}.{cfg['version']}.modules.opcodes.WorldOpcodes"
-)
-WorldClientOpcodes = __import__(world_opcode_module, fromlist=["WorldClientOpcodes"]).WorldClientOpcodes
+world_opcode_module = importlib.import_module("server.modules.opcodes.WorldOpcodes")
+WorldClientOpcodes = world_opcode_module.WorldClientOpcodes
 
 # interpretation layer
-from protocols.wow.shared.modules.interpretation.PacketInterpreter import DslDecoder
-from protocols.wow.shared.modules.interpretation.OpcodeResolver import OpcodeResolver
-from protocols.wow.shared.modules.interpretation.EncryptedWorldStream import ClientWorldStream
-from protocols.wow.shared.modules.interpretation.parser import parse_header
-from protocols.wow.shared.modules.interpretation.utils import build_world_header, build_world_header_plain
-
-text_emotes_module = (
-    f"protocols.{cfg['program']}.{cfg.get('expansion')}.{cfg['version']}.modules.shared.text_emotes"
-)
-TEXT_EMOTES = __import__(text_emotes_module, fromlist=["TEXT_EMOTES"]).TEXT_EMOTES
+from server.modules.interpretation.PacketInterpreter import DslDecoder
+from server.modules.interpretation.OpcodeResolver import OpcodeResolver
+from server.modules.interpretation.EncryptedWorldStream import ClientWorldStream
+from server.modules.interpretation.parser import parse_header
+from server.modules.interpretation.utils import build_world_header, build_world_header_plain
+from server.modules.shared.text_emotes import TEXT_EMOTES
 
 
 # ----------------------------------------------------------------------
@@ -67,6 +62,7 @@ def parse_args():
     p.add_argument("--count", type=int, default=1, help="Number of login iterations")
     p.add_argument("--stay", type=int, default=5, help="Seconds to stay logged in")
     p.add_argument("--pause", type=int, default=1, help="Pause between iterations")
+    p.add_argument("--proxy-state", default="default", help="Proxy state name from config/proxy.json")
     p.add_argument("--user")
     p.add_argument("--password")
     p.add_argument("--realmid", type=int, help="Realm ID/index (0-based or 1-based)")
@@ -86,7 +82,8 @@ class ClientSimulator:
 
     def __init__(self):
         self.cfg = ConfigLoader.load_config()
-        self.cfg["Logging"]["logging_levels"] = "Information, Success, Script, Error"
+        self.proxy_cfg = None
+        self.proxy_state_name = "default"
 
         self.username = ""
         self.password = ""
@@ -102,10 +99,38 @@ class ClientSimulator:
         self.opcode_resolver = OpcodeResolver(
             client_ops,
             server_ops,
-            world_lookup,
+            world_opcode_module,
         )
         self._addons_dir = None
         self._realm_id = None
+
+    def _load_proxy_cfg(self) -> dict | None:
+        if self.proxy_cfg is not None:
+            return self.proxy_cfg
+        try:
+            self.proxy_cfg = ProxyStateConfigLoader.load_active_config(self.proxy_state_name)
+        except Exception as exc:
+            Logger.warning(f"[CLIENT] Proxy config unavailable for state '{self.proxy_state_name}': {exc}")
+            self.proxy_cfg = None
+        return self.proxy_cfg
+
+    def _resolve_auth_target(self) -> tuple[str, int]:
+        proxy_cfg = self._load_proxy_cfg()
+        if proxy_cfg:
+            route = (proxy_cfg.get("routes") or {}).get("auth") or {}
+            listen_host = str(route.get("host") or proxy_cfg.get("listen_host") or "127.0.0.1")
+            listen_port = route.get("listen")
+            if listen_port is not None:
+                if listen_host == "0.0.0.0":
+                    listen_host = "127.0.0.1"
+                return listen_host, int(listen_port)
+
+        auth_cfg = self.cfg.get("authserver") or {}
+        host = str(auth_cfg.get("host") or "127.0.0.1")
+        if host == "0.0.0.0":
+            host = "127.0.0.1"
+        port = int(auth_cfg.get("port") or 3720)
+        return host, port
 
 
     # ============================================================
@@ -140,8 +165,7 @@ class ClientSimulator:
         return bool(self.username and self.password)
 
     def _auth_flow(self) -> socket.socket | None:
-        host = self.cfg["auth_proxy"]["listen_host"]
-        port = self.cfg["auth_proxy"]["listen_port"]
+        host, port = self._resolve_auth_target()
 
         Logger.info(f"Connecting to auth {host}:{port}")
 
@@ -1095,6 +1119,7 @@ if __name__ == "__main__":
 
     def run_once():
         client = ClientSimulator()
+        client.proxy_state_name = args.proxy_state
         if args.user:
             client.username = args.user
         if args.password:

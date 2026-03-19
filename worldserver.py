@@ -45,7 +45,7 @@ from server.modules.opcodes.WorldOpcodes import (
     WORLD_SERVER_OPCODES,
     lookup as world_lookup,
 )
-from server.modules.handlers.WorldHandlers import opcode_handlers, get_auth_challenge, reset_state, preload_cache
+from server.modules.handlers.WorldHandlers import opcode_handlers, get_auth_challenge, reset_state, preload_cache, handle_disconnect
 
 
 # ---- Opcodes ----
@@ -395,6 +395,10 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
         Logger.error(f"[WorldServer] error: {exc}")
         Logger.error(traceback.format_exc())
     finally:
+        try:
+            handle_disconnect()
+        except Exception as exc:
+            Logger.warning(f"[WorldServer] disconnect handler failed: {exc}")
         sock.close()
         Logger.info(f"[WorldServer] Closed connection from {addr}")
 

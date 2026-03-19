@@ -142,6 +142,11 @@ LOGIN_UPDATE_SEQUENCE = (
     "SMSG_UPDATE_OBJECT_1773586161_0003.json",
     "SMSG_UPDATE_OBJECT_1773586165_0004.json",
 )
+
+_POSITION_SAVE_INTERVAL_SECONDS = 60.0
+_POSITION_SAVE_Z_OFFSET = 2.0
+_MAX_MOVEMENT_POSITION_DELTA = 200.0
+_MAX_MOVEMENT_Z_DELTA = 100.0
 CHAT_MSG_SAY = 1
 CHAT_MSG_YELL = 6
 CHAT_MSG_WHISPER = 7
@@ -419,6 +424,36 @@ def _extract_movement_from_payload(payload: bytes) -> Optional[tuple[float, floa
             best_score = score
 
     return best
+
+
+def _accept_movement_update(
+    opcode_name: str,
+    x: float,
+    y: float,
+    z: float,
+    orientation: float,
+) -> bool:
+    if not all(math.isfinite(value) for value in (x, y, z, orientation)):
+        return False
+
+    current_x = float(getattr(session, "x", 0.0) or 0.0)
+    current_y = float(getattr(session, "y", 0.0) or 0.0)
+    current_z = float(getattr(session, "z", 0.0) or 0.0)
+
+    if current_x == 0.0 and current_y == 0.0 and current_z == 0.0:
+        return True
+
+    planar_delta = math.hypot(x - current_x, y - current_y)
+    vertical_delta = abs(z - current_z)
+
+    if planar_delta > _MAX_MOVEMENT_POSITION_DELTA or vertical_delta > _MAX_MOVEMENT_Z_DELTA:
+        Logger.warning(
+            f"[Movement] ignoring implausible {opcode_name} update "
+            f"dx={x - current_x:.3f} dy={y - current_y:.3f} dz={z - current_z:.3f}"
+        )
+        return False
+
+    return True
 
 
 def _find_player_living_movement_block(payload: bytes) -> Optional[dict[str, float]]:
@@ -884,6 +919,9 @@ def _queue_teleport_world_transition(ctx: WorldLoginContext) -> list[tuple[str, 
     session.post_loading_sent = True
     session.teleport_pending = False
     session.teleport_destination = None
+    _capture_persist_position_from_session()
+    _mark_position_dirty()
+    _save_session_position(online=1, force=True)
     Logger.info("[WorldHandlers] TELEPORT_BOOTSTRAP queued player create + active mover + time sync")
     return responses
 
@@ -939,34 +977,10 @@ def _encode_messagechat_payload(
     target_name: str,
     message: str,
 ) -> bytes:
-    if int(chat_type) == CHAT_MSG_SAY:
-        message_bytes = str(message or "").encode("utf-8", errors="strict")
-        # SkyFire MoP self-say uses a compact fixed header plus raw message bytes.
-        encoded_len = 0x30 + (len(message_bytes) * 0x40)
-        return (
-            bytes(
-                [
-                    0x97,
-                    0x00,
-                    0x04,
-                    0x18,
-                    0x08,
-                    (encoded_len >> 8) & 0xFF,
-                    encoded_len & 0xFF,
-                    0x00,
-                    0x03,
-                    0x01,
-                    0x03,
-                    0x01,
-                ]
-            )
-            + message_bytes
-        )
-
     sender_name_bytes = str(sender_name or "").encode("utf-8", errors="strict") + b"\x00"
     target_name_bytes = str(target_name or "").encode("utf-8", errors="strict") + b"\x00"
     message_bytes = str(message or "").encode("utf-8", errors="strict") + b"\x00"
-    return EncoderHandler.encode_packet(
+    payload = EncoderHandler.encode_packet(
         "SMSG_MESSAGECHAT",
         {
             "type": int(chat_type),
@@ -983,6 +997,11 @@ def _encode_messagechat_payload(
             "chat_tag": 0,
         },
     )
+    Logger.info(
+        f"[CHAT][SEND] type={int(chat_type)} sender={sender_name or ''} "
+        f"target={target_name or ''} bytes={len(payload)} message={message!r}"
+    )
+    return payload
 
 
 def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
@@ -1108,6 +1127,9 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
         session.instance_id = 0
         session.teleport_pending = True
         session.teleport_destination = f"manual:{map_id}:{x:.2f}:{y:.2f}:{z:.2f}:{orientation:.2f}"
+        _capture_persist_position_from_session()
+        _mark_position_dirty()
+        _save_session_position(online=1, force=True)
 
         Logger.info(
             f"[Teleport] {player_name} -> manual ({map_id} {x:.2f} {y:.2f} {z:.2f} {orientation:.2f})"
@@ -1115,7 +1137,7 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
 
         return [
             ("SMSG_TRANSFER_PENDING", _build_transfer_pending_payload(map_id)),
-            ("SMSG_NEW_WORLD", _build_new_world_payload(map_id, x, y, z, orientation)),
+            ("SMSG_NEW_WORLD", _build_new_world_payload(map_id, x, y, z + _POSITION_SAVE_Z_OFFSET, orientation)),
         ]
 
     # -----------------------------
@@ -1155,6 +1177,9 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
     session.instance_id = 0
     session.teleport_pending = True
     session.teleport_destination = destination_key
+    _capture_persist_position_from_session()
+    _mark_position_dirty()
+    _save_session_position(online=1, force=True)
 
     player_name = (
         str(getattr(session, "player_name", "") or "").strip()
@@ -1981,6 +2006,22 @@ def reset_state() -> None:
     session.world_guid = None
     session.char_guid = None
     session.time_sync_seq = 0
+    session.last_position_save_at = 0.0
+    session.position_dirty = False
+    session.persist_map_id = 0
+    session.persist_zone = 0
+    session.persist_instance_id = 0
+    session.persist_x = 0.0
+    session.persist_y = 0.0
+    session.persist_z = 0.0
+    session.persist_orientation = 0.0
+    session.last_saved_map_id = 0
+    session.last_saved_zone = 0
+    session.last_saved_instance_id = 0
+    session.last_saved_x = 0.0
+    session.last_saved_y = 0.0
+    session.last_saved_z = 0.0
+    session.last_saved_orientation = 0.0
     _reset_login_flow_state()
 
 def preload_cache() -> None:
@@ -1991,6 +2032,96 @@ def preload_cache() -> None:
         _load_char_start_outfit()
     except Exception as exc:
         Logger.warning(f"[WorldHandlers] preload_cache failed: {exc}")
+
+
+def _current_position_snapshot() -> tuple[int, int, int, float, float, float, float]:
+    return (
+        int(getattr(session, "persist_map_id", 0) or 0),
+        int(getattr(session, "persist_zone", 0) or 0),
+        int(getattr(session, "persist_instance_id", 0) or 0),
+        float(getattr(session, "persist_x", 0.0) or 0.0),
+        float(getattr(session, "persist_y", 0.0) or 0.0),
+        float(getattr(session, "persist_z", 0.0) or 0.0),
+        float(getattr(session, "persist_orientation", 0.0) or 0.0),
+    )
+
+
+def _saved_position_snapshot() -> tuple[int, int, int, float, float, float, float]:
+    return (
+        int(getattr(session, "last_saved_map_id", 0) or 0),
+        int(getattr(session, "last_saved_zone", 0) or 0),
+        int(getattr(session, "last_saved_instance_id", 0) or 0),
+        float(getattr(session, "last_saved_x", 0.0) or 0.0),
+        float(getattr(session, "last_saved_y", 0.0) or 0.0),
+        float(getattr(session, "last_saved_z", 0.0) or 0.0),
+        float(getattr(session, "last_saved_orientation", 0.0) or 0.0),
+    )
+
+
+def _mark_position_dirty() -> None:
+    session.position_dirty = _current_position_snapshot() != _saved_position_snapshot()
+
+
+def _capture_persist_position_from_session() -> None:
+    session.persist_map_id = int(getattr(session, "map_id", 0) or 0)
+    session.persist_zone = int(getattr(session, "zone", 0) or 0)
+    session.persist_instance_id = int(getattr(session, "instance_id", 0) or 0)
+    session.persist_x = float(getattr(session, "x", 0.0) or 0.0)
+    session.persist_y = float(getattr(session, "y", 0.0) or 0.0)
+    session.persist_z = float(getattr(session, "z", 0.0) or 0.0)
+    session.persist_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+
+
+def _remember_saved_position(now: float | None = None) -> None:
+    if now is None:
+        now = time.time()
+    (
+        session.last_saved_map_id,
+        session.last_saved_zone,
+        session.last_saved_instance_id,
+        session.last_saved_x,
+        session.last_saved_y,
+        session.last_saved_z,
+        session.last_saved_orientation,
+    ) = _current_position_snapshot()
+    session.last_position_save_at = float(now)
+    session.position_dirty = False
+
+
+def _save_session_position(*, online: int | None = None, force: bool = False) -> bool:
+    if not getattr(session, "char_guid", None) or not getattr(session, "realm_id", None):
+        return False
+
+    now = time.time()
+    if not force and not getattr(session, "position_dirty", False):
+        return False
+
+    ok = DatabaseConnection.save_character_position(
+        int(session.char_guid),
+        int(session.realm_id),
+        map_id=int(getattr(session, "persist_map_id", 0) or 0),
+        zone=int(getattr(session, "persist_zone", 0) or 0),
+        instance_id=int(getattr(session, "persist_instance_id", 0) or 0),
+        x=float(getattr(session, "persist_x", 0.0) or 0.0),
+        y=float(getattr(session, "persist_y", 0.0) or 0.0),
+        z=float(getattr(session, "persist_z", 0.0) or 0.0) + _POSITION_SAVE_Z_OFFSET,
+        orientation=float(getattr(session, "persist_orientation", 0.0) or 0.0),
+        online=online,
+        logout_time=int(now) if online == 0 else None,
+    )
+    if ok:
+        _remember_saved_position(now)
+    return ok
+
+
+def _maybe_periodic_position_save() -> bool:
+    if not getattr(session, "position_dirty", False):
+        return False
+    now = time.time()
+    last = float(getattr(session, "last_position_save_at", 0.0) or 0.0)
+    if (now - last) < _POSITION_SAVE_INTERVAL_SECONDS:
+        return False
+    return _save_session_position(online=1, force=True)
 
 # -----------------------------------------------------------------------------
 # CMSG handlers
@@ -2012,6 +2143,7 @@ def handle_CMSG_LOGOUT_REQUEST(
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     _log_cmsg(ctx)
     Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
+    _save_session_position(online=0, force=True)
 
     try:
         logout_response = EncoderHandler.encode_packet(
@@ -2186,6 +2318,20 @@ def handle_CMSG_PLAYER_LOGIN(
     session.y = float(row.position_y or 0.0)
     session.z = float(row.position_z or 0.0)
     session.orientation = float(row.orientation or 0.0)
+    _capture_persist_position_from_session()
+    _remember_saved_position()
+    DatabaseConnection.save_character_position(
+        int(char_guid),
+        int(realm_id),
+        map_id=int(session.persist_map_id),
+        zone=int(session.persist_zone),
+        instance_id=int(session.persist_instance_id),
+        x=float(session.persist_x),
+        y=float(session.persist_y),
+        z=float(session.persist_z) + _POSITION_SAVE_Z_OFFSET,
+        orientation=float(session.persist_orientation),
+        online=1,
+    )
 
     # --------------------------------------------------
     # Movement speeds (MoP defaults)
@@ -2539,40 +2685,17 @@ def handle_CMSG_MESSAGECHAT_SAY(ctx: PacketContext):
     if command_result is not None:
         return 0, command_result
 
-    name_payload = build_query_player_name_response(session.player_guid)
-    chat_payload = build_smsg_messagechat_say(message)
+    chat_payload = _encode_messagechat_payload(
+        chat_type=CHAT_MSG_SAY,
+        language=1,
+        sender_guid=session.player_guid,
+        sender_name=session.player_name,
+        target_guid=0,
+        target_name="",
+        message=message,
+    )
 
-    return 0, [
-        ("SMSG_QUERY_PLAYER_NAME_RESPONSE", name_payload),
-        ("SMSG_MESSAGECHAT", chat_payload),
-    ]
-
-def build_smsg_messagechat_say(message: str) -> bytes:
-
-    name = session.player_name.encode("utf-8")
-    msg = message.encode("utf-8")
-
-    payload = bytearray()
-
-    payload += struct.pack("<B", 0)      # CHAT_MSG_SAY
-    payload += struct.pack("<I", 1)      # language
-
-    payload += struct.pack("<Q", session.player_guid)
-    payload += struct.pack("<I", 0)      # flags
-
-    payload += struct.pack("<I", len(name))
-    payload += name
-
-    payload += struct.pack("<Q", 0)      # target guid
-
-    payload += struct.pack("<I", 0)      # target name len
-
-    payload += struct.pack("<I", len(msg))
-    payload += msg
-
-    payload += struct.pack("<B", 0)      # chat_tag
-
-    return bytes(payload)
+    return 0, [("SMSG_MESSAGECHAT", chat_payload)]
 def handle_CMSG_MESSAGECHAT_YELL(
     ctx: PacketContext,
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
@@ -2584,7 +2707,31 @@ def handle_CMSG_MESSAGECHAT_WHISPER(
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     return _handle_chat_message(ctx)
 
+
+def handle_CMSG_CHAT_JOIN_CHANNEL(
+    ctx: PacketContext,
+) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    channel_name = "General"
+    decoded = ctx.decoded or {}
+    if decoded.get("channel_name"):
+        channel_name = str(decoded.get("channel_name") or "General").strip() or "General"
+
+    session.chat_joined = True
+    Logger.info(f"[WorldHandlers] CHAT_JOIN_CHANNEL accepted channel={channel_name!r}")
+
+    if session.chat_motd_sent:
+        return 0, None
+
+    motd_payload = build_login_packet("SMSG_MOTD", _build_world_login_context())
+    if motd_payload is None:
+        return 0, None
+
+    session.chat_motd_sent = True
+    Logger.info("[WorldHandlers] sending MOTD after chat join")
+    return 0, [("SMSG_MOTD", motd_payload)]
+
 def handle_disconnect() -> None:
+    _save_session_position(online=0, force=True)
     _reset_login_flow_state()
 
 
@@ -2661,10 +2808,17 @@ def handle_movement_packet(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
         return 0, None
 
     x, y, z, orientation = movement
+    if not _accept_movement_update(opcode_name, x, y, z, orientation):
+        return 0, None
+
     session.x = float(x)
     session.y = float(y)
     session.z = float(z)
     session.orientation = float(orientation)
+    if opcode_name == "MSG_MOVE_HEARTBEAT":
+        _capture_persist_position_from_session()
+        _mark_position_dirty()
+        _maybe_periodic_position_save()
 
     Logger.info(
         f"[Movement] opcode={opcode_name} guid=0x{int(session.world_guid or session.player_guid or 0):X} "
@@ -2681,6 +2835,7 @@ opcode_handlers: Dict[str, Callable[[PacketContext], Tuple[int, Optional[bytes]]
     "CMSG_PLAYER_LOGIN": handle_CMSG_PLAYER_LOGIN,
     "CMSG_LOADING_SCREEN_NOTIFY": handle_CMSG_LOADING_SCREEN_NOTIFY,
     "CMSG_TIME_SYNC_RESPONSE": handle_CMSG_TIME_SYNC_RESPONSE,
+    "CMSG_CHAT_JOIN_CHANNEL": handle_CMSG_CHAT_JOIN_CHANNEL,
     "CMSG_MESSAGECHAT_SAY": handle_CMSG_MESSAGECHAT_SAY,
     "CMSG_MESSAGECHAT_YELL": handle_CMSG_MESSAGECHAT_YELL,
     "CMSG_MESSAGECHAT_WHISPER": handle_CMSG_MESSAGECHAT_WHISPER,

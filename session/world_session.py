@@ -140,4 +140,22 @@ class WorldSession:
     pending_account_data_requests: List[int] = field(default_factory=list)
     teleport_pending: bool = False
     teleport_destination: Optional[str] = None
+    chat_joined: bool = False
+    chat_motd_sent: bool = False
     skyfire_login_stage: int = 0
+    last_position_save_at: float = 0.0
+    position_dirty: bool = False
+    persist_map_id: int = 0
+    persist_zone: int = 0
+    persist_instance_id: int = 0
+    persist_x: float = 0.0
+    persist_y: float = 0.0
+    persist_z: float = 0.0
+    persist_orientation: float = 0.0
+    last_saved_map_id: int = 0
+    last_saved_zone: int = 0
+    last_saved_instance_id: int = 0
+    last_saved_x: float = 0.0
+    last_saved_y: float = 0.0
+    last_saved_z: float = 0.0
+    last_saved_orientation: float = 0.0
