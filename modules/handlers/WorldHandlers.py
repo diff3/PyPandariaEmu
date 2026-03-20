@@ -114,7 +114,7 @@ _RACE_LANGUAGE_SPELL_BY_RACE = {
 RAW_REPLAY_SAY_CHAT_PROFILE = None
 USE_SYSTEM_CHAT_FALLBACK = True
 SEND_ACCOUNT_DATA_TO_CLIENT = True
-RAW_REPLAY_ACCOUNT_DATA_PROFILE = "skyfire2"
+RAW_REPLAY_ACCOUNT_DATA_PROFILE = None
 TEXT_EMOTE_TO_ANIM_EMOTE: dict[int, int] = {
     5: 5,      # gasp
     34: 10,    # dance
@@ -2003,7 +2003,11 @@ def _decode_simple_query_type(payload: bytes) -> int:
 def _decode_account_data_request_type(payload: bytes) -> int:
     if not payload:
         return 0
-    return int(payload[0]) & 0x07
+    if len(payload) >= 4:
+        unpacked = int(struct.unpack_from("<I", payload, 0)[0])
+        if 0 <= unpacked < 8:
+            return unpacked
+    return (int(payload[0]) >> 5) & 0x07
 
 
 def _decode_account_data_update_payload(payload: bytes) -> dict[str, Any]:
@@ -2064,6 +2068,67 @@ _ACCOUNT_DATA_TYPE_1_DEFAULT = (
     'SET EJLootClass "4"\\r\\n'
 )
 
+_ACCOUNT_DATA_TYPE_0_DEFAULT = (
+    'SET flaggedTutorials "v\\x01"\\r\\n'
+    'SET cameraDistanceMaxFactor "1"\\r\\n'
+    'SET petJournalTab "2"\\r\\n'
+)
+
+_ACCOUNT_DATA_TYPE_2_DEFAULT = """bind W MOVEFORWARD
+bind S MOVEBACKWARD
+bind A TURNLEFT
+bind D TURNRIGHT
+bind Q STRAFELEFT
+bind E STRAFERIGHT
+
+bind SPACE JUMP
+bind X SITORSTAND
+
+bind TAB TARGETNEARESTENEMY
+bind SHIFT-TAB TARGETPREVIOUSENEMY
+
+bind ENTER OPENCHAT
+bind / OPENCHATSLASH
+
+bind ESCAPE TOGGLEGAMEMENU
+
+bind B TOGGLEBACKPACK
+bind SHIFT-B OPENALLBAGS
+bind C TOGGLECHARACTER0
+bind P TOGGLESPELLBOOK
+bind N TOGGLETALENTS
+bind M TOGGLEWORLDMAP
+bind L TOGGLEQUESTLOG
+
+bind F1 TARGETSELF
+bind F2 TARGETPARTYMEMBER1
+bind F3 TARGETPARTYMEMBER2
+bind F4 TARGETPARTYMEMBER3
+bind F5 TARGETPARTYMEMBER4
+
+bind 1 ACTIONBUTTON1
+bind 2 ACTIONBUTTON2
+bind 3 ACTIONBUTTON3
+bind 4 ACTIONBUTTON4
+bind 5 ACTIONBUTTON5
+bind 6 ACTIONBUTTON6
+bind 7 ACTIONBUTTON7
+bind 8 ACTIONBUTTON8
+bind 9 ACTIONBUTTON9
+bind 0 ACTIONBUTTON10
+bind - ACTIONBUTTON11
+bind = ACTIONBUTTON12
+
+bind SHIFT-1 ACTIONPAGE1
+bind SHIFT-2 ACTIONPAGE2
+bind SHIFT-3 ACTIONPAGE3
+bind SHIFT-4 ACTIONPAGE4
+bind SHIFT-5 ACTIONPAGE5
+bind SHIFT-6 ACTIONPAGE6
+"""
+
+_ACCOUNT_DATA_TYPE_3_DEFAULT = _ACCOUNT_DATA_TYPE_2_DEFAULT
+
 
 _ACCOUNT_DATA_TYPE_7_DEFAULT = """VERSION 5
 
@@ -2108,6 +2173,9 @@ ZONECHANNELS 2097155
 
 END
 """
+
+_GLOBAL_ACCOUNT_DATA_TYPES = (0, 2, 4)
+_PER_CHARACTER_ACCOUNT_DATA_TYPES = (1, 3, 5, 6, 7)
 
 
 def _build_update_account_data_payload(
@@ -2202,15 +2270,55 @@ def _load_raw_update_account_data_payload(
 
 
 def _account_data_text_for_type(data_type: int, account_name: str = "") -> str:
+    if int(data_type) == 0:
+        return _ACCOUNT_DATA_TYPE_0_DEFAULT
     if int(data_type) == 1:
         return _ACCOUNT_DATA_TYPE_1_DEFAULT
     if int(data_type) == 7:
         return _ACCOUNT_DATA_TYPE_7_DEFAULT
-    if int(data_type) in (0,):
-        name = str(account_name or "").strip() or "sandbox"
-        safe_name = name.replace("\\", "\\\\").replace('"', '\\"')
-        return f'SET accountName "{safe_name}"'
     return ""
+
+
+def _is_global_account_data_type(data_type: int) -> bool:
+    return int(data_type) in _GLOBAL_ACCOUNT_DATA_TYPES
+
+
+def _account_data_mask_for_types(data_types: tuple[int, ...]) -> int:
+    mask = 0
+    for data_type in data_types:
+        mask |= (1 << int(data_type))
+    return mask
+
+
+def _account_data_times_list_for_types(now: int, data_types: tuple[int, ...]) -> list[int]:
+    timestamps = [0] * 8
+    for data_type in data_types:
+        stored = session.account_data_times.get(int(data_type))
+        timestamps[int(data_type)] = int(stored if stored is not None else now)
+    return timestamps
+
+
+def _load_account_data_scope(owner_id: int, *, per_character: bool) -> None:
+    if int(owner_id or 0) <= 0:
+        return
+    loaded = DatabaseConnection.load_account_data(int(owner_id), per_character=per_character)
+    data_types = _PER_CHARACTER_ACCOUNT_DATA_TYPES if per_character else _GLOBAL_ACCOUNT_DATA_TYPES
+    for data_type in data_types:
+        timestamp, data_text = loaded.get(int(data_type), (0, ""))
+        session.account_data[int(data_type)] = str(data_text or "")
+        session.account_data_times[int(data_type)] = int(timestamp or 0)
+
+
+def _load_global_account_data() -> None:
+    if int(getattr(session, "account_id", 0) or 0) <= 0:
+        return
+    _load_account_data_scope(int(session.account_id), per_character=False)
+
+
+def _load_character_account_data() -> None:
+    if int(getattr(session, "char_guid", 0) or 0) <= 0:
+        return
+    _load_account_data_scope(int(session.char_guid), per_character=True)
 
 
 _ACCOUNT_DATA_PAYLOAD_CACHE: dict[tuple[int, int], bytes] = {}
@@ -2245,29 +2353,20 @@ def _build_update_account_data_payload_target_len(target_len: int, data_type: in
 
 
 def _build_minimal_post_timesync_account_packets() -> list[tuple[str, bytes]]:
-    account_name = str(session.account_name or "")
-    raw_type_7 = _load_raw_update_account_data_payload(7, RAW_REPLAY_ACCOUNT_DATA_PROFILE)
-    responses: list[tuple[str, bytes]] = [
-        (
-            "SMSG_UPDATE_ACCOUNT_DATA",
-            _build_update_account_data_payload(
-                1,
-                _account_data_text_for_type(1, account_name),
-            ),
-        )
-    ]
-    responses.append((
-        "SMSG_UPDATE_ACCOUNT_DATA",
-        raw_type_7 if raw_type_7 is not None else _build_update_account_data_payload(
-            7,
-            _account_data_text_for_type(7, account_name),
-        ),
-    ))
-    Logger.info(
-        f"[WorldHandlers] Post-time-sync account-data sizes="
-        f"{len(responses[0][1])},{len(responses[1][1])}"
-    )
-    return responses
+    # SkyFire does not proactively push account-data blobs after ACTIVE_MOVER.
+    return []
+
+
+def _account_data_payload_types_to_push() -> tuple[int, ...]:
+    return _PER_CHARACTER_ACCOUNT_DATA_TYPES
+
+
+def _account_data_times_mask() -> int:
+    return _account_data_mask_for_types(_account_data_payload_types_to_push())
+
+
+def _account_data_times_list(now: int) -> list[int]:
+    return _account_data_times_list_for_types(now, _account_data_payload_types_to_push())
 
 
 def _build_post_timesync_support_packets() -> list[tuple[str, bytes]]:
@@ -3116,10 +3215,10 @@ def handle_CMSG_PLAYER_LOGIN(
     # --------------------------------------------------
     # Account data (MoP: ALWAYS 8 slots)
     # --------------------------------------------------
-    session.account_data_times = {
-        i: 0 for i in range(8)
-    }
+    session.account_data = {}
+    session.account_data_times = {i: 0 for i in range(8)}
     session.account_data_mask = 0
+    _load_global_account_data()
     # --------------------------------------------------
     # Decode LOGIN GUID (48-bit)
     # low32 = character DB guid
@@ -3153,6 +3252,8 @@ def handle_CMSG_PLAYER_LOGIN(
     session.world_guid = selected_world_guid
     session.char_guid = char_guid
     session.active_mover_guid = selected_world_guid
+    _load_character_account_data()
+    session.account_data_mask = _account_data_mask_for_types(_PER_CHARACTER_ACCOUNT_DATA_TYPES)
     Logger.info(
         "[GUID MODE]\n"
         f"selected_guid = 0x{selected_world_guid:X}\n"
@@ -3419,15 +3520,16 @@ def handle_CMSG_CREATURE_QUERY(ctx: PacketContext) -> Tuple[int, Optional[list[t
 def handle_CMSG_REQUEST_ACCOUNT_DATA(ctx: PacketContext):
     data_type = _decode_account_data_request_type(ctx.payload)
 
-    Logger.info(f"[ACCOUNT_DATA] request type={data_type}")
+    Logger.info(f"[ACCOUNT_DATA] request type={data_type} raw={ctx.payload.hex()}")
 
     if not SEND_ACCOUNT_DATA_TO_CLIENT:
         Logger.info(f"[ACCOUNT_DATA] suppressing SMSG_UPDATE_ACCOUNT_DATA type={data_type}")
         return 0, None
 
-    raw_payload = _load_raw_update_account_data_payload(int(data_type), RAW_REPLAY_ACCOUNT_DATA_PROFILE)
-    if raw_payload is not None:
-        return 0, [("SMSG_UPDATE_ACCOUNT_DATA", raw_payload)]
+    if _is_global_account_data_type(int(data_type)):
+        _load_global_account_data()
+    else:
+        _load_character_account_data()
 
     stored_text = session.account_data.get(int(data_type))
     if stored_text is None:
@@ -3705,18 +3807,17 @@ def handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(ctx: PacketContext):
         Logger.info("[WORLD] suppressing SMSG_ACCOUNT_DATA_TIMES")
         return 0, None
 
-    raw_payload = _load_raw_account_data_times_payload(RAW_REPLAY_ACCOUNT_DATA_PROFILE)
-    if raw_payload is not None:
-        session.account_data_times_sent = True
-        return 0, [("SMSG_ACCOUNT_DATA_TIMES", raw_payload)]
+    _load_global_account_data()
+    now = int(time.time())
+    global_mask = _account_data_mask_for_types(_GLOBAL_ACCOUNT_DATA_TYPES)
 
     payload = EncoderHandler.encode_packet(
         "SMSG_ACCOUNT_DATA_TIMES",
         {
             "has_account_data_times": 1,
-            "timestamps": [0] * 8,
-            "mask": 0,
-            "server_time": int(time.time()),
+            "timestamps": _account_data_times_list_for_types(now, _GLOBAL_ACCOUNT_DATA_TYPES),
+            "mask": global_mask,
+            "server_time": now,
         },
     )
 
@@ -3739,6 +3840,15 @@ def handle_CMSG_UPDATE_ACCOUNT_DATA(ctx: PacketContext):
             session.account_data_mask |= (1 << data_type)
         else:
             session.account_data_mask &= ~(1 << data_type)
+        owner_id = int(session.account_id or 0) if _is_global_account_data_type(data_type) else int(session.char_guid or 0)
+        if owner_id > 0:
+            DatabaseConnection.save_account_data(
+                owner_id,
+                data_type,
+                timestamp,
+                account_text,
+                per_character=not _is_global_account_data_type(data_type),
+            )
 
     preview = account_text[:120].replace("\r", "\\r").replace("\n", "\\n")
     Logger.info(
@@ -3795,8 +3905,7 @@ def handle_CMSG_SET_ACTIVE_MOVER(ctx: PacketContext):
     if not getattr(session, "account_settings_sent", False):
         session.account_settings_sent = True
         if SEND_ACCOUNT_DATA_TO_CLIENT:
-            responses.extend(_build_minimal_post_timesync_account_packets())
-            Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; sending minimal account settings packets")
+            Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; waiting for client account-data requests")
         else:
             Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; suppressing account settings packets")
 

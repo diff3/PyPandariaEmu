@@ -55,6 +55,7 @@ class DatabaseConnection:
     _cache_levelstats_by_pair = {}
     _cache_xp_for_level = {}
     _item_template_cache = {}
+    _account_data_tables_ready = False
 
     @staticmethod
     def initialize():
@@ -309,6 +310,108 @@ class DatabaseConnection:
                 f"[DB] Failed to fetch character guid={char_guid} realm={realm_id}: {exc}"
             )
             raise
+
+    @staticmethod
+    def _ensure_account_data_tables() -> None:
+        if DatabaseConnection._account_data_tables_ready:
+            return
+
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS account_data (
+                    accountId INT UNSIGNED NOT NULL DEFAULT 0,
+                    type TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                    time INT UNSIGNED NOT NULL DEFAULT 0,
+                    data LONGBLOB NOT NULL,
+                    PRIMARY KEY (accountId, type)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
+                """
+            ))
+            session.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS character_account_data (
+                    guid INT UNSIGNED NOT NULL DEFAULT 0,
+                    type TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                    time INT UNSIGNED NOT NULL DEFAULT 0,
+                    data LONGBLOB NOT NULL,
+                    PRIMARY KEY (guid, type)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
+                """
+            ))
+            session.commit()
+            DatabaseConnection._account_data_tables_ready = True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] ensure account-data tables failed: {exc}")
+
+    @staticmethod
+    def load_account_data(owner_id: int, *, per_character: bool) -> dict[int, tuple[int, str]]:
+        DatabaseConnection._ensure_account_data_tables()
+        session = DatabaseConnection.chars()
+        table = "character_account_data" if per_character else "account_data"
+        id_column = "guid" if per_character else "accountId"
+        try:
+            rows = session.execute(
+                text(f"SELECT type, time, data FROM {table} WHERE {id_column} = :owner_id"),
+                {"owner_id": int(owner_id or 0)},
+            ).fetchall()
+        except Exception as exc:
+            Logger.warning(
+                f"[DB] load_account_data failed table={table} owner_id={owner_id}: {exc}"
+            )
+            return {}
+
+        result: dict[int, tuple[int, str]] = {}
+        for row in rows:
+            data_blob = row[2]
+            if isinstance(data_blob, memoryview):
+                data_blob = data_blob.tobytes()
+            if isinstance(data_blob, (bytes, bytearray)):
+                data_text = bytes(data_blob).decode("utf-8", errors="replace")
+            else:
+                data_text = str(data_blob or "")
+            result[int(row[0])] = (int(row[1] or 0), data_text)
+        return result
+
+    @staticmethod
+    def save_account_data(
+        owner_id: int,
+        data_type: int,
+        timestamp: int,
+        data: str,
+        *,
+        per_character: bool,
+    ) -> bool:
+        DatabaseConnection._ensure_account_data_tables()
+        session = DatabaseConnection.chars()
+        table = "character_account_data" if per_character else "account_data"
+        id_column = "guid" if per_character else "accountId"
+        try:
+            session.execute(
+                text(
+                    f"""
+                    REPLACE INTO {table} ({id_column}, type, time, data)
+                    VALUES (:owner_id, :data_type, :timestamp, :data)
+                    """
+                ),
+                {
+                    "owner_id": int(owner_id or 0),
+                    "data_type": int(data_type or 0),
+                    "timestamp": int(timestamp or 0),
+                    "data": (data or "").encode("utf-8", errors="strict"),
+                },
+            )
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(
+                f"[DB] save_account_data failed table={table} owner_id={owner_id} "
+                f"type={data_type}: {exc}"
+            )
+            return False
 
     @staticmethod
     def save_character_position(

@@ -133,6 +133,11 @@ class WorldLoginContext:
     # --------------------------------------------------
     @classmethod
     def from_session(cls, session):
+        account_data_times = [0] * 8
+        for index in range(8):
+            account_data_times[index] = int(
+                getattr(session, "account_data_times", {}).get(index, 0) or 0
+            )
         return cls(
             account_id=session.account_id,
             account_name=session.account_name,
@@ -154,6 +159,8 @@ class WorldLoginContext:
             server_time=session.server_time,
             game_time=getattr(session, "game_time", int(time.time())),
             time_speed=getattr(session, "time_speed", 0.01666667),
+            account_data_times=account_data_times,
+            account_data_mask=int(getattr(session, "account_data_mask", 0) or 0),
 
             walk_speed=session.walk_speed,
             run_speed=session.run_speed,

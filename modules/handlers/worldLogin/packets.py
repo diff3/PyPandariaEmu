@@ -238,11 +238,19 @@ def build_SMSG_ACCOUNT_DATA_TIMES_old(ctx) -> bytes:
 
 def build_SMSG_ACCOUNT_DATA_TIMES(_ctx=None) -> bytes:
     now = int(time.time())
+    ctx = _ctx
+    timestamps = [now] * 8
+    mask = 0
+    if ctx is not None:
+        ctx_times = list(getattr(ctx, "account_data_times", []) or [])
+        if ctx_times:
+            timestamps = [int(value or 0) for value in (ctx_times[:8] + ([0] * 8))[:8]]
+        mask = int(getattr(ctx, "account_data_mask", 0) or 0)
     Logger.info(f"[ACCOUNT DATA] server_time={now}")
     payload = _encode("SMSG_ACCOUNT_DATA_TIMES", {
         "has_account_data_times": 1,
-        "mask": 0,
-        "timestamps": [now] * 8,
+        "mask": mask,
+        "timestamps": timestamps,
         "server_time": now,
     })
     if len(payload) != 41:
