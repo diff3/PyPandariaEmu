@@ -37,6 +37,7 @@ authenticated_users: dict[int, str] = {}
 # AUTH_CLIENT_OPCODES, AUTH_SERVER_OPCODES, _ = load_auth_opcodes()
 AUTH_SERVER_OPCODE_BY_NAME = {name: code for code, name in AUTH_SERVER_OPCODES.items()}
 _srp6_mode = "skyfire"
+AUTH_LOGON_PROOF_ERROR_GENERIC = 4
 
 
 def set_srp6_mode(mode: str) -> None:
@@ -123,24 +124,29 @@ def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
 
     if not session:
         Logger.error("[AUTH_LOGON_PROOF] No SRP session for socket")
-        return 1, None
+        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
 
     A_raw = decoded.get("A")
     M1_raw = decoded.get("M1")
 
-    A = bytes.fromhex(A_raw) if isinstance(A_raw, str) else A_raw
-    M1 = bytes.fromhex(M1_raw) if isinstance(M1_raw, str) else M1_raw
+    try:
+        A = bytes.fromhex(A_raw) if isinstance(A_raw, str) else A_raw
+        M1 = bytes.fromhex(M1_raw) if isinstance(M1_raw, str) else M1_raw
+    except ValueError:
+        Logger.error("[AUTH_LOGON_PROOF] Invalid hex in A or M1")
+        srp6_sessions.pop(fd, None)
+        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
 
     if not A or not M1:
         Logger.error("[AUTH_LOGON_PROOF] Missing A or M1")
         srp6_sessions.pop(fd, None)
-        return 1, None
+        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
 
     ok, M2, session_key = session.verify_proof(A, M1)
     if not ok:
         Logger.error("[AUTH_LOGON_PROOF] SRP proof failed")
         srp6_sessions.pop(fd, None)
-        return 1, None
+        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
 
     try:
         account = DatabaseConnection.get_user_by_username(session.username)
@@ -179,6 +185,20 @@ def build_AUTH_LOGON_PROOF_S(fields: dict) -> bytes:
     Encode AUTH_LOGON_PROOF_S using provided fields.
     """
     return EncoderHandler.encode_packet("AUTH_LOGON_PROOF_S", fields)
+
+
+def build_AUTH_LOGON_PROOF_FAILURE_S(error: int = AUTH_LOGON_PROOF_ERROR_GENERIC) -> bytes:
+    """
+    Encode a minimal AUTH_LOGON_PROOF_S failure response.
+    """
+    return build_AUTH_LOGON_PROOF_S({
+        "cmd": 1,
+        "error": int(error),
+        "M2": b"\x00" * 20,
+        "unk1": 0,
+        "unk2": 0,
+        "unk3": 0,
+    })
 
 
 # ---- REALM LIST ----------------------------------------------------------
@@ -234,6 +254,7 @@ def build_realmlist_entries(realms, account_id):
 
     return entries
 
+
 def handle_REALM_LIST_C(ctx: PacketContext):
     client_socket = ctx.sock
 
@@ -261,6 +282,7 @@ def handle_REALM_LIST_C(ctx: PacketContext):
         Logger.error(f"[REALM_LIST_S] Encoding failed: {exc}")
         Logger.error(traceback.format_exc())
         return 1, None
+
 
 def build_REALM_LIST_S(realm_entries) -> bytes:
     fields = {
@@ -290,6 +312,7 @@ def handle_AUTH_RECONNECT_CHALLENGE_C(ctx: PacketContext):
         Logger.error(f"[AUTH_RECONNECT_CHALLENGE_S] Encode failed: {exc}")
         return 1, None
 
+
 def build_AUTH_RECONNECT_CHALLENGE_S() -> bytes:
     """
     Build AUTH_RECONNECT_CHALLENGE_S packet.
@@ -304,6 +327,7 @@ def build_AUTH_RECONNECT_CHALLENGE_S() -> bytes:
     }
 
     return EncoderHandler.encode_packet("AUTH_RECONNECT_CHALLENGE_S", fields)
+
 
 # ---- Opcode dispatch -----------------------------------------------------
 

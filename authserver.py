@@ -15,6 +15,7 @@ from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
 from server.modules.PacketContext import PacketContext
 from server.modules.ServerOutput import (
+    decode_enabled,
     dsl_warnings_enabled,
     project_name,
     log_decoded_packet,
@@ -119,21 +120,19 @@ def validate_packet(conn_ctx: ConnectionContext, packet_ctx: PacketContext) -> t
 
 
 def _sync_connection_state(conn_ctx: ConnectionContext, packet_ctx: PacketContext) -> None:
-    if AuthHandlersModule is None:
-        return
-
-    fd = packet_ctx.sock.fileno()
     decoded = dict(packet_ctx.decoded or {})
 
     username = str(decoded.get("I") or decoded.get("username") or conn_ctx.username or "").strip().upper()
     if username:
         conn_ctx.username = username
 
-    conn_ctx.srp_session = AuthHandlersModule.srp6_sessions.get(fd)
-    authenticated_username = AuthHandlersModule.authenticated_users.get(fd)
-    if authenticated_username:
-        conn_ctx.username = str(authenticated_username).strip().upper()
-        conn_ctx.srp_session = None
+
+def _reset_auth_flow(conn_ctx: ConnectionContext) -> None:
+    """Reset connection flow to a clean logon-challenge start."""
+    conn_ctx.state = INITIAL_STATE
+    conn_ctx.retry_count = 0
+    conn_ctx.username = None
+    conn_ctx.srp_session = None
 
 
 def step_controller(conn_ctx: ConnectionContext, handler, packet_ctx: PacketContext):
@@ -194,13 +193,18 @@ def step_controller(conn_ctx: ConnectionContext, handler, packet_ctx: PacketCont
 
     if int(err or 0) == 0:
         next_logical_state = next_state(expected_state or current_state)
-        Logger.info("[FSM] %s + SUCCESS -> %s", current_state, next_logical_state)
+        Logger.debug("[FSM] %s + SUCCESS -> %s", current_state, next_logical_state)
         conn_ctx.state = next_logical_state
         conn_ctx.retry_count = 0
         conn_ctx.last_error = None
         return StepResult.SUCCESS, response
 
     conn_ctx.last_error = f"handler returned err={err}"
+    if packet_ctx.name == "AUTH_LOGON_PROOF_C" and response:
+        Logger.warning("[FSM] %s + FAIL -> %s reason=proof_failed_reset", current_state, INITIAL_STATE)
+        _reset_auth_flow(conn_ctx)
+        return StepResult.FAIL, response
+
     if conn_ctx.retry_count < 1:
         conn_ctx.retry_count += 1
         Logger.warning("[RETRY] %s (%s)", current_state, conn_ctx.retry_count)
@@ -263,10 +267,21 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
     """
     Logger.info("[AuthServer] connection start addr=%s", addr)
     conn_ctx = ConnectionContext(start_time=time.time())
+    sock.settimeout(MAX_CONNECTION_TIME_SECONDS)
 
     try:
         while True:
-            data = sock.recv(1024)
+            try:
+                data = sock.recv(1024)
+            except socket.timeout:
+                if conn_ctx.state == "REALM_LIST":
+                    conn_ctx.last_error = None
+                    Logger.debug("[AuthServer] auth flow complete addr=%s state=%s", addr, conn_ctx.state)
+                else:
+                    conn_ctx.last_error = "idle timeout"
+                    Logger.info("[AuthServer] idle timeout addr=%s state=%s", addr, conn_ctx.state)
+                break
+
             if not data:
                 Logger.info("[AuthServer] connection closed addr=%s state=%s", addr, conn_ctx.state)
                 break
@@ -278,7 +293,8 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                 Logger.warning(f"{addr}: Unknown opcode 0x{opcode:02X}")
                 break
 
-            if should_log_packet("authserver", opcode_name):
+            packet_logging_enabled = should_log_packet("authserver", opcode_name)
+            if packet_logging_enabled:
                 Logger.info(f"[AuthServer] C→S {opcode_name}")
             log_raw_packet("authserver", opcode_name, "Raw", data)
 
@@ -333,20 +349,27 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
             server_name = AUTH_SERVER_OPCODES.get(server_op)
 
             if server_name:
-                if should_log_packet("authserver", server_name):
+                server_logging_enabled = should_log_packet("authserver", server_name)
+                if server_logging_enabled:
                     Logger.info(f"[AuthServer] S→C {server_name}")
                 log_raw_packet("authserver", server_name, "Raw", response)
-                log_decoded_packet(
-                    "authserver",
-                    server_name,
-                    safe_decode("Server", server_name, response),
-                    label=server_name,
-                )
+                if server_logging_enabled and decode_enabled("authserver"):
+                    log_decoded_packet(
+                        "authserver",
+                        server_name,
+                        safe_decode("Server", server_name, response),
+                        label=server_name,
+                    )
 
             try:
-                sock.send(response)
+                sock.sendall(response)
             except Exception as exc:
                 Logger.error(f"{addr}: Failed to send response: {exc}")
+                break
+
+            if server_name == "REALM_LIST_S":
+                conn_ctx.last_error = None
+                Logger.debug("[AuthServer] closing completed auth flow addr=%s", addr)
                 break
 
     except Exception as exc:

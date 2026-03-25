@@ -79,6 +79,26 @@ def test_step_controller_retries_once_then_rolls_back():
     assert conn.state == "AUTH_LOGON_CHALLENGE"
 
 
+def test_step_controller_proof_failure_with_response_resets_to_initial():
+    ctx = _packet("AUTH_LOGON_PROOF_C", {"A": "aa", "M1": "bb"})
+    conn = ConnectionContext(
+        state="AUTH_LOGON_PROOF",
+        start_time=time.time(),
+        username="MAPE",
+    )
+
+    try:
+        result, response = step_controller(conn, lambda packet_ctx: (1, b"\x01"), ctx)
+    finally:
+        ctx.sock.close()
+
+    assert result == StepResult.FAIL
+    assert response == b"\x01"
+    assert conn.state == INITIAL_STATE
+    assert conn.retry_count == 0
+    assert conn.username is None
+
+
 def test_step_controller_times_out_connection():
     ctx = _packet("REALM_LIST_C", {})
     conn = ConnectionContext(start_time=(time.time() - 10.0))
