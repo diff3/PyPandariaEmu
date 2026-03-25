@@ -23,6 +23,7 @@ from server.modules.interpretation.utils import initialize_dsl_runtime
 from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler as WorldCryptoHandler
 from server.session.world_session import WorldSession
 from server.session.runtime import bind_world_session, clear_world_session
+from world.mount.mount_service import load_mount_spells
 from world.teleport.teleport_service import load_teleports
 
 try:
@@ -429,6 +430,10 @@ def run_world() -> None:
     Logger.info(f"DSL runtime ready [{loaded}/{total}] {pct}%")
     DatabaseConnection.initialize()
     DatabaseConnection.preload_world_cache()
+    try:
+        load_mount_spells(DatabaseConnection.world())
+    except Exception as exc:
+        Logger.warning(f"[Mount] preload failed: {exc}")
     try:
         load_teleports(DatabaseConnection.world())
     except Exception as exc:

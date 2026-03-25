@@ -120,6 +120,8 @@ class WorldSession:
 
     known_spells: List[int] = field(default_factory=list)
     action_buttons: List[int] = field(default_factory=lambda: [0] * 120)
+    is_mounted: bool = False
+    mount_spell: Optional[int] = None
 
     # --------------------------------------------------
     # World state

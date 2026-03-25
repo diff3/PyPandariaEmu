@@ -76,6 +76,24 @@ from server.modules.opcodes.WorldOpcodes import (
     WORLD_SERVER_OPCODES,
     lookup as world_lookup,  # om du använder den
 )
+from world.mount.mount_service import (
+    ALL_MOUNT_SPELLS,
+    get_mount_display_id,
+    granted_mount_spells,
+    is_mount_spell,
+)
+from world.position.position_service import (
+    POSITION_AUTOSAVE_DISTANCE_THRESHOLD,
+    POSITION_DEBUG_ENABLED,
+    Position,
+    correct_z_if_invalid,
+    format_position,
+    normalize_position,
+    position_from_row,
+    position_from_session,
+    position_moved_enough,
+    save_player_position,
+)
 from world.teleport.teleport_service import (
     add_teleport as add_named_teleport,
     find_teleport,
@@ -108,6 +126,18 @@ WEATHER_TYPES: dict[str, int] = {
     "thunder": 86,
 }
 _LANGUAGE_SPELL_IDS = (668, 669, 108127)
+_DEFAULT_WALK_SPEED = 2.5
+_DEFAULT_RUN_SPEED = 7.0
+_DEFAULT_RUN_BACK_SPEED = 4.5
+_DEFAULT_SWIM_SPEED = 4.7
+_DEFAULT_SWIM_BACK_SPEED = 2.5
+_DEFAULT_FLY_SPEED = 7.0
+_DEFAULT_FLY_BACK_SPEED = 4.5
+_DEFAULT_TURN_SPEED = 3.1415926
+_DEFAULT_PITCH_SPEED = 3.1415926
+_UNIT_FIELD_MOUNTDISPLAYID = 0x6A
+_MOUNT_SPEED_MULTIPLIER = 2.0
+_POSITION_SAVE_INTERVAL_SECONDS = 30.0
 _RACE_LANGUAGE_SPELL_BY_RACE = {
     3: 672,       # Dwarf -> Dwarvish
     4: 671,       # Night Elf -> Darnassian
@@ -251,8 +281,6 @@ LOGIN_UPDATE_SEQUENCE = (
     "SMSG_UPDATE_OBJECT_1773586165_0004.json",
 )
 
-_POSITION_SAVE_INTERVAL_SECONDS = 60.0
-_POSITION_SAVE_Z_OFFSET = 0.0
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
 _MAX_MOVEMENT_Z_DELTA = 100.0
 CHAT_MSG_SAY = 1
@@ -282,7 +310,6 @@ def teleport_player(player, map_id: int, x: float, y: float, z: float, orientati
     player.teleport_destination = str(destination_name or "").strip() or None
     _capture_persist_position_from_session()
     _mark_position_dirty()
-    _save_session_position(online=1, force=True)
 
     return [
         (
@@ -405,6 +432,218 @@ def _ensure_language_spells_known() -> None:
             f"[Language] ensured known spells: "
             f"{', '.join(str(spell) for spell in spells if spell in set(_LANGUAGE_SPELL_IDS) | ({race_spell} if race_spell else set()))}"
         )
+
+
+def _ensure_mount_spells_known() -> None:
+    mount_related_spells = granted_mount_spells()
+    if not mount_related_spells:
+        return
+
+    spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
+    spell_set = set(spells)
+    changed = False
+
+    for spell_id in mount_related_spells:
+        spell_id = int(spell_id)
+        if spell_id not in spell_set:
+            spells.append(spell_id)
+            spell_set.add(spell_id)
+            changed = True
+
+    if changed:
+        session.known_spells = spells
+        Logger.info("[Mount] ensured %s mount-related spells in known-spells", len(mount_related_spells))
+
+
+def _restore_default_movement_speeds(player) -> None:
+    player.walk_speed = _DEFAULT_WALK_SPEED
+    player.run_speed = _DEFAULT_RUN_SPEED
+    player.run_back_speed = _DEFAULT_RUN_BACK_SPEED
+    player.swim_speed = _DEFAULT_SWIM_SPEED
+    player.swim_back_speed = _DEFAULT_SWIM_BACK_SPEED
+    player.fly_speed = _DEFAULT_FLY_SPEED
+    player.fly_back_speed = _DEFAULT_FLY_BACK_SPEED
+    player.turn_speed = _DEFAULT_TURN_SPEED
+    player.pitch_speed = _DEFAULT_PITCH_SPEED
+
+
+def _apply_mount_movement_speeds(player) -> None:
+    player.walk_speed = _DEFAULT_WALK_SPEED
+    player.run_speed = _DEFAULT_RUN_SPEED * _MOUNT_SPEED_MULTIPLIER
+    player.run_back_speed = _DEFAULT_RUN_BACK_SPEED * _MOUNT_SPEED_MULTIPLIER
+    player.swim_speed = _DEFAULT_SWIM_SPEED * _MOUNT_SPEED_MULTIPLIER
+    player.swim_back_speed = _DEFAULT_SWIM_BACK_SPEED * _MOUNT_SPEED_MULTIPLIER
+    player.fly_speed = _DEFAULT_FLY_SPEED * _MOUNT_SPEED_MULTIPLIER
+    player.fly_back_speed = _DEFAULT_FLY_BACK_SPEED * _MOUNT_SPEED_MULTIPLIER
+    player.turn_speed = _DEFAULT_TURN_SPEED
+    player.pitch_speed = _DEFAULT_PITCH_SPEED
+
+
+def _iter_decoded_ints(value: Any):
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_decoded_ints(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_decoded_ints(item)
+        return
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        yield int(value)
+
+
+def _extract_mount_spell_id_from_decoded(decoded: dict[str, Any] | None) -> Optional[int]:
+    if not decoded:
+        return None
+
+    direct_keys = (
+        "spell_id",
+        "spell",
+        "cast_spell_id",
+        "cast_spell",
+        "aura_spell_id",
+        "aura",
+    )
+    for key in direct_keys:
+        value = decoded.get(key)
+        if isinstance(value, int) and is_mount_spell(value):
+            return int(value)
+
+    for value in _iter_decoded_ints(decoded):
+        if is_mount_spell(value):
+            return int(value)
+    return None
+
+
+def _extract_mount_spell_id_from_payload(payload: bytes) -> Optional[int]:
+    if not payload or len(payload) < 4 or not ALL_MOUNT_SPELLS:
+        return None
+
+    unique_matches: list[int] = []
+    seen: set[int] = set()
+    scan_limit = min(len(payload) - 3, 64)
+
+    for offset in range(0, scan_limit, 4):
+        value = struct.unpack_from("<I", payload, offset)[0]
+        if value in ALL_MOUNT_SPELLS and value not in seen:
+            unique_matches.append(value)
+            seen.add(value)
+
+    if not unique_matches:
+        for offset in range(0, scan_limit):
+            value = struct.unpack_from("<I", payload, offset)[0]
+            if value in ALL_MOUNT_SPELLS and value not in seen:
+                unique_matches.append(value)
+                seen.add(value)
+
+    if not unique_matches:
+        return None
+    return int(unique_matches[0])
+
+
+def _extract_mount_spell_id(ctx: PacketContext) -> Optional[int]:
+    spell_id = _extract_mount_spell_id_from_decoded(ctx.decoded)
+    if spell_id:
+        return spell_id
+
+    spell_id = _extract_mount_spell_id_from_payload(ctx.payload)
+    if spell_id:
+        return spell_id
+
+    current_mount = int(getattr(ctx.session, "mount_spell", 0) or 0)
+    if current_mount and is_mount_spell(current_mount):
+        return current_mount
+    return None
+
+
+def _build_live_player_update_response() -> Optional[tuple[str, bytes]]:
+    payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", _build_world_login_context())
+    if payload is None:
+        Logger.warning("[Mount] missing live UPDATE_OBJECT builder")
+        return None
+    return _make_update_object_response(payload)
+
+
+def _resolve_player_world_guid(player) -> int:
+    world_guid = int(getattr(player, "world_guid", 0) or 0)
+    if world_guid > 0:
+        return world_guid
+
+    player_guid = int(getattr(player, "player_guid", 0) or 0)
+    if player_guid > 0xFFFFFFFF:
+        return player_guid
+
+    realm_id = int(getattr(player, "realm_id", 0) or 0)
+    char_guid = int(getattr(player, "char_guid", 0) or 0)
+    if char_guid > 0:
+        return int(
+            GuidHelper.make(
+                high=HighGuid.PLAYER,
+                realm=realm_id,
+                low=char_guid,
+            )
+        )
+
+    return player_guid
+
+
+def _build_mount_display_update_response(player, display_id: int) -> Optional[tuple[str, bytes]]:
+    player_guid = _resolve_player_world_guid(player)
+    map_id = int(getattr(player, "map_id", 0) or 0)
+    if player_guid <= 0 or map_id < 0:
+        Logger.warning(
+            "[Mount] skipping mount display update guid=%s map_id=%s display_id=%s",
+            int(player_guid),
+            int(map_id),
+            int(display_id),
+        )
+        return None
+    payload = _build_single_u32_update_object_payload(
+        map_id=map_id,
+        guid=player_guid,
+        field_index=_UNIT_FIELD_MOUNTDISPLAYID,
+        value=int(display_id) & 0xFFFFFFFF,
+    )
+    return _make_update_object_response(payload)
+
+
+def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
+    responses: list[tuple[str, bytes]] = []
+    display_id = get_mount_display_id(spell_id)
+    if display_id > 0:
+        display_packet = _build_mount_display_update_response(player, display_id)
+        if display_packet is not None:
+            responses.append(display_packet)
+            Logger.info("[Mount] mount display spell=%s display_id=%s", int(spell_id), int(display_id))
+    responses.extend(_notification_response(f"Mounted spell={int(spell_id)} speed={float(player.run_speed):.2f}"))
+    return responses
+
+
+def send_dismount_update(player) -> list[tuple[str, bytes]]:
+    responses: list[tuple[str, bytes]] = []
+    display_packet = _build_mount_display_update_response(player, 0)
+    if display_packet is not None:
+        responses.append(display_packet)
+    responses.extend(_notification_response(f"Dismounted speed={float(player.run_speed):.2f}"))
+    return responses
+
+
+def handle_mount(player, spell_id: int) -> list[tuple[str, bytes]]:
+    player.is_mounted = True
+    player.mount_spell = int(spell_id)
+    _apply_mount_movement_speeds(player)
+    Logger.info("[Mount] mounted spell=%s", int(spell_id))
+    return send_mount_update(player, int(spell_id))
+
+
+def dismount(player) -> list[tuple[str, bytes]]:
+    player.is_mounted = False
+    player.mount_spell = None
+    _restore_default_movement_speeds(player)
+    Logger.info("[Mount] dismounted")
+    return send_dismount_update(player)
 
 
 def unpack_guid(mask: int, data: bytes) -> int:
@@ -1222,7 +1461,7 @@ def _queue_teleport_world_transition(ctx: WorldLoginContext) -> list[tuple[str, 
     session.teleport_destination = None
     _capture_persist_position_from_session()
     _mark_position_dirty()
-    _save_session_position(online=1, force=True)
+    _save_session_position(reason="teleport", online=1, force=True)
     Logger.info("[WorldHandlers] TELEPORT_BOOTSTRAP queued player create + active mover + time sync")
     return responses
 
@@ -1701,7 +1940,7 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
     if command.lower() == ".save":
         _capture_persist_position_from_session()
         _mark_position_dirty()
-        ok = _save_session_position(online=1, force=True)
+        ok = _save_session_position(reason="command", online=1, force=True)
 
         map_id = int(getattr(session, "persist_map_id", 0) or 0)
         zone = int(getattr(session, "persist_zone", 0) or 0)
@@ -3559,27 +3798,39 @@ def preload_cache() -> None:
         Logger.warning(f"[WorldHandlers] preload_cache failed: {exc}")
 
 
-def _current_position_snapshot() -> tuple[int, int, int, float, float, float, float]:
+def _current_position_snapshot() -> tuple[int, int, Position | None]:
+    position = normalize_position(
+        Position(
+            map=int(getattr(session, "persist_map_id", 0) or 0),
+            x=float(getattr(session, "persist_x", 0.0) or 0.0),
+            y=float(getattr(session, "persist_y", 0.0) or 0.0),
+            z=float(getattr(session, "persist_z", 0.0) or 0.0),
+            orientation=float(getattr(session, "persist_orientation", 0.0) or 0.0),
+        ),
+        safe_z=True,
+    )
     return (
-        int(getattr(session, "persist_map_id", 0) or 0),
         int(getattr(session, "persist_zone", 0) or 0),
         int(getattr(session, "persist_instance_id", 0) or 0),
-        float(getattr(session, "persist_x", 0.0) or 0.0),
-        float(getattr(session, "persist_y", 0.0) or 0.0),
-        float(getattr(session, "persist_z", 0.0) or 0.0),
-        float(getattr(session, "persist_orientation", 0.0) or 0.0),
+        position,
     )
 
 
-def _saved_position_snapshot() -> tuple[int, int, int, float, float, float, float]:
+def _saved_position_snapshot() -> tuple[int, int, Position | None]:
+    position = normalize_position(
+        Position(
+            map=int(getattr(session, "last_saved_map_id", 0) or 0),
+            x=float(getattr(session, "last_saved_x", 0.0) or 0.0),
+            y=float(getattr(session, "last_saved_y", 0.0) or 0.0),
+            z=float(getattr(session, "last_saved_z", 0.0) or 0.0),
+            orientation=float(getattr(session, "last_saved_orientation", 0.0) or 0.0),
+        ),
+        safe_z=True,
+    )
     return (
-        int(getattr(session, "last_saved_map_id", 0) or 0),
         int(getattr(session, "last_saved_zone", 0) or 0),
         int(getattr(session, "last_saved_instance_id", 0) or 0),
-        float(getattr(session, "last_saved_x", 0.0) or 0.0),
-        float(getattr(session, "last_saved_y", 0.0) or 0.0),
-        float(getattr(session, "last_saved_z", 0.0) or 0.0),
-        float(getattr(session, "last_saved_orientation", 0.0) or 0.0),
+        position,
     )
 
 
@@ -3588,32 +3839,48 @@ def _mark_position_dirty() -> None:
 
 
 def _capture_persist_position_from_session() -> None:
-    session.persist_map_id = int(getattr(session, "map_id", 0) or 0)
+    raw_position = position_from_session(session)
+    position = normalize_position(raw_position, safe_z=True)
+    if position is None:
+        Logger.warning(
+            "[POS_SAVE] invalid live position player=%s raw=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            format_position(raw_position),
+        )
+        return
+    session.persist_map_id = int(position.map)
     session.persist_zone = int(getattr(session, "zone", 0) or 0)
     session.persist_instance_id = int(getattr(session, "instance_id", 0) or 0)
-    session.persist_x = float(getattr(session, "x", 0.0) or 0.0)
-    session.persist_y = float(getattr(session, "y", 0.0) or 0.0)
-    session.persist_z = float(getattr(session, "z", 0.0) or 0.0)
-    session.persist_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+    session.persist_x = float(position.x)
+    session.persist_y = float(position.y)
+    session.persist_z = float(position.z)
+    session.persist_orientation = float(position.orientation)
+    if POSITION_DEBUG_ENABLED:
+        Logger.debug(
+            "[POS_DEBUG] capture player=%s pos=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            format_position(position),
+        )
 
 
 def _remember_saved_position(now: float | None = None) -> None:
     if now is None:
         now = time.time()
-    (
-        session.last_saved_map_id,
-        session.last_saved_zone,
-        session.last_saved_instance_id,
-        session.last_saved_x,
-        session.last_saved_y,
-        session.last_saved_z,
-        session.last_saved_orientation,
-    ) = _current_position_snapshot()
+    current_zone, current_instance_id, current_position = _current_position_snapshot()
+    if current_position is None:
+        return
+    session.last_saved_map_id = int(current_position.map)
+    session.last_saved_zone = int(current_zone)
+    session.last_saved_instance_id = int(current_instance_id)
+    session.last_saved_x = float(current_position.x)
+    session.last_saved_y = float(current_position.y)
+    session.last_saved_z = float(current_position.z)
+    session.last_saved_orientation = float(current_position.orientation)
     session.last_position_save_at = float(now)
     session.position_dirty = False
 
 
-def _save_session_position(*, online: int | None = None, force: bool = False) -> bool:
+def _save_session_position(*, reason: str, online: int | None = None, force: bool = False) -> bool:
     if not getattr(session, "char_guid", None) or not getattr(session, "realm_id", None):
         return False
 
@@ -3623,8 +3890,9 @@ def _save_session_position(*, online: int | None = None, force: bool = False) ->
         return False
     if force and not position_dirty and online is not None:
         Logger.info(
-            "[Position] state-only save guid=%s name=%s online=%s force=%s",
+            "[POS_SAVE] state-only player=%s reason=%s name=%s online=%s force=%s",
             int(session.char_guid),
+            str(reason),
             str(getattr(session, "player_name", "") or ""),
             online,
             force,
@@ -3636,40 +3904,35 @@ def _save_session_position(*, online: int | None = None, force: bool = False) ->
             logout_time=int(now) if online == 0 else None,
         )
 
-    persist_map_id = int(getattr(session, "persist_map_id", 0) or 0)
-    persist_zone = int(getattr(session, "persist_zone", 0) or 0)
-    persist_instance_id = int(getattr(session, "persist_instance_id", 0) or 0)
-    persist_x = float(getattr(session, "persist_x", 0.0) or 0.0)
-    persist_y = float(getattr(session, "persist_y", 0.0) or 0.0)
-    persist_z = float(getattr(session, "persist_z", 0.0) or 0.0)
-    persist_orientation = float(getattr(session, "persist_orientation", 0.0) or 0.0)
-
-    Logger.info(
-        "[Position] save guid=%s name=%s map=%s zone=%s x=%.3f y=%.3f z=%.3f o=%.3f online=%s force=%s",
-        int(session.char_guid),
-        str(getattr(session, "player_name", "") or ""),
-        persist_map_id,
-        persist_zone,
-        persist_x,
-        persist_y,
-        persist_z,
-        persist_orientation,
-        online,
-        force,
+    persist_position = normalize_position(
+        Position(
+            map=int(getattr(session, "persist_map_id", 0) or 0),
+            x=float(getattr(session, "persist_x", 0.0) or 0.0),
+            y=float(getattr(session, "persist_y", 0.0) or 0.0),
+            z=float(getattr(session, "persist_z", 0.0) or 0.0),
+            orientation=float(getattr(session, "persist_orientation", 0.0) or 0.0),
+        ),
+        safe_z=True,
     )
+    if persist_position is None:
+        Logger.warning(
+            "[POS_SAVE] rejected player=%s reason=%s invalid persisted snapshot",
+            int(session.char_guid),
+            str(reason),
+        )
+        return False
 
-    ok = DatabaseConnection.save_character_position(
+    ok = save_player_position(
         int(session.char_guid),
-        int(session.realm_id),
-        map_id=persist_map_id,
-        zone=persist_zone,
-        instance_id=persist_instance_id,
-        x=persist_x,
-        y=persist_y,
-        z=persist_z + _POSITION_SAVE_Z_OFFSET,
-        orientation=persist_orientation,
+        persist_position,
+        str(reason),
+        realm_id=int(session.realm_id),
+        zone=int(getattr(session, "persist_zone", 0) or 0),
+        instance_id=int(getattr(session, "persist_instance_id", 0) or 0),
         online=online,
         logout_time=int(now) if online == 0 else None,
+        player_name=str(getattr(session, "player_name", "") or ""),
+        debug=bool(POSITION_DEBUG_ENABLED),
     )
     if ok:
         _remember_saved_position(now)
@@ -3683,7 +3946,24 @@ def _maybe_periodic_position_save() -> bool:
     last = float(getattr(session, "last_position_save_at", 0.0) or 0.0)
     if (now - last) < _POSITION_SAVE_INTERVAL_SECONDS:
         return False
-    return _save_session_position(online=1, force=True)
+    saved_zone, saved_instance_id, saved_position = _saved_position_snapshot()
+    current_zone, current_instance_id, current_position = _current_position_snapshot()
+    if current_position is None:
+        return False
+    if not position_moved_enough(saved_position, current_position, threshold=POSITION_AUTOSAVE_DISTANCE_THRESHOLD):
+        if POSITION_DEBUG_ENABLED:
+            Logger.debug(
+                "[POS_DEBUG] autosave skipped player=%s saved=%s current=%s zone=%s->%s instance=%s->%s",
+                int(getattr(session, "char_guid", 0) or 0),
+                format_position(saved_position),
+                format_position(current_position),
+                int(saved_zone),
+                int(current_zone),
+                int(saved_instance_id),
+                int(current_instance_id),
+            )
+        return False
+    return _save_session_position(reason="autosave", online=1, force=True)
 
 # -----------------------------------------------------------------------------
 # CMSG handlers
@@ -3707,7 +3987,9 @@ def handle_CMSG_LOGOUT_REQUEST(
     Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
     if USE_DB_ACCOUNT_DATA_137:
         _flush_account_data_types_to_db(_DB_ACCOUNT_DATA_137_TYPES, seed_defaults=True)
-    _save_session_position(online=0, force=True)
+    _capture_persist_position_from_session()
+    _mark_position_dirty()
+    _save_session_position(reason="logout", online=0, force=True)
 
     try:
         logout_response = EncoderHandler.encode_packet(
@@ -3880,11 +4162,26 @@ def handle_CMSG_PLAYER_LOGIN(
     # --------------------------------------------------
     # Position / orientation
     # --------------------------------------------------
-    session.x = float(row.position_x or 0.0)
-    session.y = float(row.position_y or 0.0)
-    stored_z = float(row.position_z or 0.0)
-    session.z = stored_z
-    session.orientation = float(row.orientation or 0.0)
+    loaded_position = position_from_row(row)
+    normalized_loaded_position = normalize_position(correct_z_if_invalid(loaded_position), safe_z=True)
+    if normalized_loaded_position is None:
+        Logger.warning(
+            "[POS_SAVE] invalid DB position on login player=%s raw=%s; falling back to origin",
+            int(char_guid),
+            format_position(loaded_position),
+        )
+        normalized_loaded_position = Position(
+            map=int(getattr(row, "map", 0) or 0),
+            x=0.0,
+            y=0.0,
+            z=0.0,
+            orientation=0.0,
+        )
+
+    session.x = float(normalized_loaded_position.x)
+    session.y = float(normalized_loaded_position.y)
+    session.z = float(normalized_loaded_position.z)
+    session.orientation = float(normalized_loaded_position.orientation)
     Logger.info(
         "[Position] load guid=%s name=%s map=%s zone=%s x=%.3f y=%.3f z=%.3f o=%.3f",
         int(char_guid),
@@ -3898,31 +4195,18 @@ def handle_CMSG_PLAYER_LOGIN(
     )
     _capture_persist_position_from_session()
     _remember_saved_position()
-    DatabaseConnection.save_character_position(
+    DatabaseConnection.save_character_online_state(
         int(char_guid),
         int(realm_id),
-        map_id=int(session.persist_map_id),
-        zone=int(session.persist_zone),
-        instance_id=int(session.persist_instance_id),
-        x=float(session.persist_x),
-        y=float(session.persist_y),
-        z=float(session.persist_z),
-        orientation=float(session.persist_orientation),
         online=1,
     )
 
     # --------------------------------------------------
     # Movement speeds (MoP defaults)
     # --------------------------------------------------
-    session.walk_speed = 2.5
-    session.run_speed = 7.0
-    session.run_back_speed = 4.5
-    session.swim_speed = 4.7
-    session.swim_back_speed = 2.5
-    session.fly_speed = 7.0
-    session.fly_back_speed = 4.5
-    session.turn_speed = 3.1415926
-    session.pitch_speed = 3.1415926
+    _restore_default_movement_speeds(session)
+    session.is_mounted = False
+    session.mount_spell = None
 
     # --------------------------------------------------
     # Gameplay state (LIVE)
@@ -3954,6 +4238,7 @@ def handle_CMSG_PLAYER_LOGIN(
     # --------------------------------------------------
     session.known_spells = DatabaseConnection.get_character_spells(char_guid)
     _ensure_language_spells_known()
+    _ensure_mount_spells_known()
     session.action_buttons = DatabaseConnection.get_character_action_buttons(char_guid)
 
     # --------------------------------------------------
@@ -4395,7 +4680,9 @@ def handle_CMSG_CHAT_JOIN_CHANNEL(
     return 0, [("SMSG_MOTD", motd_payload)]
 
 def handle_disconnect() -> None:
-    _save_session_position(online=0, force=True)
+    _capture_persist_position_from_session()
+    _mark_position_dirty()
+    _save_session_position(reason="disconnect", online=0, force=True)
     _reset_login_flow_state()
 
 
@@ -4508,21 +4795,52 @@ def handle_CMSG_SET_ACTIVE_MOVER(ctx: PacketContext):
             Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; suppressing account settings packets")
 
     _ensure_language_spells_known()
+    _ensure_mount_spells_known()
     responses.append(("SMSG_SEND_KNOWN_SPELLS", build_login_packet("SMSG_SEND_KNOWN_SPELLS", _build_world_login_context())))
-    Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; resending known spells including language spells")
+    Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; resending known spells including language and mounts")
 
     if responses:
         return 0, responses
 
-    # Save position when player is fully in world
-    _capture_persist_position_from_session()
-    _mark_position_dirty()
-    _save_session_position(online=1, force=True)
-
-    # Logger.info("[Teleport] Position saved after world entry")
     responses.extend(_build_minimal_post_timesync_account_packets(ctx.session))
     Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; no additional bootstrap packets sent")
     return 0, None
+
+
+def handle_CMSG_CAST_SPELL(ctx: PacketContext):
+    spell_id = _extract_mount_spell_id(ctx)
+    if not spell_id:
+        Logger.debug("[Mount] ignoring CMSG_CAST_SPELL without known mount spell match")
+        return 0, None
+
+    Logger.info("[Mount] CMSG_CAST_SPELL spell=%s payload=%s", int(spell_id), len(ctx.payload))
+    responses = handle_mount(ctx.session, int(spell_id))
+    return 0, responses
+
+
+def handle_CMSG_CANCEL_AURA(ctx: PacketContext):
+    spell_id = _extract_mount_spell_id(ctx)
+    active_mount = int(getattr(ctx.session, "mount_spell", 0) or 0)
+    if not spell_id and not active_mount:
+        Logger.debug("[Mount] ignoring CMSG_CANCEL_AURA without active mount")
+        return 0, None
+    if spell_id and not is_mount_spell(spell_id):
+        Logger.debug("[Mount] ignoring CMSG_CANCEL_AURA spell=%s not mount", int(spell_id))
+        return 0, None
+
+    Logger.info("[Mount] CMSG_CANCEL_AURA spell=%s payload=%s", int(spell_id or active_mount), len(ctx.payload))
+    responses = dismount(ctx.session)
+    return 0, responses
+
+
+def handle_CMSG_CANCEL_MOUNT_AURA(ctx: PacketContext):
+    if not bool(getattr(ctx.session, "is_mounted", False)) and not int(getattr(ctx.session, "mount_spell", 0) or 0):
+        Logger.debug("[Mount] ignoring CMSG_CANCEL_MOUNT_AURA without active mount")
+        return 0, None
+
+    Logger.info("[Mount] CMSG_CANCEL_MOUNT_AURA payload=%s", len(ctx.payload))
+    responses = dismount(ctx.session)
+    return 0, responses
 
 
 def handle_movement_packet(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
@@ -4622,6 +4940,9 @@ opcode_handlers: Dict[str, Callable[[PacketContext], Tuple[int, Optional[bytes]]
     "CMSG_REQUEST_FORCED_REACTIONS": handle_CMSG_REQUEST_FORCED_REACTIONS,
     "CMSG_WORLD_STATE_UI_TIMER_UPDATE": handle_CMSG_WORLD_STATE_UI_TIMER_UPDATE,
     "CMSG_NAME_QUERY": handle_CMSG_NAME_QUERY,
+    "CMSG_CAST_SPELL": handle_CMSG_CAST_SPELL,
+    "CMSG_CANCEL_AURA": handle_CMSG_CANCEL_AURA,
+    "CMSG_CANCEL_MOUNT_AURA": handle_CMSG_CANCEL_MOUNT_AURA,
     "CMSG_QUEST_GIVER_STATUS_QUERY": handle_CMSG_QUEST_GIVER_STATUS_QUERY,
     "CMSG_CHAR_CREATE": handle_CMSG_CHAR_CREATE,
     "CMSG_CHAR_DELETE": handle_CMSG_CHAR_DELETE,

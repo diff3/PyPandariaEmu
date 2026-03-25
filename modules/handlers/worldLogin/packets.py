@@ -31,6 +31,11 @@ from server.modules.equipment import _parse_equipment_cache
 from server.modules.player import _decode_player_bytes
 from server.modules.guid import _guid_bytes_and_masks, GuidHelper, HighGuid
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
+from world.mount.mount_service import (
+    MOUNT_RIDING_SKILL_ID,
+    MOUNT_RIDING_SKILL_VALUE,
+    granted_mount_spells,
+)
 
 
 def _load_raw_from_path(path: Path) -> Optional[bytes]:
@@ -440,12 +445,15 @@ def build_SMSG_WORLD_SERVER_INFO(_ctx=None) -> bytes:
 
 
 def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
-    spells = list(getattr(ctx, "known_spells", []) or [])
+    spells = [int(spell) for spell in (getattr(ctx, "known_spells", []) or [])]
+    spell_set = set(spells)
     # Mirror the lightweight MoP sandbox behavior and ensure chat/language
     # support is present even if the character spell rows are incomplete.
     for spell_id in (668, 669, 108127):
-        if int(spell_id) not in spells:
-            spells.append(int(spell_id))
+        spell_id = int(spell_id)
+        if spell_id not in spell_set:
+            spells.append(spell_id)
+            spell_set.add(spell_id)
     race = int(getattr(ctx, "race", 0) or 0)
     race_language_spell = {
         3: 672,       # Dwarf -> Dwarvish
@@ -461,8 +469,14 @@ def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
         25: 108130,   # Pandaren Alliance
         26: 108131,   # Pandaren Horde
     }.get(race, 0)
-    if int(race_language_spell or 0) and int(race_language_spell) not in spells:
+    if int(race_language_spell or 0) and int(race_language_spell) not in spell_set:
         spells.append(int(race_language_spell))
+        spell_set.add(int(race_language_spell))
+
+    for spell_id in granted_mount_spells():
+        if int(spell_id) not in spell_set:
+            spells.append(int(spell_id))
+            spell_set.add(int(spell_id))
 
     return _encode("SMSG_SEND_KNOWN_SPELLS", {
         "initial_login": 1,
@@ -1122,6 +1136,10 @@ def _patch_f32(payload: bytearray, offset: int, value: float) -> None:
     struct.pack_into("<f", payload, int(offset), float(value))
 
 
+def _patch_u16(payload: bytearray, offset: int, value: int) -> None:
+    struct.pack_into("<H", payload, int(offset), int(value) & 0xFFFF)
+
+
 def _ctx_int_preserve_zero(ctx: Any, primary_key: str, fallback: int) -> int:
     value = getattr(ctx, primary_key, None)
     if value is None:
@@ -1138,6 +1156,23 @@ def _resolve_player_display_id(race: int, gender: int, fallback: int = 15475) ->
 
 def _resolve_player_faction_template(race: int, fallback: int = 1610) -> int:
     return int(_PLAYER_FACTION_TEMPLATE_IDS.get(int(race) or 0, fallback))
+
+
+def _patch_mount_skill_block_1773613176_0002_fields(payload: bytearray, offsets: dict[str, int]) -> None:
+    """
+    The exact 0002 player template carries a static 16-slot skill block.
+    We do not serialize full live skill data yet, but mount usability requires
+    Riding to be present client-side. Overwrite the final slot with Riding.
+    """
+    field_base = int(offsets["object_guid_low_u32"])
+    skill_slot = 15
+    skill_ids_offset = field_base + 288 + (skill_slot * 2)
+    skill_values_offset = field_base + 320 + (skill_slot * 2)
+    skill_max_offset = field_base + 352 + (skill_slot * 2)
+
+    _patch_u16(payload, skill_ids_offset, int(MOUNT_RIDING_SKILL_ID))
+    _patch_u16(payload, skill_values_offset, int(MOUNT_RIDING_SKILL_VALUE))
+    _patch_u16(payload, skill_max_offset, int(MOUNT_RIDING_SKILL_VALUE))
 
 
 def _patch_live_update_object_1773613176_0002_fields(ctx: Any, payload: bytearray, *, offset_adjust: int = 0) -> None:
@@ -1223,6 +1258,8 @@ def _patch_live_update_object_1773613176_0002_fields(ctx: Any, payload: bytearra
     for offset_key, raw_index in equipment_field_map.items():
         if raw_index < len(equipment_cache_raw):
             _patch_u32(payload, offsets[offset_key], int(equipment_cache_raw[raw_index]) & 0xFFFFFFFF)
+
+    _patch_mount_skill_block_1773613176_0002_fields(payload, offsets)
 
 
 def _build_barncastle_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
