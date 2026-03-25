@@ -431,32 +431,36 @@ class DatabaseConnection:
         """Persist character world position and optional online/logout state."""
         session = DatabaseConnection.chars()
         try:
-            row = (
+            values = {
+                Characters.map: int(map_id or 0),
+                Characters.zone: int(zone or 0),
+                Characters.instance_id: int(instance_id or 0),
+                Characters.position_x: float(x or 0.0),
+                Characters.position_y: float(y or 0.0),
+                Characters.position_z: float(z or 0.0),
+                Characters.orientation: float(orientation or 0.0),
+            }
+
+            if online is not None:
+                values[Characters.online] = int(online)
+            if logout_time is not None:
+                values[Characters.logout_time] = int(logout_time)
+
+            updated = (
                 session.query(Characters)
                 .filter(
                     Characters.guid == int(char_guid),
                     Characters.realm == int(realm_id),
                 )
-                .one_or_none()
+                .update(values, synchronize_session=False)
             )
-            if row is None:
+
+            if not updated:
+                session.rollback()
                 Logger.warning(
                     f"[DB] save_character_position missing character guid={char_guid} realm={realm_id}"
                 )
                 return False
-
-            row.map = int(map_id or 0)
-            row.zone = int(zone or 0)
-            row.instance_id = int(instance_id or 0)
-            row.position_x = float(x or 0.0)
-            row.position_y = float(y or 0.0)
-            row.position_z = float(z or 0.0)
-            row.orientation = float(orientation or 0.0)
-
-            if online is not None:
-                row.online = int(online)
-            if logout_time is not None:
-                row.logout_time = int(logout_time)
 
             session.commit()
             return True
@@ -464,6 +468,47 @@ class DatabaseConnection:
             session.rollback()
             Logger.warning(
                 f"[DB] save_character_position failed guid={char_guid} realm={realm_id}: {exc}"
+            )
+            return False
+
+    @staticmethod
+    def save_character_online_state(
+        char_guid: int,
+        realm_id: int,
+        *,
+        online: int | None = None,
+        logout_time: int | None = None,
+    ) -> bool:
+        session = DatabaseConnection.chars()
+        try:
+            values = {}
+            if online is not None:
+                values[Characters.online] = int(online)
+            if logout_time is not None:
+                values[Characters.logout_time] = int(logout_time)
+            if not values:
+                return True
+
+            updated = (
+                session.query(Characters)
+                .filter(
+                    Characters.guid == int(char_guid),
+                    Characters.realm == int(realm_id),
+                )
+                .update(values, synchronize_session=False)
+            )
+            if not updated:
+                session.rollback()
+                Logger.warning(
+                    f"[DB] save_character_online_state missing character guid={char_guid} realm={realm_id}"
+                )
+                return False
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(
+                f"[DB] save_character_online_state failed guid={char_guid} realm={realm_id}: {exc}"
             )
             return False
 

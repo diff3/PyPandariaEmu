@@ -23,6 +23,7 @@ from server.modules.interpretation.utils import initialize_dsl_runtime
 from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler as WorldCryptoHandler
 from server.session.world_session import WorldSession
 from server.session.runtime import bind_world_session, clear_world_session
+from world.teleport.teleport_service import load_teleports
 
 try:
     from server.modules.handlers.WorldHandlers import (
@@ -36,6 +37,11 @@ except Exception:
     get_auth_challenge = None
     reset_handler_state = None
     preload_handler_cache = None
+
+
+
+
+
 
 # ---- Configuration ------------------------------------------------------
 
@@ -424,6 +430,10 @@ def run_world() -> None:
     DatabaseConnection.initialize()
     DatabaseConnection.preload_world_cache()
     try:
+        load_teleports(DatabaseConnection.world())
+    except Exception as exc:
+        Logger.warning(f"[Teleport] preload failed: {exc}")
+    try:
         preload_cache()
     except Exception:
         pass
@@ -448,6 +458,8 @@ def run_world() -> None:
 
     Logger.info("WorldServer stopping…")
     srv.close()
+
+
 
 
 # ---- Main entry ---------------------------------------------------------

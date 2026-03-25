@@ -20,14 +20,18 @@ Notes:
 
 from __future__ import annotations
 
+from http.client import responses
 import json
 import math
 import random
 import struct
 import time
+import random
+from turtle import speed
 import zlib
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
+
 from server.modules.PacketContext import PacketContext
 from server.modules.handlers.worldLogin.context import WorldLoginContext
 
@@ -71,6 +75,13 @@ from server.modules.opcodes.WorldOpcodes import (
     WORLD_CLIENT_OPCODES,
     WORLD_SERVER_OPCODES,
     lookup as world_lookup,  # om du använder den
+)
+from world.teleport.teleport_service import (
+    add_teleport as add_named_teleport,
+    find_teleport,
+    nearest_teleport,
+    remove_teleport as remove_named_teleport,
+    search_teleports,
 )
 
 # _LOGIN_UPDATE_OBJECT_CAPTURE_DIR = Path(__file__).resolve().parents[2] / "captures" / "focus" / "debug"
@@ -253,6 +264,49 @@ _CHAT_TYPE_BY_OPCODE = {
     "CMSG_MESSAGECHAT_YELL": CHAT_MSG_YELL,
     "CMSG_MESSAGECHAT_WHISPER": CHAT_MSG_WHISPER,
 }
+
+
+def _notification_response(message: str) -> list[tuple[str, bytes]]:
+    return [("SMSG_NOTIFICATION", _build_motd_notification_payload(message))]
+
+
+def teleport_player(player, map_id: int, x: float, y: float, z: float, orientation: float, *, destination_name: str) -> list[tuple[str, bytes]]:
+    player.x = float(x)
+    player.y = float(y)
+    player.z = float(z)
+    player.orientation = float(orientation)
+    player.map_id = int(map_id)
+    player.zone = _resolve_zone_from_position(int(map_id), float(x), float(y)) or int(getattr(player, "zone", 0) or 0)
+    player.instance_id = 0
+    player.teleport_pending = True
+    player.teleport_destination = str(destination_name or "").strip() or None
+    _capture_persist_position_from_session()
+    _mark_position_dirty()
+    _save_session_position(online=1, force=True)
+
+    return [
+        (
+            "SMSG_TRANSFER_PENDING",
+            build_login_packet("SMSG_TRANSFER_PENDING", type("Ctx", (), {"map_id": int(map_id)})()),
+        ),
+        (
+            "SMSG_NEW_WORLD",
+            build_login_packet(
+                "SMSG_NEW_WORLD",
+                type(
+                    "Ctx",
+                    (),
+                    {
+                        "map_id": int(map_id),
+                        "x": float(x),
+                        "y": float(y),
+                        "z": float(z),
+                        "orientation": float(orientation),
+                    },
+                )(),
+            ),
+        ),
+    ]
 MOVEMENT_FOCUS_SEQUENCE = (
     ("SMSG_MOVE_SET_ACTIVE_MOVER", "SMSG_MOVE_SET_ACTIVE_MOVER_1773613176_0001.json"),
     ("SMSG_UPDATE_OBJECT", "SMSG_UPDATE_OBJECT_1773613176_0002.json"),
@@ -966,13 +1020,25 @@ def replay_movement_focus_sequence(session: WorldSession) -> list[tuple[str, byt
         for opcode_name, filename in MOVEMENT_FOCUS_SEQUENCE
     ]
 
-    # ---- Validate required files ----
-    required = []
+    # ---- Validate only captures that are actually read from disk ----
+    required_paths: list[Path] = []
     if USE_RAW_ACTIVE_MOVER:
-        required.append(entries[0])
-    required.extend(entries[1:])
+        required_paths.append(entries[0][1])
 
-    missing = [path for _, path in required if not path.exists()]
+    for _opcode_name, path in entries[1:]:
+        if _should_skip_static_update_object_capture(path):
+            continue
+        if path.name in EXACT_UPDATE_OBJECT_BUILDERS:
+            continue
+        if USE_RAW_UPDATE_OBJECT_FALLBACK:
+            required_paths.append(path)
+            continue
+        raise RuntimeError(
+            f"Missing exact UPDATE_OBJECT builder for {path.name} while "
+            "USE_RAW_UPDATE_OBJECT_FALLBACK is disabled"
+        )
+
+    missing = [path for path in required_paths if not path.exists()]
     if missing:
         raise RuntimeError(
             f"Missing movement focus captures in {_CAPTURE_DIR}: "
@@ -1439,10 +1505,69 @@ def _build_motd_notification_payload(message: str) -> bytes:
     bits.write_bits(len(message_bytes) & 0xFFF, 12)
     return bits.getvalue() + message_bytes
 
+# Simple AreaTable cache (map_id + bounding box)
+_AREA_TABLE = None
+
+def _load_area_table():
+    global _AREA_TABLE
+    if _AREA_TABLE is not None:
+        return _AREA_TABLE
+
+    _AREA_TABLE = []
+    dbc_root = get_dbc_root()
+    if not dbc_root:
+        return _AREA_TABLE
+
+    path = dbc_root / "AreaTable.dbc"
+    if not path.exists():
+        Logger.warning("[AreaTable] missing")
+        return _AREA_TABLE
+
+    try:
+        rows = read_dbc(path, "iIIffff")  # minimal fields (id, map, x1,x2,y1,y2)
+    except Exception as e:
+        Logger.warning(f"[AreaTable] failed: {e}")
+        return _AREA_TABLE
+
+    for r in rows:
+        area_id = int(r[0])
+        map_id = int(r[1])
+        x1, x2, y1, y2 = float(r[2]), float(r[3]), float(r[4]), float(r[5])
+
+        _AREA_TABLE.append((map_id, area_id, x1, x2, y1, y2))
+
+    return _AREA_TABLE
+
+
+def _resolve_zone_from_position(map_id: int, x: float, y: float) -> int:
+    for m, area_id, x1, x2, y1, y2 in _load_area_table():
+        if m != map_id:
+            continue
+        if min(x1, x2) <= x <= max(x1, x2) and min(y1, y2) <= y <= max(y1, y2):
+            return area_id
+    return 0
+
 
 def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
     command = str(message or "").strip()
 
+    if command.lower().startswith(".roll"):
+        roll = random.randint(1, 100)
+
+        msg = f"{session.player_name} rolls {roll} (1-100)"
+
+        payload = _encode_messagechat_payload(
+            chat_type=CHAT_MSG_SAY,
+            language=0,
+            sender_guid=session.player_guid,
+            sender_name=session.player_name,
+            target_guid=0,
+            target_name="",
+            message=msg,
+        )
+
+        return [("SMSG_MESSAGECHAT", payload)]
+    
     # -----------------------------
     # DEBUG POSITION
     # -----------------------------
@@ -1455,70 +1580,6 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
             f"z={float(getattr(session, 'z', 0.0) or 0.0):.2f} "
             f"o={float(getattr(session, 'orientation', 0.0) or 0.0):.2f}"
         )
-        return []
-
-    # -----------------------------
-    # SPEED COMMAND
-    # -----------------------------
-    if command.lower().startswith(".speed"):
-        parts = command.split()
-
-        if len(parts) != 2:
-            Logger.info("[Speed] Usage: .speed <multiplier>")
-            return []
-
-        try:
-            speed = float(parts[1])
-        except ValueError:
-            Logger.info(f"[Speed] Invalid value command={command!r}")
-            return []
-
-        if speed <= 0:
-            Logger.info(f"[Speed] Non-positive speed command={command!r}")
-            return []
-
-        session.walk_speed = 2.5 * speed
-        session.run_speed = 7.0 * speed
-        session.run_back_speed = 4.5 * speed
-        session.swim_speed = 4.7 * speed
-        session.swim_back_speed = 2.5 * speed
-        session.fly_speed = 7.0 * speed
-        session.fly_back_speed = 4.5 * speed
-
-        Logger.info(
-            f"[Speed] multiplier={speed:.2f} "
-            f"walk={session.walk_speed:.2f} "
-            f"run={session.run_speed:.2f} "
-            f"fly={session.fly_speed:.2f}"
-        )
-
-        return []
-
-    # -----------------------------
-    # FLY COMMAND
-    # -----------------------------
-    if command.lower().startswith(".fly"):
-        parts = command.split()
-
-        if len(parts) != 2:
-            Logger.info("[Fly] Usage: .fly on|off")
-            return []
-
-        state = parts[1].lower()
-
-        if state == "on":
-            session.can_fly = True
-            session.fly_speed = max(session.fly_speed, 14.0)
-            Logger.info("[Fly] enabled")
-            return []
-
-        if state == "off":
-            session.can_fly = False
-            session.fly_speed = 7.0
-            Logger.info("[Fly] disabled")
-            return []
-
-        Logger.info("[Fly] Usage: .fly on|off")
         return []
 
     # -----------------------------
@@ -1701,100 +1762,109 @@ def _handle_chat_command(message: str) -> Optional[list[tuple[str, bytes]]]:
             Logger.info(f"[Teleport] Invalid .telxyz args command={command!r}")
             return []
 
-        session.x = float(x)
-        session.y = float(y)
-        session.z = float(z)
-        session.orientation = float(orientation)
-        session.map_id = int(map_id)
-        session.instance_id = 0
-        session.teleport_pending = True
-        session.teleport_destination = f"manual:{map_id}:{x:.2f}:{y:.2f}:{z:.2f}:{orientation:.2f}"
-        _capture_persist_position_from_session()
-        _mark_position_dirty()
-        _save_session_position(online=1, force=True)
-
         Logger.info(
             f"[Teleport] {player_name} -> manual ({map_id} {x:.2f} {y:.2f} {z:.2f} {orientation:.2f})"
         )
-
-        return [
-            ("SMSG_TRANSFER_PENDING", _build_transfer_pending_payload(map_id)),
-            ("SMSG_NEW_WORLD", _build_new_world_payload(map_id, x, y, z, orientation)),
-        ]
+        return teleport_player(
+            session,
+            map_id,
+            x,
+            y,
+            z,
+            orientation,
+            destination_name=f"manual:{map_id}:{x:.2f}:{y:.2f}:{z:.2f}:{orientation:.2f}",
+        )
 
     # -----------------------------
-    # TELEPORT PRESET
+    # TELEPORT COMMANDS
     # -----------------------------
     if not command.startswith(".tel"):
         return None
 
-    parts = command.split(maxsplit=1)
+    parts = command.split()
+    if len(parts) == 1:
+        return _notification_response("Usage: .tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel nearest")
 
-    if len(parts) != 2:
-        Logger.info(f"[Teleport] Unknown destination command={command!r}")
-        return []
+    action = parts[1].strip().lower()
 
-    destination_key = parts[1].strip().lower().replace(" ", "_")
-    destination = TELEPORT_DESTINATIONS.get(destination_key)
+    if action == "search":
+        query = command.split(None, 2)[2] if len(parts) >= 3 else ""
+        matches = search_teleports(query)
+        if not matches:
+            return _notification_response("Matches: none")
+        return _notification_response(f"Matches: {', '.join(matches)}")
 
+    if action == "add":
+        name = command.split(None, 2)[2].strip() if len(parts) >= 3 else ""
+        if not name:
+            return _notification_response("Usage: .tel add <name>")
+        try:
+            entry = add_named_teleport(
+                DatabaseConnection.world(),
+                name,
+                int(getattr(session, "map_id", 0) or 0),
+                float(getattr(session, "x", 0.0) or 0.0),
+                float(getattr(session, "y", 0.0) or 0.0),
+                float(getattr(session, "z", 0.0) or 0.0),
+                float(getattr(session, "orientation", 0.0) or 0.0),
+            )
+        except Exception as exc:
+            Logger.warning(f"[Teleport] add failed name={name!r}: {exc}")
+            return _notification_response("Teleport add failed")
+        return _notification_response(f"Teleport added: {entry['name']}")
+
+    if action == "rm":
+        name = command.split(None, 2)[2].strip() if len(parts) >= 3 else ""
+        if not name:
+            return _notification_response("Usage: .tel rm <name>")
+        try:
+            removed = remove_named_teleport(DatabaseConnection.world(), name)
+        except Exception as exc:
+            Logger.warning(f"[Teleport] rm failed name={name!r}: {exc}")
+            return _notification_response("Teleport remove failed")
+        if not removed:
+            return _notification_response("Teleport not found")
+        return _notification_response("Teleport removed")
+
+    if action == "nearest":
+        nearest = nearest_teleport(
+            int(getattr(session, "map_id", 0) or 0),
+            float(getattr(session, "x", 0.0) or 0.0),
+            float(getattr(session, "y", 0.0) or 0.0),
+        )
+        if nearest is None:
+            return _notification_response("Nearest: none")
+        return _notification_response(f"Nearest: {nearest['name']}")
+
+    destination_name = command.split(None, 1)[1].strip() if len(parts) >= 2 else ""
+    destination = find_teleport(destination_name)
     if destination is None:
         Logger.info(f"[Teleport] Unknown destination command={command!r}")
-        return []
+        return _notification_response("Teleport not found")
 
-    map_id = int(destination["map_id"])
+    map_id = int(destination["map"])
     x = float(destination["x"])
     y = float(destination["y"])
     z = float(destination["z"])
-    orientation = float(destination["orientation"])
-
-    session.x = float(x)
-    session.y = float(y)
-    session.z = float(z)
-    session.orientation = float(orientation)
-    session.map_id = int(map_id)
-
-    if "zone" in destination:
-        session.zone = int(destination["zone"])
-
-    session.instance_id = 0
-    session.teleport_pending = True
-    session.teleport_destination = destination_key
-    _capture_persist_position_from_session()
-    _mark_position_dirty()
-    _save_session_position(online=1, force=True)
-
+    orientation = float(destination["o"])
     player_name = (
         str(getattr(session, "player_name", "") or "").strip()
         or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
     )
 
     Logger.info(
-        f"[Teleport] {player_name} -> {destination_key} ({x:.2f} {y:.2f} {z:.2f})"
+        f"[Teleport] {player_name} -> {destination['name']} ({x:.2f} {y:.2f} {z:.2f})"
     )
 
-    return [
-        (
-            "SMSG_TRANSFER_PENDING",
-            build_login_packet("SMSG_TRANSFER_PENDING", type("Ctx", (), {"map_id": map_id})()),
-        ),
-        (
-            "SMSG_NEW_WORLD",
-            build_login_packet(
-                "SMSG_NEW_WORLD",
-                type(
-                    "Ctx",
-                    (),
-                    {
-                        "map_id": map_id,
-                        "x": x,
-                        "y": y,
-                        "z": z,
-                        "orientation": orientation,
-                    },
-                )(),
-            ),
-        ),
-    ]
+    return teleport_player(
+        session,
+        map_id,
+        x,
+        y,
+        z,
+        orientation,
+        destination_name=str(destination["name"]),
+    )
 
 
 def _handle_chat_message(ctx: PacketContext):
@@ -2019,21 +2089,69 @@ def _decode_account_data_update_payload(payload: bytes) -> dict[str, Any]:
         "account_data": "",
     }
 
-    if len(payload) < 12:
+    raw = bytes(payload or b"")
+    if raw[:1] == b"\x68":
+        raw = raw[1:]
+
+    if len(raw) >= 15:
+        # MoP 5.4.8 layout from sniff:
+        #   uint16 header (type stored in high nibble)
+        #   uint8  unknown/reserved
+        #   uint32 decompressed_size
+        #   uint32 timestamp
+        #   uint32 compressed_size
+        #   zlib payload
+        header = struct.unpack_from("<H", raw, 0)[0]
+        data_type = int((header >> 12) & 0x0F)
+        decompressed_size = int(struct.unpack_from("<I", raw, 3)[0])
+        timestamp = int(struct.unpack_from("<I", raw, 7)[0])
+        compressed_size = int(struct.unpack_from("<I", raw, 11)[0])
+
+        if 0 <= data_type < 8 and compressed_size >= 0:
+            compressed_offset = 15
+            compressed_end = min(len(raw), compressed_offset + compressed_size)
+            compressed_blob = raw[compressed_offset:compressed_end]
+
+            result["type"] = data_type
+            result["timestamp"] = timestamp
+            result["decompressed_size"] = decompressed_size
+            result["compressed_size"] = compressed_size
+
+            if decompressed_size == 0:
+                return result
+
+            if len(compressed_blob) != compressed_size:
+                result["error"] = "truncated_compressed_blob"
+                return result
+
+            try:
+                inflated = zlib.decompress(compressed_blob)
+            except Exception as exc:
+                result["error"] = f"decompress_failed:{exc}"
+                return result
+
+            if len(inflated) != decompressed_size:
+                result["warning"] = "decompressed_size_mismatch"
+
+            result["account_data"] = inflated.decode("utf-8", errors="replace")
+            return result
+
+    if len(raw) < 12:
         return result
 
-    decompressed_size, timestamp, compressed_size = struct.unpack_from("<III", payload, 0)
+    # Fallback for older layouts.
+    decompressed_size, timestamp, compressed_size = struct.unpack_from("<III", raw, 0)
     result["timestamp"] = int(timestamp)
     result["decompressed_size"] = int(decompressed_size)
     result["compressed_size"] = int(compressed_size)
 
     compressed_offset = 12
-    compressed_end = min(len(payload), compressed_offset + int(compressed_size))
-    compressed_blob = payload[compressed_offset:compressed_end]
+    compressed_end = min(len(raw), compressed_offset + int(compressed_size))
+    compressed_blob = raw[compressed_offset:compressed_end]
 
     type_offset = compressed_offset + int(compressed_size)
-    if type_offset < len(payload):
-        result["type"] = int(payload[type_offset]) & 0x07
+    if type_offset < len(raw):
+        result["type"] = int(raw[type_offset]) & 0x07
 
     if int(decompressed_size) == 0:
         return result
@@ -2127,7 +2245,52 @@ bind SHIFT-5 ACTIONPAGE5
 bind SHIFT-6 ACTIONPAGE6
 """
 
-_ACCOUNT_DATA_TYPE_3_DEFAULT = _ACCOUNT_DATA_TYPE_2_DEFAULT
+_ACCOUNT_DATA_TYPE_3_DEFAULT = (
+    "BINDINGMODE 0\r\n"
+    "bind W MOVEFORWARD\r\n"
+    "bind S MOVEBACKWARD\r\n"
+    "bind A TURNLEFT\r\n"
+    "bind D TURNRIGHT\r\n"
+    "bind Q STRAFELEFT\r\n"
+    "bind E STRAFERIGHT\r\n"
+    "bind SPACE JUMP\r\n"
+    "bind X SITORSTAND\r\n"
+    "bind ENTER OPENCHAT\r\n"
+    "bind / OPENCHATSLASH\r\n"
+    "bind 1 ACTIONBUTTON1\r\n"
+    "bind 2 ACTIONBUTTON2\r\n"
+    "bind 3 ACTIONBUTTON3\r\n"
+    "bind 4 ACTIONBUTTON4\r\n"
+    "bind 5 ACTIONBUTTON5\r\n"
+    "bind 6 ACTIONBUTTON6\r\n"
+    "bind 7 ACTIONBUTTON7\r\n"
+    "bind 8 ACTIONBUTTON8\r\n"
+    "bind 9 ACTIONBUTTON9\r\n"
+    "bind 0 ACTIONBUTTON10\r\n"
+    "bind - ACTIONBUTTON11\r\n"
+    "bind = ACTIONBUTTON12\r\n"
+    "bind SHIFT-1 ACTIONPAGE1\r\n"
+    "bind SHIFT-2 ACTIONPAGE2\r\n"
+    "bind SHIFT-3 ACTIONPAGE3\r\n"
+    "bind SHIFT-4 ACTIONPAGE4\r\n"
+    "bind SHIFT-5 ACTIONPAGE5\r\n"
+    "bind SHIFT-6 ACTIONPAGE6\r\n"
+    "bind TAB TARGETNEARESTENEMY\r\n"
+    "bind SHIFT-TAB TARGETPREVIOUSENEMY\r\n"
+    "bind F1 TARGETSELF\r\n"
+    "bind F2 TARGETPARTYMEMBER1\r\n"
+    "bind F3 TARGETPARTYMEMBER2\r\n"
+    "bind F4 TARGETPARTYMEMBER3\r\n"
+    "bind F5 TARGETPARTYMEMBER4\r\n"
+    "bind C TOGGLECHARACTER0\r\n"
+    "bind B TOGGLEBACKPACK\r\n"
+    "bind SHIFT-B OPENALLBAGS\r\n"
+    "bind P TOGGLESPELLBOOK\r\n"
+    "bind N TOGGLETALENTS\r\n"
+    "bind L TOGGLEQUESTLOG\r\n"
+    "bind ESCAPE TOGGLEGAMEMENU\r\n"
+    "bind M TOGGLEWORLDMAP\r\n"
+)
 
 
 _ACCOUNT_DATA_TYPE_7_DEFAULT = """VERSION 5
@@ -2142,11 +2305,83 @@ ZONECHANNELS 35651587
 COLORS
 
 SYSTEM 255 255 0 N
-SAY 255 255 255 N
+SAY 128 0 128 N
 PARTY 170 170 255 N
+RAID 255 127 0 N
 GUILD 64 255 64 N
+OFFICER 64 192 64 N
+YELL 255 64 64 N
 WHISPER 255 128 255 N
+WHISPER_FOREIGN 255 128 255 N
+WHISPER_INFORM 255 128 255 N
+EMOTE 255 128 64 N
+TEXT_EMOTE 255 128 64 N
+MONSTER_SAY 255 255 159 N
+MONSTER_PARTY 170 170 255 N
+MONSTER_YELL 255 64 64 N
+MONSTER_WHISPER 255 181 235 N
+MONSTER_EMOTE 255 128 64 N
 CHANNEL 255 192 192 N
+CHANNEL_JOIN 192 128 128 N
+CHANNEL_LEAVE 192 128 128 N
+CHANNEL_LIST 192 128 128 N
+CHANNEL_NOTICE 192 192 192 N
+CHANNEL_NOTICE_USER 192 192 192 N
+AFK 255 128 255 N
+DND 255 128 255 N
+IGNORED 255 0 0 N
+SKILL 85 85 255 N
+LOOT 0 170 0 N
+MONEY 255 255 0 N
+OPENING 128 128 255 N
+TRADESKILLS 255 255 255 N
+PET_INFO 128 128 255 N
+COMBAT_MISC_INFO 128 128 255 N
+COMBAT_XP_GAIN 111 111 255 N
+COMBAT_HONOR_GAIN 224 202 10 N
+COMBAT_FACTION_CHANGE 128 128 255 N
+BG_SYSTEM_NEUTRAL 255 120 10 N
+BG_SYSTEM_ALLIANCE 0 174 239 N
+BG_SYSTEM_HORDE 255 0 0 N
+RAID_LEADER 255 72 9 N
+RAID_WARNING 255 72 0 N
+RAID_BOSS_EMOTE 255 221 0 N
+RAID_BOSS_WHISPER 255 221 0 N
+FILTERED 255 0 0 N
+RESTRICTED 255 0 0 N
+BATTLENET 255 255 255 N
+ACHIEVEMENT 255 255 0 N
+GUILD_ACHIEVEMENT 64 255 64 N
+ARENA_POINTS 255 255 255 N
+PARTY_LEADER 118 200 255 N
+TARGETICONS 255 255 0 N
+BN_WHISPER 0 255 246 N
+BN_WHISPER_INFORM 0 255 246 N
+BN_CONVERSATION 0 177 240 N
+BN_CONVERSATION_NOTICE 0 177 240 N
+BN_CONVERSATION_LIST 0 177 240 N
+BN_INLINE_TOAST_ALERT 130 197 255 N
+BN_INLINE_TOAST_BROADCAST 130 197 255 N
+BN_INLINE_TOAST_BROADCAST_INFORM 130 197 255 N
+BN_INLINE_TOAST_CONVERSATION 130 197 255 N
+BN_WHISPER_PLAYER_OFFLINE 255 255 0 N
+COMBAT_GUILD_XP_GAIN 111 111 255 N
+CURRENCY 0 170 0 N
+QUEST_BOSS_EMOTE 255 128 64 N
+PET_BATTLE_COMBAT_LOG 231 222 171 N
+PET_BATTLE_INFO 225 222 93 N
+INSTANCE_CHAT 255 127 0 N
+INSTANCE_CHAT_LEADER 255 72 9 N
+CHANNEL1 255 192 192 N
+CHANNEL2 255 192 192 N
+CHANNEL3 255 192 192 N
+CHANNEL4 255 192 192 N
+CHANNEL5 255 192 192 N
+CHANNEL6 255 192 192 N
+CHANNEL7 255 192 192 N
+CHANNEL8 255 192 192 N
+CHANNEL9 255 192 192 N
+CHANNEL10 255 192 192 N
 END
 
 WINDOW 1
@@ -2159,11 +2394,47 @@ DOCKED 1
 SHOWN 1
 MESSAGES
 SYSTEM
+SYSTEM_NOMENU
 SAY
-PARTY
-GUILD
+EMOTE
+YELL
 WHISPER
+PARTY
+PARTY_LEADER
+RAID
+RAID_LEADER
+RAID_WARNING
+GUILD
+OFFICER
+MONSTER_SAY
+MONSTER_YELL
+MONSTER_EMOTE
+MONSTER_WHISPER
+MONSTER_BOSS_EMOTE
+MONSTER_BOSS_WHISPER
+ERRORS
+AFK
+DND
+IGNORED
+BG_HORDE
+BG_ALLIANCE
+BG_NEUTRAL
+COMBAT_FACTION_CHANGE
+SKILL
+LOOT
+MONEY
 CHANNEL
+ACHIEVEMENT
+GUILD_ACHIEVEMENT
+BN_WHISPER
+BN_WHISPER_INFORM
+BN_CONVERSATION
+BN_INLINE_TOAST_ALERT
+CURRENCY
+BN_WHISPER_PLAYER_OFFLINE
+PET_BATTLE_INFO
+INSTANCE_CHAT
+INSTANCE_CHAT_LEADER
 END
 
 CHANNELS
@@ -2172,10 +2443,175 @@ END
 ZONECHANNELS 2097155
 
 END
+
+WINDOW 2
+NAME Combat Log
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 2
+SHOWN 0
+MESSAGES
+OPENING
+TRADESKILLS
+PET_INFO
+COMBAT_XP_GAIN
+COMBAT_HONOR_GAIN
+COMBAT_MISC_INFO
+COMBAT_GUILD_XP_GAIN
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 0
+
+END
+
+WINDOW 3
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 0
+SHOWN 0
+MESSAGES
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 0
+
+END
+
+WINDOW 4
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 0
+SHOWN 0
+MESSAGES
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 0
+
+END
+
+WINDOW 5
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 0
+SHOWN 0
+MESSAGES
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 0
+
+END
+
+WINDOW 6
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 0
+SHOWN 0
+MESSAGES
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 0
+
+END
+
+WINDOW 7
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 0
+SHOWN 0
+MESSAGES
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 0
+
+END
+
+WINDOW 8
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 0
+SHOWN 0
+MESSAGES
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 0
+
+END
+
+WINDOW 9
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 0
+SHOWN 0
+MESSAGES
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 0
+
+END
+
+WINDOW 10
+SIZE 0
+COLOR 0 0 0 40
+LOCKED 1
+UNINTERACTABLE 0
+DOCKED 0
+SHOWN 0
+MESSAGES
+END
+
+CHANNELS
+END
+
+ZONECHANNELS 0
+
+END
+
 """
 
-_GLOBAL_ACCOUNT_DATA_TYPES = (0, 2, 4)
+_GLOBAL_ACCOUNT_DATA_STORAGE_TYPES = (0, 2, 4)
+_GLOBAL_ACCOUNT_DATA_TYPES = _GLOBAL_ACCOUNT_DATA_STORAGE_TYPES
 _PER_CHARACTER_ACCOUNT_DATA_TYPES = (1, 3, 5, 6, 7)
+_DB_ACCOUNT_DATA_137_TYPES = (1, 2, 3, 7)
+_DB_ACCOUNT_DATA_137_RESPONSE_TYPES = (1, 2, 3, 7)
 
 
 def _build_update_account_data_payload(
@@ -2274,13 +2710,53 @@ def _account_data_text_for_type(data_type: int, account_name: str = "") -> str:
         return _ACCOUNT_DATA_TYPE_0_DEFAULT
     if int(data_type) == 1:
         return _ACCOUNT_DATA_TYPE_1_DEFAULT
+    if int(data_type) == 2:
+        return _ACCOUNT_DATA_TYPE_2_DEFAULT
+    if int(data_type) == 3:
+        return _ACCOUNT_DATA_TYPE_3_DEFAULT
     if int(data_type) == 7:
         return _ACCOUNT_DATA_TYPE_7_DEFAULT
     return ""
 
 
 def _is_global_account_data_type(data_type: int) -> bool:
-    return int(data_type) in _GLOBAL_ACCOUNT_DATA_TYPES
+    return int(data_type) in _GLOBAL_ACCOUNT_DATA_STORAGE_TYPES
+
+
+def _normalize_account_data_text(data_type: int, data_text: str) -> str:
+    text = str(data_text or "")
+    if int(data_type) == 3:
+        required_fragments = (
+            "BINDINGMODE 0\r\n",
+            "bind SHIFT-6 ACTIONPAGE6\r\n",
+            "bind M TOGGLEWORLDMAP\r\n",
+        )
+        if not text.strip():
+            return _ACCOUNT_DATA_TYPE_3_DEFAULT
+        if all(fragment in text for fragment in required_fragments):
+            return text
+        Logger.info("[ACCOUNT_DATA] normalizing type=3 payload to canonical bindings layout")
+        return _ACCOUNT_DATA_TYPE_3_DEFAULT
+
+    if int(data_type) != 7:
+        return text
+
+    if not text.strip():
+        return _ACCOUNT_DATA_TYPE_7_DEFAULT
+
+    required_fragments = (
+        "WINDOW 2\nNAME Combat Log",
+        "INSTANCE_CHAT",
+        "INSTANCE_CHAT_LEADER",
+        "CHANNELS\nEND\n\nZONECHANNELS 2097155",
+    )
+    if all(fragment in text for fragment in required_fragments) and "LookingForGroup" not in text:
+        if text.rstrip("\n") == _ACCOUNT_DATA_TYPE_7_DEFAULT.rstrip("\n"):
+            return _ACCOUNT_DATA_TYPE_7_DEFAULT
+        return text
+
+    Logger.info("[ACCOUNT_DATA] normalizing type=7 payload to canonical chat layout")
+    return _ACCOUNT_DATA_TYPE_7_DEFAULT
 
 
 def _account_data_mask_for_types(data_types: tuple[int, ...]) -> int:
@@ -2302,23 +2778,124 @@ def _load_account_data_scope(owner_id: int, *, per_character: bool) -> None:
     if int(owner_id or 0) <= 0:
         return
     loaded = DatabaseConnection.load_account_data(int(owner_id), per_character=per_character)
-    data_types = _PER_CHARACTER_ACCOUNT_DATA_TYPES if per_character else _GLOBAL_ACCOUNT_DATA_TYPES
+    data_types = _PER_CHARACTER_ACCOUNT_DATA_TYPES if per_character else _GLOBAL_ACCOUNT_DATA_STORAGE_TYPES
+    seeded_types: list[int] = []
+    now = int(time.time())
     for data_type in data_types:
-        timestamp, data_text = loaded.get(int(data_type), (0, ""))
+        default_text = _account_data_text_for_type(int(data_type), str(session.account_name or ""))
+        should_persist = False
+        if int(data_type) in loaded:
+            timestamp, data_text = loaded[int(data_type)]
+            normalized_text = _normalize_account_data_text(int(data_type), str(data_text or ""))
+            if normalized_text != str(data_text or ""):
+                data_text = normalized_text
+                timestamp = int(timestamp or now)
+                should_persist = USE_DB_ACCOUNT_DATA_137 and per_character and int(data_type) in _DB_ACCOUNT_DATA_137_TYPES
+        elif default_text:
+            timestamp, data_text = now, default_text
+            should_persist = USE_DB_ACCOUNT_DATA_137 and per_character and int(data_type) in _DB_ACCOUNT_DATA_137_TYPES
+        else:
+            timestamp, data_text = 0, ""
+
+        if should_persist:
+            DatabaseConnection.save_account_data(
+                int(owner_id),
+                int(data_type),
+                int(timestamp),
+                str(data_text),
+                per_character=per_character,
+            )
+            seeded_types.append(int(data_type))
+
         session.account_data[int(data_type)] = str(data_text or "")
         session.account_data_times[int(data_type)] = int(timestamp or 0)
+        if data_text:
+            session.account_data_mask |= (1 << int(data_type))
+        else:
+            session.account_data_mask &= ~(1 << int(data_type))
+
+    if seeded_types:
+        Logger.info(
+            "[ACCOUNT_DATA] seeded defaults scope=%s owner_id=%s types=%s"
+            % (
+                "character" if per_character else "account",
+                int(owner_id),
+                ",".join(str(v) for v in seeded_types),
+            )
+        )
 
 
-def _load_global_account_data() -> None:
-    if int(getattr(session, "account_id", 0) or 0) <= 0:
+def _load_global_account_data(account_id: int | None = None) -> None:
+    owner_id = int(account_id if account_id is not None else getattr(session, "account_id", 0) or 0)
+    if owner_id <= 0:
         return
-    _load_account_data_scope(int(session.account_id), per_character=False)
+    _load_account_data_scope(owner_id, per_character=False)
 
 
-def _load_character_account_data() -> None:
-    if int(getattr(session, "char_guid", 0) or 0) <= 0:
+def _load_character_account_data(char_guid: int | None = None) -> None:
+    owner_id = int(char_guid if char_guid is not None else getattr(session, "char_guid", 0) or 0)
+    if owner_id <= 0:
         return
-    _load_account_data_scope(int(session.char_guid), per_character=True)
+    _load_account_data_scope(owner_id, per_character=True)
+
+
+def _persist_account_data_entry(
+    data_type: int,
+    account_text: str,
+    timestamp: int,
+) -> bool:
+    if not 0 <= int(data_type) < 8:
+        return False
+
+    if USE_DB_ACCOUNT_DATA_137 and int(data_type) not in _DB_ACCOUNT_DATA_137_TYPES:
+        return False
+
+    is_global = _is_global_account_data_type(int(data_type))
+    owner_id = int(session.account_id or 0) if is_global else int(session.char_guid or 0)
+    if owner_id <= 0:
+        return False
+
+    return DatabaseConnection.save_account_data(
+        owner_id,
+        int(data_type),
+        int(timestamp or 0),
+        str(account_text or ""),
+        per_character=not is_global,
+    )
+
+
+def _flush_account_data_types_to_db(
+    data_types: tuple[int, ...],
+    *,
+    seed_defaults: bool = False,
+) -> None:
+    now = int(time.time())
+    saved_types: list[int] = []
+
+    for data_type in data_types:
+        data_type = int(data_type)
+        stored_text = session.account_data.get(data_type)
+        if stored_text is None:
+            if not seed_defaults:
+                continue
+            stored_text = _account_data_text_for_type(data_type, str(session.account_name or ""))
+            session.account_data[data_type] = stored_text
+
+        timestamp = int(session.account_data_times.get(data_type) or now)
+        session.account_data_times[data_type] = timestamp
+        if stored_text:
+            session.account_data_mask |= (1 << data_type)
+        else:
+            session.account_data_mask &= ~(1 << data_type)
+
+        if _persist_account_data_entry(data_type, str(stored_text or ""), timestamp):
+            saved_types.append(data_type)
+
+    if saved_types:
+        Logger.info(
+            "[ACCOUNT_DATA] flushed types=%s to DB"
+            % ",".join(str(v) for v in saved_types)
+        )
 
 
 _ACCOUNT_DATA_PAYLOAD_CACHE: dict[tuple[int, int], bytes] = {}
@@ -3041,8 +3618,23 @@ def _save_session_position(*, online: int | None = None, force: bool = False) ->
         return False
 
     now = time.time()
-    if not force and not getattr(session, "position_dirty", False):
+    position_dirty = bool(getattr(session, "position_dirty", False))
+    if not force and not position_dirty:
         return False
+    if force and not position_dirty and online is not None:
+        Logger.info(
+            "[Position] state-only save guid=%s name=%s online=%s force=%s",
+            int(session.char_guid),
+            str(getattr(session, "player_name", "") or ""),
+            online,
+            force,
+        )
+        return DatabaseConnection.save_character_online_state(
+            int(session.char_guid),
+            int(session.realm_id),
+            online=online,
+            logout_time=int(now) if online == 0 else None,
+        )
 
     persist_map_id = int(getattr(session, "persist_map_id", 0) or 0)
     persist_zone = int(getattr(session, "persist_zone", 0) or 0)
@@ -3113,6 +3705,8 @@ def handle_CMSG_LOGOUT_REQUEST(
 ) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     _log_cmsg(ctx)
     Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
+    if USE_DB_ACCOUNT_DATA_137:
+        _flush_account_data_types_to_db(_DB_ACCOUNT_DATA_137_TYPES, seed_defaults=True)
     _save_session_position(online=0, force=True)
 
     try:
@@ -3400,7 +3994,11 @@ def handle_CMSG_PLAYER_LOGIN(
         Logger.info("[WorldHandlers] PLAYER_LOGIN consuming deferred LOADING_SCREEN_NOTIFY show=0")
         responses.extend(_queue_world_bootstrap_transition(ctx))
 
+    Logger.info(f"[DEBUG] char_guid={session.char_guid}")
+    Logger.info(f"[DEBUG] account_id={session.account_id}")
+    Logger.info(f"[DEBUG] loaded account_data keys={list(session.account_data.keys())}")
     Logger.info("[WorldHandlers] PLAYER_LOGIN queued player login bundle")
+    
     return 0, responses
 
 def handle_CMSG_LOADING_SCREEN_NOTIFY(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
@@ -3534,6 +4132,14 @@ def handle_CMSG_REQUEST_ACCOUNT_DATA(ctx: PacketContext):
     stored_text = session.account_data.get(int(data_type))
     if stored_text is None:
         stored_text = _account_data_text_for_type(int(data_type), str(session.account_name or ""))
+
+    normalized_text = _normalize_account_data_text(int(data_type), str(stored_text or ""))
+    if normalized_text != str(stored_text or ""):
+        stored_text = normalized_text
+        session.account_data[int(data_type)] = stored_text
+        stored_timestamp = int(session.account_data_times.get(int(data_type)) or time.time())
+        session.account_data_times[int(data_type)] = stored_timestamp
+        _persist_account_data_entry(int(data_type), stored_text, stored_timestamp)
 
     stored_timestamp = session.account_data_times.get(int(data_type))
     response = _build_update_account_data_payload(
@@ -3840,15 +4446,7 @@ def handle_CMSG_UPDATE_ACCOUNT_DATA(ctx: PacketContext):
             session.account_data_mask |= (1 << data_type)
         else:
             session.account_data_mask &= ~(1 << data_type)
-        owner_id = int(session.account_id or 0) if _is_global_account_data_type(data_type) else int(session.char_guid or 0)
-        if owner_id > 0:
-            DatabaseConnection.save_account_data(
-                owner_id,
-                data_type,
-                timestamp,
-                account_text,
-                per_character=not _is_global_account_data_type(data_type),
-            )
+        _persist_account_data_entry(data_type, account_text, timestamp)
 
     preview = account_text[:120].replace("\r", "\\r").replace("\n", "\\n")
     Logger.info(
@@ -3916,6 +4514,13 @@ def handle_CMSG_SET_ACTIVE_MOVER(ctx: PacketContext):
     if responses:
         return 0, responses
 
+    # Save position when player is fully in world
+    _capture_persist_position_from_session()
+    _mark_position_dirty()
+    _save_session_position(online=1, force=True)
+
+    # Logger.info("[Teleport] Position saved after world entry")
+    responses.extend(_build_minimal_post_timesync_account_packets(ctx.session))
     Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; no additional bootstrap packets sent")
     return 0, None
 
@@ -4031,3 +4636,93 @@ opcode_handlers: Dict[str, Callable[[PacketContext], Tuple[int, Optional[bytes]]
     "MSG_MOVE_SET_FACING": handle_MSG_MOVE_SET_FACING,
     "MSG_MOVE_FALL_LAND": handle_movement_packet,
 }
+
+USE_DB_ACCOUNT_DATA_137 = True
+
+_ORIG_handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES = handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES
+_ORIG_handle_CMSG_REQUEST_ACCOUNT_DATA = handle_CMSG_REQUEST_ACCOUNT_DATA
+
+
+def _account_data_times_types_for_mode():
+    return tuple(_GLOBAL_ACCOUNT_DATA_STORAGE_TYPES)
+
+
+def handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(ctx):
+    if not USE_DB_ACCOUNT_DATA_137:
+        return _ORIG_handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(ctx)
+
+    session = ctx.session
+    account_id = int(getattr(session, "account_id", 0) or 0)
+    char_guid = int(getattr(session, "char_guid", 0) or 0)
+
+    if account_id:
+        _load_global_account_data(account_id)
+    if char_guid:
+        _load_character_account_data(char_guid)
+
+    global _GLOBAL_ACCOUNT_DATA_TYPES
+    original_types = _GLOBAL_ACCOUNT_DATA_TYPES
+    try:
+        _GLOBAL_ACCOUNT_DATA_TYPES = _account_data_times_types_for_mode()
+        Logger.info(
+            "[ACCOUNT_DATA] mode=db times types=%s"
+            % ",".join(str(v) for v in _GLOBAL_ACCOUNT_DATA_TYPES)
+        )
+        return _ORIG_handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES(ctx)
+    finally:
+        _GLOBAL_ACCOUNT_DATA_TYPES = original_types
+
+
+def handle_CMSG_REQUEST_ACCOUNT_DATA(ctx):
+    if not USE_DB_ACCOUNT_DATA_137:
+        return _ORIG_handle_CMSG_REQUEST_ACCOUNT_DATA(ctx)
+
+    session = ctx.session
+    account_id = int(getattr(session, "account_id", 0) or 0)
+    char_guid = int(getattr(session, "char_guid", 0) or 0)
+
+    if account_id:
+        _load_global_account_data(account_id)
+    if char_guid:
+        _load_character_account_data(char_guid)
+
+    Logger.info("[ACCOUNT_DATA] mode=db request using preloaded global+character data")
+    return _ORIG_handle_CMSG_REQUEST_ACCOUNT_DATA(ctx)
+
+
+##  test things --
+
+def _build_minimal_post_timesync_account_packets(session) -> list[tuple[str, bytes]]:
+    if getattr(session, "account_data_captures_sent", False):
+        return []
+
+    responses: list[tuple[str, bytes]] = []
+
+    data_types = (1, 3, 7)
+
+    for data_type in data_types:
+        stored_text = session.account_data.get(data_type)
+        if not stored_text:
+            continue
+
+        timestamp = int(session.account_data_times.get(data_type) or time.time())
+
+        payload = _build_update_account_data_payload(
+            data_type,
+            stored_text,
+            timestamp=timestamp,
+            guid=int(getattr(session, "world_guid", 0) or 0),
+        )
+
+        Logger.info(f"[ACCOUNT_DATA][AUTO] type={data_type} size={len(payload)}")
+
+        responses.append(("SMSG_UPDATE_ACCOUNT_DATA", payload))
+
+    session.account_data_captures_sent = True
+    return responses
+
+
+
+# Refresh opcode routing so the late-bound wrappers above are actually used.
+opcode_handlers["CMSG_READY_FOR_ACCOUNT_DATA_TIMES"] = handle_CMSG_READY_FOR_ACCOUNT_DATA_TIMES
+opcode_handlers["CMSG_REQUEST_ACCOUNT_DATA"] = handle_CMSG_REQUEST_ACCOUNT_DATA

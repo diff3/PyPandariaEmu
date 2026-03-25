@@ -120,6 +120,51 @@ def _get_shared_world_session():
     return getattr(world_handlers, "session", None)
 
 
+def _seed_character_account_data_defaults(char_guid: int) -> None:
+    if int(char_guid or 0) <= 0:
+        return
+
+    try:
+        from server.modules.handlers import WorldHandlers as world_handlers
+    except Exception as exc:
+        Logger.warning(
+            f"[CHAR CREATE] account-data seed skipped guid={char_guid}: {exc}"
+        )
+        return
+
+    now = int(time.time())
+    account_name = ""
+    shared_session = _get_shared_world_session()
+    if shared_session is not None:
+        account_name = str(getattr(shared_session, "account_name", "") or "")
+
+    seeded_types: list[int] = []
+    for data_type in (1, 3, 7):
+        data_text = world_handlers._account_data_text_for_type(data_type, account_name)
+        data_text = world_handlers._normalize_account_data_text(
+            data_type,
+            str(data_text or ""),
+        )
+        if not DatabaseConnection.save_account_data(
+            int(char_guid),
+            int(data_type),
+            now,
+            str(data_text or ""),
+            per_character=True,
+        ):
+            Logger.warning(
+                f"[CHAR CREATE] failed to seed character_account_data guid={char_guid} type={data_type}"
+            )
+            continue
+        seeded_types.append(int(data_type))
+
+    if seeded_types:
+        Logger.info(
+            "[CHAR CREATE] seeded character_account_data guid=%s types=%s"
+            % (int(char_guid), ",".join(str(v) for v in seeded_types))
+        )
+
+
 def _get_auth_response_template() -> dict:
     return _load_template("SMSG_AUTH_RESPONSE")
 
@@ -1123,6 +1168,8 @@ def handle_CMSG_CHAR_CREATE(ctx: PacketContext):
         realm_id = int(row.realm)
         result = CHAR_CREATE_SUCCESS
         Logger.success(f"[CHAR CREATE] Created character '{name}' GUID={guid}")
+
+        _seed_character_account_data_defaults(int(guid))
 
         try:
             DatabaseConnection.apply_playercreateinfo_to_character(
