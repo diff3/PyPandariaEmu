@@ -25,6 +25,7 @@ from server.session.world_session import WorldSession
 from server.session.runtime import bind_world_session, clear_world_session
 from world.mount.mount_service import load_mount_spells
 from world.teleport.teleport_service import load_teleports
+from world.state.global_state import global_state
 
 try:
     from server.modules.handlers.WorldHandlers import (
@@ -237,6 +238,7 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
     conn_session = WorldSession()
     bind_world_session(conn_session)
+    send_lock = threading.Lock()
 
     if reset_handler_state:
         reset_handler_state()
@@ -247,6 +249,53 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
     state = WorldState.NEW
     encrypted = False
+
+    def _send_normalized_responses(target_sock: socket.socket, responses) -> None:
+        normalized = normalize_responses(responses)
+        if not normalized:
+            return
+
+        with send_lock:
+            for item in normalized:
+                if len(item) == 2:
+                    opcode_name, payload = item
+                    is_raw = False
+                else:
+                    opcode_name, payload, is_raw = item
+
+                if is_raw:
+                    if should_log_packet("worldserver", opcode_name):
+                        Logger.info(
+                            f"[WorldServer] S→C {opcode_name} (RAW passthrough, size={len(payload)})"
+                        )
+                    log_raw_packet("worldserver", opcode_name, f"[WorldServer] S→C RAW {opcode_name}", payload)
+                    target_sock.sendall(payload)
+                    continue
+
+                opcode_s = SERVER_OPCODE_BY_NAME[opcode_name]
+                size = len(payload)
+
+                if opcode_s == AUTH_RESPONSE_OPCODE:
+                    size += 4
+
+                if encrypted:
+                    packed = crypto.pack_data(opcode_s, size)
+                    header = crypto.encrypt_send(packed)
+                else:
+                    header = build_world_header_plain(opcode_s, payload)
+
+                if should_log_packet("worldserver", opcode_name):
+                    Logger.info(
+                        f"[WorldServer] S→C {opcode_name} "
+                        f"(0x{opcode_s:04X}) encrypted={encrypted} size={len(payload)}"
+                    )
+                log_raw_packet("worldserver", opcode_name, f"[WorldServer] S→C RAW {opcode_name}", header + payload)
+
+                target_sock.sendall(header)
+                target_sock.sendall(payload)
+
+    conn_session.global_state = global_state
+    conn_session.send_response = lambda responses: _send_normalized_responses(sock, responses)
 
     try:
         # ---- SERVER → CLIENT HANDSHAKE ----
@@ -364,47 +413,7 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                         return
 
                 # ---- SEND SERVER RESPONSES ----
-                responses = normalize_responses(response)
-
-                for item in responses:
-                    # Backward compatible unpack
-                    if len(item) == 2:
-                        opcode_name, payload = item
-                        is_raw = False
-                    else:
-                        opcode_name, payload, is_raw = item
-
-                    if is_raw:
-                        if should_log_packet("worldserver", opcode_name):
-                            Logger.info(
-                                f"[WorldServer] S→C {opcode_name} (RAW passthrough, size={len(payload)})"
-                            )
-                        log_raw_packet("worldserver", opcode_name, f"[WorldServer] S→C RAW {opcode_name}", payload)
-                        sock.sendall(payload)
-                        continue
-
-                    # ---- Normal (non-RAW) packet path ----
-                    opcode_s = SERVER_OPCODE_BY_NAME[opcode_name]
-                    size = len(payload)
-
-                    if opcode_s == AUTH_RESPONSE_OPCODE:
-                        size += 4  # MoP quirk
-
-                    if encrypted:
-                        packed = crypto.pack_data(opcode_s, size)
-                        header = crypto.encrypt_send(packed)
-                    else:
-                        header = build_world_header_plain(opcode_s, payload)
-
-                    if should_log_packet("worldserver", opcode_name):
-                        Logger.info(
-                            f"[WorldServer] S→C {opcode_name} "
-                            f"(0x{opcode_s:04X}) encrypted={encrypted} size={len(payload)}"
-                        )
-                    log_raw_packet("worldserver", opcode_name, f"[WorldServer] S→C RAW {opcode_name}", header + payload)
-
-                    sock.sendall(header)
-                    sock.sendall(payload)
+                _send_normalized_responses(sock, response)
 
     except Exception as exc:
         Logger.error(f"[WorldServer] error: {exc}")

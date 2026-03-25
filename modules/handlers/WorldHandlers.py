@@ -82,6 +82,7 @@ from world.mount.mount_service import (
     granted_mount_spells,
     is_mount_spell,
 )
+from world.chat.router import chat_router
 from world.position.position_service import (
     POSITION_AUTOSAVE_DISTANCE_THRESHOLD,
     POSITION_DEBUG_ENABLED,
@@ -94,6 +95,8 @@ from world.position.position_service import (
     position_moved_enough,
     save_player_position,
 )
+from world.state.global_state import global_state
+from world.state.region_manager import region_manager
 from world.teleport.teleport_service import (
     add_teleport as add_named_teleport,
     find_teleport,
@@ -296,6 +299,57 @@ _CHAT_TYPE_BY_OPCODE = {
 
 def _notification_response(message: str) -> list[tuple[str, bytes]]:
     return [("SMSG_NOTIFICATION", _build_motd_notification_payload(message))]
+
+
+def compute_weather(global_time, map_id, seed):
+    states = ("sunny", "rainy", "snowy")
+    index = hash((int(global_time) // 300, int(map_id), int(seed))) % len(states)
+    return states[int(index)]
+
+
+def _refresh_region_weather(target_session) -> None:
+    state = getattr(target_session, "global_state", None)
+    region = getattr(target_session, "region", None)
+    if state is None or region is None:
+        return
+    region.weather = compute_weather(state.time, region.map_id, state.weather_seed)
+
+
+def _advance_global_time(delta: int = 1) -> None:
+    global_state.time = int(getattr(global_state, "time", 0) or 0) + int(delta)
+
+
+def _detach_session_from_world_state(target_session) -> None:
+    region = getattr(target_session, "region", None)
+    if region is not None:
+        region.players.discard(target_session)
+    state = getattr(target_session, "global_state", None)
+    if state is not None:
+        state.chat_channels.setdefault("world", set()).discard(target_session)
+    target_session.region = None
+
+
+def _attach_session_to_world_state(target_session, *, map_id: int) -> None:
+    _detach_session_from_world_state(target_session)
+    target_session.global_state = global_state
+    target_session.region = region_manager.get_region(int(map_id))
+    target_session.region.players.add(target_session)
+    target_session.global_state.chat_channels.setdefault("world", set()).add(target_session)
+    _refresh_region_weather(target_session)
+
+
+def _transition_session_region(target_session, *, new_map_id: int) -> None:
+    _attach_session_to_world_state(target_session, map_id=int(new_map_id))
+
+
+def _dispatch_responses_to_sessions(targets, responses) -> None:
+    normalized_targets = list(targets or [])
+    if not normalized_targets or not responses:
+        return
+    for target in normalized_targets:
+        sender = getattr(target, "send_response", None)
+        if callable(sender):
+            sender(responses)
 
 
 def teleport_player(player, map_id: int, x: float, y: float, z: float, orientation: float, *, destination_name: str) -> list[tuple[str, bytes]]:
@@ -1459,6 +1513,7 @@ def _queue_teleport_world_transition(ctx: WorldLoginContext) -> list[tuple[str, 
     session.post_loading_sent = True
     session.teleport_pending = False
     session.teleport_destination = None
+    _transition_session_region(session, new_map_id=int(getattr(session, "map_id", 0) or 0))
     _capture_persist_position_from_session()
     _mark_position_dirty()
     _save_session_position(reason="teleport", online=1, force=True)
@@ -2146,16 +2201,21 @@ def _handle_chat_message(ctx: PacketContext):
             message=message,
         )
     notification_payload = _build_motd_notification_payload(message)
-    responses: list[tuple[str, bytes]] = [
-        ("SMSG_MESSAGECHAT", payload_out),
-        ("SMSG_NOTIFICATION", notification_payload),
-    ]
+    chat_response = ("SMSG_MESSAGECHAT", payload_out)
+    targets = chat_router.get_targets(session, "say")
+    dispatched = False
+    if targets:
+        _dispatch_responses_to_sessions(targets, [chat_response])
+        dispatched = True
 
-    raw_replay_messagechat = _build_raw_replay_messagechat_packet(
-        profile=RAW_REPLAY_SAY_CHAT_PROFILE,
-    )
+    responses: list[tuple[str, bytes]] = [("SMSG_NOTIFICATION", notification_payload)]
+
+    raw_replay_messagechat = _build_raw_replay_messagechat_packet(profile=RAW_REPLAY_SAY_CHAT_PROFILE)
     if raw_replay_messagechat is not None:
         responses.append(raw_replay_messagechat)
+
+    if not dispatched:
+        responses.insert(0, chat_response)
 
     return 0, responses
 
@@ -3763,6 +3823,8 @@ def reset_state() -> None:
     """
     Called by worldserver on new connections.
     """
+    _detach_session_from_world_state(session)
+    session.global_state = global_state
     session.account_id = None
     session.account_name = None
     session.realm_id = None
@@ -4232,6 +4294,7 @@ def handle_CMSG_PLAYER_LOGIN(
         if value.strip()
     ]
     session.player_name = selected_name
+    _attach_session_to_world_state(session, map_id=int(session.map_id))
 
     # --------------------------------------------------
     # Spells / actions (create info)
@@ -4344,6 +4407,8 @@ def handle_CMSG_TIME_SYNC_RESPONSE(ctx: PacketContext):
 
     session.last_time_sync_seq = seq
     session.time_sync_ok = True
+    _advance_global_time(1)
+    _refresh_region_weather(session)
 
     Logger.success(
         f"[TIME_SYNC] OK seq={seq} client_ticks={client_ticks}"
@@ -4683,6 +4748,8 @@ def handle_disconnect() -> None:
     _capture_persist_position_from_session()
     _mark_position_dirty()
     _save_session_position(reason="disconnect", online=0, force=True)
+    _detach_session_from_world_state(session)
+    session.send_response = None
     _reset_login_flow_state()
 
 

@@ -70,6 +70,8 @@ class WorldSession:
     account_name: Optional[str] = None
     player_name: Optional[str] = None
     realm_id: Optional[int] = None
+    global_state: Any = None
+    region: Any = None
 
     # --------------------------------------------------
     # GUIDs
@@ -141,6 +143,7 @@ class WorldSession:
     loading_screen_done: bool = False
     post_loading_sent: bool = False
     player_object_sent: bool = False
+    send_response: Any = None
     pending_account_data_requests: List[int] = field(default_factory=list)
     teleport_pending: bool = False
     teleport_destination: Optional[str] = None
