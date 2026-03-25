@@ -16,6 +16,7 @@ class PacketContext:
     payload: bytes
     decoded: dict[str, Any] = field(default_factory=dict)
     session: Any = None
+    connection_ctx: Any = None
     account_id: int | None = None
     realm_id: int | None = None
 
