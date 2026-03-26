@@ -27,6 +27,7 @@ from server.modules.handlers.world.chat.codec import (
 )
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
+from server.modules.handlers.world.opcodes import entities as entities_handlers
 from server.modules.handlers.world.opcodes.movement import (
     _capture_persist_position_from_session as capture_persist_position_from_session,
     _mark_position_dirty as mark_position_dirty,
@@ -55,13 +56,50 @@ def _notification_response(message: str) -> list[tuple[str, bytes]]:
     return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
 
 
-def _sniffed_messagechat_response() -> list[tuple[str, bytes]]:
-    capture_path = get_captures_root(focus=True) / "debug" / RAW_SNIFFED_MESSAGECHAT_CAPTURE
+def _debug_feedback_response(message: str) -> list[tuple[str, bytes]]:
+    return [
+        ("SMSG_NOTIFICATION", build_motd_notification_payload(message)),
+        ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message)),
+    ]
+
+
+def _list_sniffed_messagechat_captures() -> list[str]:
+    capture_dir = get_captures_root(focus=True) / "debug"
+    return sorted(path.name for path in capture_dir.glob("SMSG_MESSAGECHAT*.json"))
+
+
+def _sniffed_messagechat_response(capture_name: str | None = None) -> list[tuple[str, bytes]]:
+    selected_capture = str(capture_name or RAW_SNIFFED_MESSAGECHAT_CAPTURE)
+    capture_path = get_captures_root(focus=True) / "debug" / selected_capture
     if not capture_path.exists():
         Logger.warning(f"[CHAT][SNIFF] missing capture path={capture_path}")
-        return _notification_response(f"Missing chat sniff: {RAW_SNIFFED_MESSAGECHAT_CAPTURE}")
+        return _notification_response(f"Missing chat sniff: {selected_capture}")
     opcode_name, payload = send_raw_packet(None, "SMSG_MESSAGECHAT", capture_path)
     return [(opcode_name, payload)]
+
+
+def _namequery_response(session, query_arg: str) -> list[tuple[str, bytes]]:
+    query_value = str(query_arg or "").strip().lower()
+    if query_value in ("", "self", "me"):
+        guid = int(getattr(session, "world_guid", 0) or 0)
+    else:
+        try:
+            numeric = int(query_value, 16) if query_value.startswith("0x") else int(query_value)
+        except ValueError:
+            return _notification_response("Usage: send namequery <self|guid>")
+        if numeric <= 0:
+            return _notification_response("Usage: send namequery <self|guid>")
+        guid = numeric
+        if guid <= 0xFFFFFFFF:
+            realm_id = int(getattr(session, "realm_id", 0) or 0)
+            guid = (int(realm_id & 0xFFFF) << 40) | (0x0003 << 48) | int(guid & 0xFFFFFFFF)
+
+    if guid <= 0:
+        return _notification_response("No valid guid for namequery")
+
+    payload = entities_handlers.build_query_player_name_response(session, guid)
+    Logger.info(f"[CHAT][NAMEQUERY] guid=0x{int(guid):016X} size={len(payload)}")
+    return [("SMSG_QUERY_PLAYER_NAME_RESPONSE", payload)]
 
 
 def _dispatch_responses_to_sessions(targets, responses) -> None:
@@ -371,9 +409,82 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
 def _handle_chat_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
     command = str(message or "").strip()
 
-    if command.lower() == ".sniffchat":
+    command_lower = command.lower()
+
+    if command_lower == ".sniffchat":
         Logger.info(f"[CHAT][SNIFF] replay source={RAW_SNIFFED_MESSAGECHAT_CAPTURE}")
-        return _sniffed_messagechat_response()
+        responses = _debug_feedback_response(f"send chatsniff 1: {RAW_SNIFFED_MESSAGECHAT_CAPTURE}")
+        responses.extend(_sniffed_messagechat_response())
+        return responses
+
+    send_prefixes = (".send chatsniff", "send chatsniff")
+    if command_lower.startswith(send_prefixes):
+        parts = command.split()
+        captures = _list_sniffed_messagechat_captures()
+        if not captures:
+            return _notification_response("No sniff chat captures found")
+
+        capture_index = 1
+        if len(parts) >= 3:
+            try:
+                capture_index = int(parts[2])
+            except ValueError:
+                return _notification_response("Usage: .send chatsniff <1-n>")
+
+        if capture_index < 1 or capture_index > len(captures):
+            return _notification_response(
+                f"Usage: .send chatsniff <1-{len(captures)}>"
+            )
+
+        selected_capture = captures[capture_index - 1]
+        Logger.info(
+            f"[CHAT][SNIFF] replay index={capture_index}/{len(captures)} "
+            f"source={selected_capture}"
+        )
+        responses = _debug_feedback_response(
+            f"send chatsniff {capture_index}: {selected_capture}"
+        )
+        responses.extend(_sniffed_messagechat_response(selected_capture))
+        return responses
+
+    namequery_prefixes = (".send namequery", "send namequery")
+    if command_lower.startswith(namequery_prefixes):
+        parts = command.split(maxsplit=2)
+        query_arg = parts[2] if len(parts) >= 3 else "self"
+        responses = _debug_feedback_response(f"send namequery {query_arg}")
+        responses.extend(_namequery_response(session, query_arg))
+        return responses
+
+    chatsniffnq_prefixes = (".send chatsniffnq", "send chatsniffnq")
+    if command_lower.startswith(chatsniffnq_prefixes):
+        parts = command.split()
+        captures = _list_sniffed_messagechat_captures()
+        if not captures:
+            return _notification_response("No sniff chat captures found")
+
+        capture_index = 1
+        if len(parts) >= 3:
+            try:
+                capture_index = int(parts[2])
+            except ValueError:
+                return _notification_response("Usage: .send chatsniffnq <1-n>")
+
+        if capture_index < 1 or capture_index > len(captures):
+            return _notification_response(
+                f"Usage: .send chatsniffnq <1-{len(captures)}>"
+            )
+
+        selected_capture = captures[capture_index - 1]
+        Logger.info(
+            f"[CHAT][SNIFFNQ] replay index={capture_index}/{len(captures)} "
+            f"source={selected_capture}"
+        )
+        responses = _debug_feedback_response(
+            f"send chatsniffnq {capture_index}: {selected_capture}"
+        )
+        responses.extend(_namequery_response(session, "self"))
+        responses.extend(_sniffed_messagechat_response(selected_capture))
+        return responses
 
     return _handle_chat_command_old(session, message)
 
@@ -460,7 +571,9 @@ def _handle_chat_message(session, ctx: PacketContext):
             target_name="",
             message=message,
         )
-        return 0, [("SMSG_MESSAGECHAT", payload_out)]
+        responses = _debug_feedback_response(f"say: {message}")
+        responses.append(("SMSG_MESSAGECHAT", payload_out))
+        return 0, responses
 
     if USE_SYSTEM_CHAT_FALLBACK:
         payload_out = encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")
