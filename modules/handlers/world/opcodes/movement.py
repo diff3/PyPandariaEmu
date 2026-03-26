@@ -200,7 +200,14 @@ def parse_movement_info(
     if movement is not None:
         return movement
 
+    # Only HEARTBEAT gets the permissive fallback path. For the other movement
+    # opcodes, scanning arbitrary float windows in the payload can produce
+    # near-by x/y/z values but a bogus facing such as 0 or 2pi, which then gets
+    # persisted on logout/relogin.
     if opcode_name != "MSG_MOVE_HEARTBEAT":
+        return None
+
+    if opcode_name == "MSG_MOVE_HEARTBEAT":
         decoded = dsl_decode("MSG_MOVE_HEARTBEAT", payload, silent=True)
         movement = _extract_movement_from_decoded(session, decoded)
         if movement is not None:
