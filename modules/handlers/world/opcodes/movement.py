@@ -20,6 +20,7 @@ from server.modules.handlers.world.position.position_service import (
     position_moved_enough,
     save_player_position,
 )
+from server.modules.handlers.world.state.runtime import broadcast_player_state_update
 
 
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
@@ -560,6 +561,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                 float(getattr(session, "z", 0.0) or 0.0),
                 float(getattr(session, "orientation", 0.0) or 0.0),
             )
+            broadcast_player_state_update(session)
             return 0, None
         Logger.warning(
             f"[Movement] failed to parse {opcode_name} guid=0x{_player_guid(session):X} "
@@ -604,6 +606,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     _mark_position_dirty(session)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _maybe_periodic_position_save(session)
+    broadcast_player_state_update(session)
 
     Logger.debug(
         f"[MOVE] guid=0x{_player_guid(session):X} "
@@ -641,4 +644,5 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
         f"[MOVE] opcode=MSG_MOVE_SET_FACING guid=0x{_player_guid(session):X} "
         f"facing={session.orientation:.3f}"
     )
+    broadcast_player_state_update(session, force=True)
     return 0, None

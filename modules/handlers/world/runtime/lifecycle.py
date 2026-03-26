@@ -15,6 +15,7 @@ from server.modules.handlers.world.opcodes.movement import (
     _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.state.global_state import global_state
+from server.modules.handlers.world.state.runtime import broadcast_player_remove
 
 
 def get_auth_challenge() -> Optional[tuple[str, bytes]]:
@@ -39,6 +40,7 @@ def reset_state() -> None:
     state = getattr(session, "global_state", None)
     if state is not None:
         state.chat_channels.setdefault("world", set()).discard(session)
+        getattr(state, "sessions", set()).discard(session)
     session.region = None
     session.global_state = global_state
     session.account_id = None
@@ -75,13 +77,23 @@ def preload_cache() -> None:
 
 
 def handle_disconnect() -> None:
-    save_current_position_like_command(session, reason="disconnect", online=0, force=True)
-    region = getattr(session, "region", None)
+    handle_disconnect_session(session)
+
+
+def handle_disconnect_session(target_session) -> None:
+    if target_session is None or bool(getattr(target_session, "_disconnect_handled", False)):
+        return
+
+    target_session._disconnect_handled = True
+    broadcast_player_remove(target_session)
+    save_current_position_like_command(target_session, reason="disconnect", online=0, force=True)
+    region = getattr(target_session, "region", None)
     if region is not None:
-        region.players.discard(session)
-    state = getattr(session, "global_state", None)
+        region.players.discard(target_session)
+    state = getattr(target_session, "global_state", None)
     if state is not None:
-        state.chat_channels.setdefault("world", set()).discard(session)
-    session.region = None
-    session.send_response = None
-    login_handlers._reset_login_flow_state(session)
+        state.chat_channels.setdefault("world", set()).discard(target_session)
+        getattr(state, "sessions", set()).discard(target_session)
+    target_session.region = None
+    target_session.send_response = None
+    login_handlers._reset_login_flow_state(target_session)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import time
 from typing import Iterable
 
+from shared.Logger import Logger
 from server.modules.handlers.world.state.global_state import global_state
 from server.modules.handlers.world.state.region_manager import region_manager
 
@@ -108,6 +109,31 @@ def iter_world_sessions(state=None) -> list:
     return list(scoped_state.chat_channels.setdefault("world", set()) or ())
 
 
+def iter_active_sessions(state=None) -> list:
+    scoped_state = state or global_state
+    return list(getattr(scoped_state, "sessions", set()) or ())
+
+
+def _is_session_in_world(session) -> bool:
+    login_state = getattr(session, "login_state", None)
+    login_state_value = getattr(login_state, "value", login_state)
+    return (
+        session is not None
+        and callable(getattr(session, "send_response", None))
+        and str(login_state_value or "") == "IN_WORLD"
+        and int(getattr(session, "char_guid", 0) or 0) > 0
+    )
+
+
+def iter_in_world_sessions(*, state=None, map_id: int | None = None, region=None) -> list:
+    sessions = iter_active_sessions(state)
+    if region is not None:
+        sessions = [session for session in sessions if getattr(session, "region", None) is region]
+    if map_id is not None:
+        sessions = [session for session in sessions if int(getattr(session, "map_id", 0) or 0) == int(map_id)]
+    return [session for session in sessions if _is_session_in_world(session)]
+
+
 def iter_region_sessions(target_session=None, *, region=None, map_id: int | None = None) -> list:
     target_region = region
     if target_region is None and target_session is not None:
@@ -126,11 +152,16 @@ def attach_session_to_world_state(target_session, *, map_id: int) -> None:
     state = getattr(target_session, "global_state", None)
     if state is not None:
         state.chat_channels.setdefault("world", set()).discard(target_session)
+        getattr(state, "sessions", set()).discard(target_session)
     target_session.region = None
     target_session.global_state = global_state
     target_session.region = region_manager.get_region(int(map_id))
     target_session.region.players.add(target_session)
     target_session.global_state.chat_channels.setdefault("world", set()).add(target_session)
+    target_session.global_state.sessions.add(target_session)
+    target_session._multiplayer_removed = False
+    target_session._multiplayer_last_broadcast_at = 0.0
+    target_session._multiplayer_last_broadcast_key = None
     target_session.time_offset = int(getattr(target_session.global_state, "time_offset", 0) or 0)
     target_session.time_speed = float(getattr(target_session.global_state, "time_speed", 0.01666667) or 0.01666667)
     target_session.server_time = int(time.time())
@@ -147,7 +178,21 @@ def dispatch_responses_to_sessions(targets, responses) -> None:
     for target in normalized_targets:
         sender = getattr(target, "send_response", None)
         if callable(sender):
-            sender(responses)
+            try:
+                sender(responses)
+            except Exception as exc:
+                Logger.warning(
+                    f"[MULTI] send failed player={int(getattr(target, 'char_guid', 0) or 0)} "
+                    f"guid=0x{int(getattr(target, 'world_guid', 0) or 0):016X} err={exc}"
+                )
+                region = getattr(target, "region", None)
+                if region is not None:
+                    region.players.discard(target)
+                state = getattr(target, "global_state", None)
+                if state is not None:
+                    state.chat_channels.setdefault("world", set()).discard(target)
+                    getattr(state, "sessions", set()).discard(target)
+                target.send_response = None
 
 
 def _filtered_targets(targets: Iterable, *, exclude=None) -> list:
@@ -253,3 +298,146 @@ def broadcast_world_time(hour: int, minute: int, *, announce: str | None = None)
 
     if announce:
         broadcast_system_message(str(announce), scope="world")
+
+
+def _build_player_create_update_response(source_session) -> tuple[str, bytes] | None:
+    from server.modules.handlers.world.login.context import WorldLoginContext
+    from server.modules.handlers.world.login.packets import build_login_packet
+
+    if int(getattr(source_session, "char_guid", 0) or 0) <= 0:
+        return None
+
+    ctx = WorldLoginContext.from_session(source_session)
+    ctx.exact_0002_mode = "barncastle"
+    ctx.exact_0002_remote_player = True
+    ctx.exact_0002_map_id = int(getattr(source_session, "map_id", 0) or 0)
+    ctx.exact_0002_low_guid = int(getattr(source_session, "char_guid", 0) or 0)
+    payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
+    if payload is None:
+        return None
+    return ("SMSG_UPDATE_OBJECT", payload)
+
+
+def _build_player_remove_update_response(source_session) -> tuple[str, bytes] | None:
+    from server.modules.handlers.world.login.context import WorldLoginContext
+    from server.modules.handlers.world.login.packets import build_login_packet
+
+    low_guid = int(getattr(source_session, "char_guid", 0) or 0)
+    if low_guid <= 0:
+        return None
+
+    ctx = WorldLoginContext.from_session(source_session)
+    ctx.exact_0007_map_id = int(getattr(source_session, "map_id", 0) or 0)
+    ctx.exact_0007_out_of_range_guids = [low_guid]
+    payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613205_0007", ctx)
+    if payload is None:
+        return None
+    return ("SMSG_UPDATE_OBJECT", payload)
+
+
+def sync_player_visibility(target_session) -> None:
+    if not _is_session_in_world(target_session):
+        return
+
+    same_map_sessions = iter_in_world_sessions(map_id=int(getattr(target_session, "map_id", 0) or 0))
+    other_sessions = [session for session in same_map_sessions if session is not target_session]
+    if not other_sessions:
+        return
+
+    target_create = _build_player_create_update_response(target_session)
+    for other in other_sessions:
+        other_create = _build_player_create_update_response(other)
+        if other_create is not None:
+            dispatch_responses_to_sessions([target_session], [other_create])
+        if target_create is not None:
+            dispatch_responses_to_sessions([other], [target_create])
+
+    Logger.info(
+        f"[MULTI] synced visibility player={int(getattr(target_session, 'char_guid', 0) or 0)} "
+        f"map={int(getattr(target_session, 'map_id', 0) or 0)} peers={len(other_sessions)}"
+    )
+
+
+def sync_all_players_on_map(map_id: int) -> None:
+    sessions = iter_in_world_sessions(map_id=int(map_id))
+    if len(sessions) < 2:
+        return
+
+    for target in sessions:
+        target_create = _build_player_create_update_response(target)
+        if target_create is None:
+            continue
+        for other in sessions:
+            if other is target:
+                continue
+            other_create = _build_player_create_update_response(other)
+            if other_create is not None:
+                dispatch_responses_to_sessions([target], [other_create])
+            dispatch_responses_to_sessions([other], [target_create])
+
+    Logger.info(
+        f"[MULTI] resynced map={int(map_id)} players={len(sessions)}"
+    )
+
+
+def broadcast_player_state_update(source_session, *, force: bool = False) -> None:
+    if not _is_session_in_world(source_session):
+        return
+
+    now = float(time.time())
+    key = (
+        int(getattr(source_session, "map_id", 0) or 0),
+        int(getattr(source_session, "char_guid", 0) or 0),
+        round(float(getattr(source_session, "x", 0.0) or 0.0), 3),
+        round(float(getattr(source_session, "y", 0.0) or 0.0), 3),
+        round(float(getattr(source_session, "z", 0.0) or 0.0), 3),
+        round(float(getattr(source_session, "orientation", 0.0) or 0.0), 3),
+    )
+    last_key = getattr(source_session, "_multiplayer_last_broadcast_key", None)
+    last_at = float(getattr(source_session, "_multiplayer_last_broadcast_at", 0.0) or 0.0)
+    if not force and key == last_key and (now - last_at) < 0.10:
+        return
+
+    create_response = _build_player_create_update_response(source_session)
+    if create_response is None:
+        return
+    remove_response = _build_player_remove_update_response(source_session)
+
+    peers = [
+        session
+        for session in iter_in_world_sessions(map_id=int(getattr(source_session, "map_id", 0) or 0))
+        if session is not source_session
+    ]
+    if not peers:
+        return
+
+    responses = []
+    if remove_response is not None:
+        responses.append(remove_response)
+    responses.append(create_response)
+    dispatch_responses_to_sessions(peers, responses)
+    source_session._multiplayer_last_broadcast_at = now
+    source_session._multiplayer_last_broadcast_key = key
+    source_session._multiplayer_removed = False
+
+
+def broadcast_player_remove(source_session) -> None:
+    if bool(getattr(source_session, "_multiplayer_removed", False)):
+        return
+
+    response = _build_player_remove_update_response(source_session)
+    if response is None:
+        return
+
+    peers = [
+        session
+        for session in iter_in_world_sessions(map_id=int(getattr(source_session, "map_id", 0) or 0))
+        if session is not source_session
+    ]
+    if peers:
+        dispatch_responses_to_sessions(peers, [response])
+        Logger.info(
+            f"[MULTI] removed player={int(getattr(source_session, 'char_guid', 0) or 0)} "
+            f"map={int(getattr(source_session, 'map_id', 0) or 0)} peers={len(peers)}"
+        )
+    source_session._multiplayer_removed = True

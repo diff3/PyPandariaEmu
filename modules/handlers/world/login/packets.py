@@ -1129,6 +1129,11 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0002(_ctx=None) -> bytes:
         built = _build_live_update_object_1773613176_0002_payload(ctx)
         map_id = struct.unpack_from("<H", built, 0)[0]
         active_mode = "full-capture"
+    if bool(getattr(ctx, "exact_0002_remote_player", False)):
+        patched = bytearray(built)
+        _patch_update_object_1773613176_0002_remote_flags(patched)
+        built = bytes(patched)
+        active_mode = f"{active_mode}-remote"
     Logger.info(
         f"[UPDATE_OBJECT BUILD] 0002 mode={active_mode} map_id={map_id} packet_size={len(built)}"
     )
@@ -1311,6 +1316,20 @@ def _build_barncastle_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
         offset_adjust=_MINIMAL_UPDATE_OBJECT_1773613176_0002_OFFSET_ADJUST,
     )
     return bytes(payload)
+
+
+def _patch_update_object_1773613176_0002_remote_flags(payload: bytearray) -> None:
+    """
+    Multiplayer reuses the 0002 player-create template for remote characters.
+    That template is originally tuned for the locally controlled player, and one
+    top-level bit causes the receiving client to treat the other player as
+    locally owned/active. Clear that bit for remote players only.
+    """
+    remote_flag_offset = 14
+    remote_self_bit = 0x40
+    if len(payload) <= remote_flag_offset:
+        return
+    payload[remote_flag_offset] &= (~remote_self_bit) & 0xFF
 
 
 def _build_live_update_object_1773613176_0002_payload(ctx: Any) -> bytes:

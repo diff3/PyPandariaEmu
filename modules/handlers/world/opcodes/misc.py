@@ -37,7 +37,11 @@ from server.modules.handlers.world.opcodes.movement import (
     _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
-from server.modules.handlers.world.state.runtime import advance_global_time, refresh_region_weather
+from server.modules.handlers.world.state.runtime import (
+    advance_global_time,
+    broadcast_player_remove,
+    refresh_region_weather,
+)
 
 def _build_request_cemetery_list_response_payload(
     cemetery_ids: list[int] | None = None,
@@ -71,6 +75,7 @@ def handle_ping(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
 def handle_logout_request(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     log_cmsg(ctx)
     Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
+    broadcast_player_remove(session)
     if USE_DB_ACCOUNT_DATA_137:
         flush_account_data_types_to_db(session, tuple(DB_ACCOUNT_DATA_137_TYPES), seed_defaults=True)
     save_current_position_like_command(session, reason="logout", online=0, force=True)

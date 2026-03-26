@@ -55,7 +55,12 @@ from server.modules.handlers.world.position.position_service import (
     normalize_position,
     position_from_row,
 )
-from server.modules.handlers.world.state.runtime import attach_session_to_world_state, pack_wow_game_time
+from server.modules.handlers.world.state.runtime import (
+    attach_session_to_world_state,
+    pack_wow_game_time,
+    sync_all_players_on_map,
+    sync_player_visibility,
+)
 
 
 def _resolve_session_ids(session) -> Tuple[Optional[int], Optional[int]]:
@@ -708,6 +713,8 @@ def handle_set_active_mover(session, ctx: PacketContext):
 
     _assert_player_object_sent(session)
     _set_login_state(session, LoginState.IN_WORLD)
+    sync_player_visibility(session)
+    sync_all_players_on_map(int(getattr(session, "map_id", 0) or 0))
     responses: list[tuple[str, bytes]] = []
     motd = str(getattr(_build_world_login_context(session), "motd", "") or "").strip()
     if motd and not session.chat_motd_sent:

@@ -565,14 +565,16 @@ def _handle_chat_message(session, ctx: PacketContext):
             target_name="",
             message=message,
         )
-        responses = [
-            (
-                "SMSG_MESSAGECHAT",
-                encode_skyfire_messagechat_system_payload(f"{player_name}: {message}"),
-            )
-        ]
-        responses.append(("SMSG_MESSAGECHAT", payload_out))
-        return 0, responses
+        system_chat_response = (
+            "SMSG_MESSAGECHAT",
+            encode_skyfire_messagechat_system_payload(f"{player_name}: {message}"),
+        )
+        say_chat_response = ("SMSG_MESSAGECHAT", payload_out)
+        targets = chat_router.get_targets(session, "say")
+        if targets:
+            _dispatch_responses_to_sessions(targets, [system_chat_response, say_chat_response])
+            return 0, None
+        return 0, [system_chat_response, say_chat_response]
 
     if USE_SYSTEM_CHAT_FALLBACK:
         payload_out = encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")

@@ -182,6 +182,41 @@ def _build_questgiver_status_payload(guid: int, status: int = 0) -> bytes:
     )
 
 
+def _decode_name_query_guid(payload: bytes) -> Optional[int]:
+    raw = bytes(payload or b"")
+    if not raw:
+        return None
+
+    # Best-effort fallback for the compact MoP payloads we see in practice,
+    # e.g. 50 00 11 01 00 00 00 where 0x11 is the queried low guid.
+    if len(raw) >= 3:
+        low_guid = int(raw[2]) & 0xFF
+        if low_guid:
+            return int(low_guid)
+
+    for value in reversed(raw):
+        candidate = int(value) & 0xFF
+        if candidate:
+            return candidate
+    return None
+
+
+def _find_session_by_guid(session, guid_hint: int):
+    if guid_hint <= 0:
+        return None
+
+    state = getattr(session, "global_state", None)
+    if state is not None:
+        for other in list(getattr(state, "sessions", set()) or ()):
+            if int(getattr(other, "world_guid", 0) or 0) == int(guid_hint):
+                return other
+            if int(getattr(other, "char_guid", 0) or 0) == int(guid_hint):
+                return other
+            if (int(getattr(other, "char_guid", 0) or 0) & 0xFF) == (int(guid_hint) & 0xFF):
+                return other
+    return None
+
+
 def build_query_player_name_response(session, guid: int) -> bytes:
     name = str(getattr(session, "player_name", "") or "").strip()
     realm = _get_realm_name()
@@ -241,22 +276,40 @@ def handle_creature_query(session, ctx: PacketContext) -> Tuple[int, Optional[li
 def handle_name_query(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     Logger.debug(f"[ENTITY] opcode={ctx.name}")
     Logger.info(f"[WorldHandlers] CMSG_NAME_QUERY payload={ctx.payload.hex(' ')}")
-    world_guid = int(getattr(session, "world_guid", 0) or 0)
-    player_name = (
-        str(getattr(session, "player_name", "") or "").strip()
-        or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
-    )
+
+    requested_guid_hint = _decode_name_query_guid(ctx.payload)
+    target_session = _find_session_by_guid(session, int(requested_guid_hint or 0))
+
+    if target_session is not None:
+        world_guid = int(getattr(target_session, "world_guid", 0) or 0)
+        player_name = (
+            str(getattr(target_session, "player_name", "") or "").strip()
+            or f"Player{int(getattr(target_session, 'char_guid', 0) or 0)}"
+        )
+        race = int(getattr(target_session, "race", 0) or 0)
+        gender = int(getattr(target_session, "gender", 0) or 0)
+        class_id = int(getattr(target_session, "class_id", 0) or 0)
+    else:
+        world_guid = int(getattr(session, "world_guid", 0) or 0)
+        player_name = (
+            str(getattr(session, "player_name", "") or "").strip()
+            or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
+        )
+        race = int(getattr(session, "race", 0) or 0)
+        gender = int(getattr(session, "gender", 0) or 0)
+        class_id = int(getattr(session, "class_id", 0) or 0)
+
     world_response = _build_name_query_response(
         world_guid,
         name=player_name,
         realm_name=_get_realm_name(),
-        race=int(getattr(session, "race", 0) or 0),
-        gender=int(getattr(session, "gender", 0) or 0),
-        class_id=int(getattr(session, "class_id", 0) or 0),
+        race=race,
+        gender=gender,
+        class_id=class_id,
     )
     Logger.info(
         f"[WorldHandlers] SMSG_QUERY_PLAYER_NAME_RESPONSE guid=0x{world_guid:016X} "
-        f"name={player_name!r} size={len(world_response)}"
+        f"name={player_name!r} size={len(world_response)} requested_hint=0x{int(requested_guid_hint or 0):X}"
     )
     return 0, [("SMSG_QUERY_PLAYER_NAME_RESPONSE", world_response)]
 

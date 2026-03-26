@@ -26,6 +26,7 @@ from server.session.runtime import bind_world_session, clear_world_session
 from server.modules.handlers.world.mount.mount_service import load_mount_spells
 from server.modules.handlers.world.teleport.teleport_service import load_teleports
 from server.modules.handlers.world.state.global_state import global_state
+from server.modules.handlers.world.runtime.lifecycle import handle_disconnect_session
 
 try:
     from server.modules.handlers.WorldHandlers import (
@@ -87,6 +88,8 @@ WORLD_HANDLERS = opcode_handlers
 HOST = config["worldserver"]["host"]
 PORT = config["worldserver"]["port"]
 running = True
+_ACTIVE_CLIENTS_LOCK = threading.Lock()
+_ACTIVE_CLIENTS: dict[int, tuple[socket.socket, object, tuple[str, int]]] = {}
 
 
 HANDSHAKE_SERVER = b"0\x00WORLD OF WARCRAFT CONNECTION - SERVER TO CLIENT\x00"
@@ -99,6 +102,29 @@ def sigint(sig, frame):
     global running
     Logger.info("Shutting down WorldServer (Ctrl+C)…")
     running = False
+
+
+def _shutdown_active_clients() -> None:
+    with _ACTIVE_CLIENTS_LOCK:
+        clients = list(_ACTIVE_CLIENTS.values())
+
+    if not clients:
+        return
+
+    Logger.info(f"[WorldServer] Closing {len(clients)} active world connection(s)")
+    for sock, conn_session, addr in clients:
+        try:
+            handle_disconnect_session(conn_session)
+        except Exception as exc:
+            Logger.warning(f"[WorldServer] graceful disconnect failed for {addr}: {exc}")
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            sock.close()
+        except Exception:
+            pass
 
 
 # ---- Utility helpers ----------------------------------------------------
@@ -238,7 +264,13 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
     conn_session = WorldSession()
     bind_world_session(conn_session)
+    conn_session.world_socket = sock
+    conn_session.remote_addr = addr
+    conn_session._disconnect_handled = False
     send_lock = threading.Lock()
+
+    with _ACTIVE_CLIENTS_LOCK:
+        _ACTIVE_CLIENTS[id(conn_session)] = (sock, conn_session, addr)
 
     if reset_handler_state:
         reset_handler_state()
@@ -419,12 +451,17 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
         Logger.error(f"[WorldServer] error: {exc}")
         Logger.error(traceback.format_exc())
     finally:
+        with _ACTIVE_CLIENTS_LOCK:
+            _ACTIVE_CLIENTS.pop(id(conn_session), None)
         try:
-            handle_disconnect()
+            handle_disconnect_session(conn_session)
         except Exception as exc:
             Logger.warning(f"[WorldServer] disconnect handler failed: {exc}")
         clear_world_session()
-        sock.close()
+        try:
+            sock.close()
+        except Exception:
+            pass
         Logger.info(f"[WorldServer] Closed connection from {addr}")
 
 # ---- Server loop --------------------------------------------------------
@@ -471,6 +508,7 @@ def run_world() -> None:
             Logger.error(traceback.format_exc())
 
     Logger.info("WorldServer stopping…")
+    _shutdown_active_clients()
     srv.close()
 
 

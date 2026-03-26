@@ -9,6 +9,7 @@ class GlobalState:
         self.time_speed = 0.01666667
         self.weather_seed = 12345
         self.chat_channels = {}
+        self.sessions = set()
 
 
 global_state = GlobalState()
