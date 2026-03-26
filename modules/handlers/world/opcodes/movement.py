@@ -327,10 +327,26 @@ def parse_movement_info(
     if movement is not None:
         return movement
 
-    # Only HEARTBEAT gets the permissive fallback path. For the other movement
-    # opcodes, scanning arbitrary float windows in the payload can produce
-    # near-by x/y/z values but a bogus facing such as 0 or 2pi, which then gets
-    # persisted on logout/relogin.
+    # For a few movement opcodes we can still salvage x/y/z from the raw payload,
+    # but we keep the current facing instead of trusting random float windows.
+    if opcode_name in {
+        "MSG_MOVE_START_FORWARD",
+        "MSG_MOVE_START_BACKWARD",
+        "MSG_MOVE_STOP",
+        "MSG_MOVE_FALL_LAND",
+        "MSG_MOVE_JUMP",
+    }:
+        movement = _extract_movement_from_payload(session, payload)
+        if movement is not None:
+            x, y, z, _ignored_orientation = movement
+            return (
+                float(x),
+                float(y),
+                float(z),
+                float(getattr(session, "orientation", 0.0) or 0.0),
+            )
+
+    # Only HEARTBEAT gets the permissive full fallback, including facing.
     if opcode_name != "MSG_MOVE_HEARTBEAT":
         return None
 
@@ -533,6 +549,7 @@ def _maybe_periodic_position_save(
 @register("MSG_MOVE_START_BACKWARD")
 @register("MSG_MOVE_STOP")
 @register("MSG_MOVE_HEARTBEAT")
+@register("MSG_MOVE_JUMP")
 @register("MSG_MOVE_START_TURN_LEFT")
 @register("MSG_MOVE_START_TURN_RIGHT")
 @register("MSG_MOVE_STOP_TURN")
@@ -561,7 +578,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                 float(getattr(session, "z", 0.0) or 0.0),
                 float(getattr(session, "orientation", 0.0) or 0.0),
             )
-            broadcast_player_state_update(session)
             return 0, None
         Logger.warning(
             f"[Movement] failed to parse {opcode_name} guid=0x{_player_guid(session):X} "

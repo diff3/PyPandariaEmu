@@ -299,8 +299,9 @@ def handle_name_query(session, ctx: PacketContext) -> Tuple[int, Optional[list[t
         gender = int(getattr(session, "gender", 0) or 0)
         class_id = int(getattr(session, "class_id", 0) or 0)
 
+    response_guid = int(requested_guid_hint or 0) or int(world_guid)
     world_response = _build_name_query_response(
-        world_guid,
+        response_guid,
         name=player_name,
         realm_name=_get_realm_name(),
         race=race,
@@ -308,7 +309,7 @@ def handle_name_query(session, ctx: PacketContext) -> Tuple[int, Optional[list[t
         class_id=class_id,
     )
     Logger.info(
-        f"[WorldHandlers] SMSG_QUERY_PLAYER_NAME_RESPONSE guid=0x{world_guid:016X} "
+        f"[WorldHandlers] SMSG_QUERY_PLAYER_NAME_RESPONSE guid=0x{response_guid:016X} "
         f"name={player_name!r} size={len(world_response)} requested_hint=0x{int(requested_guid_hint or 0):X}"
     )
     return 0, [("SMSG_QUERY_PLAYER_NAME_RESPONSE", world_response)]

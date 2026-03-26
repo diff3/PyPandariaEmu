@@ -162,6 +162,8 @@ def attach_session_to_world_state(target_session, *, map_id: int) -> None:
     target_session._multiplayer_removed = False
     target_session._multiplayer_last_broadcast_at = 0.0
     target_session._multiplayer_last_broadcast_key = None
+    target_session._multiplayer_last_resync_at = 0.0
+    target_session._multiplayer_last_resync_key = None
     target_session.time_offset = int(getattr(target_session.global_state, "time_offset", 0) or 0)
     target_session.time_speed = float(getattr(target_session.global_state, "time_speed", 0.01666667) or 0.01666667)
     target_session.server_time = int(time.time())
@@ -318,6 +320,39 @@ def _build_player_create_update_response(source_session) -> tuple[str, bytes] | 
     return ("SMSG_UPDATE_OBJECT", payload)
 
 
+def _build_player_name_response(source_session) -> tuple[str, bytes] | None:
+    from server.modules.handlers.world.opcodes.entities import build_query_player_name_response
+
+    if int(getattr(source_session, "char_guid", 0) or 0) <= 0:
+        return None
+
+    low_guid = int(getattr(source_session, "char_guid", 0) or 0) & 0xFF
+    return ("SMSG_QUERY_PLAYER_NAME_RESPONSE", build_query_player_name_response(source_session, low_guid))
+
+
+def _build_player_value_update_responses(source_session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.login.context import WorldLoginContext
+    from server.modules.handlers.world.login.packets import build_login_packet
+
+    if int(getattr(source_session, "world_guid", 0) or 0) <= 0:
+        return []
+
+    ctx = WorldLoginContext.from_session(source_session)
+    ctx.exact_0004_map_id = int(getattr(source_session, "map_id", 0) or 0)
+    ctx.exact_0004_guid = int(getattr(source_session, "world_guid", 0) or 0)
+    ctx.exact_0006_map_id = int(getattr(source_session, "map_id", 0) or 0)
+    ctx.exact_0006_guid = int(getattr(source_session, "world_guid", 0) or 0)
+
+    responses: list[tuple[str, bytes]] = []
+    payload_0004 = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0004", ctx)
+    if payload_0004 is not None:
+        responses.append(("SMSG_UPDATE_OBJECT", payload_0004))
+    payload_0006 = build_login_packet("SMSG_UPDATE_OBJECT_1773613185_0006", ctx)
+    if payload_0006 is not None:
+        responses.append(("SMSG_UPDATE_OBJECT", payload_0006))
+    return responses
+
+
 def _build_player_remove_update_response(source_session) -> tuple[str, bytes] | None:
     from server.modules.handlers.world.login.context import WorldLoginContext
     from server.modules.handlers.world.login.packets import build_login_packet
@@ -344,13 +379,25 @@ def sync_player_visibility(target_session) -> None:
     if not other_sessions:
         return
 
+    target_name = _build_player_name_response(target_session)
     target_create = _build_player_create_update_response(target_session)
     for other in other_sessions:
+        other_name = _build_player_name_response(other)
         other_create = _build_player_create_update_response(other)
+        responses_to_target: list[tuple[str, bytes]] = []
+        responses_to_other: list[tuple[str, bytes]] = []
+        if other_name is not None:
+            responses_to_target.append(other_name)
         if other_create is not None:
-            dispatch_responses_to_sessions([target_session], [other_create])
+            responses_to_target.append(other_create)
+        if target_name is not None:
+            responses_to_other.append(target_name)
         if target_create is not None:
-            dispatch_responses_to_sessions([other], [target_create])
+            responses_to_other.append(target_create)
+        if responses_to_target:
+            dispatch_responses_to_sessions([target_session], responses_to_target)
+        if responses_to_other:
+            dispatch_responses_to_sessions([other], responses_to_other)
 
     Logger.info(
         f"[MULTI] synced visibility player={int(getattr(target_session, 'char_guid', 0) or 0)} "
@@ -364,16 +411,28 @@ def sync_all_players_on_map(map_id: int) -> None:
         return
 
     for target in sessions:
+        target_name = _build_player_name_response(target)
         target_create = _build_player_create_update_response(target)
         if target_create is None:
             continue
         for other in sessions:
             if other is target:
                 continue
+            other_name = _build_player_name_response(other)
             other_create = _build_player_create_update_response(other)
+            responses_to_target: list[tuple[str, bytes]] = []
+            responses_to_other: list[tuple[str, bytes]] = []
+            if other_name is not None:
+                responses_to_target.append(other_name)
             if other_create is not None:
-                dispatch_responses_to_sessions([target], [other_create])
-            dispatch_responses_to_sessions([other], [target_create])
+                responses_to_target.append(other_create)
+            if target_name is not None:
+                responses_to_other.append(target_name)
+            responses_to_other.append(target_create)
+            if responses_to_target:
+                dispatch_responses_to_sessions([target], responses_to_target)
+            if responses_to_other:
+                dispatch_responses_to_sessions([other], responses_to_other)
 
     Logger.info(
         f"[MULTI] resynced map={int(map_id)} players={len(sessions)}"
@@ -398,10 +457,10 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
     if not force and key == last_key and (now - last_at) < 0.10:
         return
 
-    create_response = _build_player_create_update_response(source_session)
-    if create_response is None:
-        return
     remove_response = _build_player_remove_update_response(source_session)
+    create_response = _build_player_create_update_response(source_session)
+    if remove_response is None and create_response is None:
+        return
 
     peers = [
         session
@@ -411,13 +470,31 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
     if not peers:
         return
 
-    responses = []
+    last_resync_key = getattr(source_session, "_multiplayer_last_resync_key", None)
+    last_resync_at = float(getattr(source_session, "_multiplayer_last_resync_at", 0.0) or 0.0)
+    full_resync_due = bool(
+        create_response is not None
+        and (
+            force
+            or last_resync_key is None
+            or (key != last_resync_key and (now - last_resync_at) >= 0.20)
+        )
+    )
+    if not full_resync_due:
+        return
+
+    responses: list[tuple[str, bytes]] = []
     if remove_response is not None:
         responses.append(remove_response)
-    responses.append(create_response)
+    if create_response is not None:
+        responses.append(create_response)
+
     dispatch_responses_to_sessions(peers, responses)
     source_session._multiplayer_last_broadcast_at = now
     source_session._multiplayer_last_broadcast_key = key
+    if create_response is not None:
+        source_session._multiplayer_last_resync_at = now
+        source_session._multiplayer_last_resync_key = key
     source_session._multiplayer_removed = False
 
 
