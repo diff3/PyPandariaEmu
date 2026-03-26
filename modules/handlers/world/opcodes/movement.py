@@ -25,6 +25,9 @@ from server.modules.handlers.world.position.position_service import (
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
 _MAX_MOVEMENT_Z_DELTA = 100.0
 _POSITION_SAVE_INTERVAL_SECONDS = 30.0
+_STATIONARY_EPSILON = 0.01
+_SIM_RUN_SPEED_YARDS_PER_SEC = 7.0
+_SIM_TURN_RATE_RAD_PER_SEC = math.pi
 
 # TODO:
 # - Move replay_movement_focus_sequence* and related UPDATE_OBJECT replay helpers
@@ -35,6 +38,23 @@ _POSITION_SAVE_INTERVAL_SECONDS = 30.0
 
 def _player_guid(session) -> int:
     return int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+
+
+def _resolve_live_position_source(session):
+    region = getattr(session, "region", None)
+    if region is None:
+        return session
+
+    expected_world_guid = int(getattr(session, "world_guid", 0) or 0)
+    expected_char_guid = int(getattr(session, "char_guid", 0) or 0)
+
+    for player in list(getattr(region, "players", ()) or ()):
+        if expected_world_guid and int(getattr(player, "world_guid", 0) or 0) == expected_world_guid:
+            return player
+        if expected_char_guid and int(getattr(player, "char_guid", 0) or 0) == expected_char_guid:
+            return player
+
+    return session
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -69,17 +89,6 @@ def _extract_movement_from_decoded(session, decoded: dict[str, Any]) -> Optional
     orientation = _coerce_float(decoded.get("facing"))
     if orientation is None:
         orientation = _coerce_float(decoded.get("orientation"))
-
-    jump_cos = _coerce_float(decoded.get("jump_cos"))
-    if (
-        orientation is not None
-        and jump_cos is not None
-        and math.isfinite(orientation)
-        and math.isfinite(jump_cos)
-        and -math.pi * 4 <= jump_cos <= math.pi * 4
-        and abs(math.cos(jump_cos) - orientation) <= 0.02
-    ):
-        orientation = jump_cos
 
     if orientation is None:
         return None
@@ -135,6 +144,123 @@ def _normalize_orientation(value: float | None) -> float | None:
     if orientation < 0.0:
         orientation += math.tau
     return orientation
+
+
+def _is_effectively_stationary(
+    session,
+    x: float,
+    y: float,
+    z: float,
+    *,
+    epsilon: float = _STATIONARY_EPSILON,
+) -> bool:
+    current_x = float(getattr(session, "x", 0.0) or 0.0)
+    current_y = float(getattr(session, "y", 0.0) or 0.0)
+    current_z = float(getattr(session, "z", 0.0) or 0.0)
+    return (
+        abs(float(x) - current_x) <= float(epsilon)
+        and abs(float(y) - current_y) <= float(epsilon)
+        and abs(float(z) - current_z) <= float(epsilon)
+    )
+
+
+def _movement_flag_state(session, attr: str) -> bool:
+    return bool(getattr(session, attr, False))
+
+
+def _set_movement_flag_state(session, attr: str, enabled: bool) -> None:
+    setattr(session, attr, bool(enabled))
+
+
+def _simulate_movement_state(session, *, now: float | None = None) -> None:
+    now = float(now if now is not None else time.time())
+    last = float(getattr(session, "_sim_motion_updated_at", 0.0) or 0.0)
+    if last <= 0.0:
+        session._sim_motion_updated_at = now
+        return
+
+    dt = max(0.0, min(now - last, 2.0))
+    session._sim_motion_updated_at = now
+    if dt <= 0.0:
+        return
+
+    orientation = _normalize_orientation(getattr(session, "orientation", 0.0))
+    if orientation is None:
+        orientation = 0.0
+
+    turn_dir = 0.0
+    if _movement_flag_state(session, "_sim_turn_left"):
+        turn_dir += 1.0
+    if _movement_flag_state(session, "_sim_turn_right"):
+        turn_dir -= 1.0
+
+    start_orientation = float(orientation)
+    end_orientation = start_orientation + (turn_dir * _SIM_TURN_RATE_RAD_PER_SEC * dt)
+    normalized_end_orientation = _normalize_orientation(end_orientation)
+    if normalized_end_orientation is None:
+        normalized_end_orientation = start_orientation
+
+    move_dir = 0.0
+    if _movement_flag_state(session, "_sim_move_forward"):
+        move_dir += 1.0
+    if _movement_flag_state(session, "_sim_move_backward"):
+        move_dir -= 1.0
+
+    if move_dir != 0.0:
+        average_orientation = _normalize_orientation((start_orientation + float(normalized_end_orientation)) / 2.0)
+        if average_orientation is None:
+            average_orientation = start_orientation
+        distance = move_dir * _SIM_RUN_SPEED_YARDS_PER_SEC * dt
+        session.x = float(getattr(session, "x", 0.0) or 0.0) + (math.cos(float(average_orientation)) * distance)
+        session.y = float(getattr(session, "y", 0.0) or 0.0) + (math.sin(float(average_orientation)) * distance)
+
+    session.orientation = float(normalized_end_orientation)
+    _capture_persist_position_from_session(session)
+    _mark_position_dirty(session)
+
+
+def _mark_movement_state(session, opcode_name: str, *, now: float | None = None) -> None:
+    now = float(now if now is not None else time.time())
+    _simulate_movement_state(session, now=now)
+
+    if opcode_name == "MSG_MOVE_START_FORWARD":
+        _set_movement_flag_state(session, "_sim_move_forward", True)
+    elif opcode_name == "MSG_MOVE_START_BACKWARD":
+        _set_movement_flag_state(session, "_sim_move_backward", True)
+    elif opcode_name == "MSG_MOVE_STOP":
+        _set_movement_flag_state(session, "_sim_move_forward", False)
+        _set_movement_flag_state(session, "_sim_move_backward", False)
+    elif opcode_name == "MSG_MOVE_START_TURN_LEFT":
+        _set_movement_flag_state(session, "_sim_turn_left", True)
+    elif opcode_name == "MSG_MOVE_START_TURN_RIGHT":
+        _set_movement_flag_state(session, "_sim_turn_right", True)
+    elif opcode_name == "MSG_MOVE_STOP_TURN":
+        _set_movement_flag_state(session, "_sim_turn_left", False)
+        _set_movement_flag_state(session, "_sim_turn_right", False)
+
+    session._sim_motion_updated_at = now
+
+
+def _flush_simulated_movement(session, *, now: float | None = None) -> None:
+    _simulate_movement_state(session, now=now)
+
+
+def _has_recent_simulated_translation(
+    session,
+    *,
+    now: float | None = None,
+    max_age_seconds: float = 0.75,
+) -> bool:
+    now = float(now if now is not None else time.time())
+    last = float(getattr(session, "_sim_motion_updated_at", 0.0) or 0.0)
+    if last <= 0.0:
+        return False
+    if (now - last) > float(max_age_seconds):
+        return False
+    return bool(
+        getattr(session, "_sim_move_forward", False)
+        or getattr(session, "_sim_move_backward", False)
+    )
 
 
 def _extract_movement_from_payload(session, payload: bytes) -> Optional[tuple[float, float, float, float]]:
@@ -257,7 +383,8 @@ def _mark_position_dirty(session) -> None:
 
 
 def _capture_persist_position_from_session(session) -> None:
-    raw_position = position_from_session(session)
+    source = _resolve_live_position_source(session)
+    raw_position = position_from_session(source)
     position = normalize_position(raw_position, safe_z=True)
     if position is None:
         Logger.warning(
@@ -275,9 +402,10 @@ def _capture_persist_position_from_session(session) -> None:
     session.persist_orientation = float(position.orientation)
     if POSITION_DEBUG_ENABLED:
         Logger.debug(
-            "[POS_DEBUG] capture player=%s pos=%s",
+            "[POS_DEBUG] capture player=%s pos=%s source=%s",
             int(getattr(session, "char_guid", 0) or 0),
             format_position(position),
+            type(source).__name__,
         )
 
 
@@ -357,6 +485,18 @@ def _save_session_position(session, *, reason: str, online: int | None = None, f
     return ok
 
 
+def _save_current_position_like_command(
+    session,
+    *,
+    reason: str,
+    online: int | None = None,
+    force: bool = True,
+) -> bool:
+    _capture_persist_position_from_session(session)
+    _mark_position_dirty(session)
+    return _save_session_position(session, reason=str(reason), online=online, force=force)
+
+
 def _maybe_periodic_position_save(
     session,
     *,
@@ -402,6 +542,25 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
 
     movement = parse_movement_info(session, opcode_name, ctx.payload, ctx.decoded)
     if movement is None:
+        if opcode_name in {
+            "MSG_MOVE_START_FORWARD",
+            "MSG_MOVE_START_BACKWARD",
+            "MSG_MOVE_STOP",
+            "MSG_MOVE_START_TURN_LEFT",
+            "MSG_MOVE_START_TURN_RIGHT",
+            "MSG_MOVE_STOP_TURN",
+        }:
+            _mark_movement_state(session, opcode_name)
+            Logger.debug(
+                "[Movement] simulated %s guid=0x%X pos=(%.3f, %.3f, %.3f) facing=%.3f",
+                opcode_name,
+                _player_guid(session),
+                float(getattr(session, "x", 0.0) or 0.0),
+                float(getattr(session, "y", 0.0) or 0.0),
+                float(getattr(session, "z", 0.0) or 0.0),
+                float(getattr(session, "orientation", 0.0) or 0.0),
+            )
+            return 0, None
         Logger.warning(
             f"[Movement] failed to parse {opcode_name} guid=0x{_player_guid(session):X} "
             f"payload_len={len(ctx.payload)}"
@@ -420,14 +579,30 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             "keeping previous facing"
         )
         normalized_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+    elif opcode_name == "MSG_MOVE_HEARTBEAT" and _is_effectively_stationary(session, x, y, z):
+        current_orientation = _normalize_orientation(getattr(session, "orientation", 0.0))
+        if current_orientation is not None and not math.isclose(
+            float(normalized_orientation),
+            float(current_orientation),
+            abs_tol=1e-4,
+        ):
+            Logger.debug(
+                "[Movement] ignoring stationary %s orientation override %.6f -> %.6f",
+                opcode_name,
+                float(current_orientation),
+                float(normalized_orientation),
+            )
+            normalized_orientation = float(current_orientation)
 
     session.x = float(x)
     session.y = float(y)
     session.z = float(z)
     session.orientation = float(normalized_orientation)
+    now = time.time()
+    session._sim_motion_updated_at = now
+    _capture_persist_position_from_session(session)
+    _mark_position_dirty(session)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
-        _capture_persist_position_from_session(session)
-        _mark_position_dirty(session)
         _maybe_periodic_position_save(session)
 
     Logger.debug(

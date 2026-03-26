@@ -12,9 +12,7 @@ from server.modules.handlers.world.characters.characters import preload_cache as
 from server.session.runtime import session
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.opcodes.movement import (
-    _capture_persist_position_from_session as capture_persist_position_from_session,
-    _mark_position_dirty as mark_position_dirty,
-    _save_session_position as save_session_position,
+    _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.state.global_state import global_state
 
@@ -77,9 +75,7 @@ def preload_cache() -> None:
 
 
 def handle_disconnect() -> None:
-    capture_persist_position_from_session(session)
-    mark_position_dirty(session)
-    save_session_position(session, reason="disconnect", online=0, force=True)
+    save_current_position_like_command(session, reason="disconnect", online=0, force=True)
     region = getattr(session, "region", None)
     if region is not None:
         region.players.discard(session)

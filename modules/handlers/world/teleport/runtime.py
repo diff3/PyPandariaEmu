@@ -65,6 +65,8 @@ def teleport_player(
     Behavior is preserved from the legacy implementation; only the module
     placement changes so teleport concerns live under world/teleport.
     """
+    same_map = int(getattr(player, "map_id", 0) or 0) == int(map_id)
+
     player.x = float(x)
     player.y = float(y)
     player.z = float(z)
@@ -78,6 +80,41 @@ def teleport_player(
     player.teleport_destination = str(destination_name or "").strip() or None
     capture_persist_position_from_session(player)
     mark_position_dirty(player)
+
+    if same_map:
+        Logger.info(
+            "[Teleport] same-map teleport map=%s destination=%s; completing without loading screen",
+            int(map_id),
+            player.teleport_destination,
+        )
+        from server.modules.handlers.world.opcodes import login as login_handlers
+
+        responses = [
+            (
+                "SMSG_NEW_WORLD",
+                build_login_packet(
+                    "SMSG_NEW_WORLD",
+                    type(
+                        "Ctx",
+                        (),
+                        {
+                            "map_id": int(map_id),
+                            "x": float(x),
+                            "y": float(y),
+                            "z": float(z),
+                            "orientation": float(orientation),
+                        },
+                    )(),
+                ),
+            ),
+        ]
+        responses.extend(
+            login_handlers._queue_teleport_world_transition(
+                player,
+                login_handlers._build_world_login_context(player),
+            )
+        )
+        return responses
 
     return [
         (

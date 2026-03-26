@@ -34,9 +34,7 @@ from server.modules.handlers.world.login.packets import build_login_packet
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.opcodes.movement import (
-    _capture_persist_position_from_session as capture_persist_position_from_session,
-    _mark_position_dirty as mark_position_dirty,
-    _save_session_position as save_session_position,
+    _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
 from server.modules.handlers.world.state.runtime import advance_global_time, refresh_region_weather
@@ -75,9 +73,7 @@ def handle_logout_request(session, ctx: PacketContext) -> Tuple[int, Optional[li
     Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
     if USE_DB_ACCOUNT_DATA_137:
         flush_account_data_types_to_db(session, tuple(DB_ACCOUNT_DATA_137_TYPES), seed_defaults=True)
-    capture_persist_position_from_session(session)
-    mark_position_dirty(session)
-    save_session_position(session, reason="logout", online=0, force=True)
+    save_current_position_like_command(session, reason="logout", online=0, force=True)
 
     try:
         logout_response = EncoderHandler.encode_packet(

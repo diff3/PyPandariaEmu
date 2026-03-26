@@ -29,9 +29,7 @@ from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.opcodes import entities as entities_handlers
 from server.modules.handlers.world.opcodes.movement import (
-    _capture_persist_position_from_session as capture_persist_position_from_session,
-    _mark_position_dirty as mark_position_dirty,
-    _save_session_position as save_session_position,
+    _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
 from server.modules.handlers.world.state.runtime import pack_wow_game_time, resolve_weather_type
@@ -250,9 +248,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         ]
 
     if command.lower() == ".save":
-        capture_persist_position_from_session(session)
-        mark_position_dirty(session)
-        ok = save_session_position(session, reason="command", online=1, force=True)
+        ok = save_current_position_like_command(session, reason="command", online=1, force=True)
 
         map_id = int(getattr(session, "persist_map_id", 0) or 0)
         zone = int(getattr(session, "persist_zone", 0) or 0)
