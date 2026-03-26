@@ -6,7 +6,7 @@ from typing import Any, Optional, Tuple
 from shared.Logger import Logger
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
-from server.modules.guid import GuidHelper, HighGuid
+from server.modules.game.guid import GuidHelper, HighGuid
 from server.modules.handlers.world.characters.characters import (
     handle_CMSG_CHAR_CREATE as handle_char_create_packet,
     handle_CMSG_CHAR_DELETE as handle_char_delete_packet,

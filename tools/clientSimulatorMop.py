@@ -30,7 +30,7 @@ from server.modules.crypto.SRP6Client import SRP6Client
 from server.modules.crypto.SRP6Crypto import SRP6Crypto
 from server.modules.protocol.AddonsBuilder import AddonsBuilder
 from server.modules.protocol.AuthClientBuilder import AuthClientBuilder
-from server.modules.guid import GuidHelper, HighGuid
+from server.modules.game.guid import GuidHelper, HighGuid
 from server.modules.opcodes.OpcodeLoader import load_world_opcodes
 
 world_opcode_module = importlib.import_module("server.modules.opcodes.WorldOpcodes")

@@ -7,7 +7,7 @@ import struct
 
 from shared.Logger import Logger
 from shared.PathUtils import get_captures_root
-from server.modules.guid import GuidHelper
+from server.modules.game.guid import GuidHelper
 from server.modules.handlers.world.login.packets import build_login_packet
 from server.session.runtime import session as runtime_session
 

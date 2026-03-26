@@ -6,7 +6,7 @@ from typing import Any, Optional
 from shared.Logger import Logger
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
-from server.modules.guid import GuidHelper, HighGuid
+from server.modules.game.guid import GuidHelper, HighGuid
 from server.modules.handlers.world.login.context import WorldLoginContext
 from server.modules.handlers.world.login.packets import build_login_packet
 from server.modules.handlers.world.chat.codec import build_motd_notification_payload

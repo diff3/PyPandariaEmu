@@ -3,7 +3,7 @@
 
 import unittest
 
-from server.modules.guid import (
+from server.modules.game.guid import (
     GuidHelper,
     HighGuid,
     PlayerGuid,

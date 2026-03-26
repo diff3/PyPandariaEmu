@@ -27,6 +27,9 @@ from server.modules.database.CharactersModel import (
     CharacterAction,
     CharacterSpell,
 )
+from server.modules.game.equipment import _parse_equipment_cache
+from server.modules.game.guid import _guid_bytes_and_masks
+from server.modules.game.player import _decode_player_bytes
 from server.session.runtime import session
 from server.modules.opcodes.WorldOpcodes import (
     WORLD_CLIENT_OPCODES,
@@ -49,7 +52,6 @@ from server.modules.handlers.world.login.packets import (
     build_ENUM_CHARACTERS_RESULT,
 )
 
-_ITEM_TEMPLATE_CACHE: dict[int, tuple[int, int]] = {}
 _INVTYPE_SLOT_MAP = {
     1: [0],   # head
     2: [1],   # neck
@@ -85,7 +87,6 @@ _DBC_CHAR_START_OUTFIT_FMT = (
 )
 _DBC_CHAR_START_OUTFIT_CACHE: Optional[dict[tuple[int, int, int], list[int]]] = None
 _DBC_CHAR_START_OUTFIT_MERGED: Optional[dict[tuple[int, int], list[int]]] = None
-_EQUIPMENT_SLOTS = 23
 _GUID_MASK_KEYS = [f"guid_{i}_mask" for i in range(8)]
 _GUILD_MASK_KEYS = [
     "guildguid_0_mask",
@@ -253,35 +254,6 @@ def _validate_character_name(name: str) -> Optional[int]:
 
 
 
-def _apply_item_template_info(entries: list[dict]) -> list[dict]:
-    entry_ids = {
-        e.get("display_id")
-        for e in entries
-        if e.get("display_id") and (e.get("int_type") or 0) == 0
-    }
-    if not entry_ids:
-        return entries
-
-    template_map = _resolve_item_template_map(list(entry_ids))
-    if not template_map:
-        return entries
-
-    for entry in entries:
-        if (entry.get("int_type") or 0) != 0:
-            continue
-        item_entry = entry.get("display_id")
-        if not item_entry:
-            continue
-        mapped = template_map.get(item_entry)
-        if not mapped:
-            continue
-        display_id, inv_type = mapped
-        if display_id:
-            entry["display_id"] = display_id
-        if inv_type is not None:
-            entry["int_type"] = inv_type
-    return entries
-
 def _default_equipment() -> list[dict]:
     return [
         {"enchant": 0, "int_type": 0, "display_id": 0}
@@ -389,17 +361,6 @@ def _build_equipment_cache_from_starting_items(race: int, class_: int, gender: i
     return " ".join(str(val) for val in pairs)
 
 
-def _resolve_item_template_map(entries: list[int]) -> dict[int, tuple[int, int]]:
-    if not entries:
-        return {}
-    missing = [entry for entry in entries if entry not in _ITEM_TEMPLATE_CACHE]
-    if missing:
-        fetched = DatabaseConnection.get_item_template_map(missing)
-        if fetched:
-            _ITEM_TEMPLATE_CACHE.update(fetched)
-    return {entry: _ITEM_TEMPLATE_CACHE.get(entry) for entry in entries if entry in _ITEM_TEMPLATE_CACHE}
-
-
 def _equipment_is_empty(entries: list[dict]) -> bool:
     if not entries:
         return True
@@ -416,136 +377,6 @@ def _build_empty_enum_characters_payload() -> bytes:
     }
     return EncoderHandler.encode_packet("SMSG_ENUM_CHARACTERS_RESULT", fields)
 
-def _parse_equipment_cache(cache: str) -> Optional[list[dict]]:
-    if not cache:
-        return None
-    values = [int(x) for x in re.findall(r"-?\d+", cache)]
-    if len(values) < 3:
-        return None
-
-    def _triples(seq, offset):
-        trimmed = seq[offset:]
-        max_items = min(len(trimmed), _EQUIPMENT_SLOTS * 3)
-        max_items -= max_items % 3
-        if max_items <= 0:
-            return []
-        return [trimmed[i:i + 3] for i in range(0, max_items, 3)]
-
-    def _pairs(seq, offset):
-        trimmed = seq[offset:]
-        max_items = min(len(trimmed), _EQUIPMENT_SLOTS * 2)
-        max_items -= max_items % 2
-        if max_items <= 0:
-            return []
-        return [trimmed[i:i + 2] for i in range(0, max_items, 2)]
-
-    def _score_triples(triples, order):
-        if not triples:
-            return -1
-        display_idx, inv_idx, enchant_idx = order
-        score = 0
-        for t in triples:
-            display = t[display_idx]
-            inv_type = t[inv_idx]
-            enchant = t[enchant_idx]
-            if 0 <= inv_type <= 30:
-                score += 4
-            if 0 <= display <= 200000:
-                score += 2
-            if display != 0:
-                score += 1
-            if 0 <= enchant <= 100000:
-                score += 1
-        return score
-
-    def _score_pairs(pairs, order):
-        if not pairs:
-            return -1
-        display_idx, inv_idx = order
-        score = 0
-        for p in pairs:
-            display = p[display_idx]
-            inv_type = p[inv_idx]
-            if 0 <= inv_type <= 30:
-                score += 4
-            if 0 <= display <= 200000:
-                score += 2
-            if display != 0:
-                score += 1
-        return score
-
-    triple_orders = [
-        (0, 1, 2),  # display, inv_type, enchant (expected)
-        (0, 2, 1),
-        (1, 0, 2),
-        (1, 2, 0),
-        (2, 0, 1),
-        (2, 1, 0),
-    ]
-    pair_orders = [
-        (0, 1),  # display, inv_type (expected)
-        (1, 0),
-    ]
-
-    best_kind = None
-    best_offset = 0
-    best_order = None
-    best_score = -1
-
-    for offset in (0, 1, 2):
-        triples = _triples(values, offset)
-        for order in triple_orders:
-            score = _score_triples(triples, order)
-            if score > best_score:
-                best_kind = "triples"
-                best_score = score
-                best_offset = offset
-                best_order = order
-
-    for offset in (0, 1):
-        pairs = _pairs(values, offset)
-        for order in pair_orders:
-            score = _score_pairs(pairs, order)
-            if score > best_score:
-                best_kind = "pairs"
-                best_score = score
-                best_offset = offset
-                best_order = order
-
-    if best_kind is None:
-        return None
-
-    if best_offset != 0 or (best_kind == "triples" and best_order != triple_orders[0]) or (
-        best_kind == "pairs" and best_order != pair_orders[0]
-    ):
-        Logger.info(
-            f"[WorldHandlers] Equipment cache parsed with kind={best_kind} offset={best_offset} order={best_order}"
-        )
-
-    entries = []
-    if best_kind == "triples":
-        triples = _triples(values, best_offset)
-        display_idx, inv_idx, enchant_idx = best_order
-        for display_id, inv_type, enchant in (
-            (t[display_idx], t[inv_idx], t[enchant_idx]) for t in triples
-        ):
-            entries.append(
-                {"enchant": enchant, "int_type": inv_type, "display_id": display_id}
-            )
-    else:
-        pairs = _pairs(values, best_offset)
-        display_idx, inv_idx = best_order
-        for display_id, inv_type in ((p[display_idx], p[inv_idx]) for p in pairs):
-            entries.append(
-                {"enchant": 0, "int_type": inv_type, "display_id": display_id}
-            )
-
-    entries = _apply_item_template_info(entries)
-
-    while len(entries) < _EQUIPMENT_SLOTS:
-        entries.append({"enchant": 0, "int_type": 0, "display_id": 0})
-
-    return entries
 def _default_taximask() -> str:
     return " ".join(["0"] * 16)
 
@@ -590,20 +421,6 @@ def _next_character_slot(session, account_id: int, realm_id: int) -> int:
             realm_id = None
 
     return account_id, realm_id
-
-def _decode_player_bytes(player_bytes: int, player_bytes2: int) -> dict:
-    return {
-        "skin": player_bytes & 0xFF,
-        "face": (player_bytes >> 8) & 0xFF,
-        "hair_style": (player_bytes >> 16) & 0xFF,
-        "hair_color": (player_bytes >> 24) & 0xFF,
-        "facial_hair": player_bytes2 & 0xFF,
-    }
-def _guid_bytes_and_masks(guid: int) -> tuple[list[int], dict]:
-    guid_val = int(guid or 0)
-    raw = guid_val.to_bytes(8, "little", signed=False)
-    masks = {f"guid_{i}_mask": 1 if raw[i] != 0 else 0 for i in range(8)}
-    return list(raw), masks
 
 def _build_equipment_from_starting_items(race: int, class_: int, gender: int | None = None) -> Optional[list[dict]]:
     dbc_entries = _get_outfit_items(race, class_, gender)
