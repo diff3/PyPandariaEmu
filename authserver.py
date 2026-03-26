@@ -38,6 +38,7 @@ PORT = config["authserver"]["port"]
 running = True
 runtime = None
 MAX_CONNECTION_TIME_SECONDS = 5.0
+REALM_LIST_CONNECTION_TIME_SECONDS = 300.0
 MAX_CONNECTION_STEPS = 10
 INITIAL_STATE = "AUTH_LOGON_CHALLENGE"
 STATE_FLOW = (
@@ -100,6 +101,12 @@ def previous_state(state: str) -> str:
     return STATE_FLOW[index - 1]
 
 
+def connection_time_limit_for_state(state: str) -> float:
+    if str(state or "") == "REALM_LIST":
+        return REALM_LIST_CONNECTION_TIME_SECONDS
+    return MAX_CONNECTION_TIME_SECONDS
+
+
 def validate_packet(conn_ctx: ConnectionContext, packet_ctx: PacketContext) -> tuple[bool, str | None]:
     opcode_name = str(packet_ctx.name or "")
     decoded = dict(packet_ctx.decoded or {})
@@ -153,9 +160,14 @@ def step_controller(conn_ctx: ConnectionContext, handler, packet_ctx: PacketCont
     - TIMEOUT/FATAL instruct the caller to terminate the connection
     """
     now = time.time()
-    if (now - float(conn_ctx.start_time or now)) > MAX_CONNECTION_TIME_SECONDS:
+    time_limit = connection_time_limit_for_state(conn_ctx.state)
+    if (now - float(conn_ctx.start_time or now)) > time_limit:
         conn_ctx.last_error = "connection exceeded time limit"
-        Logger.warning("[TIMEOUT] connection exceeded limit state=%s", conn_ctx.state)
+        Logger.warning(
+            "[TIMEOUT] connection exceeded limit state=%s limit=%s",
+            conn_ctx.state,
+            time_limit,
+        )
         return StepResult.TIMEOUT, None
 
     conn_ctx.step_count += 1
@@ -369,8 +381,12 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
             if server_name == "REALM_LIST_S":
                 conn_ctx.last_error = None
-                Logger.debug("[AuthServer] closing completed auth flow addr=%s", addr)
-                break
+                sock.settimeout(connection_time_limit_for_state(conn_ctx.state))
+                Logger.debug(
+                    "[AuthServer] auth flow ready for repeat realm list addr=%s timeout=%s",
+                    addr,
+                    connection_time_limit_for_state(conn_ctx.state),
+                )
 
     except Exception as exc:
         Logger.error(f"{addr}: Unexpected error: {exc}")

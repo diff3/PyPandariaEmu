@@ -447,15 +447,32 @@ def build_SMSG_WORLD_SERVER_INFO(_ctx=None) -> bytes:
 def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
     spells = [int(spell) for spell in (getattr(ctx, "known_spells", []) or [])]
     spell_set = set(spells)
-    # Mirror the lightweight MoP sandbox behavior and ensure chat/language
-    # support is present even if the character spell rows are incomplete.
     for spell_id in (668, 669, 108127):
         spell_id = int(spell_id)
         if spell_id not in spell_set:
             spells.append(spell_id)
             spell_set.add(spell_id)
     race = int(getattr(ctx, "race", 0) or 0)
+    alliance_races = {1, 3, 4, 7, 11, 22, 25}
+    horde_races = {2, 5, 6, 8, 9, 10, 26}
+    base_language_spell = {
+        1: 668,       # Human -> Common
+        2: 669,       # Orc -> Orcish
+        24: 108127,   # Pandaren Neutral
+        25: 668,      # Pandaren Alliance -> Common
+        26: 669,      # Pandaren Horde -> Orcish
+    }.get(race, 0)
+    if int(base_language_spell or 0) == 0:
+        if race in alliance_races:
+            base_language_spell = 668
+        elif race in horde_races:
+            base_language_spell = 669
+    if int(base_language_spell or 0) and int(base_language_spell) not in spell_set:
+        spells.append(int(base_language_spell))
+        spell_set.add(int(base_language_spell))
     race_language_spell = {
+        1: 668,       # Human -> Common
+        2: 669,       # Orc -> Orcish
         3: 672,       # Dwarf -> Dwarvish
         4: 671,       # Night Elf -> Darnassian
         5: 17737,     # Undead -> Gutterspeak

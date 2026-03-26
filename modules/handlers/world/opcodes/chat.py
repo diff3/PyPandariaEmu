@@ -574,7 +574,7 @@ def _handle_chat_message(session, ctx: PacketContext):
         responses = [
             (
                 "SMSG_MESSAGECHAT",
-                encode_skyfire_messagechat_system_payload(f"<{player_name}> {message}"),
+                encode_skyfire_messagechat_system_payload(f"{player_name}: {message}"),
             )
         ]
         responses.append(("SMSG_MESSAGECHAT", payload_out))

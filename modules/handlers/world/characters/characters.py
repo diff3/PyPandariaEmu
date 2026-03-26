@@ -27,6 +27,10 @@ from server.modules.database.CharactersModel import (
     CharacterAction,
     CharacterSpell,
 )
+from server.modules.handlers.world.account_data import (
+    account_data_text_for_type,
+    normalize_account_data_text,
+)
 from server.modules.game.equipment import _parse_equipment_cache
 from server.modules.game.guid import _guid_bytes_and_masks
 from server.modules.game.player import _decode_player_bytes
@@ -125,14 +129,6 @@ def _seed_character_account_data_defaults(char_guid: int) -> None:
     if int(char_guid or 0) <= 0:
         return
 
-    try:
-        from server.modules.handlers import WorldHandlers as world_handlers
-    except Exception as exc:
-        Logger.warning(
-            f"[CHAR CREATE] account-data seed skipped guid={char_guid}: {exc}"
-        )
-        return
-
     now = int(time.time())
     account_name = ""
     shared_session = _get_shared_world_session()
@@ -141,8 +137,8 @@ def _seed_character_account_data_defaults(char_guid: int) -> None:
 
     seeded_types: list[int] = []
     for data_type in (1, 3, 7):
-        data_text = world_handlers._account_data_text_for_type(data_type, account_name)
-        data_text = world_handlers._normalize_account_data_text(
+        data_text = account_data_text_for_type(data_type, account_name)
+        data_text = normalize_account_data_text(
             data_type,
             str(data_text or ""),
         )

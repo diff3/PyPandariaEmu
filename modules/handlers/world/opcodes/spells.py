@@ -23,8 +23,19 @@ from server.modules.handlers.world.mount.mount_service import (
 )
 
 
-_LANGUAGE_SPELL_IDS = (668, 669, 108127)
+_ALLIANCE_RACES = {1, 3, 4, 7, 11, 22, 25}
+_HORDE_RACES = {2, 5, 6, 8, 9, 10, 26}
+_SANDBOX_LANGUAGE_SPELL_IDS = (668, 669, 108127)
+_BASE_LANGUAGE_SPELL_BY_RACE = {
+    1: 668,       # Human -> Common
+    2: 669,       # Orc -> Orcish
+    24: 108127,   # Pandaren Neutral
+    25: 668,      # Pandaren Alliance -> Common
+    26: 669,      # Pandaren Horde -> Orcish
+}
 _RACE_LANGUAGE_SPELL_BY_RACE = {
+    1: 668,
+    2: 669,
     3: 672,
     4: 671,
     5: 17737,
@@ -38,6 +49,9 @@ _RACE_LANGUAGE_SPELL_BY_RACE = {
     25: 108130,
     26: 108131,
 }
+_ALL_LANGUAGE_SPELL_IDS = frozenset(
+    set(_SANDBOX_LANGUAGE_SPELL_IDS) | set(_BASE_LANGUAGE_SPELL_BY_RACE.values()) | set(_RACE_LANGUAGE_SPELL_BY_RACE.values())
+)
 _DEFAULT_WALK_SPEED = 2.5
 _DEFAULT_RUN_SPEED = 7.0
 _DEFAULT_RUN_BACK_SPEED = 4.5
@@ -81,11 +95,22 @@ def _build_single_u32_update_object_payload(*, map_id: int, guid: int, field_ind
 def ensure_language_spells_known(session) -> None:
     spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
     changed = False
-    for spell_id in _LANGUAGE_SPELL_IDS:
-        if int(spell_id) not in spells:
-            spells.append(int(spell_id))
+    for spell_id in _SANDBOX_LANGUAGE_SPELL_IDS:
+        spell_id = int(spell_id)
+        if spell_id not in spells:
+            spells.append(spell_id)
             changed = True
-    race_spell = int(_RACE_LANGUAGE_SPELL_BY_RACE.get(int(getattr(session, "race", 0) or 0), 0) or 0)
+    race = int(getattr(session, "race", 0) or 0)
+    base_spell = int(_BASE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
+    if base_spell == 0:
+        if race in _ALLIANCE_RACES:
+            base_spell = 668
+        elif race in _HORDE_RACES:
+            base_spell = 669
+    if base_spell and base_spell not in spells:
+        spells.append(base_spell)
+        changed = True
+    race_spell = int(_RACE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
     if race_spell and race_spell not in spells:
         spells.append(race_spell)
         changed = True
@@ -95,6 +120,12 @@ def ensure_language_spells_known(session) -> None:
             "[SPELL] ensured language spells count=%s",
             len(spells),
         )
+    language_spells = sorted(int(spell_id) for spell_id in spells if int(spell_id) in _ALL_LANGUAGE_SPELL_IDS)
+    Logger.info(
+        "[SPELL][LANG] race=%s known=%s",
+        race,
+        language_spells,
+    )
 
 
 def ensure_mount_spells_known(session) -> None:
