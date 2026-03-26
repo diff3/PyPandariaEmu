@@ -1,4 +1,4 @@
-from world.mount import mount_service
+from server.modules.handlers.world.mount import mount_service
 
 
 class _FakeResult:
@@ -14,11 +14,10 @@ class _FakeResult:
 
 
 class _FakeDb:
-    def __init__(self, rows=None, *, tables=None, row_counts=None):
+    def __init__(self, rows=None, *, tables=None):
         self.rows = list(rows or [])
         self.calls = []
-        self.tables = set(tables or {"spell_effect"})
-        self.row_counts = dict(row_counts or {})
+        self.tables = set({"spell_effect"} if tables is None else tables)
 
     def execute(self, query, params=None):
         sql = str(query)
@@ -28,10 +27,7 @@ class _FakeDb:
             if table_name in self.tables:
                 return _FakeResult([(1,)])
             return _FakeResult([])
-        if "SELECT COUNT(*) FROM" in sql:
-            table_name = sql.split("FROM", 1)[1].strip().split()[0]
-            return _FakeResult([(int(self.row_counts.get(table_name, 0)),)])
-        if "SELECT DISTINCT spell" in sql or "SELECT DISTINCT EffectSpellId AS spell" in sql:
+        if "SELECT DISTINCT spell" in sql:
             return _FakeResult(self.rows)
         return _FakeResult([])
 
@@ -68,17 +64,16 @@ def test_granted_mount_spells_include_riding_support():
     assert 115913 in spells
 
 
-def test_load_mount_spells_skips_incomplete_spelleffect_dbc():
+def test_load_mount_spells_uses_fallback_when_spell_effect_missing():
     db = _FakeDb(
         rows=[(32235,)],
-        tables={"spelleffect_dbc"},
-        row_counts={"spelleffect_dbc": 73},
+        tables=set(),
     )
 
     mount_service.ALL_MOUNT_SPELLS.clear()
     mount_service.load_mount_spells(db)
 
-    assert set(mount_service.FALLBACK_TEST_MOUNT_SPELLS).issubset(mount_service.ALL_MOUNT_SPELLS)
+    assert set(mount_service.FALLBACK_MOUNT_SPELLS).issubset(mount_service.ALL_MOUNT_SPELLS)
 
 
 def test_get_mount_display_id_returns_known_test_mapping():

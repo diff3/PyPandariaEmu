@@ -18,7 +18,7 @@ from DSL.modules.Processor import load_case
 from DSL.modules.Session import get_session
 from shared.Logger import Logger
 from shared.PathUtils import get_captures_root, get_dbc_root, get_json_root
-# from server.modules.OpcodeLoader import load_world_opcodes
+# from server.modules.opcodes.OpcodeLoader import load_world_opcodes
 from server.modules.interpretation.utils import to_safe_json
 from server.modules.dbc import read_dbc
 from server.modules.database.DatabaseConnection import DatabaseConnection
@@ -32,7 +32,7 @@ from server.modules.opcodes.WorldOpcodes import (
     WORLD_CLIENT_OPCODES,
     WORLD_SERVER_OPCODES,
 )
-from server.modules.PacketContext import PacketContext
+from server.modules.protocol.PacketContext import PacketContext
 
 # Lookup maps (opcode int -> name)
 # WORLD_CLIENT_OPCODES, WORLD_SERVER_OPCODES, _ = load_world_opcodes()
@@ -45,7 +45,7 @@ _DEFAULT_EXPLORED_ZONES: Optional[str] = None
 _DEFAULT_KNOWN_TITLES: Optional[str] = None
 _MAX_CHARACTERS_PER_REALM = 30
 
-from server.modules.handlers.worldLogin.packets import (
+from server.modules.handlers.world.login.packets import (
     build_ENUM_CHARACTERS_RESULT,
 )
 
@@ -223,7 +223,7 @@ def _load_char_start_outfit() -> dict[tuple[int, int, int], list[int]]:
 
     _DBC_CHAR_START_OUTFIT_CACHE = outfits
     _DBC_CHAR_START_OUTFIT_MERGED = {k: sorted(v) for k, v in merged.items()}
-    Logger.info(f"[WorldHandlers] Loaded CharStartOutfit entries: {len(outfits)}")
+    Logger.info("[Characters] Loaded %s char outfits", len(outfits))
     return _DBC_CHAR_START_OUTFIT_CACHE
 
 

@@ -21,17 +21,17 @@ import json
 import struct
 from DSL.modules.EncoderHandler import EncoderHandler
 from DSL.modules.bitsHandler import BitWriter
-from server.modules.PacketContext import PacketContext
+from server.modules.protocol.PacketContext import PacketContext
 from shared.Logger import Logger
 
-from .constants import RACES_MOP, CLASSES_MOP
+from server.modules.handlers.world.constants.login import RACES_MOP, CLASSES_MOP
 from shared.PathUtils import get_captures_root, get_debug_root
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.equipment import _parse_equipment_cache
 from server.modules.player import _decode_player_bytes
 from server.modules.guid import _guid_bytes_and_masks, GuidHelper, HighGuid
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
-from world.mount.mount_service import (
+from server.modules.handlers.world.mount.mount_service import (
     MOUNT_RIDING_SKILL_ID,
     MOUNT_RIDING_SKILL_VALUE,
     granted_mount_spells,

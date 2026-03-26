@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
-from world.chat.router import ChatRouter
-from world.state.global_state import GlobalState
-from world.state.region_manager import RegionManager
+from server.modules.handlers.world.chat.router import ChatRouter
+from server.modules.handlers.world.state.global_state import GlobalState
+from server.modules.handlers.world.state.region_manager import RegionManager
 
 
 def test_region_manager_returns_stable_region_instances():

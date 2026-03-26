@@ -1,7 +1,7 @@
 import math
 from types import SimpleNamespace
 
-from world.position import position_service
+from server.modules.handlers.world.position import position_service
 
 
 class _FakeDbApi:

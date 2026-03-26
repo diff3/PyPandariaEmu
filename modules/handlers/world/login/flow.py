@@ -35,8 +35,8 @@ This module only defines packet ordering.
 WorldHandlers drives the actual state transitions.
 """
 
-from server.modules.handlers.worldLogin.context import WorldLoginContext
-from server.modules.handlers.worldLogin.packets import build_login_packet
+from server.modules.handlers.world.login.context import WorldLoginContext
+from server.modules.handlers.world.login.packets import build_login_packet
 from shared.Logger import Logger
 
 

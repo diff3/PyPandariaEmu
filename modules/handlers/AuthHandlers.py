@@ -17,8 +17,8 @@ import socket
 import traceback
 
 from shared.Logger import Logger
-from server.modules.PacketContext import PacketContext
-# from server.modules.OpcodeLoader import load_auth_opcodes
+from server.modules.protocol.PacketContext import PacketContext
+# from server.modules.opcodes.OpcodeLoader import load_auth_opcodes
 from server.modules.opcodes.AuthOpcodes import (
     AUTH_SERVER_OPCODES,
 )

@@ -9,8 +9,8 @@ import traceback
 from enum import Enum, auto
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
-from server.modules.PacketContext import PacketContext
-from server.modules.ServerOutput import (
+from server.modules.protocol.PacketContext import PacketContext
+from server.modules.protocol.ServerOutput import (
     project_name,
     log_raw_packet,
     should_log_packet,
@@ -23,9 +23,9 @@ from server.modules.interpretation.utils import initialize_dsl_runtime
 from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler as WorldCryptoHandler
 from server.session.world_session import WorldSession
 from server.session.runtime import bind_world_session, clear_world_session
-from world.mount.mount_service import load_mount_spells
-from world.teleport.teleport_service import load_teleports
-from world.state.global_state import global_state
+from server.modules.handlers.world.mount.mount_service import load_mount_spells
+from server.modules.handlers.world.teleport.teleport_service import load_teleports
+from server.modules.handlers.world.state.global_state import global_state
 
 try:
     from server.modules.handlers.WorldHandlers import (

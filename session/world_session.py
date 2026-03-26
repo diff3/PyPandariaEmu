@@ -15,7 +15,7 @@ class LoginState(str, Enum):
     IN_WORLD = "IN_WORLD"
 
 
-@dataclass
+@dataclass(eq=False)
 class WorldSession:
     # --------------------------------------------------
     # Identity / auth

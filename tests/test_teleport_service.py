@@ -1,4 +1,4 @@
-from world.teleport import teleport_service
+from server.modules.handlers.world.teleport import teleport_service
 
 
 class _FakeResult:

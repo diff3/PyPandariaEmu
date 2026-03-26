@@ -9,7 +9,7 @@ from server.authserver import (
     previous_state,
     step_controller,
 )
-from server.modules.PacketContext import PacketContext
+from server.modules.protocol.PacketContext import PacketContext
 
 
 def _packet(name: str, decoded=None) -> PacketContext:

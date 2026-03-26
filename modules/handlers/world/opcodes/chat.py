@@ -1,0 +1,510 @@
+from __future__ import annotations
+
+import random
+import time
+from typing import Optional, Tuple
+
+from DSL.modules.EncoderHandler import EncoderHandler
+from shared.Logger import Logger
+from server.modules.protocol.PacketContext import PacketContext
+from server.modules.database.DatabaseConnection import DatabaseConnection
+from server.modules.handlers.world.login.packets import build_login_packet
+from server.modules.handlers.world.bootstrap.replay import build_single_u32_update_object_payload
+from server.modules.handlers.world.chat.router import chat_router
+from server.modules.handlers.world.chat.codec import (
+    CHAT_MSG_SAY,
+    TEXT_EMOTE_TO_ANIM_EMOTE,
+    build_motd_notification_payload,
+    build_raw_replay_messagechat_packet,
+    decode_chat_message,
+    encode_messagechat_payload,
+    encode_skyfire_messagechat_system_payload,
+    encode_text_emote_payload,
+)
+from server.modules.handlers.world.dispatcher import register
+from server.modules.handlers.world.opcodes import login as login_handlers
+from server.modules.handlers.world.opcodes.movement import (
+    _capture_persist_position_from_session as capture_persist_position_from_session,
+    _mark_position_dirty as mark_position_dirty,
+    _save_session_position as save_session_position,
+)
+from server.modules.handlers.world.packet_logging import log_cmsg
+from server.modules.handlers.world.state.runtime import pack_wow_game_time, resolve_weather_type
+from server.modules.handlers.world.teleport.runtime import teleport_player
+from server.modules.handlers.world.teleport.teleport_service import (
+    add_teleport as add_named_teleport,
+    find_teleport,
+    nearest_teleport,
+    remove_teleport as remove_named_teleport,
+    search_teleports,
+)
+
+
+# TODO: Move messagechat packet encoders and raw replay helpers out of legacy once
+# entity/chat packet builders are isolated from the old monolith.
+RAW_REPLAY_SAY_CHAT_PROFILE = None
+USE_SYSTEM_CHAT_FALLBACK = True
+
+
+def _notification_response(message: str) -> list[tuple[str, bytes]]:
+    return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
+
+
+def _dispatch_responses_to_sessions(targets, responses) -> None:
+    normalized_targets = list(targets or [])
+    if not normalized_targets or not responses:
+        return
+    for target in normalized_targets:
+        sender = getattr(target, "send_response", None)
+        if callable(sender):
+            sender(responses)
+
+
+def _handle_chat_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
+    command = str(message or "").strip()
+
+    if command.lower().startswith(".roll"):
+        roll = random.randint(1, 100)
+        msg = f"{session.player_name} rolls {roll} (1-100)"
+        payload = encode_messagechat_payload(
+            chat_type=CHAT_MSG_SAY,
+            language=0,
+            sender_guid=session.player_guid,
+            sender_name=session.player_name,
+            target_guid=0,
+            target_name="",
+            message=msg,
+        )
+        return [("SMSG_MESSAGECHAT", payload)]
+
+    if command.lower() == ".getxy":
+        Logger.info(
+            "[GETXY] "
+            f"map={int(getattr(session, 'map_id', 0) or 0)} "
+            f"x={float(getattr(session, 'x', 0.0) or 0.0):.2f} "
+            f"y={float(getattr(session, 'y', 0.0) or 0.0):.2f} "
+            f"z={float(getattr(session, 'z', 0.0) or 0.0):.2f} "
+            f"o={float(getattr(session, 'orientation', 0.0) or 0.0):.2f}"
+        )
+        return []
+
+    if command.lower().startswith(".weather"):
+        parts = command.split()
+        if len(parts) not in (2, 3):
+            Logger.info("[Weather] Usage: .weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
+            return []
+
+        weather_key = parts[1].strip().lower()
+        density = 0.0 if weather_key in ("clear", "fine", "sun") else 0.5
+        if len(parts) == 3:
+            try:
+                density = max(0.0, min(1.0, float(parts[2])))
+            except ValueError:
+                Logger.info(f"[Weather] Invalid density command={command!r}")
+                return []
+
+        try:
+            weather_type = int(weather_key)
+        except ValueError:
+            weather_type = resolve_weather_type(weather_key, density)
+
+        if weather_type < 0:
+            Logger.info(f"[Weather] Unknown weather command={command!r}")
+            return []
+
+        session.weather = {
+            "weather_type": int(weather_type),
+            "density": float(density),
+            "abrupt": 0,
+        }
+        Logger.info(
+            f"[Weather] type={int(weather_type)} density={float(density):.2f} abrupt=0"
+        )
+        return [
+            (
+                "SMSG_WEATHER",
+                build_login_packet(
+                    "SMSG_WEATHER",
+                    type(
+                        "Ctx",
+                        (),
+                        {
+                            "weather_type": int(weather_type),
+                            "density": float(density),
+                            "abrupt": 0,
+                        },
+                    )(),
+                ),
+            )
+        ]
+
+    if command.lower().startswith(".time"):
+        parts = command.split(maxsplit=1)
+        if len(parts) != 2:
+            Logger.info("[Time] Usage: .time <HH:MM|day|night|dawn|dusk|noon|midnight>")
+            return []
+
+        arg = parts[1].strip().lower()
+        presets = {
+            "day": (12, 0),
+            "noon": (12, 0),
+            "night": (0, 0),
+            "midnight": (0, 0),
+            "dawn": (6, 0),
+            "dusk": (18, 0),
+            "sunrise": (6, 0),
+            "sunset": (18, 0),
+        }
+
+        if arg in presets:
+            hour, minute = presets[arg]
+        else:
+            time_parts = arg.split(":", 1)
+            if len(time_parts) != 2:
+                Logger.info(f"[Time] Invalid time command={command!r}")
+                return []
+            try:
+                hour = int(time_parts[0])
+                minute = int(time_parts[1])
+            except ValueError:
+                Logger.info(f"[Time] Invalid time command={command!r}")
+                return []
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                Logger.info(f"[Time] Out-of-range time command={command!r}")
+                return []
+
+        now = int(time.time())
+        lt = time.localtime(now)
+        current_seconds = int(lt.tm_hour) * 3600 + int(lt.tm_min) * 60 + int(lt.tm_sec)
+        target_seconds = int(hour) * 3600 + int(minute) * 60 + int(lt.tm_sec)
+
+        session.server_time = now
+        session.time_offset = target_seconds - current_seconds
+        session.time_speed = 0.01666667
+        session.game_time = pack_wow_game_time(session.server_time + session.time_offset)
+
+        Logger.info(
+            f"[Time] hour={hour:02d} minute={minute:02d} "
+            f"offset={int(session.time_offset)} packed=0x{int(session.game_time):08X}"
+        )
+        return [
+            (
+                "SMSG_LOGIN_SET_TIME_SPEED",
+                build_login_packet(
+                    "SMSG_LOGIN_SET_TIME_SPEED",
+                    login_handlers._build_world_login_context(session),
+                ),
+            ),
+        ]
+
+    if command.lower() == ".save":
+        capture_persist_position_from_session(session)
+        mark_position_dirty(session)
+        ok = save_session_position(session, reason="command", online=1, force=True)
+
+        map_id = int(getattr(session, "persist_map_id", 0) or 0)
+        zone = int(getattr(session, "persist_zone", 0) or 0)
+        x = float(getattr(session, "persist_x", 0.0) or 0.0)
+        y = float(getattr(session, "persist_y", 0.0) or 0.0)
+        z = float(getattr(session, "persist_z", 0.0) or 0.0)
+        orientation = float(getattr(session, "persist_orientation", 0.0) or 0.0)
+        player_name = (
+            str(getattr(session, "player_name", "") or "").strip()
+            or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
+        )
+
+        if ok:
+            message = (
+                f"[Save] {player_name} map={map_id} zone={zone} "
+                f"x={x:.2f} y={y:.2f} z={z:.2f} o={orientation:.2f}"
+            )
+            Logger.info(message)
+        else:
+            message = f"[Save] failed for {player_name}"
+            Logger.warning(message)
+
+        return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
+
+    if command.lower().startswith(".telxyz"):
+        parts = command.split()
+        player_name = (
+            str(getattr(session, "player_name", "") or "").strip()
+            or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
+        )
+        if len(parts) != 6:
+            Logger.info(f"[Teleport] Invalid .telxyz syntax command={command!r}")
+            payload_out = encode_messagechat_payload(
+                chat_type=CHAT_MSG_SAY,
+                language=0,
+                sender_guid=int(getattr(session, "player_guid", 0) or getattr(session, "world_guid", 0) or 0),
+                sender_name=player_name,
+                target_guid=0,
+                target_name="",
+                message="Usage: .telxyz <map> <x> <y> <z> <orientation>",
+            )
+            return [("SMSG_MESSAGECHAT", payload_out)]
+
+        try:
+            map_id = int(parts[1])
+            x = float(parts[2])
+            y = float(parts[3])
+            z = float(parts[4])
+            orientation = float(parts[5])
+        except (TypeError, ValueError):
+            Logger.info(f"[Teleport] Invalid .telxyz args command={command!r}")
+            return []
+
+        Logger.info(
+            f"[Teleport] {player_name} -> manual ({map_id} {x:.2f} {y:.2f} {z:.2f} {orientation:.2f})"
+        )
+        return teleport_player(
+            session,
+            map_id,
+            x,
+            y,
+            z,
+            orientation,
+            destination_name=f"manual:{map_id}:{x:.2f}:{y:.2f}:{z:.2f}:{orientation:.2f}",
+        )
+
+    if not command.startswith(".tel"):
+        return None
+
+    parts = command.split()
+    if len(parts) == 1:
+        return _notification_response("Usage: .tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel nearest")
+
+    action = parts[1].strip().lower()
+    if action == "search":
+        query = command.split(None, 2)[2] if len(parts) >= 3 else ""
+        matches = search_teleports(query)
+        if not matches:
+            return _notification_response("Matches: none")
+        return _notification_response(f"Matches: {', '.join(matches)}")
+
+    if action == "add":
+        name = command.split(None, 2)[2].strip() if len(parts) >= 3 else ""
+        if not name:
+            return _notification_response("Usage: .tel add <name>")
+        try:
+            entry = add_named_teleport(
+                DatabaseConnection.world(),
+                name,
+                int(getattr(session, "map_id", 0) or 0),
+                float(getattr(session, "x", 0.0) or 0.0),
+                float(getattr(session, "y", 0.0) or 0.0),
+                float(getattr(session, "z", 0.0) or 0.0),
+                float(getattr(session, "orientation", 0.0) or 0.0),
+            )
+        except Exception as exc:
+            Logger.warning(f"[Teleport] add failed name={name!r}: {exc}")
+            return _notification_response("Teleport add failed")
+        return _notification_response(f"Teleport added: {entry['name']}")
+
+    if action == "rm":
+        name = command.split(None, 2)[2].strip() if len(parts) >= 3 else ""
+        if not name:
+            return _notification_response("Usage: .tel rm <name>")
+        try:
+            removed = remove_named_teleport(DatabaseConnection.world(), name)
+        except Exception as exc:
+            Logger.warning(f"[Teleport] rm failed name={name!r}: {exc}")
+            return _notification_response("Teleport remove failed")
+        if not removed:
+            return _notification_response("Teleport not found")
+        return _notification_response("Teleport removed")
+
+    if action == "nearest":
+        nearest = nearest_teleport(
+            int(getattr(session, "map_id", 0) or 0),
+            float(getattr(session, "x", 0.0) or 0.0),
+            float(getattr(session, "y", 0.0) or 0.0),
+        )
+        if nearest is None:
+            return _notification_response("Nearest: none")
+        return _notification_response(f"Nearest: {nearest['name']}")
+
+    destination_name = command.split(None, 1)[1].strip() if len(parts) >= 2 else ""
+    destination = find_teleport(destination_name)
+    if destination is None:
+        Logger.info(f"[Teleport] Unknown destination command={command!r}")
+        return _notification_response("Teleport not found")
+
+    map_id = int(destination["map"])
+    x = float(destination["x"])
+    y = float(destination["y"])
+    z = float(destination["z"])
+    orientation = float(destination["o"])
+    player_name = (
+        str(getattr(session, "player_name", "") or "").strip()
+        or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
+    )
+
+    Logger.info(
+        f"[Teleport] {player_name} -> {destination['name']} ({x:.2f} {y:.2f} {z:.2f})"
+    )
+    return teleport_player(
+        session,
+        map_id,
+        x,
+        y,
+        z,
+        orientation,
+        destination_name=str(destination["name"]),
+    )
+
+
+def _handle_chat_message(session, ctx: PacketContext):
+    chat = decode_chat_message(ctx.name, ctx.payload, ctx.decoded)
+    message = chat["message"]
+    if not message:
+        return 0, None
+
+    command_responses = _handle_chat_command(session, message)
+    if command_responses is not None:
+        return 0, command_responses if command_responses else None
+
+    player_name = session.player_name
+    sender_guid = int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    language = int(chat.get("language") or 0)
+
+    Logger.debug(f"[CHAT] opcode={ctx.name}")
+    Logger.info(f"[CHAT] {player_name}: {message}")
+
+    if USE_SYSTEM_CHAT_FALLBACK:
+        payload_out = encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")
+        Logger.info(
+            f"[CHAT][FALLBACK] mode=system player={player_name!r} bytes={len(payload_out)} message={message!r}"
+        )
+    else:
+        payload_out = encode_messagechat_payload(
+            chat_type=CHAT_MSG_SAY,
+            language=language,
+            sender_guid=sender_guid,
+            sender_name=player_name,
+            target_guid=0,
+            target_name="",
+            message=message,
+        )
+
+    notification_payload = build_motd_notification_payload(message)
+    chat_response = ("SMSG_MESSAGECHAT", payload_out)
+    targets = chat_router.get_targets(session, "say")
+    dispatched = False
+    if targets:
+        _dispatch_responses_to_sessions(targets, [chat_response])
+        dispatched = True
+
+    responses: list[tuple[str, bytes]] = [("SMSG_NOTIFICATION", notification_payload)]
+    raw_replay_messagechat = build_raw_replay_messagechat_packet(
+        profile=RAW_REPLAY_SAY_CHAT_PROFILE
+    )
+    if raw_replay_messagechat is not None:
+        responses.append(raw_replay_messagechat)
+    if not dispatched:
+        responses.insert(0, chat_response)
+    return 0, responses
+
+
+@register("CMSG_CHAT_JOIN_CHANNEL")
+def handle_chat_join_channel(session, ctx: PacketContext):
+    channel_name = "General"
+    decoded = ctx.decoded or {}
+    if decoded.get("channel_name"):
+        channel_name = str(decoded.get("channel_name") or "General").strip() or "General"
+
+    session.chat_joined = True
+    Logger.info(f"[WorldHandlers] CHAT_JOIN_CHANNEL accepted channel={channel_name!r}")
+
+    if session.chat_motd_sent:
+        return 0, None
+
+    motd_payload = build_login_packet("SMSG_MOTD", login_handlers._build_world_login_context(session))
+    if motd_payload is None:
+        return 0, None
+
+    session.chat_motd_sent = True
+    Logger.info("[WorldHandlers] sending MOTD after chat join")
+    return 0, [("SMSG_MOTD", motd_payload)]
+
+
+@register("CMSG_MESSAGECHAT_SAY")
+def handle_messagechat_say(session, ctx: PacketContext):
+    return _handle_chat_message(session, ctx)
+
+
+@register("CMSG_MESSAGECHAT_YELL")
+def handle_messagechat_yell(session, ctx: PacketContext):
+    return _handle_chat_message(session, ctx)
+
+
+@register("CMSG_MESSAGECHAT_WHISPER")
+def handle_messagechat_whisper(session, ctx: PacketContext):
+    return _handle_chat_message(session, ctx)
+
+
+@register("CMSG_SEND_TEXT_EMOTE")
+def handle_send_text_emote(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    decoded = log_cmsg(ctx)
+    emote_id = int((decoded or {}).get("emote_id") or 0)
+    emote_num = int((decoded or {}).get("emote_num") or 0)
+    target_guid = int((decoded or {}).get("target_guid") or 0)
+    player_guid = int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    anim_emote = int(TEXT_EMOTE_TO_ANIM_EMOTE.get(emote_id, 0) or 0)
+
+    Logger.info(
+        f"[EMOTE][TEXT] emote_id={emote_id} emote_num={emote_num} anim_emote={anim_emote} "
+        f"player_guid=0x{player_guid:016X} target_guid=0x{target_guid:016X}"
+    )
+
+    responses: list[tuple[str, bytes]] = [
+        (
+            "SMSG_TEXT_EMOTE",
+            encode_text_emote_payload(
+                player_guid=player_guid,
+                target_guid=target_guid,
+                text_emote=emote_id,
+                emote_num=emote_num,
+            ),
+        )
+    ]
+
+    if anim_emote == 10:
+        responses.append(
+            (
+                "SMSG_UPDATE_OBJECT",
+                build_single_u32_update_object_payload(
+                    map_id=int(getattr(session, "map_id", 0) or 0),
+                    guid=player_guid,
+                    field_index=0x59,
+                    value=10,
+                ),
+            )
+        )
+    elif anim_emote > 0:
+        emote_payload = EncoderHandler.encode_packet(
+            "SMSG_EMOTE",
+            {
+                "emote_id": anim_emote,
+                "guid": player_guid,
+            },
+        )
+        responses.append(("SMSG_EMOTE", emote_payload))
+
+    return 0, responses
+
+
+@register("CMSG_EMOTE")
+def handle_emote(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    decoded = log_cmsg(ctx)
+    emote_id = int((decoded or {}).get("emote_id") or 0)
+    player_guid = int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    Logger.info(f"[EMOTE] emote_id={emote_id} player_guid=0x{player_guid:016X}")
+    payload = EncoderHandler.encode_packet(
+        "SMSG_EMOTE",
+        {
+            "emote_id": emote_id,
+            "guid": player_guid,
+        },
+    )
+    return 0, [("SMSG_EMOTE", payload)]

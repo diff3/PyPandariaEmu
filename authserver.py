@@ -13,8 +13,8 @@ from enum import Enum
 from DSL.modules.DslRuntime import DslRuntime
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
-from server.modules.PacketContext import PacketContext
-from server.modules.ServerOutput import (
+from server.modules.protocol.PacketContext import PacketContext
+from server.modules.protocol.ServerOutput import (
     decode_enabled,
     dsl_warnings_enabled,
     project_name,

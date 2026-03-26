@@ -7,8 +7,8 @@ from typing import Any, Dict, Optional
 
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
-from server.modules.ServerOutput import dsl_warnings_enabled
-from server.modules.PacketDump import dump_capture
+from server.modules.protocol.ServerOutput import dsl_warnings_enabled
+from server.modules.protocol.PacketDump import dump_capture
 from DSL.modules.DslRuntime import DslRuntime
 
 
