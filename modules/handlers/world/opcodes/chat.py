@@ -32,7 +32,13 @@ from server.modules.handlers.world.opcodes.movement import (
     _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
-from server.modules.handlers.world.state.runtime import pack_wow_game_time, resolve_weather_type
+from server.modules.handlers.world.state.runtime import (
+    broadcast_region_weather,
+    broadcast_system_message,
+    broadcast_world_time,
+    pack_wow_game_time,
+    resolve_weather_type,
+)
 from server.modules.handlers.world.teleport.runtime import teleport_player
 from server.modules.handlers.world.teleport.teleport_service import (
     add_teleport as add_named_teleport,
@@ -145,7 +151,8 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             return []
 
         weather_key = parts[1].strip().lower()
-        density = 0.0 if weather_key in ("clear", "fine", "sun") else 0.5
+        density = 0.0 if weather_key in ("clear", "fine", "sun") else 1.0
+        abrupt = 1
         if len(parts) == 3:
             try:
                 density = max(0.0, min(1.0, float(parts[2])))
@@ -162,31 +169,17 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             Logger.info(f"[Weather] Unknown weather command={command!r}")
             return []
 
-        session.weather = {
-            "weather_type": int(weather_type),
-            "density": float(density),
-            "abrupt": 0,
-        }
         Logger.info(
-            f"[Weather] type={int(weather_type)} density={float(density):.2f} abrupt=0"
+            f"[Weather] type={int(weather_type)} density={float(density):.2f} abrupt={abrupt}"
         )
-        return [
-            (
-                "SMSG_WEATHER",
-                build_login_packet(
-                    "SMSG_WEATHER",
-                    type(
-                        "Ctx",
-                        (),
-                        {
-                            "weather_type": int(weather_type),
-                            "density": float(density),
-                            "abrupt": 0,
-                        },
-                    )(),
-                ),
-            )
-        ]
+        broadcast_region_weather(
+            session,
+            int(weather_type),
+            float(density),
+            abrupt,
+            announce=f"[Weather] type={int(weather_type)} density={float(density):.2f}",
+        )
+        return []
 
     if command.lower().startswith(".time"):
         parts = command.split(maxsplit=1)
@@ -237,15 +230,20 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             f"[Time] hour={hour:02d} minute={minute:02d} "
             f"offset={int(session.time_offset)} packed=0x{int(session.game_time):08X}"
         )
-        return [
-            (
-                "SMSG_LOGIN_SET_TIME_SPEED",
-                build_login_packet(
-                    "SMSG_LOGIN_SET_TIME_SPEED",
-                    login_handlers._build_world_login_context(session),
-                ),
-            ),
-        ]
+        broadcast_world_time(
+            int(hour),
+            int(minute),
+            announce=f"[Time] {hour:02d}:{minute:02d}",
+        )
+        return []
+
+    if command.lower().startswith(".system "):
+        message = str(command[8:] or "").strip()
+        if not message:
+            return _notification_response("Usage: .system <message>")
+        Logger.info(f"[SystemChat] message={message!r}")
+        broadcast_system_message(message, scope="world")
+        return []
 
     if command.lower() == ".save":
         ok = save_current_position_like_command(session, reason="command", online=1, force=True)

@@ -1764,10 +1764,28 @@ def build_SMSG_UPDATE_WORLD_STATE(ctx) -> bytes:
     })
 
 def build_SMSG_WEATHER(ctx) -> bytes:
+    weather = getattr(ctx, "weather", None)
+    if not isinstance(weather, dict):
+        weather = {}
+    weather_type = int(
+        getattr(
+            ctx,
+            "weather_type",
+            getattr(ctx, "weather_id", weather.get("weather_type", 0)),
+        ) or 0
+    )
+    if weather_type < 0:
+        weather_type = 0
     return _encode("SMSG_WEATHER", {
-        "weather_type": int(getattr(ctx, "weather_type", getattr(ctx, "weather_id", 0)) or 0),
-        "density": float(getattr(ctx, "density", getattr(ctx, "intensity", 0.0)) or 0.0),
-        "abrupt": int(getattr(ctx, "abrupt", 0) or 0),
+        "weather_type": weather_type,
+        "density": float(
+            getattr(
+                ctx,
+                "density",
+                getattr(ctx, "intensity", weather.get("density", 0.0)),
+            ) or 0.0
+        ),
+        "abrupt": int(getattr(ctx, "abrupt", weather.get("abrupt", 0)) or 0),
     })
 def build_SMSG_HOTFIX_NOTIFY_BLOB(_ctx=None) -> bytes:
     return _encode("SMSG_HOTFIX_NOTIFY_BLOB", {

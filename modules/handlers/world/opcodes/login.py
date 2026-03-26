@@ -380,7 +380,6 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     responses: list[tuple[str, bytes]] = []
 
     for opcode_name in (
-        "SMSG_FEATURE_SYSTEM_STATUS",
         "SMSG_LOGIN_VERIFY_WORLD",
         "SMSG_LOGIN_SET_TIME_SPEED",
         "SMSG_BIND_POINT_UPDATE",
@@ -404,7 +403,6 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         "SMSG_INIT_WORLD_STATES",
         "SMSG_WEATHER",
         "SMSG_QUERY_TIME_RESPONSE",
-        "SMSG_UI_TIME",
     ):
         payload = build_login_packet(opcode_name, ctx)
         if payload is None:
@@ -610,7 +608,7 @@ def handle_player_login(session, ctx: PacketContext):
     session.phase_data = {}
     session.world_states = {}
     session.single_world_state = {}
-    session.weather = {}
+    session.weather = dict(getattr(getattr(session, "region", None), "weather", {}) or {})
 
     session.server_time = int(time.time())
     session.game_time = pack_wow_game_time(

@@ -190,4 +190,5 @@ class WorldLoginContext:
 
             known_spells=session.known_spells,
             action_buttons=session.action_buttons,
+            weather=dict(getattr(session, "weather", {}) or {}),
         )

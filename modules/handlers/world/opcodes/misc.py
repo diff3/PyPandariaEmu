@@ -284,11 +284,7 @@ def handle_request_forced_reactions(session, ctx: PacketContext) -> Tuple[int, O
 @register("CMSG_WORLD_STATE_UI_TIMER_UPDATE")
 def handle_world_state_ui_timer_update(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     Logger.info("[WorldHandlers] CMSG_WORLD_STATE_UI_TIMER_UPDATE")
-    response = build_login_packet("SMSG_UI_TIME", login_handlers._build_world_login_context(session))
-    if response is None:
-        Logger.error("[WorldHandlers] Missing builder for SMSG_UI_TIME")
-        return 1, None
-    return 0, [("SMSG_UI_TIME", response)]
+    return 0, None
 
 
 @register("CMSG_REQUEST_HOTFIX")
