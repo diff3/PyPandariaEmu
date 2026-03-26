@@ -130,8 +130,7 @@ def handle_discarded_time_sync_acks(session, ctx: PacketContext):
     return 0, None
 
 
-@register("CMSG_REQUEST_ACCOUNT_DATA")
-def handle_request_account_data(session, ctx: PacketContext):
+def handle_request_account_data_old(session, ctx: PacketContext):
     if USE_DB_ACCOUNT_DATA_137:
         account_id = int(getattr(session, "account_id", 0) or 0)
         char_guid = int(getattr(session, "char_guid", 0) or 0)
@@ -171,6 +170,65 @@ def handle_request_account_data(session, ctx: PacketContext):
         str(stored_text or ""),
         timestamp=int(stored_timestamp) if stored_timestamp is not None else None,
     )
+    return 0, [("SMSG_UPDATE_ACCOUNT_DATA", response)]
+
+
+@register("CMSG_REQUEST_ACCOUNT_DATA")
+def handle_request_account_data(session, ctx: PacketContext):
+    if USE_DB_ACCOUNT_DATA_137:
+        account_id = int(getattr(session, "account_id", 0) or 0)
+        char_guid = int(getattr(session, "char_guid", 0) or 0)
+        if account_id:
+            load_global_account_data(session, account_id)
+        if char_guid:
+            load_character_account_data(session, char_guid)
+        Logger.info("[ACCOUNT_DATA] mode=db request using preloaded global+character data")
+
+    data_type = decode_account_data_request_type(ctx.payload)
+    Logger.info(f"[ACCOUNT_DATA] request type={data_type} raw={ctx.payload.hex()}")
+
+    if not SEND_ACCOUNT_DATA_TO_CLIENT:
+        Logger.info(f"[ACCOUNT_DATA] suppressing SMSG_UPDATE_ACCOUNT_DATA type={data_type}")
+        return 0, None
+
+    if is_global_account_data_type(int(data_type)):
+        load_global_account_data(session)
+    else:
+        load_character_account_data(session)
+
+    stored_text = session.account_data.get(int(data_type))
+    if stored_text is None:
+        stored_text = account_data_text_for_type(int(data_type), str(session.account_name or ""))
+
+    normalized_text = normalize_account_data_text(int(data_type), str(stored_text or ""))
+    if normalized_text != str(stored_text or ""):
+        stored_text = normalized_text
+        session.account_data[int(data_type)] = stored_text
+        stored_timestamp = int(session.account_data_times.get(int(data_type)) or time.time())
+        session.account_data_times[int(data_type)] = stored_timestamp
+        persist_account_data_entry(session, int(data_type), stored_text, stored_timestamp)
+
+    stored_timestamp = session.account_data_times.get(int(data_type))
+    account_data_guid = int(
+        getattr(session, "world_guid", 0)
+        or getattr(session, "player_guid", 0)
+        or 0
+    )
+    response = build_update_account_data_payload(
+        int(data_type),
+        str(stored_text or ""),
+        timestamp=int(stored_timestamp) if stored_timestamp is not None else None,
+        guid=account_data_guid,
+    )
+    if int(data_type) in (2, 3):
+        scope = "global" if is_global_account_data_type(int(data_type)) else "character"
+        owner_id = int(session.account_id or 0) if scope == "global" else int(session.char_guid or 0)
+        preview = str(stored_text or "")[:120].replace("\r", "\\r").replace("\n", "\\n")
+        Logger.info(
+            f"[ACCOUNT_DATA][SEND] type={int(data_type)} scope={scope} owner={owner_id} "
+            f"timestamp={int(stored_timestamp or 0)} len={len(str(stored_text or ''))} "
+            f"guid=0x{account_data_guid:016X} preview={preview!r}"
+        )
     return 0, [("SMSG_UPDATE_ACCOUNT_DATA", response)]
 
 

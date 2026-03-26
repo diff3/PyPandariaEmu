@@ -6,10 +6,14 @@ from typing import Optional, Tuple
 
 from DSL.modules.EncoderHandler import EncoderHandler
 from shared.Logger import Logger
+from shared.PathUtils import get_captures_root
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.login.packets import build_login_packet
-from server.modules.handlers.world.bootstrap.replay import build_single_u32_update_object_payload
+from server.modules.handlers.world.bootstrap.replay import (
+    build_single_u32_update_object_payload,
+    send_raw_packet,
+)
 from server.modules.handlers.world.chat.router import chat_router
 from server.modules.handlers.world.chat.codec import (
     CHAT_MSG_SAY,
@@ -44,10 +48,20 @@ from server.modules.handlers.world.teleport.teleport_service import (
 # entity/chat packet builders are isolated from the old monolith.
 RAW_REPLAY_SAY_CHAT_PROFILE = None
 USE_SYSTEM_CHAT_FALLBACK = True
+RAW_SNIFFED_MESSAGECHAT_CAPTURE = "SMSG_MESSAGECHAT_1774505644_0004.json"
 
 
 def _notification_response(message: str) -> list[tuple[str, bytes]]:
     return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
+
+
+def _sniffed_messagechat_response() -> list[tuple[str, bytes]]:
+    capture_path = get_captures_root(focus=True) / "debug" / RAW_SNIFFED_MESSAGECHAT_CAPTURE
+    if not capture_path.exists():
+        Logger.warning(f"[CHAT][SNIFF] missing capture path={capture_path}")
+        return _notification_response(f"Missing chat sniff: {RAW_SNIFFED_MESSAGECHAT_CAPTURE}")
+    opcode_name, payload = send_raw_packet(None, "SMSG_MESSAGECHAT", capture_path)
+    return [(opcode_name, payload)]
 
 
 def _dispatch_responses_to_sessions(targets, responses) -> None:
@@ -60,7 +74,7 @@ def _dispatch_responses_to_sessions(targets, responses) -> None:
             sender(responses)
 
 
-def _handle_chat_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
+def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, bytes]]]:
     command = str(message or "").strip()
 
     if command.lower().startswith(".roll"):
@@ -354,7 +368,17 @@ def _handle_chat_command(session, message: str) -> Optional[list[tuple[str, byte
     )
 
 
-def _handle_chat_message(session, ctx: PacketContext):
+def _handle_chat_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
+    command = str(message or "").strip()
+
+    if command.lower() == ".sniffchat":
+        Logger.info(f"[CHAT][SNIFF] replay source={RAW_SNIFFED_MESSAGECHAT_CAPTURE}")
+        return _sniffed_messagechat_response()
+
+    return _handle_chat_command_old(session, message)
+
+
+def _handle_chat_message_old(session, ctx: PacketContext):
     chat = decode_chat_message(ctx.name, ctx.payload, ctx.decoded)
     message = chat["message"]
     if not message:
@@ -370,6 +394,73 @@ def _handle_chat_message(session, ctx: PacketContext):
 
     Logger.debug(f"[CHAT] opcode={ctx.name}")
     Logger.info(f"[CHAT] {player_name}: {message}")
+
+    if USE_SYSTEM_CHAT_FALLBACK:
+        payload_out = encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")
+        Logger.info(
+            f"[CHAT][FALLBACK] mode=system player={player_name!r} bytes={len(payload_out)} message={message!r}"
+        )
+    else:
+        payload_out = encode_messagechat_payload(
+            chat_type=CHAT_MSG_SAY,
+            language=language,
+            sender_guid=sender_guid,
+            sender_name=player_name,
+            target_guid=0,
+            target_name="",
+            message=message,
+        )
+
+    notification_payload = build_motd_notification_payload(message)
+    chat_response = ("SMSG_MESSAGECHAT", payload_out)
+    targets = chat_router.get_targets(session, "say")
+    dispatched = False
+    if targets:
+        _dispatch_responses_to_sessions(targets, [chat_response])
+        dispatched = True
+
+    responses: list[tuple[str, bytes]] = [("SMSG_NOTIFICATION", notification_payload)]
+    raw_replay_messagechat = build_raw_replay_messagechat_packet(
+        profile=RAW_REPLAY_SAY_CHAT_PROFILE
+    )
+    if raw_replay_messagechat is not None:
+        responses.append(raw_replay_messagechat)
+    if not dispatched:
+        responses.insert(0, chat_response)
+    return 0, responses
+
+
+def _handle_chat_message(session, ctx: PacketContext):
+    chat = decode_chat_message(ctx.name, ctx.payload, ctx.decoded)
+    message = chat["message"]
+    if not message:
+        return 0, None
+
+    command_responses = _handle_chat_command(session, message)
+    if command_responses is not None:
+        return 0, command_responses if command_responses else None
+
+    player_name = session.player_name
+    sender_guid = int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    language = int(chat.get("language") or 0)
+
+    Logger.debug(f"[CHAT] opcode={ctx.name}")
+    Logger.info(f"[CHAT] {player_name}: {message}")
+
+    if ctx.name == "CMSG_MESSAGECHAT_SAY":
+        say_guid = int(getattr(session, "char_guid", 0) or 0)
+        if say_guid <= 0:
+            say_guid = sender_guid
+        payload_out = encode_messagechat_payload(
+            chat_type=CHAT_MSG_SAY,
+            language=language,
+            sender_guid=say_guid,
+            sender_name=player_name,
+            target_guid=0,
+            target_name="",
+            message=message,
+        )
+        return 0, [("SMSG_MESSAGECHAT", payload_out)]
 
     if USE_SYSTEM_CHAT_FALLBACK:
         payload_out = encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")
