@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import math
-import struct
 import time
 from typing import Iterable
 
@@ -266,15 +265,15 @@ def broadcast_region_responses(responses, *, target_session=None, region=None, m
 
 
 def build_system_message_responses(message: str) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.chat.codec import (
-        build_motd_notification_payload,
-        encode_skyfire_messagechat_system_payload,
-    )
+    from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 
-    return [
-        ("SMSG_NOTIFICATION", build_motd_notification_payload(message)),
-        ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message)),
-    ]
+    # Fallback if we need to restore center-screen notifications:
+    # from server.modules.handlers.world.chat.codec import build_motd_notification_payload
+    # return [
+    #     ("SMSG_NOTIFICATION", build_motd_notification_payload(message)),
+    #     ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message)),
+    # ]
+    return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
 
 
 def broadcast_system_message(
@@ -383,149 +382,27 @@ def _build_player_name_response(source_session) -> tuple[str, bytes] | None:
 
 
 def _build_player_value_update_responses(source_session) -> list[tuple[str, bytes]]:
-    payload = _build_player_move_response(source_session)
-    if payload is None:
+    from server.modules.handlers.world.login.context import WorldLoginContext
+    from server.modules.handlers.world.login.packets import build_login_packet
+
+    guid = int(getattr(source_session, "char_guid", 0) or 0)
+    if guid <= 0:
         return []
-    return [("SMSG_PLAYER_MOVE", payload)]
 
+    ctx = WorldLoginContext.from_session(source_session)
+    ctx.exact_0004_map_id = int(getattr(source_session, "map_id", 0) or 0)
+    ctx.exact_0004_guid = guid
+    ctx.exact_0006_map_id = int(getattr(source_session, "map_id", 0) or 0)
+    ctx.exact_0006_guid = guid
 
-def _movement_guid_bytes(session) -> list[int]:
-    guid = int(getattr(session, "char_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF
-    return list(guid.to_bytes(8, "little", signed=False))
-
-
-def _movement_flags(session) -> int:
-    flags = 0
-    if bool(getattr(session, "_sim_move_forward", False)):
-        flags |= 0x00000001
-    if bool(getattr(session, "_sim_move_backward", False)):
-        flags |= 0x00000002
-    if bool(getattr(session, "_sim_turn_left", False)):
-        flags |= 0x00000010
-    if bool(getattr(session, "_sim_turn_right", False)):
-        flags |= 0x00000020
-    return int(flags)
-
-
-class _PacketBitWriter:
-    def __init__(self) -> None:
-        self._bits = 0
-        self._current = 0
-        self._payload = bytearray()
-
-    def write_bit(self, value: int | bool) -> None:
-        if value:
-            self._current |= 1 << (7 - self._bits)
-        self._bits += 1
-        if self._bits == 8:
-            self._payload.append(self._current)
-            self._bits = 0
-            self._current = 0
-
-    def write_bits(self, value: int, count: int) -> None:
-        for index in reversed(range(int(count))):
-            self.write_bit((int(value) >> index) & 1)
-
-    def align(self) -> None:
-        if self._bits:
-            self._payload.append(self._current)
-            self._bits = 0
-            self._current = 0
-
-    def write_u8(self, value: int) -> None:
-        self.align()
-        self._payload.append(int(value) & 0xFF)
-
-    def write_u32(self, value: int) -> None:
-        self.align()
-        self._payload.extend(struct.pack("<I", int(value) & 0xFFFFFFFF))
-
-    def write_f32(self, value: float) -> None:
-        self.align()
-        self._payload.extend(struct.pack("<f", float(value)))
-
-    def write_byte_seq(self, value: int) -> None:
-        byte_value = int(value) & 0xFF
-        if byte_value != 0:
-            self.write_u8(byte_value ^ 0x01)
-
-    def build(self) -> bytes:
-        self.align()
-        return bytes(self._payload)
-
-
-def _build_player_move_response(source_session) -> bytes | None:
-    guid_bytes = _movement_guid_bytes(source_session)
-    if not any(guid_bytes):
-        return None
-
-    writer = _PacketBitWriter()
-    move_flags = _movement_flags(source_session)
-    move_flags2 = 0
-    movement_counter = int(getattr(source_session, "_movement_counter", 0) or 0)
-    has_orientation = not math.isclose(
-        float(getattr(source_session, "orientation", 0.0) or 0.0),
-        0.0,
-        abs_tol=1e-6,
-    )
-    has_movement_flags = move_flags != 0
-
-    writer.write_bit(1)  # !hasPitch
-    writer.write_bit(1 if guid_bytes[2] else 0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(1 if guid_bytes[0] else 0)
-    writer.write_bit(0 if has_orientation else 1)
-    writer.write_bit(0)  # hasFallData
-    writer.write_bit(0 if movement_counter else 1)
-    writer.write_bit(1 if guid_bytes[3] else 0)
-    writer.write_bit(0)  # hasFallDirection
-    writer.write_bit(0)  # hasTransportData
-    writer.write_bit(1 if guid_bytes[4] else 0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(0)
-    writer.write_bit(1)  # !hasSplineElevation
-    writer.write_bit(0 if has_movement_flags else 1)
-    writer.write_bit(0)
-    if has_movement_flags:
-        writer.write_bits(move_flags, 30)
-    writer.write_bit(1)  # !hasMovementFlags2
-    writer.write_bit(1 if guid_bytes[7] else 0)
-    writer.write_bit(1 if guid_bytes[1] else 0)
-    writer.write_bit(0)  # !hasTimestamp
-    if move_flags2:
-        writer.write_bits(move_flags2, 13)
-    writer.write_bit(1 if guid_bytes[5] else 0)
-    writer.write_bits(0, 22)  # forcesCount
-    writer.write_bit(1 if guid_bytes[6] else 0)
-
-    writer.write_f32(float(getattr(source_session, "y", 0.0) or 0.0))
-    writer.write_byte_seq(guid_bytes[5])
-    writer.write_byte_seq(guid_bytes[1])
-    writer.write_f32(float(getattr(source_session, "z", 0.0) or 0.0))
-    writer.write_u32(int(time.time() * 1000) & 0xFFFFFFFF)
-    if has_orientation:
-        writer.write_f32(float(getattr(source_session, "orientation", 0.0) or 0.0))
-    writer.write_byte_seq(guid_bytes[3])
-    writer.write_byte_seq(guid_bytes[0])
-    writer.write_byte_seq(guid_bytes[2])
-    writer.write_byte_seq(guid_bytes[6])
-    if movement_counter:
-        writer.write_u32(movement_counter)
-    writer.write_f32(float(getattr(source_session, "x", 0.0) or 0.0))
-    writer.write_byte_seq(guid_bytes[4])
-    writer.write_byte_seq(guid_bytes[7])
-
-    source_session._movement_counter = (movement_counter + 1) & 0xFFFFFFFF
-    return writer.build()
+    responses: list[tuple[str, bytes]] = []
+    payload_0004 = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0004", ctx)
+    if payload_0004 is not None:
+        responses.append(("SMSG_UPDATE_OBJECT", payload_0004))
+    payload_0006 = build_login_packet("SMSG_UPDATE_OBJECT_1773613185_0006", ctx)
+    if payload_0006 is not None:
+        responses.append(("SMSG_UPDATE_OBJECT", payload_0006))
+    return responses
 
 
 def _build_player_remove_update_response(source_session) -> tuple[str, bytes] | None:
@@ -606,8 +483,16 @@ def _reconcile_session_visibility_pair(source_session, other_session, *, source_
         created_for_other = _send_player_create(other_session, source_session)
         updated_for_other = False
         if not created_for_other and source_value_responses and source_guid in _visible_guid_set(other_session):
-            dispatch_responses_to_sessions([other_session], source_value_responses)
-            updated_for_other = True
+            responses: list[tuple[str, bytes]] = []
+            remove_response = _build_player_remove_update_response(source_session)
+            create_response = _build_player_create_update_response(source_session)
+            if remove_response is not None:
+                responses.append(remove_response)
+            if create_response is not None:
+                responses.append(create_response)
+            if responses:
+                dispatch_responses_to_sessions([other_session], responses)
+                updated_for_other = True
         return created_for_source, created_for_other, updated_for_other
 
     removed_from_source = _send_player_remove(source_session, other_session)

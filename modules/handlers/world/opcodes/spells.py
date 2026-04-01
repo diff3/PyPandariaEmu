@@ -9,7 +9,7 @@ from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.game.guid import GuidHelper, HighGuid
 from server.modules.handlers.world.login.context import WorldLoginContext
 from server.modules.handlers.world.login.packets import build_login_packet
-from server.modules.handlers.world.chat.codec import build_motd_notification_payload
+from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.handlers.world.bootstrap.replay import (
     build_single_u32_update_object_payload,
     make_update_object_response,
@@ -76,7 +76,9 @@ def _world_login_context_from_session(session):
 
 
 def _notification_response(message: str) -> list[tuple[str, bytes]]:
-    return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
+    # Fallback if we need to restore screen notifications for spell feedback:
+    # return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
+    return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
 
 
 def _make_update_object_response(payload: bytes) -> tuple[str, bytes]:

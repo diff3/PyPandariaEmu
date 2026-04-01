@@ -73,7 +73,8 @@ PRE_UPDATE_OBJECT_PACKETS = (
     "SMSG_CLIENTCACHE_VERSION",
     "SMSG_ACCOUNT_DATA_TIMES",
     "SMSG_TUTORIAL_FLAGS",
-    "SMSG_MOTD",
+    # MOTD goes out as CHAT_MSG_SYSTEM instead of SMSG_MOTD for now.
+    # "SMSG_MOTD",
     "SMSG_SEND_KNOWN_SPELLS",
     "SMSG_SEND_UNLEARN_SPELLS",
     # Temporarily disabled while debugging character-specific login stalls.

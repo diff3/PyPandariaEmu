@@ -35,7 +35,7 @@ from server.modules.handlers.world.account_data import (
     load_global_account_data,
 )
 from server.modules.handlers.world.bootstrap import replay as bootstrap_replay
-from server.modules.handlers.world.chat.codec import build_motd_notification_payload
+from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.handlers.world.constants.character_data import (
     DEFAULT_MAX_PRIMARY_POWER_BY_DISPLAY,
     PLAYER_DISPLAY_POWER_BY_CLASS,
@@ -723,9 +723,12 @@ def handle_set_active_mover(session, ctx: PacketContext):
     motd = str(getattr(_build_world_login_context(session), "motd", "") or "").strip()
     if motd and not session.chat_motd_sent:
         session.chat_motd_sent = True
-        notification_payload = build_motd_notification_payload(motd)
-        Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; sending MOTD notification fallback")
-        responses.append(("SMSG_NOTIFICATION", notification_payload))
+        # Fallback if we need to restore screen MOTD:
+        # notification_payload = build_motd_notification_payload(motd)
+        # Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; sending MOTD notification fallback")
+        # responses.append(("SMSG_NOTIFICATION", notification_payload))
+        Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; sending MOTD as system chat")
+        responses.append(("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(motd)))
 
     if not getattr(session, "account_settings_sent", False):
         session.account_settings_sent = True

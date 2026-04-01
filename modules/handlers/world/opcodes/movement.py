@@ -334,12 +334,11 @@ def parse_movement_info(
     if movement is not None:
         return movement
 
-    # For a few movement opcodes we can still salvage x/y/z from the raw payload,
-    # but we keep the current facing instead of trusting random float windows.
+    # Start/stop movement opcodes are state transitions. Treating arbitrary float
+    # windows in those payloads as live coordinates has caused z=0 snaps, which
+    # in turn makes nearby players disappear client-side. Only heartbeat/fall/jump
+    # should move the authoritative position.
     if opcode_name in {
-        "MSG_MOVE_START_FORWARD",
-        "MSG_MOVE_START_BACKWARD",
-        "MSG_MOVE_STOP",
         "MSG_MOVE_FALL_LAND",
         "MSG_MOVE_JUMP",
     }:

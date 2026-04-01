@@ -18,7 +18,6 @@ from server.modules.handlers.world.chat.router import chat_router
 from server.modules.handlers.world.chat.codec import (
     CHAT_MSG_SAY,
     TEXT_EMOTE_TO_ANIM_EMOTE,
-    build_motd_notification_payload,
     build_raw_replay_messagechat_packet,
     decode_chat_message,
     encode_messagechat_payload,
@@ -57,14 +56,18 @@ RAW_SNIFFED_MESSAGECHAT_CAPTURE = "SMSG_MESSAGECHAT_1774505644_0004.json"
 
 
 def _notification_response(message: str) -> list[tuple[str, bytes]]:
-    return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
+    # Fallback if we need to restore center-screen notifications:
+    # return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
+    return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
 
 
 def _debug_feedback_response(message: str) -> list[tuple[str, bytes]]:
-    return [
-        ("SMSG_NOTIFICATION", build_motd_notification_payload(message)),
-        ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message)),
-    ]
+    # Fallback if we need both notification + system chat again:
+    # return [
+    #     ("SMSG_NOTIFICATION", build_motd_notification_payload(message)),
+    #     ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message)),
+    # ]
+    return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
 
 
 def _list_sniffed_messagechat_captures() -> list[str]:
@@ -269,7 +272,9 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             message = f"[Save] failed for {player_name}"
             Logger.warning(message)
 
-        return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
+        # Fallback if we need to restore center-screen notifications:
+        # return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
+        return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
 
     if command.lower().startswith(".telxyz"):
         parts = command.split()
@@ -516,7 +521,6 @@ def _handle_chat_message_old(session, ctx: PacketContext):
             message=message,
         )
 
-    notification_payload = build_motd_notification_payload(message)
     chat_response = ("SMSG_MESSAGECHAT", payload_out)
     targets = chat_router.get_targets(session, "say")
     dispatched = False
@@ -524,7 +528,9 @@ def _handle_chat_message_old(session, ctx: PacketContext):
         _dispatch_responses_to_sessions(targets, [chat_response])
         dispatched = True
 
-    responses: list[tuple[str, bytes]] = [("SMSG_NOTIFICATION", notification_payload)]
+    # Fallback if we need per-message screen notifications again:
+    # responses: list[tuple[str, bytes]] = [("SMSG_NOTIFICATION", notification_payload)]
+    responses: list[tuple[str, bytes]] = []
     raw_replay_messagechat = build_raw_replay_messagechat_packet(
         profile=RAW_REPLAY_SAY_CHAT_PROFILE
     )
@@ -565,16 +571,19 @@ def _handle_chat_message(session, ctx: PacketContext):
             target_name="",
             message=message,
         )
-        system_chat_response = (
-            "SMSG_MESSAGECHAT",
-            encode_skyfire_messagechat_system_payload(f"{player_name}: {message}"),
-        )
         say_chat_response = ("SMSG_MESSAGECHAT", payload_out)
         targets = chat_router.get_targets(session, "say")
         if targets:
-            _dispatch_responses_to_sessions(targets, [system_chat_response, say_chat_response])
+            # Fallback if we want to mirror say as system feedback too:
+            # system_chat_response = (
+            #     "SMSG_MESSAGECHAT",
+            #     encode_skyfire_messagechat_system_payload(f"{player_name}: {message}"),
+            # )
+            # _dispatch_responses_to_sessions(targets, [system_chat_response, say_chat_response])
+            _dispatch_responses_to_sessions(targets, [say_chat_response])
             return 0, None
-        return 0, [system_chat_response, say_chat_response]
+        # return 0, [system_chat_response, say_chat_response]
+        return 0, [say_chat_response]
 
     if USE_SYSTEM_CHAT_FALLBACK:
         payload_out = encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")
@@ -592,7 +601,6 @@ def _handle_chat_message(session, ctx: PacketContext):
             message=message,
         )
 
-    notification_payload = build_motd_notification_payload(message)
     chat_response = ("SMSG_MESSAGECHAT", payload_out)
     targets = chat_router.get_targets(session, "say")
     dispatched = False
@@ -600,7 +608,9 @@ def _handle_chat_message(session, ctx: PacketContext):
         _dispatch_responses_to_sessions(targets, [chat_response])
         dispatched = True
 
-    responses: list[tuple[str, bytes]] = [("SMSG_NOTIFICATION", notification_payload)]
+    # Fallback if we need per-message screen notifications again:
+    # responses: list[tuple[str, bytes]] = [("SMSG_NOTIFICATION", notification_payload)]
+    responses: list[tuple[str, bytes]] = []
     raw_replay_messagechat = build_raw_replay_messagechat_packet(
         profile=RAW_REPLAY_SAY_CHAT_PROFILE
     )
@@ -624,13 +634,17 @@ def handle_chat_join_channel(session, ctx: PacketContext):
     if session.chat_motd_sent:
         return 0, None
 
-    motd_payload = build_login_packet("SMSG_MOTD", login_handlers._build_world_login_context(session))
-    if motd_payload is None:
-        return 0, None
-
     session.chat_motd_sent = True
     Logger.info("[WorldHandlers] sending MOTD after chat join")
-    return 0, [("SMSG_MOTD", motd_payload)]
+    motd = str(getattr(login_handlers._build_world_login_context(session), "motd", "") or "").strip()
+    if not motd:
+        return 0, None
+    # Fallback if we need to restore SMSG_MOTD:
+    # motd_payload = build_login_packet("SMSG_MOTD", login_handlers._build_world_login_context(session))
+    # if motd_payload is None:
+    #     return 0, None
+    # return 0, [("SMSG_MOTD", motd_payload)]
+    return 0, [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(motd))]
 
 
 @register("CMSG_MESSAGECHAT_SAY")
