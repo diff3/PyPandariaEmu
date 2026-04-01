@@ -42,8 +42,10 @@ class AddonsBuilder:
                 {
                     "name": entry.name,
                     "enabled": 1,
+                    "use_public_key": 1,
                     "crc": AddonsBuilder.ADDON_CRC_FALLBACK,
                     "unk": 0,
+                    "url_file": 0,
                 }
             )
 
@@ -72,9 +74,9 @@ class AddonsBuilder:
             name = (addon.get("name") or "").encode("ascii", errors="replace")
             out.extend(name)
             out.append(0)
-            out.append(int(addon.get("enabled", 0)) & 0xFF)
+            out.append(int(addon.get("use_public_key", addon.get("enabled", 0)) or 0) & 0xFF)
             out.extend(int(addon.get("crc", 0)).to_bytes(4, "little"))
-            out.extend(int(addon.get("unk", 0)).to_bytes(4, "little"))
+            out.extend(int(addon.get("url_file", addon.get("unk", 0)) or 0).to_bytes(4, "little"))
         return bytes(out)
 
     @staticmethod
@@ -109,19 +111,21 @@ class AddonsBuilder:
             if idx + 9 > len(data):
                 raise ValueError("addons data truncated")
 
-            enabled = data[idx]
+            use_public_key = data[idx]
             idx += 1
             crc = int.from_bytes(data[idx:idx + 4], "little")
             idx += 4
-            unk = int.from_bytes(data[idx:idx + 4], "little")
+            url_file = int.from_bytes(data[idx:idx + 4], "little")
             idx += 4
 
             addons.append(
                 {
                     "name": name,
-                    "enabled": enabled,
+                    "enabled": 1,
+                    "use_public_key": use_public_key,
                     "crc": crc,
-                    "unk": unk,
+                    "unk": url_file,
+                    "url_file": url_file,
                 }
             )
 

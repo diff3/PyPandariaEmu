@@ -25,6 +25,7 @@ from server.modules.protocol.PacketContext import PacketContext
 from shared.Logger import Logger
 
 from server.modules.handlers.world.constants.login import RACES_MOP, CLASSES_MOP
+from server.modules.handlers.world.addons import addon_public_key_bytes
 from shared.PathUtils import get_captures_root, get_debug_root
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.game.equipment import _parse_equipment_cache
@@ -1881,27 +1882,34 @@ def build_SMSG_ADDON_INFO(ctx) -> bytes:
     banned = list(getattr(ctx, "banned_addons", []) or [])
 
     payload = bytearray()
-    payload.extend(int(len(banned)).to_bytes(4, "little", signed=False))
-
     bits = BitWriter()
-    bits.write_bits(len(addons) & 0x1FF, 9)
+    bits.write_bits(len(banned) & 0x3FFFF, 18)
+    bits.write_bits(len(addons) & 0x7FFFFF, 23)
     for addon in addons:
-        use_public_key = 1 if int(addon.get("use_public_key", 0) or 0) else 0
         enabled = 1 if int(addon.get("enabled", 1) or 0) else 0
-        is_banned = 1 if int(addon.get("banned", 0) or 0) else 0
-        bits.write_bits(use_public_key, 1)
+        send_public_key = 1 if int(addon.get("send_public_key", 0) or 0) else 0
+        bits.write_bits(0, 1)
         bits.write_bits(enabled, 1)
-        bits.write_bits(is_banned, 1)
+        bits.write_bits(send_public_key, 1)
     payload.extend(bits.getvalue())
 
+    public_key = addon_public_key_bytes()
     for addon in addons:
-        payload.append(1 if int(addon.get("enabled", 1) or 0) else 0)
-        payload.extend(int(addon.get("unk", 0) or 0).to_bytes(4, "little", signed=False))
+        enabled = 1 if int(addon.get("enabled", 1) or 0) else 0
+        send_public_key = 1 if int(addon.get("send_public_key", 0) or 0) else 0
+        if send_public_key:
+            payload.extend(public_key)
+        if enabled:
+            payload.append(enabled)
+            payload.extend((0).to_bytes(4, "little", signed=False))
         payload.append(int(addon.get("state", 2) or 2) & 0xFF)
 
     for addon in banned:
         payload.extend(int(addon.get("id", 0) or 0).to_bytes(4, "little", signed=False))
-
+        payload.extend((1).to_bytes(4, "little", signed=False))
+        for _ in range(8):
+            payload.extend((0).to_bytes(4, "little", signed=False))
+        payload.extend(int(addon.get("timestamp", 0) or 0).to_bytes(4, "little", signed=False))
     return bytes(payload)
 
 

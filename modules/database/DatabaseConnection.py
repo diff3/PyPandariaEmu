@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from hashlib import md5
+
 from sqlalchemy import create_engine, or_, text
 from sqlalchemy.orm import scoped_session, sessionmaker
 
@@ -56,6 +58,7 @@ class DatabaseConnection:
     _cache_xp_for_level = {}
     _item_template_cache = {}
     _account_data_tables_ready = False
+    _addon_tables_ready = False
 
     @staticmethod
     def initialize():
@@ -345,6 +348,108 @@ class DatabaseConnection:
         except Exception as exc:
             session.rollback()
             Logger.warning(f"[DB] ensure account-data tables failed: {exc}")
+
+    @staticmethod
+    def _ensure_addon_tables() -> None:
+        if DatabaseConnection._addon_tables_ready:
+            return
+
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS addons (
+                    name VARCHAR(255) NOT NULL,
+                    crc INT UNSIGNED NOT NULL DEFAULT 0,
+                    PRIMARY KEY (name)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
+                """
+            ))
+            session.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS banned_addons (
+                    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    name VARCHAR(255) NOT NULL DEFAULT '',
+                    version VARCHAR(255) NOT NULL DEFAULT '',
+                    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
+                """
+            ))
+            session.commit()
+            DatabaseConnection._addon_tables_ready = True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] ensure addon tables failed: {exc}")
+
+    @staticmethod
+    def load_known_addons() -> dict[str, int]:
+        DatabaseConnection._ensure_addon_tables()
+        session = DatabaseConnection.chars()
+        try:
+            rows = session.execute(text("SELECT name, crc FROM addons")).fetchall()
+        except Exception as exc:
+            Logger.warning(f"[DB] load_known_addons failed: {exc}")
+            return {}
+
+        result: dict[str, int] = {}
+        for row in rows:
+            try:
+                result[str(row[0])] = int(row[1] or 0)
+            except Exception:
+                continue
+        return result
+
+    @staticmethod
+    def save_known_addon(name: str, crc: int) -> bool:
+        DatabaseConnection._ensure_addon_tables()
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(
+                text("REPLACE INTO addons (name, crc) VALUES (:name, :crc)"),
+                {"name": str(name or ""), "crc": int(crc or 0)},
+            )
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] save_known_addon failed name={name}: {exc}")
+            return False
+
+    @staticmethod
+    def load_banned_addons() -> list[dict]:
+        DatabaseConnection._ensure_addon_tables()
+        session = DatabaseConnection.chars()
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT id, name, version, UNIX_TIMESTAMP(timestamp) AS ts
+                    FROM banned_addons
+                    ORDER BY id ASC
+                    """
+                )
+            ).fetchall()
+        except Exception as exc:
+            Logger.warning(f"[DB] load_banned_addons failed: {exc}")
+            return []
+
+        result: list[dict] = []
+        for row in rows:
+            try:
+                name = str(row[1] or "")
+                version = str(row[2] or "")
+                result.append({
+                    "id": int(row[0] or 0),
+                    "name": name,
+                    "version": version,
+                    "timestamp": int(row[3] or 0),
+                    "name_md5": md5(name.encode("utf-8", errors="replace")).digest(),
+                    "version_md5": md5(version.encode("utf-8", errors="replace")).digest(),
+                })
+            except Exception:
+                continue
+        return result
 
     @staticmethod
     def load_account_data(owner_id: int, *, per_character: bool) -> dict[int, tuple[int, str]]:

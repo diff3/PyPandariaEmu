@@ -27,6 +27,7 @@ from server.modules.handlers.world.mount.mount_service import load_mount_spells
 from server.modules.handlers.world.teleport.teleport_service import load_teleports
 from server.modules.handlers.world.state.global_state import global_state
 from server.modules.handlers.world.runtime.lifecycle import handle_disconnect_session
+from server.modules.handlers.world.addons import load_from_db as load_addon_cache
 
 try:
     from server.modules.handlers.WorldHandlers import (
@@ -476,6 +477,10 @@ def run_world() -> None:
     Logger.info(f"DSL runtime ready [{loaded}/{total}] {pct}%")
     DatabaseConnection.initialize()
     DatabaseConnection.preload_world_cache()
+    try:
+        load_addon_cache()
+    except Exception as exc:
+        Logger.warning(f"[ADDONS] preload failed: {exc}")
     try:
         load_mount_spells(DatabaseConnection.world())
     except Exception as exc:
