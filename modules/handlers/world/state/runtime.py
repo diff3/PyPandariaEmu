@@ -3,12 +3,17 @@
 
 from __future__ import annotations
 
+import math
+import struct
 import time
 from typing import Iterable
 
 from shared.Logger import Logger
+from server.modules.handlers.world.position.position_service import position_delta, position_from_session
 from server.modules.handlers.world.state.global_state import global_state
 from server.modules.handlers.world.state.region_manager import region_manager
+
+PLAYER_VISIBILITY_DISTANCE = 120.0
 
 
 WEATHER_TYPES: dict[str, int] = {
@@ -145,7 +150,53 @@ def iter_region_sessions(target_session=None, *, region=None, map_id: int | None
     return list(getattr(target_region, "players", ()) or ())
 
 
+def _session_guid(session) -> int:
+    return int(getattr(session, "char_guid", 0) or 0)
+
+
+def _visible_guid_set(session) -> set[int]:
+    visible = getattr(session, "visible_guids", None)
+    if isinstance(visible, set):
+        return visible
+    normalized = set(int(guid) for guid in (visible or ()) if int(guid or 0) > 0)
+    session.visible_guids = normalized
+    return normalized
+
+
+def _clear_session_visibility(session) -> None:
+    visible_guids = _visible_guid_set(session)
+    if not visible_guids:
+        return
+
+    session_guid = _session_guid(session)
+    for peer in iter_in_world_sessions():
+        if peer is session:
+            continue
+        if session_guid > 0:
+            _visible_guid_set(peer).discard(session_guid)
+    visible_guids.clear()
+
+
+def _sessions_share_phase(left, right) -> bool:
+    left_phase = int(getattr(left, "phase_mask", 0) or 0)
+    right_phase = int(getattr(right, "phase_mask", 0) or 0)
+    return left_phase == 0 or right_phase == 0 or left_phase == right_phase
+
+
+def _sessions_in_visibility_range(left, right) -> bool:
+    if int(getattr(left, "map_id", 0) or 0) != int(getattr(right, "map_id", 0) or 0):
+        return False
+    if int(getattr(left, "instance_id", 0) or 0) != int(getattr(right, "instance_id", 0) or 0):
+        return False
+    if not _sessions_share_phase(left, right):
+        return False
+
+    delta = position_delta(position_from_session(left), position_from_session(right))
+    return math.isfinite(float(delta.distance_3d)) and float(delta.distance_3d) <= float(PLAYER_VISIBILITY_DISTANCE)
+
+
 def attach_session_to_world_state(target_session, *, map_id: int) -> None:
+    _clear_session_visibility(target_session)
     region = getattr(target_session, "region", None)
     if region is not None:
         region.players.discard(target_session)
@@ -164,6 +215,7 @@ def attach_session_to_world_state(target_session, *, map_id: int) -> None:
     target_session._multiplayer_last_broadcast_key = None
     target_session._multiplayer_last_resync_at = 0.0
     target_session._multiplayer_last_resync_key = None
+    target_session.visible_guids.clear()
     target_session.time_offset = int(getattr(target_session.global_state, "time_offset", 0) or 0)
     target_session.time_speed = float(getattr(target_session.global_state, "time_speed", 0.01666667) or 0.01666667)
     target_session.server_time = int(time.time())
@@ -323,34 +375,157 @@ def _build_player_create_update_response(source_session) -> tuple[str, bytes] | 
 def _build_player_name_response(source_session) -> tuple[str, bytes] | None:
     from server.modules.handlers.world.opcodes.entities import build_query_player_name_response
 
-    if int(getattr(source_session, "char_guid", 0) or 0) <= 0:
+    char_guid = int(getattr(source_session, "char_guid", 0) or 0)
+    if char_guid <= 0:
         return None
 
-    low_guid = int(getattr(source_session, "char_guid", 0) or 0) & 0xFF
-    return ("SMSG_QUERY_PLAYER_NAME_RESPONSE", build_query_player_name_response(source_session, low_guid))
+    return ("SMSG_QUERY_PLAYER_NAME_RESPONSE", build_query_player_name_response(source_session, char_guid))
 
 
 def _build_player_value_update_responses(source_session) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.login.context import WorldLoginContext
-    from server.modules.handlers.world.login.packets import build_login_packet
-
-    if int(getattr(source_session, "world_guid", 0) or 0) <= 0:
+    payload = _build_player_move_response(source_session)
+    if payload is None:
         return []
+    return [("SMSG_PLAYER_MOVE", payload)]
 
-    ctx = WorldLoginContext.from_session(source_session)
-    ctx.exact_0004_map_id = int(getattr(source_session, "map_id", 0) or 0)
-    ctx.exact_0004_guid = int(getattr(source_session, "world_guid", 0) or 0)
-    ctx.exact_0006_map_id = int(getattr(source_session, "map_id", 0) or 0)
-    ctx.exact_0006_guid = int(getattr(source_session, "world_guid", 0) or 0)
 
-    responses: list[tuple[str, bytes]] = []
-    payload_0004 = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0004", ctx)
-    if payload_0004 is not None:
-        responses.append(("SMSG_UPDATE_OBJECT", payload_0004))
-    payload_0006 = build_login_packet("SMSG_UPDATE_OBJECT_1773613185_0006", ctx)
-    if payload_0006 is not None:
-        responses.append(("SMSG_UPDATE_OBJECT", payload_0006))
-    return responses
+def _movement_guid_bytes(session) -> list[int]:
+    guid = int(getattr(session, "char_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF
+    return list(guid.to_bytes(8, "little", signed=False))
+
+
+def _movement_flags(session) -> int:
+    flags = 0
+    if bool(getattr(session, "_sim_move_forward", False)):
+        flags |= 0x00000001
+    if bool(getattr(session, "_sim_move_backward", False)):
+        flags |= 0x00000002
+    if bool(getattr(session, "_sim_turn_left", False)):
+        flags |= 0x00000010
+    if bool(getattr(session, "_sim_turn_right", False)):
+        flags |= 0x00000020
+    return int(flags)
+
+
+class _PacketBitWriter:
+    def __init__(self) -> None:
+        self._bits = 0
+        self._current = 0
+        self._payload = bytearray()
+
+    def write_bit(self, value: int | bool) -> None:
+        if value:
+            self._current |= 1 << (7 - self._bits)
+        self._bits += 1
+        if self._bits == 8:
+            self._payload.append(self._current)
+            self._bits = 0
+            self._current = 0
+
+    def write_bits(self, value: int, count: int) -> None:
+        for index in reversed(range(int(count))):
+            self.write_bit((int(value) >> index) & 1)
+
+    def align(self) -> None:
+        if self._bits:
+            self._payload.append(self._current)
+            self._bits = 0
+            self._current = 0
+
+    def write_u8(self, value: int) -> None:
+        self.align()
+        self._payload.append(int(value) & 0xFF)
+
+    def write_u32(self, value: int) -> None:
+        self.align()
+        self._payload.extend(struct.pack("<I", int(value) & 0xFFFFFFFF))
+
+    def write_f32(self, value: float) -> None:
+        self.align()
+        self._payload.extend(struct.pack("<f", float(value)))
+
+    def write_byte_seq(self, value: int) -> None:
+        byte_value = int(value) & 0xFF
+        if byte_value != 0:
+            self.write_u8(byte_value ^ 0x01)
+
+    def build(self) -> bytes:
+        self.align()
+        return bytes(self._payload)
+
+
+def _build_player_move_response(source_session) -> bytes | None:
+    guid_bytes = _movement_guid_bytes(source_session)
+    if not any(guid_bytes):
+        return None
+
+    writer = _PacketBitWriter()
+    move_flags = _movement_flags(source_session)
+    move_flags2 = 0
+    movement_counter = int(getattr(source_session, "_movement_counter", 0) or 0)
+    has_orientation = not math.isclose(
+        float(getattr(source_session, "orientation", 0.0) or 0.0),
+        0.0,
+        abs_tol=1e-6,
+    )
+    has_movement_flags = move_flags != 0
+
+    writer.write_bit(1)  # !hasPitch
+    writer.write_bit(1 if guid_bytes[2] else 0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(1 if guid_bytes[0] else 0)
+    writer.write_bit(0 if has_orientation else 1)
+    writer.write_bit(0)  # hasFallData
+    writer.write_bit(0 if movement_counter else 1)
+    writer.write_bit(1 if guid_bytes[3] else 0)
+    writer.write_bit(0)  # hasFallDirection
+    writer.write_bit(0)  # hasTransportData
+    writer.write_bit(1 if guid_bytes[4] else 0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(0)
+    writer.write_bit(1)  # !hasSplineElevation
+    writer.write_bit(0 if has_movement_flags else 1)
+    writer.write_bit(0)
+    if has_movement_flags:
+        writer.write_bits(move_flags, 30)
+    writer.write_bit(1)  # !hasMovementFlags2
+    writer.write_bit(1 if guid_bytes[7] else 0)
+    writer.write_bit(1 if guid_bytes[1] else 0)
+    writer.write_bit(0)  # !hasTimestamp
+    if move_flags2:
+        writer.write_bits(move_flags2, 13)
+    writer.write_bit(1 if guid_bytes[5] else 0)
+    writer.write_bits(0, 22)  # forcesCount
+    writer.write_bit(1 if guid_bytes[6] else 0)
+
+    writer.write_f32(float(getattr(source_session, "y", 0.0) or 0.0))
+    writer.write_byte_seq(guid_bytes[5])
+    writer.write_byte_seq(guid_bytes[1])
+    writer.write_f32(float(getattr(source_session, "z", 0.0) or 0.0))
+    writer.write_u32(int(time.time() * 1000) & 0xFFFFFFFF)
+    if has_orientation:
+        writer.write_f32(float(getattr(source_session, "orientation", 0.0) or 0.0))
+    writer.write_byte_seq(guid_bytes[3])
+    writer.write_byte_seq(guid_bytes[0])
+    writer.write_byte_seq(guid_bytes[2])
+    writer.write_byte_seq(guid_bytes[6])
+    if movement_counter:
+        writer.write_u32(movement_counter)
+    writer.write_f32(float(getattr(source_session, "x", 0.0) or 0.0))
+    writer.write_byte_seq(guid_bytes[4])
+    writer.write_byte_seq(guid_bytes[7])
+
+    source_session._movement_counter = (movement_counter + 1) & 0xFFFFFFFF
+    return writer.build()
 
 
 def _build_player_remove_update_response(source_session) -> tuple[str, bytes] | None:
@@ -370,6 +545,76 @@ def _build_player_remove_update_response(source_session) -> tuple[str, bytes] | 
     return ("SMSG_UPDATE_OBJECT", payload)
 
 
+def _build_player_create_responses(source_session) -> list[tuple[str, bytes]]:
+    responses: list[tuple[str, bytes]] = []
+    name_response = _build_player_name_response(source_session)
+    create_response = _build_player_create_update_response(source_session)
+    if name_response is not None:
+        responses.append(name_response)
+    if create_response is not None:
+        responses.append(create_response)
+    return responses
+
+
+def _send_player_create(observer_session, source_session) -> bool:
+    source_guid = _session_guid(source_session)
+    if source_guid <= 0:
+        return False
+
+    visible_guids = _visible_guid_set(observer_session)
+    if source_guid in visible_guids:
+        return False
+
+    responses = _build_player_create_responses(source_session)
+    if not responses:
+        return False
+
+    dispatch_responses_to_sessions([observer_session], responses)
+    visible_guids.add(source_guid)
+    return True
+
+
+def _send_player_remove(observer_session, source_session) -> bool:
+    source_guid = _session_guid(source_session)
+    if source_guid <= 0:
+        return False
+
+    visible_guids = _visible_guid_set(observer_session)
+    if source_guid not in visible_guids:
+        return False
+
+    remove_response = _build_player_remove_update_response(source_session)
+    visible_guids.discard(source_guid)
+    if remove_response is None:
+        return False
+
+    dispatch_responses_to_sessions([observer_session], [remove_response])
+    return True
+
+
+def _reconcile_session_visibility_pair(source_session, other_session, *, source_value_responses=None) -> tuple[bool, bool, bool]:
+    if other_session is source_session or not _is_session_in_world(other_session):
+        return False, False, False
+
+    source_guid = _session_guid(source_session)
+    other_guid = _session_guid(other_session)
+    if source_guid <= 0 or other_guid <= 0:
+        return False, False, False
+
+    if _sessions_in_visibility_range(source_session, other_session):
+        created_for_source = _send_player_create(source_session, other_session)
+        created_for_other = _send_player_create(other_session, source_session)
+        updated_for_other = False
+        if not created_for_other and source_value_responses and source_guid in _visible_guid_set(other_session):
+            dispatch_responses_to_sessions([other_session], source_value_responses)
+            updated_for_other = True
+        return created_for_source, created_for_other, updated_for_other
+
+    removed_from_source = _send_player_remove(source_session, other_session)
+    removed_from_other = _send_player_remove(other_session, source_session)
+    return removed_from_source, removed_from_other, False
+
+
 def sync_player_visibility(target_session) -> None:
     if not _is_session_in_world(target_session):
         return
@@ -379,29 +624,27 @@ def sync_player_visibility(target_session) -> None:
     if not other_sessions:
         return
 
-    target_name = _build_player_name_response(target_session)
-    target_create = _build_player_create_update_response(target_session)
+    created_links = 0
+    removed_links = 0
     for other in other_sessions:
-        other_name = _build_player_name_response(other)
-        other_create = _build_player_create_update_response(other)
-        responses_to_target: list[tuple[str, bytes]] = []
-        responses_to_other: list[tuple[str, bytes]] = []
-        if other_name is not None:
-            responses_to_target.append(other_name)
-        if other_create is not None:
-            responses_to_target.append(other_create)
-        if target_name is not None:
-            responses_to_other.append(target_name)
-        if target_create is not None:
-            responses_to_other.append(target_create)
-        if responses_to_target:
-            dispatch_responses_to_sessions([target_session], responses_to_target)
-        if responses_to_other:
-            dispatch_responses_to_sessions([other], responses_to_other)
+        had_other_before = _session_guid(other) in _visible_guid_set(target_session)
+        had_target_before = _session_guid(target_session) in _visible_guid_set(other)
+        changed_for_target, changed_for_other, _ = _reconcile_session_visibility_pair(target_session, other)
+        now_has_other = _session_guid(other) in _visible_guid_set(target_session)
+        now_has_target = _session_guid(target_session) in _visible_guid_set(other)
+        if changed_for_target and now_has_other:
+            created_links += 1
+        elif had_other_before and not now_has_other:
+            removed_links += 1
+        if changed_for_other and now_has_target:
+            created_links += 1
+        elif had_target_before and not now_has_target:
+            removed_links += 1
 
     Logger.info(
         f"[MULTI] synced visibility player={int(getattr(target_session, 'char_guid', 0) or 0)} "
-        f"map={int(getattr(target_session, 'map_id', 0) or 0)} peers={len(other_sessions)}"
+        f"map={int(getattr(target_session, 'map_id', 0) or 0)} peers={len(other_sessions)} "
+        f"created={created_links} removed={removed_links} visible={len(_visible_guid_set(target_session))}"
     )
 
 
@@ -410,32 +653,14 @@ def sync_all_players_on_map(map_id: int) -> None:
     if len(sessions) < 2:
         return
 
-    for target in sessions:
-        target_name = _build_player_name_response(target)
-        target_create = _build_player_create_update_response(target)
-        if target_create is None:
-            continue
-        for other in sessions:
-            if other is target:
-                continue
-            other_name = _build_player_name_response(other)
-            other_create = _build_player_create_update_response(other)
-            responses_to_target: list[tuple[str, bytes]] = []
-            responses_to_other: list[tuple[str, bytes]] = []
-            if other_name is not None:
-                responses_to_target.append(other_name)
-            if other_create is not None:
-                responses_to_target.append(other_create)
-            if target_name is not None:
-                responses_to_other.append(target_name)
-            responses_to_other.append(target_create)
-            if responses_to_target:
-                dispatch_responses_to_sessions([target], responses_to_target)
-            if responses_to_other:
-                dispatch_responses_to_sessions([other], responses_to_other)
+    pair_count = 0
+    for index, target in enumerate(sessions):
+        for other in sessions[index + 1:]:
+            _reconcile_session_visibility_pair(target, other)
+            pair_count += 1
 
     Logger.info(
-        f"[MULTI] resynced map={int(map_id)} players={len(sessions)}"
+        f"[MULTI] resynced map={int(map_id)} players={len(sessions)} pairs={pair_count}"
     )
 
 
@@ -457,9 +682,9 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
     if not force and key == last_key and (now - last_at) < 0.10:
         return
 
-    remove_response = _build_player_remove_update_response(source_session)
-    create_response = _build_player_create_update_response(source_session)
-    if remove_response is None and create_response is None:
+    value_responses = _build_player_value_update_responses(source_session)
+    create_responses = _build_player_create_responses(source_session)
+    if not value_responses and not create_responses:
         return
 
     peers = [
@@ -470,32 +695,39 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
     if not peers:
         return
 
-    last_resync_key = getattr(source_session, "_multiplayer_last_resync_key", None)
-    last_resync_at = float(getattr(source_session, "_multiplayer_last_resync_at", 0.0) or 0.0)
-    full_resync_due = bool(
-        create_response is not None
-        and (
-            force
-            or last_resync_key is None
-            or (key != last_resync_key and (now - last_resync_at) >= 0.20)
+    created = 0
+    updated = 0
+    removed = 0
+    for peer in peers:
+        had_source_before = _session_guid(source_session) in _visible_guid_set(peer)
+        had_peer_before = _session_guid(peer) in _visible_guid_set(source_session)
+        changed_for_source, changed_for_peer, updated_for_peer = _reconcile_session_visibility_pair(
+            source_session,
+            peer,
+            source_value_responses=value_responses,
         )
-    )
-    if not full_resync_due:
-        return
+        has_source_now = _session_guid(source_session) in _visible_guid_set(peer)
+        has_peer_now = _session_guid(peer) in _visible_guid_set(source_session)
+        if changed_for_source and has_peer_now:
+            created += 1
+        elif had_peer_before and not has_peer_now:
+            removed += 1
+        if changed_for_peer and has_source_now:
+            created += 1
+        elif had_source_before and not has_source_now:
+            removed += 1
+        updated += int(updated_for_peer)
 
-    responses: list[tuple[str, bytes]] = []
-    if remove_response is not None:
-        responses.append(remove_response)
-    if create_response is not None:
-        responses.append(create_response)
-
-    dispatch_responses_to_sessions(peers, responses)
     source_session._multiplayer_last_broadcast_at = now
     source_session._multiplayer_last_broadcast_key = key
-    if create_response is not None:
-        source_session._multiplayer_last_resync_at = now
-        source_session._multiplayer_last_resync_key = key
     source_session._multiplayer_removed = False
+    if force or created or updated or removed:
+        Logger.debug(
+            f"[MULTI] update player={int(getattr(source_session, 'char_guid', 0) or 0)} "
+            f"map={int(getattr(source_session, 'map_id', 0) or 0)} peers={len(peers)} "
+            f"created={created} updated={updated} removed={removed} "
+            f"visible={len(_visible_guid_set(source_session))}"
+        )
 
 
 def broadcast_player_remove(source_session) -> None:
@@ -503,18 +735,25 @@ def broadcast_player_remove(source_session) -> None:
         return
 
     response = _build_player_remove_update_response(source_session)
-    if response is None:
-        return
-
+    source_guid = _session_guid(source_session)
     peers = [
         session
         for session in iter_in_world_sessions(map_id=int(getattr(source_session, "map_id", 0) or 0))
         if session is not source_session
     ]
-    if peers:
-        dispatch_responses_to_sessions(peers, [response])
+    removed_from = 0
+    for peer in peers:
+        peer_visible = _visible_guid_set(peer)
+        if source_guid > 0 and source_guid in peer_visible:
+            peer_visible.discard(source_guid)
+            if response is not None:
+                dispatch_responses_to_sessions([peer], [response])
+            removed_from += 1
+        _visible_guid_set(source_session).discard(_session_guid(peer))
+    _visible_guid_set(source_session).clear()
+    if removed_from:
         Logger.info(
             f"[MULTI] removed player={int(getattr(source_session, 'char_guid', 0) or 0)} "
-            f"map={int(getattr(source_session, 'map_id', 0) or 0)} peers={len(peers)}"
+            f"map={int(getattr(source_session, 'map_id', 0) or 0)} peers={removed_from}"
         )
     source_session._multiplayer_removed = True

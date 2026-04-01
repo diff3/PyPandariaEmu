@@ -153,6 +153,7 @@ class WorldSession:
     chat_joined: bool = False
     chat_motd_sent: bool = False
     skyfire_login_stage: int = 0
+    visible_guids: set[int] = field(default_factory=set)
     last_position_save_at: float = 0.0
     position_dirty: bool = False
     persist_map_id: int = 0

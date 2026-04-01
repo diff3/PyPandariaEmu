@@ -4,11 +4,13 @@ import struct
 from typing import Any, Optional, Tuple
 
 from DSL.modules.EncoderHandler import EncoderHandler
+from DSL.modules.bitsHandler import BitInterPreter
 from DSL.modules.bitsHandler import BitWriter
 from shared.Logger import Logger
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.dispatcher import register
+from server.modules.game.guid import GuidHelper
 
 
 MAX_CREATURE_QUEST_ITEMS = 6
@@ -121,22 +123,98 @@ def _build_name_query_response(
     *,
     name: str,
     realm_name: str,
+    realm_id: int,
+    account_id: int,
     race: int,
     gender: int,
     class_id: int,
+    level: int,
+    deleted: bool = False,
 ) -> bytes:
+    guid_value = int(guid or 0) & 0xFFFFFFFFFFFFFFFF
+    guid_bytes = list(GuidHelper.to_le_bytes(guid_value))
+    zero_guid = [0] * 8
+    player_name = str(name or "").strip()
+    has_name = bool(player_name)
+
+    def write_byte_seq(payload: bytearray, value: int) -> None:
+        byte_value = int(value) & 0xFF
+        if byte_value != 0:
+            payload.append(byte_value ^ 0x01)
+
+    bits = BitWriter()
     payload = bytearray()
-    payload.extend(str(name or "").encode("utf-8", errors="strict") + b"\x00")
-    payload.extend(str(realm_name or "").encode("utf-8", errors="strict") + b"\x00")
-    payload.extend(struct.pack("<III", int(race), int(gender), int(class_id)))
-    payload.append(0)
-    return EncoderHandler.encode_packet(
-        "SMSG_QUERY_PLAYER_NAME_RESPONSE",
-        {
-            "guid": int(guid),
-            "raw": bytes(payload),
-        },
-    )
+
+    for index in (3, 6, 7, 2, 5, 4, 0, 1):
+        bits.write_bits(1 if guid_bytes[index] else 0, 1)
+
+    payload.extend(bits.getvalue())
+
+    for index in (5, 4, 7, 6, 1, 2):
+        write_byte_seq(payload, guid_bytes[index])
+
+    payload.append(0 if has_name else 1)
+
+    if has_name:
+        payload.extend(struct.pack("<I", int(realm_id) & 0xFFFFFFFF))
+        payload.extend(struct.pack("<I", int(account_id or 1) & 0xFFFFFFFF))
+        payload.append(int(class_id) & 0xFF)
+        payload.append(int(race) & 0xFF)
+        payload.append(int(level) & 0xFF)
+        payload.append(int(gender) & 0xFF)
+
+    write_byte_seq(payload, guid_bytes[0])
+    write_byte_seq(payload, guid_bytes[3])
+
+    if not has_name:
+        return bytes(payload)
+
+    bits = BitWriter()
+    for value in (
+        zero_guid[2],
+        zero_guid[7],
+        guid_bytes[7],
+        guid_bytes[2],
+        guid_bytes[0],
+        0,  # deleted flag
+        zero_guid[4],
+        guid_bytes[5],
+        zero_guid[1],
+        zero_guid[3],
+        zero_guid[0],
+    ):
+        bits.write_bits(1 if value else 0, 1)
+
+    for _ in range(5):
+        bits.write_bits(0, 7)
+
+    for value in (guid_bytes[6], guid_bytes[3], zero_guid[5], guid_bytes[1], guid_bytes[4]):
+        bits.write_bits(1 if value else 0, 1)
+
+    encoded_name = player_name.encode("utf-8", errors="ignore")
+    bits.write_bits(len(encoded_name), 6)
+    bits.write_bits(1 if zero_guid[6] else 0, 1)
+    payload.extend(bits.getvalue())
+
+    for index in (6, 0):
+        write_byte_seq(payload, guid_bytes[index])
+    payload.extend(encoded_name)
+    for index in (5, 2):
+        write_byte_seq(payload, zero_guid[index])
+    write_byte_seq(payload, guid_bytes[3])
+    for index in (4, 3):
+        write_byte_seq(payload, zero_guid[index])
+    write_byte_seq(payload, guid_bytes[4])
+    write_byte_seq(payload, guid_bytes[2])
+    write_byte_seq(payload, zero_guid[7])
+    write_byte_seq(payload, zero_guid[6])
+    write_byte_seq(payload, guid_bytes[7])
+    write_byte_seq(payload, guid_bytes[1])
+    write_byte_seq(payload, zero_guid[1])
+    write_byte_seq(payload, guid_bytes[5])
+    write_byte_seq(payload, zero_guid[0])
+
+    return bytes(payload)
 
 
 def _build_name_query_response_no_data(guid: int) -> bytes:
@@ -144,9 +222,12 @@ def _build_name_query_response_no_data(guid: int) -> bytes:
         guid,
         name="",
         realm_name="",
+        realm_id=0,
+        account_id=0,
         race=0,
         gender=0,
         class_id=0,
+        level=0,
     )
 
 
@@ -187,12 +268,39 @@ def _decode_name_query_guid(payload: bytes) -> Optional[int]:
     if not raw:
         return None
 
-    # Best-effort fallback for the compact MoP payloads we see in practice,
-    # e.g. 50 00 11 01 00 00 00 where 0x11 is the queried low guid.
-    if len(raw) >= 3:
-        low_guid = int(raw[2]) & 0xFF
-        if low_guid:
-            return int(low_guid)
+    try:
+        byte_pos = 0
+        bit_pos = 0
+        guid = [0] * 8
+
+        guid[4], byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        _bit14, byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        guid[6], byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        guid[0], byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        guid[7], byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        guid[1], byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        _bit1c, byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        guid[5], byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        guid[2], byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        guid[3], byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+
+        if bit_pos:
+            byte_pos += 1
+            bit_pos = 0
+
+        for index in (7, 5, 1, 2, 6, 3, 0, 4):
+            if not guid[index]:
+                continue
+            if byte_pos >= len(raw):
+                return None
+            guid[index] ^= raw[byte_pos]
+            byte_pos += 1
+
+        decoded = int.from_bytes(bytes(guid), "little", signed=False)
+        if decoded:
+            return decoded
+    except Exception:
+        pass
 
     for value in reversed(raw):
         candidate = int(value) & 0xFF
@@ -220,16 +328,22 @@ def _find_session_by_guid(session, guid_hint: int):
 def build_query_player_name_response(session, guid: int) -> bytes:
     name = str(getattr(session, "player_name", "") or "").strip()
     realm = _get_realm_name()
+    realm_id = int(getattr(session, "realm_id", 0) or 0)
+    account_id = int(getattr(session, "account_id", 0) or 0)
     race = int(getattr(session, "race", 0) or 0)
     gender = int(getattr(session, "gender", 0) or 0)
     class_id = int(getattr(session, "class_id", 0) or 0)
+    level = int(getattr(session, "level", 0) or 0)
     return _build_name_query_response(
         int(guid),
         name=name,
         realm_name=realm,
+        realm_id=realm_id,
+        account_id=account_id,
         race=race,
         gender=gender,
         class_id=class_id,
+        level=level,
     )
 
 
@@ -281,32 +395,43 @@ def handle_name_query(session, ctx: PacketContext) -> Tuple[int, Optional[list[t
     target_session = _find_session_by_guid(session, int(requested_guid_hint or 0))
 
     if target_session is not None:
-        world_guid = int(getattr(target_session, "world_guid", 0) or 0)
+        low_guid = int(getattr(target_session, "char_guid", 0) or 0)
         player_name = (
             str(getattr(target_session, "player_name", "") or "").strip()
             or f"Player{int(getattr(target_session, 'char_guid', 0) or 0)}"
         )
+        realm_id = int(getattr(target_session, "realm_id", 0) or 0)
+        account_id = int(getattr(target_session, "account_id", 0) or 0)
         race = int(getattr(target_session, "race", 0) or 0)
         gender = int(getattr(target_session, "gender", 0) or 0)
         class_id = int(getattr(target_session, "class_id", 0) or 0)
+        level = int(getattr(target_session, "level", 0) or 0)
     else:
-        world_guid = int(getattr(session, "world_guid", 0) or 0)
+        low_guid = int(getattr(session, "char_guid", 0) or 0)
         player_name = (
             str(getattr(session, "player_name", "") or "").strip()
             or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
         )
+        realm_id = int(getattr(session, "realm_id", 0) or 0)
+        account_id = int(getattr(session, "account_id", 0) or 0)
         race = int(getattr(session, "race", 0) or 0)
         gender = int(getattr(session, "gender", 0) or 0)
         class_id = int(getattr(session, "class_id", 0) or 0)
+        level = int(getattr(session, "level", 0) or 0)
 
-    response_guid = int(requested_guid_hint or 0) or int(world_guid)
+    response_guid = int(requested_guid_hint or 0)
+    if response_guid <= 0:
+        response_guid = int(low_guid or 0)
     world_response = _build_name_query_response(
         response_guid,
         name=player_name,
         realm_name=_get_realm_name(),
+        realm_id=realm_id,
+        account_id=account_id,
         race=race,
         gender=gender,
         class_id=class_id,
+        level=level,
     )
     Logger.info(
         f"[WorldHandlers] SMSG_QUERY_PLAYER_NAME_RESPONSE guid=0x{response_guid:016X} "

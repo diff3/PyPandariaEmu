@@ -224,22 +224,29 @@ def _mark_movement_state(session, opcode_name: str, *, now: float | None = None)
     now = float(now if now is not None else time.time())
     _simulate_movement_state(session, now=now)
 
+    _apply_movement_state_flags(session, opcode_name)
+    session._sim_motion_updated_at = now
+
+
+def _apply_movement_state_flags(session, opcode_name: str) -> None:
     if opcode_name == "MSG_MOVE_START_FORWARD":
         _set_movement_flag_state(session, "_sim_move_forward", True)
+        _set_movement_flag_state(session, "_sim_move_backward", False)
     elif opcode_name == "MSG_MOVE_START_BACKWARD":
         _set_movement_flag_state(session, "_sim_move_backward", True)
+        _set_movement_flag_state(session, "_sim_move_forward", False)
     elif opcode_name == "MSG_MOVE_STOP":
         _set_movement_flag_state(session, "_sim_move_forward", False)
         _set_movement_flag_state(session, "_sim_move_backward", False)
     elif opcode_name == "MSG_MOVE_START_TURN_LEFT":
         _set_movement_flag_state(session, "_sim_turn_left", True)
+        _set_movement_flag_state(session, "_sim_turn_right", False)
     elif opcode_name == "MSG_MOVE_START_TURN_RIGHT":
         _set_movement_flag_state(session, "_sim_turn_right", True)
+        _set_movement_flag_state(session, "_sim_turn_left", False)
     elif opcode_name == "MSG_MOVE_STOP_TURN":
         _set_movement_flag_state(session, "_sim_turn_left", False)
         _set_movement_flag_state(session, "_sim_turn_right", False)
-
-    session._sim_motion_updated_at = now
 
 
 def _flush_simulated_movement(session, *, now: float | None = None) -> None:
@@ -569,6 +576,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             "MSG_MOVE_STOP_TURN",
         }:
             _mark_movement_state(session, opcode_name)
+            broadcast_player_state_update(session, force=True)
             Logger.debug(
                 "[Movement] simulated %s guid=0x%X pos=(%.3f, %.3f, %.3f) facing=%.3f",
                 opcode_name,
@@ -588,6 +596,8 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     x, y, z, orientation = movement
     if not _accept_movement_update(session, opcode_name, x, y, z, orientation):
         return 0, None
+
+    _apply_movement_state_flags(session, opcode_name)
 
     normalized_orientation = _normalize_orientation(orientation)
     if normalized_orientation is None:

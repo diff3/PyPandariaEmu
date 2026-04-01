@@ -66,6 +66,7 @@ def reset_state() -> None:
     session.last_saved_y = 0.0
     session.last_saved_z = 0.0
     session.last_saved_orientation = 0.0
+    session.visible_guids.clear()
     login_handlers._reset_login_flow_state(session)
 
 
@@ -96,4 +97,5 @@ def handle_disconnect_session(target_session) -> None:
         getattr(state, "sessions", set()).discard(target_session)
     target_session.region = None
     target_session.send_response = None
+    target_session.visible_guids.clear()
     login_handlers._reset_login_flow_state(target_session)
