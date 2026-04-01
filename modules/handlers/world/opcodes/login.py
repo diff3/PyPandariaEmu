@@ -447,12 +447,16 @@ def handle_auth_session(session, ctx: PacketContext):
     session.world_guid = None
     session.char_guid = None
     session.player_name = None
+    session.addons = list(decoded.get("addons") or [])
+    session.addon_trailing_value = int(decoded.get("addons_crc", 0) or 0)
+    session.banned_addons = []
     _reset_login_flow_state(session)
     _set_login_state(session, LoginState.AUTHED)
 
     Logger.info(
         f"[WorldHandlers] AUTH_SESSION account={session.account_name} "
-        f"account_id={session.account_id} realm_id={session.realm_id}"
+        f"account_id={session.account_id} realm_id={session.realm_id} "
+        f"addons={len(session.addons)}"
     )
 
     login_ctx = _build_world_login_context(session)

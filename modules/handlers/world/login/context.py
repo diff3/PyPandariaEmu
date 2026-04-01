@@ -25,6 +25,9 @@ class WorldLoginContext:
     # Character screen / auth
     # --------------------------------------------------
     realms: list = field(default_factory=list)
+    addons: list[dict] = field(default_factory=list)
+    addon_trailing_value: int = 0
+    banned_addons: list[dict] = field(default_factory=list)
 
     client_cache_version: int = 5
     tutorial_flags: list[int] = field(default_factory=lambda: [0] * 16)
@@ -142,6 +145,9 @@ class WorldLoginContext:
             account_id=session.account_id,
             account_name=session.account_name,
             realm_id=session.realm_id,
+            addons=list(getattr(session, "addons", []) or []),
+            addon_trailing_value=int(getattr(session, "addon_trailing_value", 0) or 0),
+            banned_addons=list(getattr(session, "banned_addons", []) or []),
 
             player_guid=session.player_guid,
             char_guid=session.char_guid,

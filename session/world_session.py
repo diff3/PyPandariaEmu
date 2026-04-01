@@ -30,6 +30,9 @@ class WorldSession:
     server_time: int = 0
     game_time: int = 0
     motd = "Hello World"
+    addons: List[Dict[str, Any]] = field(default_factory=list)
+    addon_trailing_value: int = 0
+    banned_addons: List[Dict[str, Any]] = field(default_factory=list)
 
     
 

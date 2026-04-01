@@ -1876,10 +1876,33 @@ def build_SMSG_AUTH_RESPONSE(ctx) -> bytes:
     return EncoderHandler.encode_packet("SMSG_AUTH_RESPONSE", fields)
 
 
-def build_SMSG_ADDON_INFO(addons: list[dict]) -> bytes:
-    return _encode("SMSG_ADDON_INFO", {
-        "addons": addons,
-    })
+def build_SMSG_ADDON_INFO(ctx) -> bytes:
+    addons = list(getattr(ctx, "addons", []) or [])
+    banned = list(getattr(ctx, "banned_addons", []) or [])
+
+    payload = bytearray()
+    payload.extend(int(len(banned)).to_bytes(4, "little", signed=False))
+
+    bits = BitWriter()
+    bits.write_bits(len(addons) & 0x1FF, 9)
+    for addon in addons:
+        use_public_key = 1 if int(addon.get("use_public_key", 0) or 0) else 0
+        enabled = 1 if int(addon.get("enabled", 1) or 0) else 0
+        is_banned = 1 if int(addon.get("banned", 0) or 0) else 0
+        bits.write_bits(use_public_key, 1)
+        bits.write_bits(enabled, 1)
+        bits.write_bits(is_banned, 1)
+    payload.extend(bits.getvalue())
+
+    for addon in addons:
+        payload.append(1 if int(addon.get("enabled", 1) or 0) else 0)
+        payload.extend(int(addon.get("unk", 0) or 0).to_bytes(4, "little", signed=False))
+        payload.append(int(addon.get("state", 2) or 2) & 0xFF)
+
+    for addon in banned:
+        payload.extend(int(addon.get("id", 0) or 0).to_bytes(4, "little", signed=False))
+
+    return bytes(payload)
 
 
 def build_SMSG_TUTORIAL_FLAGS(ctx) -> bytes:
