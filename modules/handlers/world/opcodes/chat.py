@@ -56,6 +56,23 @@ from server.modules.handlers.world.teleport.teleport_service import (
 RAW_REPLAY_SAY_CHAT_PROFILE = None
 USE_SYSTEM_CHAT_FALLBACK = True
 RAW_SNIFFED_MESSAGECHAT_CAPTURE = "SMSG_MESSAGECHAT_1774505644_0004.json"
+_UNIT_FIELD_ANIMTIER = 0x4C
+_UNIT_FIELD_EMOTE_STATE = 0x59
+_PLAYER_FIELD_PLAYER_FLAGS = 0xA2
+_STAND_STATE_STANDING = 0
+_STAND_STATE_SITTING = 1
+_STAND_STATE_SLEEPING = 3
+_STAND_STATE_KNEEL = 8
+_PLAYER_FLAGS_AFK = 0x00000002
+_PLAYER_FLAGS_DND = 0x00000004
+_DEFAULT_AFK_MESSAGE = "Away from keyboard"
+_DEFAULT_DND_MESSAGE = "Do not disturb"
+_TEXT_EMOTE_TO_STAND_STATE = {
+    59: _STAND_STATE_KNEEL,
+    86: _STAND_STATE_SITTING,
+    87: _STAND_STATE_SLEEPING,
+    141: _STAND_STATE_STANDING,
+}
 
 
 def _notification_response(message: str) -> list[tuple[str, bytes]]:
@@ -150,6 +167,21 @@ def _find_active_session_by_player_name(session, target_name: str):
     return None
 
 
+def _iter_map_sessions(session) -> list:
+    state = getattr(session, "global_state", None)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    results = []
+    for candidate in list(getattr(state, "sessions", set()) or ()):
+        if not callable(getattr(candidate, "send_response", None)):
+            continue
+        if int(getattr(candidate, "char_guid", 0) or 0) <= 0:
+            continue
+        if int(getattr(candidate, "map_id", 0) or 0) != map_id:
+            continue
+        results.append(candidate)
+    return results
+
+
 def _build_chat_response(
     *,
     chat_type: int,
@@ -172,6 +204,157 @@ def _build_chat_response(
             message=message,
         ),
     )
+
+
+def _dispatch_or_return(session, responses: list[tuple[str, bytes]]):
+    targets = _iter_map_sessions(session)
+    if targets:
+        _dispatch_responses_to_sessions(targets, responses)
+        return 0, None
+    return 0, responses
+
+
+def _dispatch_world_system_message(session, message: str):
+    responses = _notification_response(message)
+    targets = chat_router.get_targets(session, "say")
+    if targets:
+        _dispatch_responses_to_sessions(targets, responses)
+        return 0, None
+    return 0, responses
+
+
+def _clear_persistent_emote_state(session) -> list[tuple[str, bytes]]:
+    if int(getattr(session, "npc_emote_state", 0) or 0) != 10:
+        return []
+    player_guid = _sender_chat_guid(session)
+    setattr(session, "npc_emote_state", 0)
+    return [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_single_u32_update_object_payload(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                guid=player_guid,
+                field_index=_UNIT_FIELD_EMOTE_STATE,
+                value=0,
+            ),
+        )
+    ]
+
+
+def _current_stand_state(session) -> int:
+    return int(getattr(session, "player_stand_state", _STAND_STATE_STANDING) or _STAND_STATE_STANDING)
+
+
+def _set_stand_state(session, stand_state: int) -> list[tuple[str, bytes]]:
+    target_state = int(stand_state or _STAND_STATE_STANDING)
+    current_state = _current_stand_state(session)
+    setattr(session, "player_stand_state", target_state)
+    if current_state == target_state:
+        return []
+    player_guid = _sender_chat_guid(session)
+    return [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_single_u32_update_object_payload(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                guid=player_guid,
+                field_index=_UNIT_FIELD_ANIMTIER,
+                value=target_state,
+            ),
+        )
+    ]
+
+
+def _clear_stand_state(session) -> list[tuple[str, bytes]]:
+    if _current_stand_state(session) == _STAND_STATE_STANDING:
+        return []
+    return _set_stand_state(session, _STAND_STATE_STANDING)
+
+
+def _clear_stateful_emote_states(session) -> list[tuple[str, bytes]]:
+    return _clear_stand_state(session) + _clear_persistent_emote_state(session)
+
+
+def _build_player_flags_update(session) -> tuple[str, bytes]:
+    return (
+        "SMSG_UPDATE_OBJECT",
+        build_single_u32_update_object_payload(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            guid=_sender_chat_guid(session),
+            field_index=_PLAYER_FIELD_PLAYER_FLAGS,
+            value=int(getattr(session, "player_flags", 0) or 0),
+        ),
+    )
+
+
+def _set_presence_flags(session, *, afk: bool | None = None, dnd: bool | None = None, auto_reply_msg: str | None = None):
+    player_flags = int(getattr(session, "player_flags", 0) or 0)
+    if afk is not None:
+        setattr(session, "is_afk", bool(afk))
+        if afk:
+            player_flags |= _PLAYER_FLAGS_AFK
+        else:
+            player_flags &= ~_PLAYER_FLAGS_AFK
+    if dnd is not None:
+        setattr(session, "is_dnd", bool(dnd))
+        if dnd:
+            player_flags |= _PLAYER_FLAGS_DND
+        else:
+            player_flags &= ~_PLAYER_FLAGS_DND
+    if auto_reply_msg is not None:
+        setattr(session, "auto_reply_msg", str(auto_reply_msg or ""))
+    session.player_flags = int(player_flags)
+    return _dispatch_or_return(session, [_build_player_flags_update(session)])
+
+
+def _toggle_afk(session, message: str):
+    message = str(message or "").strip()
+    if bool(getattr(session, "is_afk", False)):
+        if message:
+            return _set_presence_flags(session, afk=True, auto_reply_msg=message)
+        code, responses = _set_presence_flags(session, afk=False, auto_reply_msg="")
+        world_code, world_responses = _dispatch_world_system_message(
+            session,
+            f"{getattr(session, 'player_name', 'Player')} is no longer AFK",
+        )
+        if responses and world_responses:
+            return code or world_code, list(responses) + list(world_responses)
+        return code or world_code, responses or world_responses
+
+    auto_reply = message or _DEFAULT_AFK_MESSAGE
+    code, responses = _set_presence_flags(session, afk=True, dnd=False, auto_reply_msg=auto_reply)
+    world_code, world_responses = _dispatch_world_system_message(
+        session,
+        f"{getattr(session, 'player_name', 'Player')} is AFK",
+    )
+    if responses and world_responses:
+        return code or world_code, list(responses) + list(world_responses)
+    return code or world_code, responses or world_responses
+
+
+def _toggle_dnd(session, message: str):
+    message = str(message or "").strip()
+    if bool(getattr(session, "is_dnd", False)):
+        if message:
+            return _set_presence_flags(session, dnd=True, auto_reply_msg=message)
+        code, responses = _set_presence_flags(session, dnd=False, auto_reply_msg="")
+        world_code, world_responses = _dispatch_world_system_message(
+            session,
+            f"{getattr(session, 'player_name', 'Player')} is no longer DND",
+        )
+        if responses and world_responses:
+            return code or world_code, list(responses) + list(world_responses)
+        return code or world_code, responses or world_responses
+
+    auto_reply = message or _DEFAULT_DND_MESSAGE
+    code, responses = _set_presence_flags(session, afk=False, dnd=True, auto_reply_msg=auto_reply)
+    world_code, world_responses = _dispatch_world_system_message(
+        session,
+        f"{getattr(session, 'player_name', 'Player')} is DND",
+    )
+    if responses and world_responses:
+        return code or world_code, list(responses) + list(world_responses)
+    return code or world_code, responses or world_responses
 
 
 def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, bytes]]]:
@@ -638,6 +821,8 @@ def _handle_chat_message(session, ctx: PacketContext):
         return 0, [say_chat_response]
 
     if ctx.name == "CMSG_MESSAGECHAT_YELL":
+        if USE_SYSTEM_CHAT_FALLBACK:
+            Logger.info(f"[CHAT][YELL] using skyfire packet path sender={player_name!r} message={message!r}")
         yell_chat_response = _build_chat_response(
             chat_type=CHAT_MSG_YELL,
             language=language,
@@ -657,7 +842,8 @@ def _handle_chat_message(session, ctx: PacketContext):
         target_name = str(chat.get("target") or "").strip()
         if not target_name:
             Logger.info(f"[CHAT][WHISPER] missing target from={player_name!r} message={message!r}")
-            return 0, _notification_response("Usage: /w <player> <message>")
+            Logger.debug(f"[CHAT][WHISPER] decoded={chat!r} raw={bytes(ctx.payload or b'').hex()}")
+            return 0, _notification_response("Whisper target missing")
 
         target_session = _find_active_session_by_player_name(session, target_name)
         if target_session is None:
@@ -692,7 +878,14 @@ def _handle_chat_message(session, ctx: PacketContext):
 
         if target_session is not session:
             _dispatch_responses_to_sessions([target_session], [recipient_response])
-        return 0, [echo_response]
+        responses = [echo_response]
+        if bool(getattr(target_session, "is_afk", False)):
+            auto_reply_msg = str(getattr(target_session, "auto_reply_msg", "") or _DEFAULT_AFK_MESSAGE)
+            responses.extend(_notification_response(f"{target_player_name} is AFK: {auto_reply_msg}"))
+        elif bool(getattr(target_session, "is_dnd", False)):
+            auto_reply_msg = str(getattr(target_session, "auto_reply_msg", "") or _DEFAULT_DND_MESSAGE)
+            responses.extend(_notification_response(f"{target_player_name} is DND: {auto_reply_msg}"))
+        return 0, responses
 
     if USE_SYSTEM_CHAT_FALLBACK:
         payload_out = encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")
@@ -771,13 +964,25 @@ def handle_messagechat_whisper(session, ctx: PacketContext):
     return _handle_chat_message(session, ctx)
 
 
+@register("CMSG_CHAT_MESSAGE_AFK")
+def handle_messagechat_afk(session, ctx: PacketContext):
+    chat = decode_chat_message(ctx.name, ctx.payload, ctx.decoded)
+    return _toggle_afk(session, str(chat.get("message") or ""))
+
+
+@register("CMSG_MESSAGECHAT_DND")
+def handle_messagechat_dnd(session, ctx: PacketContext):
+    chat = decode_chat_message(ctx.name, ctx.payload, ctx.decoded)
+    return _toggle_dnd(session, str(chat.get("message") or ""))
+
+
 @register("CMSG_SEND_TEXT_EMOTE")
 def handle_send_text_emote(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     decoded = log_cmsg(ctx)
     emote_id = int((decoded or {}).get("emote_id") or 0)
     emote_num = int((decoded or {}).get("emote_num") or 0)
     target_guid = int((decoded or {}).get("target_guid") or 0)
-    player_guid = int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    player_guid = _sender_chat_guid(session)
     anim_emote = int(TEXT_EMOTE_TO_ANIM_EMOTE.get(emote_id, 0) or 0)
 
     Logger.info(
@@ -797,19 +1002,29 @@ def handle_send_text_emote(session, ctx: PacketContext) -> Tuple[int, Optional[l
         )
     ]
 
+    stand_state = _TEXT_EMOTE_TO_STAND_STATE.get(emote_id)
+    if stand_state is not None:
+        responses = _clear_persistent_emote_state(session) + responses
+        responses.extend(_set_stand_state(session, stand_state))
+        return _dispatch_or_return(session, responses)
+
     if anim_emote == 10:
+        responses = _clear_stand_state(session) + responses
+        setattr(session, "npc_emote_state", 10)
         responses.append(
             (
                 "SMSG_UPDATE_OBJECT",
                 build_single_u32_update_object_payload(
                     map_id=int(getattr(session, "map_id", 0) or 0),
                     guid=player_guid,
-                    field_index=0x59,
+                    field_index=_UNIT_FIELD_EMOTE_STATE,
                     value=10,
                 ),
             )
         )
     elif anim_emote > 0:
+        responses = _clear_stateful_emote_states(session) + responses
+        setattr(session, "npc_emote_state", 0)
         emote_payload = EncoderHandler.encode_packet(
             "SMSG_EMOTE",
             {
@@ -819,15 +1034,16 @@ def handle_send_text_emote(session, ctx: PacketContext) -> Tuple[int, Optional[l
         )
         responses.append(("SMSG_EMOTE", emote_payload))
 
-    return 0, responses
+    return _dispatch_or_return(session, responses)
 
 
 @register("CMSG_EMOTE")
 def handle_emote(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     decoded = log_cmsg(ctx)
     emote_id = int((decoded or {}).get("emote_id") or 0)
-    player_guid = int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    player_guid = _sender_chat_guid(session)
     Logger.info(f"[EMOTE] emote_id={emote_id} player_guid=0x{player_guid:016X}")
+    responses = _clear_stateful_emote_states(session)
     payload = EncoderHandler.encode_packet(
         "SMSG_EMOTE",
         {
@@ -835,4 +1051,5 @@ def handle_emote(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[
             "guid": player_guid,
         },
     )
-    return 0, [("SMSG_EMOTE", payload)]
+    responses.append(("SMSG_EMOTE", payload))
+    return _dispatch_or_return(session, responses)

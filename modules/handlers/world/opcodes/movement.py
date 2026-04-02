@@ -6,6 +6,7 @@ import time
 from typing import Any, Optional, Tuple
 
 from shared.Logger import Logger
+from server.modules.handlers.world.bootstrap.replay import build_single_u32_update_object_payload
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.interpretation.utils import dsl_decode
@@ -39,6 +40,53 @@ _SIM_TURN_RATE_RAD_PER_SEC = math.pi
 
 def _player_guid(session) -> int:
     return int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+
+
+def _broadcast_same_map(session, responses) -> None:
+    state = getattr(session, "global_state", None)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    for target in list(getattr(state, "sessions", set()) or ()):
+        sender = getattr(target, "send_response", None)
+        if not callable(sender):
+            continue
+        if int(getattr(target, "map_id", 0) or 0) != map_id:
+            continue
+        sender(list(responses))
+
+
+def _clear_dance_emote_state_on_move(session) -> None:
+    responses = []
+
+    if int(getattr(session, "player_stand_state", 0) or 0) != 0:
+        setattr(session, "player_stand_state", 0)
+        responses.append(
+            (
+                "SMSG_UPDATE_OBJECT",
+                build_single_u32_update_object_payload(
+                    map_id=int(getattr(session, "map_id", 0) or 0),
+                    guid=int(getattr(session, "char_guid", 0) or _player_guid(session) or 0),
+                    field_index=0x4C,
+                    value=0,
+                ),
+            )
+        )
+
+    if int(getattr(session, "npc_emote_state", 0) or 0) == 10:
+        setattr(session, "npc_emote_state", 0)
+        responses.append(
+            (
+                "SMSG_UPDATE_OBJECT",
+                build_single_u32_update_object_payload(
+                    map_id=int(getattr(session, "map_id", 0) or 0),
+                    guid=int(getattr(session, "char_guid", 0) or _player_guid(session) or 0),
+                    field_index=0x59,
+                    value=0,
+                ),
+            )
+        )
+
+    if responses:
+        _broadcast_same_map(session, responses)
 
 
 def _resolve_live_position_source(session):
@@ -563,6 +611,7 @@ def _maybe_periodic_position_save(
 def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     opcode_name = str(ctx.name or f"0x{int(ctx.opcode):04X}")
     Logger.debug(f"[MOVE] opcode={opcode_name}")
+    _clear_dance_emote_state_on_move(session)
 
     movement = parse_movement_info(session, opcode_name, ctx.payload, ctx.decoded)
     if movement is None:
@@ -646,6 +695,7 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
     if len(payload) < 4:
         Logger.warning("[Movement] MSG_MOVE_SET_FACING payload too short")
         return 0, None
+    _clear_dance_emote_state_on_move(session)
 
     try:
         orientation = struct.unpack_from("<f", payload, len(payload) - 4)[0]

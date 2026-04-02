@@ -152,6 +152,9 @@ class WorldSession:
     teleport_destination: Optional[str] = None
     chat_joined: bool = False
     chat_motd_sent: bool = False
+    auto_reply_msg: str = ""
+    is_afk: bool = False
+    is_dnd: bool = False
     skyfire_login_stage: int = 0
     visible_guids: set[int] = field(default_factory=set)
     last_position_save_at: float = 0.0

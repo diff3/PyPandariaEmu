@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from DSL.modules.EncoderHandler import EncoderHandler
+from DSL.modules.bitsHandler import BitInterPreter
 from DSL.modules.bitsHandler import BitWriter
 from shared.Logger import Logger
 from shared.PathUtils import get_captures_root
@@ -16,20 +17,73 @@ CHAT_MSG_WHISPER = 7
 CHAT_MSG_WHISPER_INFORM = 8
 
 TEXT_EMOTE_TO_ANIM_EMOTE: dict[int, int] = {
-    5: 5,
+    3: 14,
+    5: 21,
+    6: 24,
+    8: 20,
+    12: 24,
+    17: 2,
+    19: 3,
+    20: 11,
+    21: 4,
+    22: 19,
+    23: 11,
+    24: 21,
+    25: 6,
+    26: 21,
+    31: 18,
+    32: 6,
+    33: 2,
     34: 10,
-    41: 0,
+    35: 7,
+    37: 7,
+    41: 23,
+    43: 5,
+    45: 11,
+    47: 11,
+    48: 3,
+    51: 20,
+    52: 11,
+    53: 3,
+    55: 3,
+    58: 17,
+    59: 68,
+    60: 11,
+    61: 12,
+    65: 18,
+    66: 274,
+    67: 273,
+    71: 20,
     72: 25,
+    74: 16,
+    75: 15,
+    76: 11,
     77: 14,
+    78: 66,
+    82: 22,
+    83: 6,
     84: 24,
-    86: 12,
-    87: 13,
+    86: 13,
+    87: 12,
+    92: 20,
     93: 1,
-    97: 0,
+    94: 5,
+    95: 6,
     100: 4,
     101: 3,
     102: 3,
+    107: 6,
+    113: 14,
+    118: 6,
+    120: 6,
+    124: 6,
+    136: 19,
     141: 26,
+    143: 18,
+    183: 14,
+    204: 15,
+    243: 21,
+    264: 275,
 }
 
 
@@ -59,11 +113,35 @@ def decode_chat_message(
         or ""
     ).strip()
 
-    if not message and len(payload) > 5:
+    if not message and len(payload) > 5 and opcode_name not in ("CMSG_MESSAGECHAT_WHISPER", "CMSG_MESSAGECHAT_YELL"):
         try:
             message = payload[5:].decode("utf-8", errors="ignore").strip("\x00").strip()
         except Exception:
             message = ""
+
+    if opcode_name == "CMSG_MESSAGECHAT_YELL" and not message and len(payload) >= 5:
+        try:
+            msg_len = int(payload[4])
+            message = payload[5 : 5 + msg_len].decode("utf-8", errors="ignore").strip("\x00").strip()
+        except Exception:
+            message = ""
+
+    if opcode_name == "CMSG_MESSAGECHAT_WHISPER" and (not message or not target) and len(payload) >= 7:
+        try:
+            msg_len, byte_pos, bit_pos = BitInterPreter.read_bits(payload, 4, 0, 8)
+            target_len, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 9)
+            if bit_pos != 0:
+                byte_pos += 1
+                bit_pos = 0
+            data = payload[byte_pos:]
+            if not message:
+                message = data[:msg_len].decode("utf-8", errors="ignore").strip("\x00").strip()
+            if not target:
+                target_start = int(msg_len)
+                target_end = target_start + int(target_len)
+                target = data[target_start:target_end].decode("utf-8", errors="ignore").strip("\x00").strip()
+        except Exception:
+            pass
 
     return {
         "message": message,
@@ -222,18 +300,21 @@ def encode_messagechat_payload(
     target_name: str,
     message: str,
 ) -> bytes:
-    if int(chat_type) == CHAT_MSG_SAY and int(target_guid) == 0 and not str(target_name or ""):
+    if int(chat_type) in (CHAT_MSG_SAY, CHAT_MSG_YELL, CHAT_MSG_WHISPER, CHAT_MSG_WHISPER_INFORM):
+        receiver_guid = int(target_guid or 0)
+        if receiver_guid <= 0:
+            receiver_guid = int(sender_guid or 0)
         payload = _encode_skyfire_messagechat_payload(
             message,
-            chat_type=CHAT_MSG_SAY,
+            chat_type=int(chat_type),
             sender_guid=int(sender_guid or 0),
-            receiver_guid=int(sender_guid or 0),
+            receiver_guid=receiver_guid,
             language=int(language or 0),
         )
         Logger.info(
             f"[CHAT][SEND] type={int(chat_type)} sender={sender_name or ''} "
             f"target={target_name or ''} guid=0x{int(sender_guid or 0):016X} "
-            f"bytes={len(payload)} message={message!r} mode=skyfire-say"
+            f"bytes={len(payload)} message={message!r} mode=skyfire-chat"
         )
         return payload
 
