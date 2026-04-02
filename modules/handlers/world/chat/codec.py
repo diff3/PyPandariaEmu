@@ -13,6 +13,7 @@ CHAT_MSG_SAY = 1
 CHAT_MSG_SYSTEM = 0
 CHAT_MSG_YELL = 6
 CHAT_MSG_WHISPER = 7
+CHAT_MSG_WHISPER_INFORM = 8
 
 TEXT_EMOTE_TO_ANIM_EMOTE: dict[int, int] = {
     5: 5,
@@ -49,7 +50,14 @@ def decode_chat_message(
     message = str(decoded.get("msg") or "").strip()
     language = int(decoded.get("language") or 0)
     channel = str(decoded.get("channel") or "").strip()
-    target = str(decoded.get("target") or "").strip()
+    target = str(
+        decoded.get("target")
+        or decoded.get("target_name")
+        or decoded.get("to")
+        or decoded.get("receiver")
+        or decoded.get("player")
+        or ""
+    ).strip()
 
     if not message and len(payload) > 5:
         try:

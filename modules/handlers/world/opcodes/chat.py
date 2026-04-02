@@ -17,6 +17,9 @@ from server.modules.handlers.world.bootstrap.replay import (
 from server.modules.handlers.world.chat.router import chat_router
 from server.modules.handlers.world.chat.codec import (
     CHAT_MSG_SAY,
+    CHAT_MSG_WHISPER,
+    CHAT_MSG_WHISPER_INFORM,
+    CHAT_MSG_YELL,
     TEXT_EMOTE_TO_ANIM_EMOTE,
     build_raw_replay_messagechat_packet,
     decode_chat_message,
@@ -117,6 +120,58 @@ def _dispatch_responses_to_sessions(targets, responses) -> None:
         sender = getattr(target, "send_response", None)
         if callable(sender):
             sender(responses)
+
+
+def _sender_chat_guid(session) -> int:
+    return int(
+        getattr(session, "char_guid", 0)
+        or getattr(session, "world_guid", 0)
+        or getattr(session, "player_guid", 0)
+        or 0
+    )
+
+
+def _normalize_player_name(value: str) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _find_active_session_by_player_name(session, target_name: str):
+    normalized_target = _normalize_player_name(target_name)
+    if not normalized_target:
+        return None
+
+    state = getattr(session, "global_state", None)
+    for candidate in list(getattr(state, "sessions", set()) or ()):
+        if not callable(getattr(candidate, "send_response", None)):
+            continue
+        candidate_name = _normalize_player_name(getattr(candidate, "player_name", ""))
+        if candidate_name == normalized_target:
+            return candidate
+    return None
+
+
+def _build_chat_response(
+    *,
+    chat_type: int,
+    language: int,
+    sender_guid: int,
+    sender_name: str,
+    target_guid: int,
+    target_name: str,
+    message: str,
+) -> tuple[str, bytes]:
+    return (
+        "SMSG_MESSAGECHAT",
+        encode_messagechat_payload(
+            chat_type=chat_type,
+            language=language,
+            sender_guid=sender_guid,
+            sender_name=sender_name,
+            target_guid=target_guid,
+            target_name=target_name,
+            message=message,
+        ),
+    )
 
 
 def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, bytes]]]:
@@ -552,20 +607,17 @@ def _handle_chat_message(session, ctx: PacketContext):
         return 0, command_responses if command_responses else None
 
     player_name = session.player_name
-    sender_guid = int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    sender_guid = _sender_chat_guid(session)
     language = int(chat.get("language") or 0)
 
     Logger.debug(f"[CHAT] opcode={ctx.name}")
     Logger.info(f"[CHAT] {player_name}: {message}")
 
     if ctx.name == "CMSG_MESSAGECHAT_SAY":
-        say_guid = int(getattr(session, "char_guid", 0) or 0)
-        if say_guid <= 0:
-            say_guid = sender_guid
         payload_out = encode_messagechat_payload(
             chat_type=CHAT_MSG_SAY,
             language=language,
-            sender_guid=say_guid,
+            sender_guid=sender_guid,
             sender_name=player_name,
             target_guid=0,
             target_name="",
@@ -584,6 +636,63 @@ def _handle_chat_message(session, ctx: PacketContext):
             return 0, None
         # return 0, [system_chat_response, say_chat_response]
         return 0, [say_chat_response]
+
+    if ctx.name == "CMSG_MESSAGECHAT_YELL":
+        yell_chat_response = _build_chat_response(
+            chat_type=CHAT_MSG_YELL,
+            language=language,
+            sender_guid=sender_guid,
+            sender_name=player_name,
+            target_guid=0,
+            target_name="",
+            message=message,
+        )
+        targets = chat_router.get_targets(session, "yell")
+        if targets:
+            _dispatch_responses_to_sessions(targets, [yell_chat_response])
+            return 0, None
+        return 0, [yell_chat_response]
+
+    if ctx.name == "CMSG_MESSAGECHAT_WHISPER":
+        target_name = str(chat.get("target") or "").strip()
+        if not target_name:
+            Logger.info(f"[CHAT][WHISPER] missing target from={player_name!r} message={message!r}")
+            return 0, _notification_response("Usage: /w <player> <message>")
+
+        target_session = _find_active_session_by_player_name(session, target_name)
+        if target_session is None:
+            Logger.info(
+                f"[CHAT][WHISPER] target offline from={player_name!r} target={target_name!r} message={message!r}"
+            )
+            return 0, _notification_response(f"{target_name} is not online")
+
+        target_player_name = (
+            str(getattr(target_session, "player_name", "") or "").strip()
+            or target_name
+        )
+        target_guid = _sender_chat_guid(target_session)
+        recipient_response = _build_chat_response(
+            chat_type=CHAT_MSG_WHISPER,
+            language=language,
+            sender_guid=sender_guid,
+            sender_name=player_name,
+            target_guid=target_guid,
+            target_name=target_player_name,
+            message=message,
+        )
+        echo_response = _build_chat_response(
+            chat_type=CHAT_MSG_WHISPER_INFORM,
+            language=language,
+            sender_guid=sender_guid,
+            sender_name=player_name,
+            target_guid=target_guid,
+            target_name=target_player_name,
+            message=message,
+        )
+
+        if target_session is not session:
+            _dispatch_responses_to_sessions([target_session], [recipient_response])
+        return 0, [echo_response]
 
     if USE_SYSTEM_CHAT_FALLBACK:
         payload_out = encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")

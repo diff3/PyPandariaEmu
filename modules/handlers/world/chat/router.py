@@ -6,6 +6,7 @@ class ChatRouter:
     def __init__(self):
         self.chat_scope = {
             "say": "world",
+            "yell": "world",
         }
 
     def get_targets(self, session, channel):
