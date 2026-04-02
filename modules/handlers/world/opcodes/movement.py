@@ -1125,7 +1125,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     _mark_position_dirty(session)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _maybe_periodic_position_save(session)
-    broadcast_player_state_update(session)
+    broadcast_player_state_update(session, force=(opcode_name == "MSG_MOVE_HEARTBEAT"))
 
     Logger.debug(
         f"[MOVE] guid=0x{_player_guid(session):X} "

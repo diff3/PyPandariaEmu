@@ -588,22 +588,21 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
     key = (
         int(getattr(source_session, "map_id", 0) or 0),
         int(getattr(source_session, "char_guid", 0) or 0),
-        round(float(getattr(source_session, "x", 0.0) or 0.0), 3),
-        round(float(getattr(source_session, "y", 0.0) or 0.0), 3),
-        round(float(getattr(source_session, "z", 0.0) or 0.0), 3),
-        round(float(getattr(source_session, "orientation", 0.0) or 0.0), 3),
+        round(float(getattr(source_session, "x", 0.0) or 0.0), 5),
+        round(float(getattr(source_session, "y", 0.0) or 0.0), 5),
+        round(float(getattr(source_session, "z", 0.0) or 0.0), 5),
+        round(float(getattr(source_session, "orientation", 0.0) or 0.0), 5),
     )
     last_key = getattr(source_session, "_multiplayer_last_broadcast_key", None)
     last_at = float(getattr(source_session, "_multiplayer_last_broadcast_at", 0.0) or 0.0)
-    if not force and key == last_key and (now - last_at) < 0.10:
+    if not force and key == last_key and (now - last_at) < 0.02:
         return
 
     move_response = _build_player_move_response(source_session)
     value_responses = []
     if move_response is None:
         value_responses = _build_player_value_update_responses(source_session)
-    create_responses = _build_player_create_responses(source_session)
-    if move_response is None and not value_responses and not create_responses:
+    if move_response is None and not value_responses:
         return
 
     resync_responses: list[tuple[str, bytes]] = []
