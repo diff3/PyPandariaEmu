@@ -515,11 +515,11 @@ def _reconcile_session_visibility_pair(
                 responses.append(source_move_response)
             else:
                 responses.extend(list(source_value_responses or []))
-            if source_resync_responses:
-                # The client still ignores our current SMSG_PLAYER_MOVE layout in
-                # some cases. Keep a throttled remove+create fallback layered on
-                # top so remote players remain visually updated while we keep
-                # iterating on the exact live movement packet.
+            if not responses and source_resync_responses:
+                # Keep the old resync fallback only when no live movement packet
+                # is available. The newer normal-walk SMSG_PLAYER_MOVE path is
+                # good enough now that layering remove+create on top mostly adds
+                # teleport-like jitter.
                 responses.extend(list(source_resync_responses))
             if responses:
                 updated_for_other = True
@@ -609,7 +609,7 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
     resync_responses: list[tuple[str, bytes]] = []
     last_resync_key = getattr(source_session, "_multiplayer_last_resync_key", None)
     last_resync_at = float(getattr(source_session, "_multiplayer_last_resync_at", 0.0) or 0.0)
-    if key != last_resync_key and (force or (now - last_resync_at) >= 0.75):
+    if move_response is None and key != last_resync_key and (force or (now - last_resync_at) >= 0.75):
         remove_response = _build_player_remove_update_response(source_session)
         create_response = _build_player_create_update_response(source_session)
         if remove_response is not None:
