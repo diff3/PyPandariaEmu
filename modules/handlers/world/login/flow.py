@@ -75,10 +75,10 @@ PRE_UPDATE_OBJECT_PACKETS = (
     "SMSG_TUTORIAL_FLAGS",
     # MOTD goes out as CHAT_MSG_SYSTEM instead of SMSG_MOTD for now.
     # "SMSG_MOTD",
+    "SMSG_UPDATE_TALENT_DATA",
     "SMSG_SEND_KNOWN_SPELLS",
     "SMSG_SEND_UNLEARN_SPELLS",
-    # Temporarily disabled while debugging character-specific login stalls.
-    # "SMSG_UPDATE_ACTION_BUTTONS",
+    "SMSG_UPDATE_ACTION_BUTTONS",
     "SMSG_LOGIN_VERIFY_WORLD",
     "SMSG_LOGIN_SET_TIME_SPEED",
     "SMSG_BIND_POINT_UPDATE",

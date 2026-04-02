@@ -263,7 +263,8 @@ class DatabaseConnection:
     @staticmethod
     def get_characters_for_account(account_id, realm_id):
         session = DatabaseConnection.chars()
-        base = session.query(Characters).filter(
+        session.expire_all()
+        base = session.query(Characters).populate_existing().filter(
             Characters.account == account_id,
             Characters.realm == realm_id,
         ).order_by(Characters.slot.asc(), Characters.guid.asc())
@@ -300,8 +301,10 @@ class DatabaseConnection:
         """
         session = DatabaseConnection.chars()
         try:
+            session.expire_all()
             return (
                 session.query(Characters)
+                .populate_existing()
                 .filter(
                     Characters.guid == int(char_guid),
                     Characters.realm == int(realm_id),
@@ -568,6 +571,7 @@ class DatabaseConnection:
                 return False
 
             session.commit()
+            session.expire_all()
             return True
         except Exception as exc:
             session.rollback()
@@ -609,6 +613,7 @@ class DatabaseConnection:
                 )
                 return False
             session.commit()
+            session.expire_all()
             return True
         except Exception as exc:
             session.rollback()
@@ -806,38 +811,14 @@ class DatabaseConnection:
     @staticmethod
     def get_character_action_buttons(char_guid: int) -> list[int]:
         """
-        Return action buttons for character.
-        Falls back to createinfo actions if none exist.
+        Return default action buttons for character race/class.
+        Sandbox mode currently ignores saved character_action rows and
+        always derives the bar from playercreateinfo_action.
         """
         session = DatabaseConnection.chars()
 
-        rows = (
-            session.query(
-                CharacterAction.button,
-                CharacterAction.action,
-                CharacterAction.type_,
-            )
-            .filter(CharacterAction.guid == char_guid)
-            .all()
-        )
-
         # --------------------------------------------------
-        # If character has saved actions
-        # --------------------------------------------------
-        if rows:
-            buttons = [0] * 120
-            for btn, action, type_ in rows:
-                try:
-                    idx = int(btn)
-                    if 0 <= idx < 120:
-                        # Pack action + type the same way Trinity/SkyFire does
-                        buttons[idx] = (int(action) & 0x00FFFFFF) | (int(type_) << 24)
-                except Exception:
-                    continue
-            return buttons
-
-        # --------------------------------------------------
-        # New character → use createinfo actions
+        # Sandbox default → use createinfo actions
         # --------------------------------------------------
         char = (
             session.query(Characters.race, Characters.class_)
@@ -847,17 +828,24 @@ class DatabaseConnection:
 
         if not char:
             Logger.error(f"[DB] get_character_action_buttons: character {char_guid} not found")
-            return [0] * 120
+            return [0] * 132
 
-        buttons = [0] * 120
+        buttons = [0] * 132
         actions = DatabaseConnection.get_player_createinfo_actions(
             race=int(char.race),
             class_=int(char.class_),
         )
+        Logger.info(
+            "[ACTION_BUTTON] loading default action bar guid=%s race=%s class=%s count=%s",
+            int(char_guid),
+            int(char.race),
+            int(char.class_),
+            len(actions),
+        )
 
         for button, action, type_ in actions:
             try:
-                if 0 <= button < 120:
+                if 0 <= button < 132:
                     buttons[button] = (int(action) & 0x00FFFFFF) | (int(type_) << 24)
             except Exception:
                 continue
@@ -1010,6 +998,100 @@ class DatabaseConnection:
         except Exception as exc:
             session.rollback()
             Logger.warning(f"[DB] Failed to apply playercreateinfo: {exc}")
+
+    @staticmethod
+    def save_character_action_button(guid: int, button: int, action: int, type_: int, *, spec: int = 0) -> bool:
+        session = DatabaseConnection.chars()
+        guid = int(guid)
+        button = int(button)
+        action = int(action)
+        type_ = int(type_)
+        spec = int(spec)
+
+        try:
+            row = (
+                session.query(CharacterAction)
+                .filter(
+                    CharacterAction.guid == guid,
+                    CharacterAction.spec == spec,
+                    CharacterAction.button == button,
+                )
+                .one_or_none()
+            )
+
+            if action <= 0:
+                if row is not None:
+                    session.delete(row)
+            else:
+                if row is None:
+                    row = CharacterAction(
+                        guid=guid,
+                        spec=spec,
+                        button=button,
+                        action=action,
+                        type_=type_,
+                    )
+                    session.add(row)
+                else:
+                    row.action = action
+                    row.type_ = type_
+
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.error(
+                f"[DB] save_character_action_button failed guid={guid} button={button} "
+                f"action={action} type={type_}: {exc}"
+            )
+            return False
+
+    @staticmethod
+    def ensure_character_spells(guid: int, spell_ids: list[int] | tuple[int, ...] | set[int]) -> list[int]:
+        session = DatabaseConnection.chars()
+        guid = int(guid)
+        desired = sorted(
+            {
+                int(spell_id)
+                for spell_id in (spell_ids or [])
+                if int(spell_id or 0) > 0
+            }
+        )
+        if guid <= 0 or not desired:
+            return []
+
+        try:
+            existing_rows = (
+                session.query(CharacterSpell.spell)
+                .filter(
+                    CharacterSpell.guid == guid,
+                    CharacterSpell.spell.in_(desired),
+                    CharacterSpell.disabled == 0,
+                )
+                .all()
+            )
+            existing = {int(row[0]) for row in existing_rows}
+            missing = [spell_id for spell_id in desired if spell_id not in existing]
+            if not missing:
+                return []
+
+            session.add_all(
+                CharacterSpell(
+                    guid=guid,
+                    spell=int(spell_id),
+                    active=1,
+                    disabled=0,
+                    spec=0,
+                    spec_mask=0,
+                )
+                for spell_id in missing
+            )
+            session.commit()
+            return missing
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] ensure_character_spells failed guid={guid}: {exc}")
+            return []
 
     @staticmethod
     def get_starting_item_entries(race: int, class_: int, gender: int | None = None) -> list[int]:

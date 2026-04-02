@@ -5,8 +5,10 @@ import struct
 import time
 from typing import Any, Optional, Tuple
 
+from DSL.modules.bitsHandler import BitWriter
 from shared.Logger import Logger
 from server.modules.handlers.world.bootstrap.replay import build_single_u32_update_object_payload
+from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.interpretation.utils import dsl_decode
@@ -21,14 +23,268 @@ from server.modules.handlers.world.position.position_service import (
     position_moved_enough,
     save_player_position,
 )
+from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.handlers.world.state.runtime import broadcast_player_state_update
+
+
+def _append_guid_byte_seq(payload: bytearray, raw_guid: bytes, order: tuple[int, ...]) -> None:
+    for index in order:
+        value = raw_guid[index]
+        if value:
+            payload.append((value ^ 1) & 0xFF)
+
+
+_MOVEMENTFLAG_FORWARD = 0x00000001
+_MOVEMENTFLAG_BACKWARD = 0x00000002
+_MOVEMENTFLAG_LEFT = 0x00000010
+_MOVEMENTFLAG_RIGHT = 0x00000020
+_MOVEMENTFLAG_FALLING = 0x00000800
+
+
+def _movement_sync_guid(session) -> int:
+    return int(getattr(session, "char_guid", 0) or _player_guid(session) or 0)
+
+
+def _movement_state(session):
+    state = getattr(session, "movement_state", None)
+    if state is None:
+        from server.session.world_session import MovementState
+
+        state = MovementState()
+        session.movement_state = state
+
+    state.x = float(getattr(state, "x", getattr(session, "x", 0.0)) or 0.0)
+    state.y = float(getattr(state, "y", getattr(session, "y", 0.0)) or 0.0)
+    state.z = float(getattr(state, "z", getattr(session, "z", 0.0)) or 0.0)
+    state.orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
+    state.flags = int(getattr(state, "flags", 0) or 0)
+    state.flags2 = int(getattr(state, "flags2", 0) or 0)
+    state.timestamp_ms = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
+    state.counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
+    return state
+
+
+def _sync_session_from_movement_state(session) -> None:
+    state = _movement_state(session)
+    session.x = float(state.x)
+    session.y = float(state.y)
+    session.z = float(state.z)
+    session.orientation = float(state.orientation)
+
+
+def _movement_flags_for_sync(session) -> int:
+    return int(_movement_state(session).flags)
+
+
+def _movement_timestamp_ms(session) -> int:
+    state = _movement_state(session)
+    existing = int(getattr(state, "timestamp_ms", 0) or 0)
+    now_ms = int(time.time() * 1000.0) & 0xFFFFFFFF
+    if existing <= 0:
+        state.timestamp_ms = now_ms
+        return now_ms
+    if now_ms <= existing:
+        now_ms = (existing + 1) & 0xFFFFFFFF
+    state.timestamp_ms = now_ms
+    return now_ms
+
+
+def build_smsg_player_move_payload_old(session) -> bytes | None:
+    state = _movement_state(session)
+    guid_value = _movement_sync_guid(session)
+    if guid_value <= 0:
+        return None
+
+    raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
+    move_flags = int(state.flags)
+    move_flags2 = int(state.flags2)
+    timestamp = _movement_timestamp_ms(session)
+    x = float(state.x)
+    y = float(state.y)
+    z = float(state.z)
+    orientation = float(state.orientation)
+    # Keep outbound SMSG_PLAYER_MOVE on the simpler low-guid layout that gave
+    # the best visual sync so far in the sandbox. The stricter SkyFire-like
+    # rewrite made the client ignore live movement again.
+    has_fall_data = False
+    has_fall_direction = False
+
+    bits = BitWriter()
+    bits.write_bits(1, 1)  # MSEHasPitch -> !hasPitch
+    bits.write_bits(1 if raw_guid[2] else 0, 1)
+    bits.write_bits(0, 1)  # MSEZeroBit
+    bits.write_bits(0, 1)  # MSEZeroBit
+    bits.write_bits(1 if raw_guid[0] else 0, 1)
+    bits.write_bits(0, 1)  # MSEHasOrientation -> !hasOrientation
+    bits.write_bits(0 if has_fall_data else 1, 1)  # MSEHasFallData -> !hasFallData
+    bits.write_bits(1, 1)  # MSEHasCounter -> !counter
+    bits.write_bits(1 if raw_guid[3] else 0, 1)
+    bits.write_bits(0 if has_fall_direction else 1, 1)  # MSEHasFallDirection -> !hasFallDirection
+    bits.write_bits(1, 1)  # MSEHasTransportData -> !hasTransportData
+    bits.write_bits(1 if raw_guid[4] else 0, 1)
+    bits.write_bits(1, 1)  # MSEHasSplineElevation -> !hasSplineElevation
+    bits.write_bits(0 if move_flags else 1, 1)  # MSEHasMovementFlags -> !hasMovementFlags
+    bits.write_bits(0, 1)  # MSEZeroBit
+    if move_flags:
+        bits.write_bits(int(move_flags), 30)
+    bits.write_bits(0 if move_flags2 else 1, 1)  # MSEHasMovementFlags2 -> !hasMovementFlags2
+    bits.write_bits(1 if raw_guid[7] else 0, 1)
+    bits.write_bits(1 if raw_guid[1] else 0, 1)
+    bits.write_bits(0, 1)  # MSEHasTimestamp -> !hasTimestamp
+    if move_flags2:
+        bits.write_bits(int(move_flags2), 13)
+    bits.write_bits(1 if raw_guid[5] else 0, 1)
+    bits.write_bits(0, 22)  # MSEForcesCount
+    bits.write_bits(1 if raw_guid[6] else 0, 1)
+
+    payload = bytearray(bits.getvalue())
+    payload.extend(struct.pack("<f", y))  # MSEPositionY
+    _append_guid_byte_seq(payload, raw_guid, (5, 1))
+    payload.extend(struct.pack("<f", z))  # MSEPositionZ
+    payload.extend(struct.pack("<I", timestamp))  # MSETimestamp
+    payload.extend(struct.pack("<f", orientation))  # MSEOrientation
+    _append_guid_byte_seq(payload, raw_guid, (3,))
+    _append_guid_byte_seq(payload, raw_guid, (0, 2, 6))
+    payload.extend(struct.pack("<f", x))  # MSEPositionX
+    _append_guid_byte_seq(payload, raw_guid, (4, 7))
+    return bytes(payload)
+
+
+def build_smsg_player_move_payload(session) -> bytes | None:
+    state = _movement_state(session)
+    guid_value = _movement_sync_guid(session)
+    if guid_value <= 0:
+        return None
+
+    raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
+    move_flags = int(state.flags)
+    move_flags2 = int(state.flags2)
+    timestamp = _movement_timestamp_ms(session)
+    x = float(state.x)
+    y = float(state.y)
+    z = float(state.z)
+    orientation = float(state.orientation)
+    has_orientation = not math.isclose(float(orientation), 0.0, abs_tol=1e-6)
+    has_counter = int(getattr(state, "counter", 0) or 0) != 0
+
+    bits = BitWriter()
+    bits.write_bits(1, 1)  # MSEHasPitch -> !hasPitch
+    bits.write_bits(1 if raw_guid[2] else 0, 1)
+    bits.write_bits(0, 1)  # MSEZeroBit
+    bits.write_bits(0, 1)  # MSEZeroBit
+    bits.write_bits(1 if raw_guid[0] else 0, 1)
+    bits.write_bits(0 if has_orientation else 1, 1)  # MSEHasOrientation -> !hasOrientation
+    bits.write_bits(0, 1)  # MSEHasFallData
+    bits.write_bits(0 if has_counter else 1, 1)  # MSEHasCounter -> !counter
+    bits.write_bits(1 if raw_guid[3] else 0, 1)
+    bits.write_bits(0, 1)  # MSEHasTransportData
+    bits.write_bits(1 if raw_guid[4] else 0, 1)
+    bits.write_bits(1, 1)  # MSEHasSplineElevation -> !hasSplineElevation
+    bits.write_bits(0 if move_flags else 1, 1)  # MSEHasMovementFlags -> !hasMovementFlags
+    bits.write_bits(0, 1)  # MSEZeroBit
+    if move_flags:
+        bits.write_bits(int(move_flags), 30)
+    bits.write_bits(0 if move_flags2 else 1, 1)  # MSEHasMovementFlags2 -> !hasMovementFlags2
+    bits.write_bits(1 if raw_guid[7] else 0, 1)
+    bits.write_bits(1 if raw_guid[1] else 0, 1)
+    bits.write_bits(0 if timestamp else 1, 1)  # MSEHasTimestamp -> !hasTimestamp
+    if move_flags2:
+        bits.write_bits(int(move_flags2), 13)
+    bits.write_bits(1 if raw_guid[5] else 0, 1)
+    bits.write_bits(0, 22)  # MSEForcesCount
+    bits.write_bits(1 if raw_guid[6] else 0, 1)
+
+    payload = bytearray(bits.getvalue())
+    payload.extend(struct.pack("<f", y))  # MSEPositionY
+    if raw_guid[5]:
+        payload.append((raw_guid[5] ^ 1) & 0xFF)  # MSEGuidByte5
+    if raw_guid[1]:
+        payload.append((raw_guid[1] ^ 1) & 0xFF)  # MSEGuidByte1
+    payload.extend(struct.pack("<f", z))  # MSEPositionZ
+    if timestamp:
+        payload.extend(struct.pack("<I", timestamp))  # MSETimestamp
+    if has_orientation:
+        payload.extend(struct.pack("<f", orientation))  # MSEOrientation
+    if raw_guid[3]:
+        payload.append((raw_guid[3] ^ 1) & 0xFF)  # MSEGuidByte3
+    if raw_guid[0]:
+        payload.append((raw_guid[0] ^ 1) & 0xFF)  # MSEGuidByte0
+    if raw_guid[2]:
+        payload.append((raw_guid[2] ^ 1) & 0xFF)  # MSEGuidByte2
+    if raw_guid[6]:
+        payload.append((raw_guid[6] ^ 1) & 0xFF)  # MSEGuidByte6
+    if has_counter:
+        payload.extend(struct.pack("<I", int(state.counter) & 0xFFFFFFFF))  # MSECounter
+    payload.extend(struct.pack("<f", x))  # MSEPositionX
+    if raw_guid[4]:
+        payload.append((raw_guid[4] ^ 1) & 0xFF)  # MSEGuidByte4
+    if raw_guid[7]:
+        payload.append((raw_guid[7] ^ 1) & 0xFF)  # MSEGuidByte7
+
+    state.counter = (int(getattr(state, "counter", 0) or 0) + 1) & 0xFFFFFFFF
+    return bytes(payload)
+
+
+def build_move_set_run_speed_payload(session) -> bytes:
+    raw_guid = int(_player_guid(session) or 0).to_bytes(8, "little", signed=False)
+
+    bits = BitWriter()
+    for index in (1, 7, 4, 2, 5, 3, 6, 0):
+        bits.write_bits(1 if raw_guid[index] else 0, 1)
+
+    payload = bytearray(bits.getvalue())
+    _append_guid_byte_seq(payload, raw_guid, (1,))
+
+    state = _movement_state(session)
+    counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
+    payload.extend(struct.pack("<I", counter))
+    state.counter = (counter + 1) & 0xFFFFFFFF
+
+    _append_guid_byte_seq(payload, raw_guid, (7, 3, 0))
+    payload.extend(struct.pack("<f", float(getattr(session, "run_speed", 7.0) or 7.0)))
+    _append_guid_byte_seq(payload, raw_guid, (2, 4, 6, 5))
+    return bytes(payload)
+
+
+def build_same_map_teleport_payload(session) -> bytes:
+    raw_guid = int(_player_guid(session) or 0).to_bytes(8, "little", signed=False)
+
+    bits = BitWriter()
+    for index in (0, 6, 5, 7, 2):
+        bits.write_bits(1 if raw_guid[index] else 0, 1)
+    bits.write_bits(0, 1)  # has transport data
+    bits.write_bits(1 if raw_guid[4] else 0, 1)
+    for _ in range(8):
+        bits.write_bits(0, 1)  # empty transport guid mask
+    bits.write_bits(1 if raw_guid[3] else 0, 1)
+    bits.write_bits(1 if raw_guid[1] else 0, 1)
+    bits.write_bits(0, 1)  # zero bit
+
+    payload = bytearray(bits.getvalue())
+    _append_guid_byte_seq(payload, raw_guid, (4, 7))
+    payload.extend(struct.pack("<f", float(getattr(session, "z", 0.0) or 0.0)))
+    payload.extend(struct.pack("<f", float(getattr(session, "y", 0.0) or 0.0)))
+    _append_guid_byte_seq(payload, raw_guid, (2, 3, 5))
+    payload.extend(struct.pack("<f", float(getattr(session, "x", 0.0) or 0.0)))
+
+    state = _movement_state(session)
+    counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
+    payload.extend(struct.pack("<I", counter))
+    state.counter = (counter + 1) & 0xFFFFFFFF
+
+    _append_guid_byte_seq(payload, raw_guid, (0, 6, 1))
+    payload.extend(struct.pack("<f", float(getattr(session, "orientation", 0.0) or 0.0)))
+    return bytes(payload)
+
+
+def _is_teleporting(session) -> bool:
+    return bool(getattr(session, "near_teleport_pending", False) or getattr(session, "teleport_pending", False))
 
 
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
 _MAX_MOVEMENT_Z_DELTA = 100.0
 _POSITION_SAVE_INTERVAL_SECONDS = 30.0
 _STATIONARY_EPSILON = 0.01
-_SIM_RUN_SPEED_YARDS_PER_SEC = 7.0
 _SIM_TURN_RATE_RAD_PER_SEC = math.pi
 
 # TODO:
@@ -154,6 +410,12 @@ def _extract_movement_from_decoded(session, decoded: dict[str, Any]) -> Optional
     return None
 
 
+def _simulated_ground_speed(session, move_dir: float) -> float:
+    if float(move_dir) < 0.0:
+        return float(getattr(session, "run_back_speed", 4.5) or 4.5)
+    return float(getattr(session, "run_speed", 7.0) or 7.0)
+
+
 def _score_movement_candidate(
     session,
     x: float,
@@ -201,11 +463,17 @@ def _is_effectively_stationary(
     y: float,
     z: float,
     *,
+    current_x: float | None = None,
+    current_y: float | None = None,
+    current_z: float | None = None,
     epsilon: float = _STATIONARY_EPSILON,
 ) -> bool:
-    current_x = float(getattr(session, "x", 0.0) or 0.0)
-    current_y = float(getattr(session, "y", 0.0) or 0.0)
-    current_z = float(getattr(session, "z", 0.0) or 0.0)
+    if current_x is None:
+        current_x = float(getattr(session, "x", 0.0) or 0.0)
+    if current_y is None:
+        current_y = float(getattr(session, "y", 0.0) or 0.0)
+    if current_z is None:
+        current_z = float(getattr(session, "z", 0.0) or 0.0)
     return (
         abs(float(x) - current_x) <= float(epsilon)
         and abs(float(y) - current_y) <= float(epsilon)
@@ -213,110 +481,62 @@ def _is_effectively_stationary(
     )
 
 
-def _movement_flag_state(session, attr: str) -> bool:
-    return bool(getattr(session, attr, False))
-
-
-def _set_movement_flag_state(session, attr: str, enabled: bool) -> None:
-    setattr(session, attr, bool(enabled))
-
-
-def _simulate_movement_state(session, *, now: float | None = None) -> None:
-    now = float(now if now is not None else time.time())
-    last = float(getattr(session, "_sim_motion_updated_at", 0.0) or 0.0)
-    if last <= 0.0:
-        session._sim_motion_updated_at = now
-        return
-
-    dt = max(0.0, min(now - last, 2.0))
-    session._sim_motion_updated_at = now
-    if dt <= 0.0:
-        return
-
-    orientation = _normalize_orientation(getattr(session, "orientation", 0.0))
-    if orientation is None:
-        orientation = 0.0
-
-    turn_dir = 0.0
-    if _movement_flag_state(session, "_sim_turn_left"):
-        turn_dir += 1.0
-    if _movement_flag_state(session, "_sim_turn_right"):
-        turn_dir -= 1.0
-
-    start_orientation = float(orientation)
-    end_orientation = start_orientation + (turn_dir * _SIM_TURN_RATE_RAD_PER_SEC * dt)
-    normalized_end_orientation = _normalize_orientation(end_orientation)
-    if normalized_end_orientation is None:
-        normalized_end_orientation = start_orientation
-
-    move_dir = 0.0
-    if _movement_flag_state(session, "_sim_move_forward"):
-        move_dir += 1.0
-    if _movement_flag_state(session, "_sim_move_backward"):
-        move_dir -= 1.0
-
-    if move_dir != 0.0:
-        average_orientation = _normalize_orientation((start_orientation + float(normalized_end_orientation)) / 2.0)
-        if average_orientation is None:
-            average_orientation = start_orientation
-        distance = move_dir * _SIM_RUN_SPEED_YARDS_PER_SEC * dt
-        session.x = float(getattr(session, "x", 0.0) or 0.0) + (math.cos(float(average_orientation)) * distance)
-        session.y = float(getattr(session, "y", 0.0) or 0.0) + (math.sin(float(average_orientation)) * distance)
-
-    session.orientation = float(normalized_end_orientation)
-    _capture_persist_position_from_session(session)
-    _mark_position_dirty(session)
-
-
-def _mark_movement_state(session, opcode_name: str, *, now: float | None = None) -> None:
-    now = float(now if now is not None else time.time())
-    _simulate_movement_state(session, now=now)
-
-    _apply_movement_state_flags(session, opcode_name)
-    session._sim_motion_updated_at = now
-
-
-def _apply_movement_state_flags(session, opcode_name: str) -> None:
+def _apply_movement_flags(state, opcode_name: str) -> None:
+    flags = int(getattr(state, "flags", 0) or 0)
     if opcode_name == "MSG_MOVE_START_FORWARD":
-        _set_movement_flag_state(session, "_sim_move_forward", True)
-        _set_movement_flag_state(session, "_sim_move_backward", False)
+        flags |= _MOVEMENTFLAG_FORWARD
+        flags &= ~_MOVEMENTFLAG_BACKWARD
     elif opcode_name == "MSG_MOVE_START_BACKWARD":
-        _set_movement_flag_state(session, "_sim_move_backward", True)
-        _set_movement_flag_state(session, "_sim_move_forward", False)
+        flags |= _MOVEMENTFLAG_BACKWARD
+        flags &= ~_MOVEMENTFLAG_FORWARD
     elif opcode_name == "MSG_MOVE_STOP":
-        _set_movement_flag_state(session, "_sim_move_forward", False)
-        _set_movement_flag_state(session, "_sim_move_backward", False)
+        flags &= ~(_MOVEMENTFLAG_FORWARD | _MOVEMENTFLAG_BACKWARD)
+        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
     elif opcode_name == "MSG_MOVE_START_TURN_LEFT":
-        _set_movement_flag_state(session, "_sim_turn_left", True)
-        _set_movement_flag_state(session, "_sim_turn_right", False)
+        flags |= _MOVEMENTFLAG_LEFT
+        flags &= ~_MOVEMENTFLAG_RIGHT
     elif opcode_name == "MSG_MOVE_START_TURN_RIGHT":
-        _set_movement_flag_state(session, "_sim_turn_right", True)
-        _set_movement_flag_state(session, "_sim_turn_left", False)
+        flags |= _MOVEMENTFLAG_RIGHT
+        flags &= ~_MOVEMENTFLAG_LEFT
     elif opcode_name == "MSG_MOVE_STOP_TURN":
-        _set_movement_flag_state(session, "_sim_turn_left", False)
-        _set_movement_flag_state(session, "_sim_turn_right", False)
+        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
+    elif opcode_name == "MSG_MOVE_HEARTBEAT":
+        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
+    elif opcode_name == "MSG_MOVE_JUMP":
+        flags |= _MOVEMENTFLAG_FALLING
+        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
+    elif opcode_name == "MSG_MOVE_FALL_LAND":
+        flags &= ~_MOVEMENTFLAG_FALLING
+        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
+    state.flags = int(flags)
 
 
-def _flush_simulated_movement(session, *, now: float | None = None) -> None:
-    _simulate_movement_state(session, now=now)
+def _extract_packet_timestamp(opcode_name: str, payload: bytes) -> int | None:
+    if opcode_name == "MSG_MOVE_HEARTBEAT" and len(payload) >= 32:
+        return int.from_bytes(payload[-4:], "little", signed=False)
+    if opcode_name == "MSG_MOVE_START_FORWARD" and len(payload) >= 28:
+        return int.from_bytes(payload[24:28], "little", signed=False)
+    if opcode_name == "MSG_MOVE_START_BACKWARD" and len(payload) >= 28:
+        return int.from_bytes(payload[-4:], "little", signed=False)
+    if opcode_name == "MSG_MOVE_STOP" and len(payload) >= 28:
+        return int.from_bytes(payload[-4:], "little", signed=False)
+    if opcode_name == "MSG_MOVE_JUMP" and len(payload) >= 52:
+        return int.from_bytes(payload[-4:], "little", signed=False)
+    if opcode_name == "MSG_MOVE_FALL_LAND" and len(payload) >= 28:
+        return int.from_bytes(payload[-4:], "little", signed=False)
+    if opcode_name in {"MSG_MOVE_START_TURN_LEFT", "MSG_MOVE_START_TURN_RIGHT", "MSG_MOVE_STOP_TURN"} and len(payload) >= 24:
+        return int.from_bytes(payload[-4:], "little", signed=False)
+    return None
 
 
-def _has_recent_simulated_translation(
-    session,
-    *,
-    now: float | None = None,
-    max_age_seconds: float = 0.75,
-) -> bool:
-    now = float(now if now is not None else time.time())
-    last = float(getattr(session, "_sim_motion_updated_at", 0.0) or 0.0)
-    if last <= 0.0:
+def _is_stale_client_timestamp(current_timestamp_ms: int, incoming_timestamp_ms: int) -> bool:
+    current = int(current_timestamp_ms or 0) & 0xFFFFFFFF
+    incoming = int(incoming_timestamp_ms or 0) & 0xFFFFFFFF
+    if current <= 0 or incoming <= 0:
         return False
-    if (now - last) > float(max_age_seconds):
+    if incoming >= current:
         return False
-    return bool(
-        getattr(session, "_sim_move_forward", False)
-        or getattr(session, "_sim_move_backward", False)
-    )
+    return (current - incoming) < 60000
 
 
 def _extract_movement_from_payload(session, payload: bytes) -> Optional[tuple[float, float, float, float]]:
@@ -337,6 +557,151 @@ def _extract_movement_from_payload(session, payload: bytes) -> Optional[tuple[fl
             best_score = score
 
     return best
+
+
+def _extract_skyfire_movement_from_payload(
+    session,
+    opcode_name: str,
+    payload: bytes,
+) -> Optional[tuple[float, float, float, float]]:
+    if len(payload) < 12:
+        return None
+
+    try:
+        first, second, third = struct.unpack_from("<fff", payload, 0)
+    except struct.error:
+        return None
+
+    orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+
+    if opcode_name == "MSG_MOVE_HEARTBEAT":
+        # SkyFire 5.4.8 MovementHeartBeat starts with PositionZ, PositionX, PositionY.
+        z, x, y = first, second, third
+        orientation_offsets = ()
+        if len(payload) >= 51:
+            orientation_offsets = (23, 20)
+        elif len(payload) >= 32:
+            orientation_offsets = (18, 20)
+        for offset in orientation_offsets:
+            try:
+                candidate = struct.unpack_from("<f", payload, offset)[0]
+            except struct.error:
+                continue
+            normalized = _normalize_orientation(candidate)
+            if normalized is not None:
+                orientation = float(normalized)
+                break
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_START_FORWARD":
+        # SkyFire 5.4.8 MovementStartForward starts with PositionZ, PositionX, PositionY.
+        z, x, y = first, second, third
+        if len(payload) >= 32:
+            try:
+                candidate = struct.unpack_from("<f", payload, 28)[0]
+                normalized = _normalize_orientation(candidate)
+                if normalized is not None:
+                    orientation = float(normalized)
+            except struct.error:
+                pass
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_START_BACKWARD":
+        # SkyFire 5.4.8 MovementStartBackward starts with PositionY, PositionZ, PositionX.
+        y, z, x = first, second, third
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_STOP":
+        # SkyFire 5.4.8 MovementStop starts with PositionX, PositionY, PositionZ.
+        x, y, z = first, second, third
+        if len(payload) >= 24:
+            try:
+                candidate = struct.unpack_from("<f", payload, 20)[0]
+                normalized = _normalize_orientation(candidate)
+                if normalized is not None:
+                    orientation = float(normalized)
+            except struct.error:
+                pass
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_START_TURN_RIGHT":
+        # SkyFire 5.4.8 MovementStartTurnRight starts with PositionX, PositionZ, PositionY.
+        x, z, y = first, second, third
+        if len(payload) >= 28:
+            try:
+                candidate = struct.unpack_from("<f", payload, 24)[0]
+                normalized = _normalize_orientation(candidate)
+                if normalized is not None:
+                    orientation = float(normalized)
+            except struct.error:
+                pass
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_START_TURN_LEFT":
+        # SkyFire 5.4.8 MovementStartTurnLeft starts with PositionZ, PositionX, PositionY.
+        z, x, y = first, second, third
+        if len(payload) >= 28:
+            try:
+                candidate = struct.unpack_from("<f", payload, 24)[0]
+                normalized = _normalize_orientation(candidate)
+                if normalized is not None:
+                    orientation = float(normalized)
+            except struct.error:
+                pass
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_STOP_TURN":
+        # SkyFire 5.4.8 MovementStopTurn starts with PositionX, PositionZ, PositionY.
+        x, z, y = first, second, third
+        orientation_offsets = ()
+        if len(payload) >= 32:
+            orientation_offsets = (24, 20)
+        elif len(payload) >= 24:
+            orientation_offsets = (20,)
+        for offset in orientation_offsets:
+            try:
+                candidate = struct.unpack_from("<f", payload, offset)[0]
+            except struct.error:
+                continue
+            normalized = _normalize_orientation(candidate)
+            if normalized is not None:
+                orientation = float(normalized)
+                break
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_JUMP":
+        # SkyFire 5.4.8 MovementJump starts with PositionY, PositionX, PositionZ.
+        y, x, z = first, second, third
+        if len(payload) >= 48:
+            try:
+                candidate = struct.unpack_from("<f", payload, 44)[0]
+                normalized = _normalize_orientation(candidate)
+                if normalized is not None:
+                    orientation = float(normalized)
+            except struct.error:
+                pass
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_FALL_LAND":
+        # SkyFire 5.4.8 MovementFallLand starts with PositionY, PositionZ, PositionX.
+        y, z, x = first, second, third
+        orientation_offsets = ()
+        if len(payload) >= 36:
+            orientation_offsets = (32, 24)
+        elif len(payload) >= 28:
+            orientation_offsets = (24,)
+        for offset in orientation_offsets:
+            try:
+                candidate = struct.unpack_from("<f", payload, offset)[0]
+            except struct.error:
+                continue
+            normalized = _normalize_orientation(candidate)
+            if normalized is not None:
+                orientation = float(normalized)
+                break
+        return (float(x), float(y), float(z), float(orientation))
+
+    return None
 
 
 def _accept_movement_update(
@@ -378,6 +743,11 @@ def parse_movement_info(
     decoded: dict[str, Any] | None = None,
 ) -> Optional[tuple[float, float, float, float]]:
     decoded = decoded or {}
+
+    exact_movement = _extract_skyfire_movement_from_payload(session, opcode_name, payload)
+    if exact_movement is not None:
+        return exact_movement
+
     movement = _extract_movement_from_decoded(session, decoded)
     if movement is not None:
         return movement
@@ -411,6 +781,40 @@ def parse_movement_info(
             return movement
 
     return _extract_movement_from_payload(session, payload)
+
+
+def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> None:
+    state = _movement_state(session)
+    previous_timestamp = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
+    _apply_movement_flags(state, opcode_name)
+    timestamp = _extract_packet_timestamp(opcode_name, payload)
+    if timestamp is not None:
+        state.timestamp_ms = int(timestamp) & 0xFFFFFFFF
+    else:
+        state.timestamp_ms = _movement_timestamp_ms(session)
+    return None
+
+
+def _store_authoritative_movement(session, opcode_name: str, payload: bytes, movement: tuple[float, float, float, float] | None) -> None:
+    state = _movement_state(session)
+    incoming_timestamp = _extract_packet_timestamp(opcode_name, payload)
+    if incoming_timestamp is not None and _is_stale_client_timestamp(state.timestamp_ms, incoming_timestamp):
+        Logger.debug(
+            "[Movement] ignoring stale %s timestamp current=%u incoming=%u",
+            opcode_name,
+            int(state.timestamp_ms),
+            int(incoming_timestamp),
+        )
+        return False
+    _record_movement_packet_state(session, opcode_name, payload)
+    if movement is not None:
+        x, y, z, orientation = movement
+        state.x = float(x)
+        state.y = float(y)
+        state.z = float(z)
+        state.orientation = float(orientation)
+    _sync_session_from_movement_state(session)
+    return True
 
 
 def _current_position_snapshot(session) -> tuple[int, int, Position | None]:
@@ -465,7 +869,16 @@ def _capture_persist_position_from_session(session) -> None:
         )
         return
     session.persist_map_id = int(position.map)
-    session.persist_zone = int(getattr(session, "zone", 0) or 0)
+    resolved_zone = int(
+        resolve_zone_from_position(
+            int(position.map),
+            float(position.x),
+            float(position.y),
+        ) or 0
+    )
+    session.persist_zone = resolved_zone or int(getattr(session, "zone", 0) or 0)
+    if resolved_zone:
+        session.zone = int(resolved_zone)
     session.persist_instance_id = int(getattr(session, "instance_id", 0) or 0)
     session.persist_x = float(position.x)
     session.persist_y = float(position.y)
@@ -611,6 +1024,9 @@ def _maybe_periodic_position_save(
 def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     opcode_name = str(ctx.name or f"0x{int(ctx.opcode):04X}")
     Logger.debug(f"[MOVE] opcode={opcode_name}")
+    if _is_teleporting(session):
+        Logger.debug(f"[Movement] ignoring {opcode_name} while teleport is pending")
+        return 0, None
     _clear_dance_emote_state_on_move(session)
 
     movement = parse_movement_info(session, opcode_name, ctx.payload, ctx.decoded)
@@ -623,16 +1039,18 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             "MSG_MOVE_START_TURN_RIGHT",
             "MSG_MOVE_STOP_TURN",
         }:
-            _mark_movement_state(session, opcode_name)
+            if not _store_authoritative_movement(session, opcode_name, ctx.payload, None):
+                return 0, None
             broadcast_player_state_update(session, force=True)
             Logger.debug(
-                "[Movement] simulated %s guid=0x%X pos=(%.3f, %.3f, %.3f) facing=%.3f",
+                "[Movement] state-only %s guid=0x%X pos=(%.3f, %.3f, %.3f) facing=%.3f flags=0x%X",
                 opcode_name,
                 _player_guid(session),
                 float(getattr(session, "x", 0.0) or 0.0),
                 float(getattr(session, "y", 0.0) or 0.0),
                 float(getattr(session, "z", 0.0) or 0.0),
                 float(getattr(session, "orientation", 0.0) or 0.0),
+                int(_movement_state(session).flags),
             )
             return 0, None
         Logger.warning(
@@ -645,7 +1063,14 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     if not _accept_movement_update(session, opcode_name, x, y, z, orientation):
         return 0, None
 
-    _apply_movement_state_flags(session, opcode_name)
+    previous_x = float(getattr(session, "x", 0.0) or 0.0)
+    previous_y = float(getattr(session, "y", 0.0) or 0.0)
+    previous_z = float(getattr(session, "z", 0.0) or 0.0)
+    previous_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+    previous_normalized_orientation = _normalize_orientation(previous_orientation)
+
+    if not _store_authoritative_movement(session, opcode_name, ctx.payload, movement):
+        return 0, None
 
     normalized_orientation = _normalize_orientation(orientation)
     if normalized_orientation is None:
@@ -654,28 +1079,48 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             f"[Movement] ignoring implausible orientation from {opcode_name}: {orientation!r}; "
             "keeping previous facing"
         )
-        normalized_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
-    elif opcode_name == "MSG_MOVE_HEARTBEAT" and _is_effectively_stationary(session, x, y, z):
-        current_orientation = _normalize_orientation(getattr(session, "orientation", 0.0))
-        if current_orientation is not None and not math.isclose(
-            float(normalized_orientation),
-            float(current_orientation),
-            abs_tol=1e-4,
-        ):
-            Logger.debug(
-                "[Movement] ignoring stationary %s orientation override %.6f -> %.6f",
-                opcode_name,
-                float(current_orientation),
-                float(normalized_orientation),
-            )
-            normalized_orientation = float(current_orientation)
+        normalized_orientation = (
+            float(previous_normalized_orientation)
+            if previous_normalized_orientation is not None
+            else 0.0
+        )
+    elif opcode_name == "MSG_MOVE_HEARTBEAT":
+        if previous_normalized_orientation is not None:
+            if opcode_name == "MSG_MOVE_HEARTBEAT" and _is_effectively_stationary(
+                session,
+                x,
+                y,
+                z,
+                current_x=previous_x,
+                current_y=previous_y,
+                current_z=previous_z,
+            ):
+                if not math.isclose(
+                    float(normalized_orientation),
+                    float(previous_normalized_orientation),
+                    abs_tol=1e-4,
+                ):
+                    Logger.debug(
+                        "[Movement] ignoring stationary %s orientation override %.6f -> %.6f",
+                        opcode_name,
+                        float(previous_normalized_orientation),
+                        float(normalized_orientation),
+                    )
+            else:
+                Logger.debug(
+                    "[Movement] ignoring %s orientation override %.6f -> %.6f",
+                    opcode_name,
+                    float(previous_normalized_orientation),
+                    float(normalized_orientation),
+                )
+            normalized_orientation = float(previous_normalized_orientation)
 
-    session.x = float(x)
-    session.y = float(y)
-    session.z = float(z)
-    session.orientation = float(normalized_orientation)
-    now = time.time()
-    session._sim_motion_updated_at = now
+    state = _movement_state(session)
+    state.x = float(x)
+    state.y = float(y)
+    state.z = float(z)
+    state.orientation = float(normalized_orientation)
+    _sync_session_from_movement_state(session)
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
@@ -691,6 +1136,9 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
 
 @register("MSG_MOVE_SET_FACING")
 def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
+    if _is_teleporting(session):
+        Logger.debug("[Movement] ignoring MSG_MOVE_SET_FACING while teleport is pending")
+        return 0, None
     payload = bytes(ctx.payload or b"")
     if len(payload) < 4:
         Logger.warning("[Movement] MSG_MOVE_SET_FACING payload too short")
@@ -710,7 +1158,9 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
         )
         return 0, None
 
-    session.orientation = float(normalized_orientation)
+    state = _movement_state(session)
+    state.orientation = float(normalized_orientation)
+    _sync_session_from_movement_state(session)
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     _maybe_periodic_position_save(session)
@@ -720,4 +1170,43 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
         f"facing={session.orientation:.3f}"
     )
     broadcast_player_state_update(session, force=True)
+    return 0, None
+
+
+@register("CMSG_MOVE_TELEPORT_ACK")
+def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
+    if not bool(getattr(session, "near_teleport_pending", False)):
+        Logger.debug("[Teleport] ignoring unexpected CMSG_MOVE_TELEPORT_ACK")
+        return 0, [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Teleport] unexpected near-teleport ack ignored"))]
+
+    session.near_teleport_pending = False
+    _capture_persist_position_from_session(session)
+    _mark_position_dirty(session)
+    _save_session_position(session, reason="near-teleport", online=1, force=True)
+    broadcast_player_state_update(session, force=True)
+    Logger.info(
+        "[Teleport] same-map teleport ack destination=%s pos=(%.2f %.2f %.2f %.2f)",
+        str(getattr(session, "teleport_destination", "") or ""),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+    )
+    return 0, [
+        (
+            "SMSG_MESSAGECHAT",
+            encode_skyfire_messagechat_system_payload(
+                f"[Teleport] same-map ack -> {str(getattr(session, 'teleport_destination', '') or '?')}"
+            ),
+        )
+    ]
+
+
+@register("CMSG_MOVE_FORCE_RUN_SPEED_CHANGE_ACK")
+def handle_move_force_run_speed_change_ack(session, _ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
+    Logger.debug(
+        "[Movement] CMSG_MOVE_FORCE_RUN_SPEED_CHANGE_ACK guid=0x%X run_speed=%.3f",
+        _player_guid(session),
+        float(getattr(session, "run_speed", 0.0) or 0.0),
+    )
     return 0, None

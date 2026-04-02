@@ -15,6 +15,24 @@ class LoginState(str, Enum):
     IN_WORLD = "IN_WORLD"
 
 
+@dataclass
+class MovementState:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    orientation: float = 0.0
+    flags: int = 0
+    flags2: int = 0
+    timestamp_ms: int = 0
+    counter: int = 0
+    has_fall_data: bool = False
+    fall_time: int = 0
+    fall_vertical_speed: float = 0.0
+    fall_horizontal_speed: float = 0.0
+    fall_sin_angle: float = 0.0
+    fall_cos_angle: float = 0.0
+
+
 @dataclass(eq=False)
 class WorldSession:
     # --------------------------------------------------
@@ -94,6 +112,7 @@ class WorldSession:
     y: float = 0.0
     z: float = 0.0
     orientation: float = 0.0
+    movement_state: MovementState = field(default_factory=MovementState)
 
     # --------------------------------------------------
     # Movement / speeds
@@ -124,7 +143,7 @@ class WorldSession:
     equipment_cache_raw: List[int] = field(default_factory=list)
 
     known_spells: List[int] = field(default_factory=list)
-    action_buttons: List[int] = field(default_factory=lambda: [0] * 120)
+    action_buttons: List[int] = field(default_factory=lambda: [0] * 132)
     is_mounted: bool = False
     mount_spell: Optional[int] = None
 
@@ -150,6 +169,7 @@ class WorldSession:
     pending_account_data_requests: List[int] = field(default_factory=list)
     teleport_pending: bool = False
     teleport_destination: Optional[str] = None
+    near_teleport_pending: bool = False
     chat_joined: bool = False
     chat_motd_sent: bool = False
     auto_reply_msg: str = ""

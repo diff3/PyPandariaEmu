@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import struct
 import time
 from typing import Optional, Tuple
 
 from DSL.modules.EncoderHandler import EncoderHandler
+from DSL.modules.bitsHandler import BitInterPreter
 from shared.Logger import Logger
 from server.modules.handlers.world.login.packets import (
     handle_CMSG_REQUEST_HOTFIX as handle_request_hotfix_packet,
@@ -43,6 +45,38 @@ from server.modules.handlers.world.state.runtime import (
     refresh_region_weather,
 )
 
+
+def _decode_set_action_button_payload(payload: bytes) -> tuple[int, int, int]:
+    raw = bytes(payload or b"")
+    if len(raw) < 2:
+        raise ValueError("payload too short")
+
+    slot_id = int(raw[0])
+    button_bytes = [0] * 8
+    byte_pos = 1
+    bit_pos = 0
+    present: dict[int, bool] = {}
+
+    for index in (7, 0, 5, 2, 1, 6, 3, 4):
+        bit_value, byte_pos, bit_pos = BitInterPreter.read_bits(raw, byte_pos, bit_pos, 1)
+        present[index] = bool(bit_value)
+
+    if bit_pos != 0:
+        byte_pos += 1
+
+    for index in (6, 7, 3, 5, 2, 1, 4, 0):
+        if not present.get(index, False):
+            continue
+        if byte_pos >= len(raw):
+            raise ValueError("payload truncated")
+        button_bytes[index] = raw[byte_pos] ^ 0x01
+        byte_pos += 1
+
+    action_id = int(struct.unpack_from("<I", bytes(button_bytes), 0)[0] & 0x00FFFFFF)
+    type_word = int(struct.unpack_from("<I", bytes(button_bytes), 4)[0])
+    action_type = int((type_word >> 24) & 0xFF)
+    return slot_id, action_id, action_type
+
 def _build_request_cemetery_list_response_payload(
     cemetery_ids: list[int] | None = None,
     *,
@@ -69,6 +103,43 @@ def handle_ping(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     except Exception as exc:
         Logger.error(f"[WorldHandlers] SMSG_PONG encode failed: {exc}")
         return 1, None
+
+
+@register("CMSG_SET_ACTION_BUTTON")
+def handle_set_action_button(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    try:
+        slot_id, action_id, action_type = _decode_set_action_button_payload(ctx.payload)
+    except Exception as exc:
+        Logger.warning(f"[ACTION_BUTTON] decode failed: {exc}")
+        return 0, None
+
+    Logger.info(
+        f"[ACTION_BUTTON] guid={int(getattr(session, 'char_guid', 0) or 0)} "
+        f"slot={slot_id} action={action_id} type={action_type}"
+    )
+
+    buttons = list(getattr(session, "action_buttons", []) or [])
+    if len(buttons) < 132:
+        buttons.extend([0] * (132 - len(buttons)))
+    if 0 <= int(slot_id) < len(buttons):
+        buttons[int(slot_id)] = (
+            ((int(action_type) & 0xFF) << 24) | (int(action_id) & 0x00FFFFFF)
+        ) if int(action_id) > 0 else 0
+        session.action_buttons = buttons
+
+    # Sandbox default-action-bar mode:
+    # keep client-side/session edits in memory only for now.
+    # char_guid = int(getattr(session, "char_guid", 0) or 0)
+    # if char_guid > 0:
+    #     DatabaseConnection.save_character_action_button(
+    #         char_guid,
+    #         int(slot_id),
+    #         int(action_id),
+    #         int(action_type),
+    #         spec=0,
+    #     )
+
+    return 0, None
 
 
 @register("CMSG_LOGOUT_REQUEST")

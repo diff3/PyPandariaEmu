@@ -56,6 +56,7 @@ from server.modules.handlers.world.position.position_service import (
     normalize_position,
     position_from_row,
 )
+from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.handlers.world.state.runtime import (
     attach_session_to_world_state,
     pack_wow_game_time,
@@ -319,6 +320,7 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     session.skyfire_login_stage = 0
     session.teleport_pending = False
     session.teleport_destination = None
+    session.near_teleport_pending = False
 
 
 def _build_world_login_context(session) -> WorldLoginContext:
@@ -542,7 +544,6 @@ def handle_player_login(session, ctx: PacketContext):
     )
 
     session.map_id = int(row.map or 0)
-    session.zone = int(row.zone or 0)
     session.instance_id = int(row.instance_id or 0)
 
     loaded_position = position_from_row(row)
@@ -565,6 +566,13 @@ def handle_player_login(session, ctx: PacketContext):
     session.y = float(normalized_loaded_position.y)
     session.z = float(normalized_loaded_position.z)
     session.orientation = float(normalized_loaded_position.orientation)
+    session.zone = int(
+        resolve_zone_from_position(
+            int(session.map_id),
+            float(session.x),
+            float(session.y),
+        ) or int(row.zone or 0)
+    )
     Logger.info(
         "[Position] load guid=%s name=%s map=%s zone=%s x=%.3f y=%.3f z=%.3f o=%.3f",
         int(char_guid),
@@ -692,6 +700,15 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
         )
         login_ctx = _build_world_login_context(session)
         responses = _queue_teleport_world_transition(session, login_ctx)
+        responses.insert(
+            0,
+            (
+                "SMSG_MESSAGECHAT",
+                encode_skyfire_messagechat_system_payload(
+                    f"[Teleport] loading done -> {str(getattr(session, 'teleport_destination', '') or '?')}"
+                ),
+            ),
+        )
         return 0, responses
     if getattr(session, "post_loading_sent", False):
         Logger.info("[WorldHandlers] LOADING_SCREEN_NOTIFY show=0 after bootstrap; ignoring duplicate")

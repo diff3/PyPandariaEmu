@@ -25,7 +25,6 @@ from server.modules.handlers.world.mount.mount_service import (
 
 _ALLIANCE_RACES = {1, 3, 4, 7, 11, 22, 25}
 _HORDE_RACES = {2, 5, 6, 8, 9, 10, 26}
-_SANDBOX_LANGUAGE_SPELL_IDS = (668, 669, 108127)
 _BASE_LANGUAGE_SPELL_BY_RACE = {
     1: 668,       # Human -> Common
     2: 669,       # Orc -> Orcish
@@ -50,7 +49,16 @@ _RACE_LANGUAGE_SPELL_BY_RACE = {
     26: 108131,
 }
 _ALL_LANGUAGE_SPELL_IDS = frozenset(
-    set(_SANDBOX_LANGUAGE_SPELL_IDS) | set(_BASE_LANGUAGE_SPELL_BY_RACE.values()) | set(_RACE_LANGUAGE_SPELL_BY_RACE.values())
+    set(_BASE_LANGUAGE_SPELL_BY_RACE.values()) | set(_RACE_LANGUAGE_SPELL_BY_RACE.values())
+)
+_SANDBOX_COMPANION_PET_SPELL_IDS = (
+    139196,  # Pierre
+    143714,  # Rascal-Bot
+)
+_SANDBOX_BATTLE_PET_SUPPORT_SPELL_IDS = (
+    119467,  # Battle Pet Training
+    122026,  # Track Pets
+    125439,  # Revive Battle Pets
 )
 _DEFAULT_WALK_SPEED = 2.5
 _DEFAULT_RUN_SPEED = 7.0
@@ -95,27 +103,13 @@ def _build_single_u32_update_object_payload(*, map_id: int, guid: int, field_ind
 
 
 def ensure_language_spells_known(session) -> None:
-    spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
     changed = False
-    for spell_id in _SANDBOX_LANGUAGE_SPELL_IDS:
-        spell_id = int(spell_id)
+    spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
+    race = int(getattr(session, "race", 0) or 0)
+    for spell_id in granted_language_spells_for_race(race):
         if spell_id not in spells:
             spells.append(spell_id)
             changed = True
-    race = int(getattr(session, "race", 0) or 0)
-    base_spell = int(_BASE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
-    if base_spell == 0:
-        if race in _ALLIANCE_RACES:
-            base_spell = 668
-        elif race in _HORDE_RACES:
-            base_spell = 669
-    if base_spell and base_spell not in spells:
-        spells.append(base_spell)
-        changed = True
-    race_spell = int(_RACE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
-    if race_spell and race_spell not in spells:
-        spells.append(race_spell)
-        changed = True
     if changed:
         session.known_spells = spells
         Logger.debug(
@@ -128,6 +122,43 @@ def ensure_language_spells_known(session) -> None:
         race,
         language_spells,
     )
+
+
+def granted_language_spells_for_race(race: int) -> list[int]:
+    granted: list[int] = []
+    race = int(race or 0)
+    base_spell = int(_BASE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
+    if base_spell == 0:
+        if race in _ALLIANCE_RACES:
+            base_spell = 668
+        elif race in _HORDE_RACES:
+            base_spell = 669
+    if base_spell > 0:
+        granted.append(base_spell)
+    race_spell = int(_RACE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
+    if race_spell > 0 and race_spell not in granted:
+        granted.append(race_spell)
+    return granted
+
+
+def granted_companion_pet_spells() -> list[int]:
+    return sorted(int(spell_id) for spell_id in _SANDBOX_COMPANION_PET_SPELL_IDS if int(spell_id) > 0)
+
+
+def granted_battle_pet_support_spells() -> list[int]:
+    return sorted(int(spell_id) for spell_id in _SANDBOX_BATTLE_PET_SUPPORT_SPELL_IDS if int(spell_id) > 0)
+
+
+def ensure_companion_pet_spells_known(session) -> None:
+    spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
+    changed = False
+    for spell_id in granted_battle_pet_support_spells() + granted_companion_pet_spells():
+        if spell_id not in spells:
+            spells.append(spell_id)
+            changed = True
+    if changed:
+        session.known_spells = spells
+        Logger.debug("[SPELL] ensured companion pet spells count=%s", len(getattr(session, "known_spells", []) or []))
 
 
 def ensure_mount_spells_known(session) -> None:
@@ -154,7 +185,15 @@ def ensure_mount_spells_known(session) -> None:
 def initialize_session_spells(session, char_guid: int) -> None:
     session.known_spells = DatabaseConnection.get_character_spells(int(char_guid))
     ensure_language_spells_known(session)
+    ensure_companion_pet_spells_known(session)
     ensure_mount_spells_known(session)
+    persisted_spells = set(granted_language_spells_for_race(int(getattr(session, "race", 0) or 0)))
+    persisted_spells.update(granted_battle_pet_support_spells())
+    persisted_spells.update(granted_companion_pet_spells())
+    if int(char_guid) > 0 and persisted_spells:
+        inserted = DatabaseConnection.ensure_character_spells(int(char_guid), persisted_spells)
+        if inserted:
+            Logger.info("[SPELL] persisted sandbox spells guid=%s spells=%s", int(char_guid), inserted)
     Logger.debug("[SPELL] sending known spells count=%s", len(getattr(session, "known_spells", []) or []))
 
 
@@ -167,6 +206,7 @@ def build_known_spells_response(session) -> tuple[str, bytes]:
 
 def build_active_mover_spell_sync_responses(session) -> list[tuple[str, bytes]]:
     ensure_language_spells_known(session)
+    ensure_companion_pet_spells_known(session)
     ensure_mount_spells_known(session)
     return [build_known_spells_response(session)]
 
@@ -191,6 +231,21 @@ def _apply_mount_movement_speeds(player) -> None:
     player.swim_back_speed = _DEFAULT_SWIM_BACK_SPEED * _MOUNT_SPEED_MULTIPLIER
     player.fly_speed = _DEFAULT_FLY_SPEED * _MOUNT_SPEED_MULTIPLIER
     player.fly_back_speed = _DEFAULT_FLY_BACK_SPEED * _MOUNT_SPEED_MULTIPLIER
+    player.turn_speed = _DEFAULT_TURN_SPEED
+    player.pitch_speed = _DEFAULT_PITCH_SPEED
+
+
+def set_custom_run_speed(player, run_speed: float) -> None:
+    target_run_speed = max(0.1, float(run_speed))
+    scale = float(target_run_speed) / float(_DEFAULT_RUN_SPEED)
+
+    player.walk_speed = _DEFAULT_WALK_SPEED * scale
+    player.run_speed = target_run_speed
+    player.run_back_speed = _DEFAULT_RUN_BACK_SPEED * scale
+    player.swim_speed = _DEFAULT_SWIM_SPEED * scale
+    player.swim_back_speed = _DEFAULT_SWIM_BACK_SPEED * scale
+    player.fly_speed = _DEFAULT_FLY_SPEED * scale
+    player.fly_back_speed = _DEFAULT_FLY_BACK_SPEED * scale
     player.turn_speed = _DEFAULT_TURN_SPEED
     player.pitch_speed = _DEFAULT_PITCH_SPEED
 

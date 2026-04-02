@@ -96,6 +96,14 @@ def refresh_region_weather(target_session) -> None:
     region = getattr(target_session, "region", None)
     if state is None or region is None:
         return
+    manual_region_weather = getattr(state, "manual_region_weather", None)
+    if isinstance(manual_region_weather, dict):
+        manual_weather = manual_region_weather.get(int(getattr(region, "map_id", 0) or 0))
+        if isinstance(manual_weather, dict):
+            region.weather = dict(manual_weather)
+            region.weather_manual = True
+            target_session.weather = dict(manual_weather)
+            return
     if bool(getattr(region, "weather_manual", False)) and isinstance(getattr(region, "weather", None), dict):
         target_session.weather = dict(region.weather)
         return
@@ -315,8 +323,11 @@ def broadcast_region_weather(target_session, weather_type: int, density: float, 
             broadcast_system_message(str(announce), scope="world")
         return
 
+    state = getattr(target_session, "global_state", None)
     region.weather = dict(weather_state)
     region.weather_manual = True
+    if state is not None and isinstance(getattr(state, "manual_region_weather", None), dict):
+        state.manual_region_weather[int(getattr(region, "map_id", 0) or 0)] = dict(weather_state)
 
     if payload is not None:
         for player in iter_region_sessions(region=region):
@@ -405,6 +416,15 @@ def _build_player_value_update_responses(source_session) -> list[tuple[str, byte
     return responses
 
 
+def _build_player_move_response(source_session) -> tuple[str, bytes] | None:
+    from server.modules.handlers.world.opcodes.movement import build_smsg_player_move_payload
+
+    payload = build_smsg_player_move_payload(source_session)
+    if not payload:
+        return None
+    return ("SMSG_PLAYER_MOVE", payload)
+
+
 def _build_player_remove_update_response(source_session) -> tuple[str, bytes] | None:
     from server.modules.handlers.world.login.context import WorldLoginContext
     from server.modules.handlers.world.login.packets import build_login_packet
@@ -469,7 +489,14 @@ def _send_player_remove(observer_session, source_session) -> bool:
     return True
 
 
-def _reconcile_session_visibility_pair(source_session, other_session, *, source_value_responses=None) -> tuple[bool, bool, bool]:
+def _reconcile_session_visibility_pair(
+    source_session,
+    other_session,
+    *,
+    source_move_response=None,
+    source_value_responses=None,
+    source_resync_responses=None,
+) -> tuple[bool, bool, bool]:
     if other_session is source_session or not _is_session_in_world(other_session):
         return False, False, False
 
@@ -482,17 +509,21 @@ def _reconcile_session_visibility_pair(source_session, other_session, *, source_
         created_for_source = _send_player_create(source_session, other_session)
         created_for_other = _send_player_create(other_session, source_session)
         updated_for_other = False
-        if not created_for_other and source_value_responses and source_guid in _visible_guid_set(other_session):
-            responses: list[tuple[str, bytes]] = []
-            remove_response = _build_player_remove_update_response(source_session)
-            create_response = _build_player_create_update_response(source_session)
-            if remove_response is not None:
-                responses.append(remove_response)
-            if create_response is not None:
-                responses.append(create_response)
+        if not created_for_other and source_guid in _visible_guid_set(other_session):
+            responses = []
+            if source_move_response is not None:
+                responses.append(source_move_response)
+            else:
+                responses.extend(list(source_value_responses or []))
+            if source_resync_responses:
+                # The client still ignores our current SMSG_PLAYER_MOVE layout in
+                # some cases. Keep a throttled remove+create fallback layered on
+                # top so remote players remain visually updated while we keep
+                # iterating on the exact live movement packet.
+                responses.extend(list(source_resync_responses))
             if responses:
-                dispatch_responses_to_sessions([other_session], responses)
                 updated_for_other = True
+                dispatch_responses_to_sessions([other_session], responses)
         return created_for_source, created_for_other, updated_for_other
 
     removed_from_source = _send_player_remove(source_session, other_session)
@@ -567,10 +598,24 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
     if not force and key == last_key and (now - last_at) < 0.10:
         return
 
-    value_responses = _build_player_value_update_responses(source_session)
+    move_response = _build_player_move_response(source_session)
+    value_responses = []
+    if move_response is None:
+        value_responses = _build_player_value_update_responses(source_session)
     create_responses = _build_player_create_responses(source_session)
-    if not value_responses and not create_responses:
+    if move_response is None and not value_responses and not create_responses:
         return
+
+    resync_responses: list[tuple[str, bytes]] = []
+    last_resync_key = getattr(source_session, "_multiplayer_last_resync_key", None)
+    last_resync_at = float(getattr(source_session, "_multiplayer_last_resync_at", 0.0) or 0.0)
+    if key != last_resync_key and (force or (now - last_resync_at) >= 0.75):
+        remove_response = _build_player_remove_update_response(source_session)
+        create_response = _build_player_create_update_response(source_session)
+        if remove_response is not None:
+            resync_responses.append(remove_response)
+        if create_response is not None:
+            resync_responses.append(create_response)
 
     peers = [
         session
@@ -589,7 +634,9 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
         changed_for_source, changed_for_peer, updated_for_peer = _reconcile_session_visibility_pair(
             source_session,
             peer,
+            source_move_response=move_response,
             source_value_responses=value_responses,
+            source_resync_responses=resync_responses,
         )
         has_source_now = _session_guid(source_session) in _visible_guid_set(peer)
         has_peer_now = _session_guid(peer) in _visible_guid_set(source_session)
@@ -605,6 +652,9 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
 
     source_session._multiplayer_last_broadcast_at = now
     source_session._multiplayer_last_broadcast_key = key
+    if resync_responses:
+        source_session._multiplayer_last_resync_at = now
+        source_session._multiplayer_last_resync_key = key
     source_session._multiplayer_removed = False
     if force or created or updated or removed:
         Logger.debug(

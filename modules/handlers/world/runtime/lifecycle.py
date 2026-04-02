@@ -98,4 +98,5 @@ def handle_disconnect_session(target_session) -> None:
     target_session.region = None
     target_session.send_response = None
     target_session.visible_guids.clear()
+    target_session.near_teleport_pending = False
     login_handlers._reset_login_flow_state(target_session)

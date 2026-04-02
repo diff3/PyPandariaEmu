@@ -30,7 +30,9 @@ from server.modules.handlers.world.chat.codec import (
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.opcodes import entities as entities_handlers
+from server.modules.handlers.world.opcodes import spells as spells_handlers
 from server.modules.handlers.world.opcodes.movement import (
+    build_move_set_run_speed_payload,
     _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
@@ -359,8 +361,9 @@ def _toggle_dnd(session, message: str):
 
 def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, bytes]]]:
     command = str(message or "").strip()
+    command_lower = command.lower()
 
-    if command.lower().startswith(".roll"):
+    if command_lower.startswith(".roll"):
         roll = random.randint(1, 100)
         msg = f"{session.player_name} rolls {roll} (1-100)"
         payload = encode_messagechat_payload(
@@ -374,7 +377,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         )
         return [("SMSG_MESSAGECHAT", payload)]
 
-    if command.lower() == ".getxy":
+    if command_lower == ".getxy":
         Logger.info(
             "[GETXY] "
             f"map={int(getattr(session, 'map_id', 0) or 0)} "
@@ -385,7 +388,34 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         )
         return []
 
-    if command.lower().startswith(".weather"):
+    if command_lower.startswith(".speed"):
+        parts = command.split(maxsplit=1)
+        if len(parts) != 2:
+            return _notification_response("Usage: .speed <run_speed|default>")
+
+        value = parts[1].strip().lower()
+        if value in {"default", "reset"}:
+            spells_handlers._restore_default_movement_speeds(session)
+        else:
+            try:
+                run_speed = float(value)
+            except ValueError:
+                return _notification_response("Usage: .speed <run_speed|default>")
+            if not (0.1 <= run_speed <= 50.0):
+                return _notification_response("Usage: .speed <0.1-50.0>")
+            spells_handlers.set_custom_run_speed(session, run_speed)
+
+        return [
+            ("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(session)),
+            (
+                "SMSG_MESSAGECHAT",
+                encode_skyfire_messagechat_system_payload(
+                    f"[Speed] run={float(getattr(session, 'run_speed', 0.0) or 0.0):.2f}"
+                ),
+            ),
+        ]
+
+    if command_lower.startswith(".weather"):
         parts = command.split()
         if len(parts) not in (2, 3):
             Logger.info("[Weather] Usage: .weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
@@ -422,7 +452,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         )
         return []
 
-    if command.lower().startswith(".time"):
+    if command_lower.startswith(".time"):
         parts = command.split(maxsplit=1)
         if len(parts) != 2:
             Logger.info("[Time] Usage: .time <HH:MM|day|night|dawn|dusk|noon|midnight>")
@@ -478,7 +508,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         )
         return []
 
-    if command.lower().startswith(".system "):
+    if command_lower.startswith(".system "):
         message = str(command[8:] or "").strip()
         if not message:
             return _notification_response("Usage: .system <message>")
@@ -486,7 +516,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         broadcast_system_message(message, scope="world")
         return []
 
-    if command.lower() == ".save":
+    if command_lower == ".save":
         ok = save_current_position_like_command(session, reason="command", online=1, force=True)
 
         map_id = int(getattr(session, "persist_map_id", 0) or 0)
@@ -514,7 +544,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         # return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
         return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
 
-    if command.lower().startswith(".telxyz"):
+    if command_lower.startswith(".telxyz"):
         parts = command.split()
         player_name = (
             str(getattr(session, "player_name", "") or "").strip()

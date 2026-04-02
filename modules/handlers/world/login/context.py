@@ -115,7 +115,7 @@ class WorldLoginContext:
     equipment_cache_raw: list[int] = field(default_factory=list)
 
     known_spells: list = field(default_factory=list)
-    action_buttons: list = field(default_factory=lambda: [0] * 120)
+    action_buttons: list = field(default_factory=lambda: [0] * 132)
 
     factions: Dict[str, Any] = field(default_factory=dict)
     achievements: Dict[str, Any] = field(default_factory=dict)

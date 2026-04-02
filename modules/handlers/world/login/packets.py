@@ -31,6 +31,7 @@ from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.game.equipment import _parse_equipment_cache
 from server.modules.game.player import _decode_player_bytes
 from server.modules.game.guid import _guid_bytes_and_masks, GuidHelper, HighGuid
+from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
 from server.modules.handlers.world.mount.mount_service import (
     MOUNT_RIDING_SKILL_ID,
@@ -496,50 +497,42 @@ def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
             spells.append(int(spell_id))
             spell_set.add(int(spell_id))
 
-    return _encode("SMSG_SEND_KNOWN_SPELLS", {
-        "initial_login": 1,
-        "spell_count": len(spells),
-        "spells": [{"spell_id": int(spell)} for spell in spells],
-    })
+    payload = bytearray()
+    bits = BitWriter()
+    bits.write_bits(0, 1)
+    bits.write_bits(len(spells) & 0x3FFFFF, 22)
+    payload.extend(bits.getvalue())
+    for spell_id in spells:
+        payload.extend(struct.pack("<I", int(spell_id)))
+    return bytes(payload)
 
 
 def build_SMSG_SEND_UNLEARN_SPELLS(ctx) -> bytes:
-    return _encode("SMSG_SEND_UNLEARN_SPELLS", {
-        "count": 0,
-        "spells": [],
-    })
+    bits = BitWriter()
+    bits.write_bits(0, 22)
+    return bits.getvalue()
 
 
 def build_SMSG_UPDATE_ACTION_BUTTONS(ctx) -> bytes:
-    # Prefer the captured payload for now. The speculative fixed-size builder
-    # produces a packet the client accepts on wire level, but the action bar
-    # UI stops rendering buttons. Keep the manual path as fallback while we
-    # revisit the real format later.
-    captured = _load_payload_packet("SMSG_UPDATE_ACTION_BUTTONS")
-    use_capture = (
-        captured is not None
-        and int(getattr(ctx, "char_guid", 0) or 0) == 2
-    )
-    if use_capture:
-        Logger.info("[ACTION_BUTTONS MODE] capture")
-        return captured
-
-    Logger.info("[ACTION_BUTTONS MODE] manual-fallback")
+    Logger.info("[ACTION_BUTTONS MODE] manual")
     button_count = 132
-    packet_type = 1
+    packet_type = int(getattr(ctx, "action_button_state", 0) or 0) & 0xFF
     source_buttons = list(getattr(ctx, "action_buttons", []) or [])
-    button_values = [0] * button_count
-
-    for index, value in enumerate(source_buttons[:button_count]):
-        try:
-            button_values[index] = int(value) & 0xFFFFFFFF
-        except Exception:
-            button_values[index] = 0
 
     button_bytes = [
-        list(int(value).to_bytes(8, "little", signed=False))
-        for value in button_values
+        [0] * 8
+        for _ in range(button_count)
     ]
+
+    for index, packed_value in enumerate(source_buttons[:button_count]):
+        try:
+            packed_value = int(packed_value) & 0xFFFFFFFF
+            action_id = packed_value & 0x00FFFFFF
+            action_type = (packed_value >> 24) & 0xFF
+            raw = struct.pack("<II", action_id, action_type << 24)
+            button_bytes[index] = list(raw)
+        except Exception:
+            button_bytes[index] = [0] * 8
 
     bits = BitWriter()
     for byte_index in (4, 5, 3, 1, 6, 7, 0, 2):
@@ -1043,17 +1036,32 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
             ctx,
             "exact_0004_mask_bytes",
             bytes.fromhex(
-                "4000001c00000080e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                "4000001c00000080e0000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
             ),
         )
     )
-    field_bytes = bytes(
+    field_bytes = bytearray(
         getattr(
             ctx,
             "exact_0004_field_bytes",
-            bytes.fromhex("04000733c0000733c000000000000000"),
+            bytes.fromhex("0000000000000000000000000000000000004000743c0000743c00000000000000000000"),
         )
     )
+    display_id = int(
+        getattr(
+            ctx,
+            "display_id",
+            _resolve_player_display_id(
+                int(getattr(ctx, "race", 0) or 0),
+                int(getattr(ctx, "gender", 0) or 0),
+                15476,
+            ),
+        )
+        or 15476
+    )
+    if len(field_bytes) >= 28:
+        struct.pack_into("<I", field_bytes, 20, display_id)
+        struct.pack_into("<I", field_bytes, 24, display_id)
     dynamic_mask_blocks = int(getattr(ctx, "exact_0004_dynamic_mask_blocks", 0))
 
     payload = bytearray()
@@ -1061,7 +1069,7 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
     payload += _build_exact_update_object_value_update_entry(
         guid=guid,
         mask_bytes=mask_bytes,
-        field_bytes=field_bytes,
+        field_bytes=bytes(field_bytes),
         dynamic_mask_blocks=dynamic_mask_blocks,
     )
     built = bytes(payload)
@@ -1596,17 +1604,32 @@ def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:
             ctx,
             "exact_0006_mask_bytes",
             bytes.fromhex(
-                "4000001c00000020e0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                "4000001c00000000e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
             ),
         )
     )
-    field_bytes = bytes(
+    field_bytes = bytearray(
         getattr(
             ctx,
             "exact_0006_field_bytes",
-            bytes.fromhex("08000400733c0000733c00000000000001000000"),
+            bytes.fromhex("00000000000000000000000000000000743c0000743c000000000000"),
         )
     )
+    display_id = int(
+        getattr(
+            ctx,
+            "display_id",
+            _resolve_player_display_id(
+                int(getattr(ctx, "race", 0) or 0),
+                int(getattr(ctx, "gender", 0) or 0),
+                15476,
+            ),
+        )
+        or 15476
+    )
+    if len(field_bytes) >= 24:
+        struct.pack_into("<I", field_bytes, 16, display_id)
+        struct.pack_into("<I", field_bytes, 20, display_id)
     dynamic_mask_blocks = int(getattr(ctx, "exact_0006_dynamic_mask_blocks", 0))
 
     payload = bytearray()
@@ -1614,7 +1637,7 @@ def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:
     payload += _build_exact_update_object_value_update_entry(
         guid=guid,
         mask_bytes=mask_bytes,
-        field_bytes=field_bytes,
+        field_bytes=bytes(field_bytes),
         dynamic_mask_blocks=dynamic_mask_blocks,
     )
     built = bytes(payload)
@@ -2046,6 +2069,14 @@ def build_ENUM_CHARACTERS_RESULT(account_id: int, realm_id: int) -> bytes:
                     for _ in range(23)
                 ]
 
+            resolved_zone = int(
+                resolve_zone_from_position(
+                    int(row.map or 0),
+                    float(row.position_x or 0.0),
+                    float(row.position_y or 0.0),
+                ) or int(row.zone or 0)
+            )
+
             # ---------- CHARACTER ----------
             char = {
                 "unk02": 0,
@@ -2071,7 +2102,7 @@ def build_ENUM_CHARACTERS_RESULT(account_id: int, realm_id: int) -> bytes:
                 "petDisplayID": 0,
                 "unk3": 0,
                 "char_flags": int(row.playerFlags),
-                "zone": int(row.zone),
+                "zone": resolved_zone,
                 "z": float(row.position_z),
                 "guid": 0,        # combined by DSL
                 "guildguid": 0,   # combined by DSL

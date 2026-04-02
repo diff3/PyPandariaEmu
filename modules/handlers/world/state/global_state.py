@@ -8,6 +8,7 @@ class GlobalState:
         self.time_offset = 0
         self.time_speed = 0.01666667
         self.weather_seed = 12345
+        self.manual_region_weather = {}
         self.chat_channels = {}
         self.sessions = set()
 
