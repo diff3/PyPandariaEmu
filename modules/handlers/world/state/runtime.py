@@ -592,12 +592,10 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
         round(float(getattr(source_session, "y", 0.0) or 0.0), 5),
         round(float(getattr(source_session, "z", 0.0) or 0.0), 5),
         round(float(getattr(source_session, "orientation", 0.0) or 0.0), 5),
-        int(getattr(getattr(source_session, "movement_state", None), "flags", 0) or 0),
-        int(getattr(getattr(source_session, "movement_state", None), "flags2", 0) or 0),
     )
     last_key = getattr(source_session, "_multiplayer_last_broadcast_key", None)
     last_at = float(getattr(source_session, "_multiplayer_last_broadcast_at", 0.0) or 0.0)
-    if not force and key == last_key and (now - last_at) < 0.015:
+    if not force and key == last_key and (now - last_at) < 0.02:
         return
 
     move_response = _build_player_move_response(source_session)

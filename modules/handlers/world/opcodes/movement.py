@@ -1060,16 +1060,30 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         return 0, None
 
     x, y, z, orientation = movement
-    if not _accept_movement_update(session, opcode_name, x, y, z, orientation):
-        return 0, None
-
     previous_x = float(getattr(session, "x", 0.0) or 0.0)
     previous_y = float(getattr(session, "y", 0.0) or 0.0)
     previous_z = float(getattr(session, "z", 0.0) or 0.0)
     previous_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
     previous_normalized_orientation = _normalize_orientation(previous_orientation)
 
-    if not _store_authoritative_movement(session, opcode_name, ctx.payload, movement):
+    if opcode_name in {
+        "MSG_MOVE_START_TURN_LEFT",
+        "MSG_MOVE_START_TURN_RIGHT",
+        "MSG_MOVE_STOP_TURN",
+    }:
+        # Let turn packets own facing, but keep XYZ anchored to the current
+        # authoritative position. Heartbeats are the more reliable source for
+        # live position during moving turns in our current sync model.
+        x = previous_x
+        y = previous_y
+        z = previous_z
+
+    if not _accept_movement_update(session, opcode_name, x, y, z, orientation):
+        return 0, None
+
+    adjusted_movement = (x, y, z, orientation)
+
+    if not _store_authoritative_movement(session, opcode_name, ctx.payload, adjusted_movement):
         return 0, None
 
     normalized_orientation = _normalize_orientation(orientation)
@@ -1125,18 +1139,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     _mark_position_dirty(session)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _maybe_periodic_position_save(session)
-    broadcast_player_state_update(
-        session,
-        force=opcode_name in {
-            "MSG_MOVE_HEARTBEAT",
-            "MSG_MOVE_START_FORWARD",
-            "MSG_MOVE_START_BACKWARD",
-            "MSG_MOVE_STOP",
-            "MSG_MOVE_START_TURN_LEFT",
-            "MSG_MOVE_START_TURN_RIGHT",
-            "MSG_MOVE_STOP_TURN",
-        },
-    )
+    broadcast_player_state_update(session, force=(opcode_name == "MSG_MOVE_HEARTBEAT"))
 
     Logger.debug(
         f"[MOVE] guid=0x{_player_guid(session):X} "
