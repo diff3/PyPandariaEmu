@@ -60,6 +60,7 @@ def _movement_state(session):
     state.flags = int(getattr(state, "flags", 0) or 0)
     state.flags2 = int(getattr(state, "flags2", 0) or 0)
     state.timestamp_ms = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
+    state.client_timestamp_ms = int(getattr(state, "client_timestamp_ms", 0) or 0) & 0xFFFFFFFF
     state.counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
     return state
 
@@ -150,7 +151,7 @@ def build_smsg_player_move_payload_old(session) -> bytes | None:
     return bytes(payload)
 
 
-def build_smsg_player_move_payload(session) -> bytes | None:
+def build_smsg_player_move_payload_stable_old(session) -> bytes | None:
     state = _movement_state(session)
     guid_value = _movement_sync_guid(session)
     if guid_value <= 0:
@@ -223,6 +224,10 @@ def build_smsg_player_move_payload(session) -> bytes | None:
 
     state.counter = (int(getattr(state, "counter", 0) or 0) + 1) & 0xFFFFFFFF
     return bytes(payload)
+
+
+def build_smsg_player_move_payload(session) -> bytes | None:
+    return build_smsg_player_move_payload_stable_old(session)
 
 
 def build_move_set_run_speed_payload(session) -> bytes:
@@ -785,7 +790,6 @@ def parse_movement_info(
 
 def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> None:
     state = _movement_state(session)
-    previous_timestamp = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
     _apply_movement_flags(state, opcode_name)
     timestamp = _extract_packet_timestamp(opcode_name, payload)
     if timestamp is not None:
@@ -1071,9 +1075,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         "MSG_MOVE_START_TURN_RIGHT",
         "MSG_MOVE_STOP_TURN",
     }:
-        # Let turn packets own facing, but keep XYZ anchored to the current
-        # authoritative position. Heartbeats are the more reliable source for
-        # live position during moving turns in our current sync model.
         x = previous_x
         y = previous_y
         z = previous_z

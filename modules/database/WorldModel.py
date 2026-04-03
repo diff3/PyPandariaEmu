@@ -13,6 +13,12 @@ class ItemTemplate(Base):
     entry = Column(MEDIUMINT(unsigned=True), primary_key=True, default=0)
     displayid = Column(Integer, nullable=False, default=0)
     inventory_type = Column("InventoryType", TINYINT(unsigned=True), nullable=False, default=0)
+    stackable = Column(Integer, nullable=False, default=1)
+    buy_count = Column("BuyCount", TINYINT(unsigned=True), nullable=False, default=1)
+    bag_family = Column("BagFamily", Integer, nullable=False, default=0)
+    class_ = Column("class", TINYINT(unsigned=True), nullable=False, default=0)
+    subclass = Column("subclass", TINYINT(unsigned=True), nullable=False, default=0)
+    container_slots = Column("ContainerSlots", TINYINT(unsigned=True), nullable=False, default=0)
 
 
 class PlayerFactionchangeAchievement(Base):

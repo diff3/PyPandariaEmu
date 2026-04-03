@@ -98,3 +98,32 @@ class CharacterSpell(Base):
     disabled = Column(TINYINT(unsigned=True), nullable=False, default=0)
     spec = Column(TINYINT(unsigned=True), nullable=False, default=0)
     spec_mask = Column("specMask", SMALLINT(unsigned=True), nullable=False, default=0)
+
+
+class CharacterInventory(Base):
+    __tablename__ = "character_inventory"
+
+    guid = Column(Integer, nullable=False, default=0)
+    bag = Column(Integer, nullable=False, default=0)
+    slot = Column(TINYINT(unsigned=True), nullable=False, default=0)
+    item = Column(Integer, primary_key=True, autoincrement=False, default=0)
+
+
+class ItemInstance(Base):
+    __tablename__ = "item_instance"
+
+    guid = Column(Integer, primary_key=True, autoincrement=False, default=0)
+    itemEntry = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    owner_guid = Column(Integer, nullable=False, default=0)
+    creatorGuid = Column(Integer, nullable=False, default=0)
+    giftCreatorGuid = Column(Integer, nullable=False, default=0)
+    count = Column(Integer, nullable=False, default=1)
+    duration = Column(Integer, nullable=False, default=0)
+    charges = Column(Text)
+    flags = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    enchantments = Column(Text, nullable=False, default="")
+    randomPropertyId = Column(SmallInteger, nullable=False, default=0)
+    reforgeID = Column(Integer, nullable=False, default=0)
+    durability = Column(SMALLINT(unsigned=True), nullable=False, default=0)
+    playedTime = Column(Integer, nullable=False, default=0)
+    text = Column(Text)

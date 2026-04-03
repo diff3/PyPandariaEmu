@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import struct
 import time
 from typing import Optional, Tuple
 
@@ -10,9 +11,19 @@ from shared.PathUtils import get_captures_root
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.login.packets import build_login_packet
+from server.modules.game.guid import GuidHelper
+from server.modules.game.inventory import (
+    add_item_to_character,
+    auto_equip_item,
+    swap_character_item,
+)
 from server.modules.handlers.world.bootstrap.replay import (
     build_single_u32_update_object_payload,
     send_raw_packet,
+)
+from server.modules.handlers.world.inventory_sync import (
+    build_item_snapshot_responses,
+    build_login_inventory_sync_responses,
 )
 from server.modules.handlers.world.chat.router import chat_router
 from server.modules.handlers.world.chat.codec import (
@@ -30,6 +41,10 @@ from server.modules.handlers.world.chat.codec import (
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.opcodes import entities as entities_handlers
+from server.modules.handlers.world.state.runtime import (
+    build_self_player_appearance_responses,
+    resync_player_appearance,
+)
 from server.modules.handlers.world.opcodes import spells as spells_handlers
 from server.modules.handlers.world.opcodes.movement import (
     build_move_set_run_speed_payload,
@@ -75,12 +90,141 @@ _TEXT_EMOTE_TO_STAND_STATE = {
     87: _STAND_STATE_SLEEPING,
     141: _STAND_STATE_STANDING,
 }
+_ITEM_HIGHGUID = 0x400
+_ITEM_FIELD_STACK_COUNT = 0x10
+_PLAYER_FIELD_INV_SLOTS = (0x8 + 0x98) + 0x325
+_PLAYER_FIELD_PACK_SLOTS = (0x8 + 0x98) + 0x353
+_ITEM_CREATE_FLAGS = b"\x00\x00\x00\x00\x00\x00"
+_ITEM_CREATE_MASK = bytes.fromhex("f30581000000000000000000")
 
 
 def _notification_response(message: str) -> list[tuple[str, bytes]]:
     # Fallback if we need to restore center-screen notifications:
     # return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
     return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
+
+
+def _make_skyfire_guid(low: int, entry: int, high: int) -> int:
+    shift = 48 if int(high) in {0xF101, 0xF102} else 52
+    return (
+        (int(low) & 0xFFFFFFFF)
+        | ((int(entry) & 0xFFFFF) << 32)
+        | ((int(high) & 0xFFFFF) << shift)
+    )
+
+
+def _make_item_world_guid(item_low_guid: int) -> int:
+    return _make_skyfire_guid(int(item_low_guid), 0, _ITEM_HIGHGUID)
+
+
+def _build_item_create_update_payload(session, item) -> bytes:
+    item_guid = _make_item_world_guid(int(item.item_guid))
+    field_values = (
+        int(item_guid & 0xFFFFFFFF),
+        int((item_guid >> 32) & 0xFFFFFFFF),
+        3,
+        int(item.entry),
+        0,
+        0x3F800000,
+        int(getattr(session, "char_guid", 0) or 0),
+        int(getattr(session, "char_guid", 0) or 0),
+        int(item.count),
+        1,
+    )
+
+    entry = bytearray()
+    entry += struct.pack("<B", 1)
+    entry += GuidHelper.pack(int(item_guid))
+    entry += struct.pack("<B", 1)
+    entry += _ITEM_CREATE_FLAGS
+    entry += struct.pack("<B", len(_ITEM_CREATE_MASK) // 4)
+    entry += _ITEM_CREATE_MASK
+    for value in field_values:
+        entry += struct.pack("<I", int(value) & 0xFFFFFFFF)
+    entry += struct.pack("<B", 0)
+
+    payload = bytearray()
+    payload += struct.pack("<HI", int(getattr(session, "map_id", 0) or 0) & 0xFFFF, 1)
+    payload += entry
+    return bytes(payload)
+
+
+def _inventory_slot_field_index(bag: int, slot: int) -> Optional[int]:
+    bag = int(bag)
+    slot = int(slot)
+    if bag != 0:
+        return None
+    if 0 <= slot < 23:
+        return _PLAYER_FIELD_INV_SLOTS + (slot * 2)
+    if 23 <= slot < 39:
+        return _PLAYER_FIELD_PACK_SLOTS + ((slot - 23) * 2)
+    return None
+
+
+def _build_inventory_slot_update_responses(session, item) -> list[tuple[str, bytes]]:
+    field_index = _inventory_slot_field_index(int(item.bag), int(item.slot))
+    if field_index is None:
+        return []
+
+    item_guid = _make_item_world_guid(int(item.item_guid))
+    player_guid = int(getattr(session, "char_guid", 0) or 0)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    return [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_single_u32_update_object_payload(
+                map_id=map_id,
+                guid=player_guid,
+                field_index=field_index,
+                value=int(item_guid & 0xFFFFFFFF),
+            ),
+        ),
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_single_u32_update_object_payload(
+                map_id=map_id,
+                guid=player_guid,
+                field_index=field_index + 1,
+                value=int((item_guid >> 32) & 0xFFFFFFFF),
+            ),
+        ),
+    ]
+
+
+def _build_inventory_count_update_response(session, item) -> tuple[str, bytes]:
+    return (
+        "SMSG_UPDATE_OBJECT",
+        build_single_u32_update_object_payload(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            guid=_make_item_world_guid(int(item.item_guid)),
+            field_index=_ITEM_FIELD_STACK_COUNT,
+            value=int(item.count),
+        ),
+    )
+
+
+def _build_additem_sync_responses(session, result) -> list[tuple[str, bytes]]:
+    responses: list[tuple[str, bytes]] = []
+    created_item_guids = {int(item_guid) for item_guid in getattr(result, "created_item_guids", ())}
+    changed_items = list(getattr(result, "changed_items", ()) or ())
+    if not changed_items and getattr(result, "item", None) is not None:
+        changed_items = [result.item]
+
+    for item in changed_items:
+        if int(getattr(item, "bag", -1)) != 0:
+            continue
+        if int(getattr(item, "item_guid", 0) or 0) in created_item_guids:
+            responses.extend(build_item_snapshot_responses(session, item))
+        responses.extend(_build_inventory_slot_update_responses(session, item))
+        if int(getattr(item, "item_guid", 0) or 0) not in created_item_guids:
+            responses.append(_build_inventory_count_update_response(session, item))
+    return responses
+
+
+def _build_inventory_mutation_sync_responses(session) -> list[tuple[str, bytes]]:
+    responses = build_self_player_appearance_responses(session)
+    responses.extend(build_login_inventory_sync_responses(session))
+    return responses
 
 
 def _debug_feedback_response(message: str) -> list[tuple[str, bytes]]:
@@ -515,6 +659,68 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         Logger.info(f"[SystemChat] message={message!r}")
         broadcast_system_message(message, scope="world")
         return []
+
+    if command_lower.startswith(".additem"):
+        parts = command.split()
+        if len(parts) not in (2, 3):
+            return _notification_response("Usage: .additem <itemEntry> [count]")
+        try:
+            item_entry = int(parts[1], 0)
+            item_count = int(parts[2], 0) if len(parts) == 3 else 1
+        except ValueError:
+            return _notification_response("Usage: .additem <itemEntry> [count]")
+
+        result = add_item_to_character(session, item_entry, item_count)
+        level = "info" if result.ok else "warning"
+        getattr(Logger, level)(f"[Inventory] .additem entry={item_entry} count={item_count} result={result.message}")
+        responses = _build_additem_sync_responses(session, result) if result.ok else []
+        responses.extend(_notification_response(f"[Inventory] {result.message}"))
+        return responses
+
+    if command_lower.startswith(".autoequip"):
+        parts = command.split()
+        if len(parts) != 3:
+            return _notification_response("Usage: .autoequip <bag> <slot>")
+        try:
+            src_bag = int(parts[1], 0)
+            src_slot = int(parts[2], 0)
+        except ValueError:
+            return _notification_response("Usage: .autoequip <bag> <slot>")
+
+        result = auto_equip_item(session, src_bag, src_slot)
+        level = "info" if result.ok else "warning"
+        getattr(Logger, level)(
+            f"[Inventory] .autoequip src=({src_bag},{src_slot}) result={result.message}"
+        )
+        responses = _build_inventory_mutation_sync_responses(session) if result.ok else []
+        if result.ok:
+            resync_player_appearance(session)
+        responses.extend(_notification_response(f"[Inventory] {result.message}"))
+        return responses
+
+    if command_lower.startswith(".swapitem"):
+        parts = command.split()
+        if len(parts) != 5:
+            return _notification_response("Usage: .swapitem <srcBag> <srcSlot> <dstBag> <dstSlot>")
+        try:
+            src_bag = int(parts[1], 0)
+            src_slot = int(parts[2], 0)
+            dst_bag = int(parts[3], 0)
+            dst_slot = int(parts[4], 0)
+        except ValueError:
+            return _notification_response("Usage: .swapitem <srcBag> <srcSlot> <dstBag> <dstSlot>")
+
+        result = swap_character_item(session, src_bag, src_slot, dst_bag, dst_slot)
+        level = "info" if result.ok else "warning"
+        getattr(Logger, level)(
+            "[Inventory] .swapitem src=(%s,%s) dst=(%s,%s) result=%s"
+            % (src_bag, src_slot, dst_bag, dst_slot, result.message)
+        )
+        responses = _build_inventory_mutation_sync_responses(session) if result.ok else []
+        if result.ok:
+            resync_player_appearance(session)
+        responses.extend(_notification_response(f"[Inventory] {result.message}"))
+        return responses
 
     if command_lower == ".save":
         ok = save_current_position_like_command(session, reason="command", online=1, force=True)

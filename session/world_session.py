@@ -24,6 +24,7 @@ class MovementState:
     flags: int = 0
     flags2: int = 0
     timestamp_ms: int = 0
+    client_timestamp_ms: int = 0
     counter: int = 0
     has_fall_data: bool = False
     fall_time: int = 0
@@ -141,6 +142,9 @@ class WorldSession:
     player_bytes2: int = 0
     player_flags: int = 0
     equipment_cache_raw: List[int] = field(default_factory=list)
+    inventory_state: Any = None
+    inventory_items: Dict[Any, Any] = field(default_factory=dict)
+    inventory_by_guid: Dict[int, Any] = field(default_factory=dict)
 
     known_spells: List[int] = field(default_factory=list)
     action_buttons: List[int] = field(default_factory=lambda: [0] * 132)

@@ -7,6 +7,7 @@ from shared.Logger import Logger
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.game.guid import GuidHelper, HighGuid
+from server.modules.game.inventory import refresh_session_inventory
 from server.modules.handlers.world.characters.characters import (
     handle_CMSG_CHAR_CREATE as handle_char_create_packet,
     handle_CMSG_CHAR_DELETE as handle_char_delete_packet,
@@ -42,6 +43,7 @@ from server.modules.handlers.world.constants.character_data import (
     PLAYER_FACTION_TEMPLATE_BY_RACE,
 )
 from server.modules.handlers.world.dispatcher import register
+from server.modules.handlers.world.inventory_sync import build_login_inventory_sync_responses
 from server.modules.handlers.world.opcodes import misc as misc_handlers
 from server.modules.handlers.world.opcodes.movement import (
     _capture_persist_position_from_session as capture_persist_position_from_session,
@@ -365,6 +367,10 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
             session.account_data_times_sent = True
         responses.append((opcode_name, payload))
     responses.extend(update_packets)
+    inventory_packets = build_login_inventory_sync_responses(session)
+    if inventory_packets:
+        Logger.info(f"[WorldLogin] sending {len(inventory_packets)} inventory sync packets")
+        responses.extend(inventory_packets)
     for opcode_name, payload in post_update_packets:
         Logger.info(f"[WorldLogin] sending {opcode_name}")
         responses.append((opcode_name, payload))
@@ -537,6 +543,7 @@ def handle_player_login(session, ctx: PacketContext):
     if not row:
         Logger.error(f"[WorldHandlers] Character not found guid={char_guid} realm={realm_id}")
         return 1, None
+    session._character_row = row
     selected_name = str(getattr(row, "name", "") or f"Player{char_guid}")
     Logger.info(
         f"[WorldHandlers] PLAYER_LOGIN selected name={selected_name} "
@@ -611,12 +618,13 @@ def handle_player_login(session, ctx: PacketContext):
     session.player_bytes = int(row.playerBytes or 0)
     session.player_bytes2 = int(row.playerBytes2 or 0)
     session.player_flags = int(row.playerFlags or 0)
+    session.player_name = selected_name
     session.equipment_cache_raw = [
         int(value)
         for value in str(getattr(row, "equipmentCache", "") or "").split()
         if value.strip()
     ]
-    session.player_name = selected_name
+    refresh_session_inventory(session)
     attach_session_to_world_state(session, map_id=int(session.map_id))
 
     spells_handlers.initialize_session_spells(session, int(char_guid))

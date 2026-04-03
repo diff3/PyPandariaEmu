@@ -382,6 +382,23 @@ def _build_player_create_update_response(source_session) -> tuple[str, bytes] | 
     return ("SMSG_UPDATE_OBJECT", payload)
 
 
+def build_self_player_appearance_responses(source_session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.login.context import WorldLoginContext
+    from server.modules.handlers.world.login.packets import build_login_packet
+
+    if int(getattr(source_session, "char_guid", 0) or 0) <= 0:
+        return []
+
+    ctx = WorldLoginContext.from_session(source_session)
+    ctx.exact_0002_mode = "barncastle"
+    ctx.exact_0002_map_id = int(getattr(source_session, "map_id", 0) or 0)
+    ctx.exact_0002_low_guid = int(getattr(source_session, "char_guid", 0) or 0)
+    payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
+    if payload is None:
+        return []
+    return [("SMSG_UPDATE_OBJECT", payload)]
+
+
 def _build_player_name_response(source_session) -> tuple[str, bytes] | None:
     from server.modules.handlers.world.opcodes.entities import build_query_player_name_response
 
@@ -577,6 +594,41 @@ def sync_all_players_on_map(map_id: int) -> None:
 
     Logger.info(
         f"[MULTI] resynced map={int(map_id)} players={len(sessions)} pairs={pair_count}"
+    )
+
+
+def resync_player_appearance(source_session) -> None:
+    if not _is_session_in_world(source_session):
+        return
+
+    remove_response = _build_player_remove_update_response(source_session)
+    create_response = _build_player_create_update_response(source_session)
+    if remove_response is None and create_response is None:
+        return
+
+    peers = [
+        session
+        for session in iter_in_world_sessions(map_id=int(getattr(source_session, "map_id", 0) or 0))
+        if session is not source_session
+    ]
+    if not peers:
+        return
+
+    source_guid = _session_guid(source_session)
+    for peer in peers:
+        if source_guid not in _visible_guid_set(peer):
+            continue
+        responses: list[tuple[str, bytes]] = []
+        if remove_response is not None:
+            responses.append(remove_response)
+        if create_response is not None:
+            responses.append(create_response)
+        if responses:
+            dispatch_responses_to_sessions([peer], responses)
+
+    Logger.info(
+        f"[MULTI] appearance resync player={int(getattr(source_session, 'char_guid', 0) or 0)} "
+        f"map={int(getattr(source_session, 'map_id', 0) or 0)} peers={len(peers)}"
     )
 
 

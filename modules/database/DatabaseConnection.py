@@ -14,6 +14,8 @@ from server.modules.database.CharactersModel import (
     Characters,
     CharacterAction,
     CharacterSpell,
+    CharacterInventory,
+    ItemInstance,
 )
 from server.modules.database.WorldModel import (
     ItemTemplate,
@@ -57,6 +59,7 @@ class DatabaseConnection:
     _cache_levelstats_by_pair = {}
     _cache_xp_for_level = {}
     _item_template_cache = {}
+    _item_template_details_cache = {}
     _account_data_tables_ready = False
     _addon_tables_ready = False
 
@@ -211,6 +214,7 @@ class DatabaseConnection:
         DatabaseConnection._cache_levelstats_by_pair = {}
         DatabaseConnection._cache_xp_for_level = {}
         DatabaseConnection._item_template_cache = {}
+        DatabaseConnection._item_template_details_cache = {}
         DatabaseConnection.preload_world_cache()
 
     # AUTH DB SESSION
@@ -660,6 +664,113 @@ class DatabaseConnection:
             except Exception:
                 continue
         return {entry: cached.get(entry) for entry in entries if entry in cached}
+
+    @staticmethod
+    def get_item_template_details(entries: list[int]) -> dict[int, dict[str, int]]:
+        if not entries:
+            return {}
+
+        cached = DatabaseConnection._item_template_details_cache
+        missing = [entry for entry in entries if entry not in cached]
+        if missing:
+            try:
+                session = DatabaseConnection.world()
+            except Exception as exc:
+                Logger.warning(f"[DB] World DB unavailable: {exc}")
+                return {entry: cached.get(entry) for entry in entries if entry in cached}
+
+            try:
+                rows = (
+                    session.query(ItemTemplate)
+                    .filter(ItemTemplate.entry.in_(list(missing)))
+                    .all()
+                )
+            except Exception as exc:
+                Logger.warning(f"[DB] item_template detail lookup failed: {exc}")
+                return {entry: cached.get(entry) for entry in entries if entry in cached}
+
+            for row in rows:
+                try:
+                    entry = int(row.entry)
+                    cached[entry] = {
+                        "entry": entry,
+                        "display_id": int(row.displayid or 0),
+                        "inventory_type": int(row.inventory_type or 0),
+                        "stackable": max(1, int(row.stackable or 1)),
+                        "buy_count": max(1, int(row.buy_count or 1)),
+                        "bag_family": int(row.bag_family or 0),
+                        "item_class": int(row.class_ or 0),
+                        "subclass": int(row.subclass or 0),
+                        "container_slots": int(row.container_slots or 0),
+                    }
+                except Exception:
+                    continue
+
+        return {entry: cached.get(entry) for entry in entries if entry in cached}
+
+    @staticmethod
+    def get_character_inventory_rows(char_guid: int) -> list[dict]:
+        session = DatabaseConnection.chars()
+        try:
+            rows = (
+                session.query(CharacterInventory, ItemInstance)
+                .join(ItemInstance, ItemInstance.guid == CharacterInventory.item)
+                .filter(CharacterInventory.guid == int(char_guid))
+                .order_by(CharacterInventory.bag.asc(), CharacterInventory.slot.asc(), CharacterInventory.item.asc())
+                .all()
+            )
+        except Exception as exc:
+            Logger.warning(f"[DB] get_character_inventory_rows failed guid={char_guid}: {exc}")
+            return []
+
+        result: list[dict] = []
+        for inv_row, item_row in rows:
+            try:
+                result.append(
+                    {
+                        "guid": int(inv_row.guid or 0),
+                        "bag": int(inv_row.bag or 0),
+                        "slot": int(inv_row.slot or 0),
+                        "item_guid": int(inv_row.item or 0),
+                        "item_entry": int(item_row.itemEntry or 0),
+                        "owner_guid": int(item_row.owner_guid or 0),
+                        "count": int(item_row.count or 0),
+                        "flags": int(item_row.flags or 0),
+                        "durability": int(item_row.durability or 0),
+                        "random_property_id": int(item_row.randomPropertyId or 0),
+                    }
+                )
+            except Exception:
+                continue
+        return result
+
+    @staticmethod
+    def save_character_equipment_cache(char_guid: int, realm_id: int, equipment_cache: str) -> bool:
+        session = DatabaseConnection.chars()
+        try:
+            updated = (
+                session.query(Characters)
+                .filter(
+                    Characters.guid == int(char_guid),
+                    Characters.realm == int(realm_id),
+                )
+                .update({Characters.equipmentCache: str(equipment_cache or "")}, synchronize_session=False)
+            )
+            if not updated:
+                session.rollback()
+                Logger.warning(
+                    f"[DB] save_character_equipment_cache missing character guid={char_guid} realm={realm_id}"
+                )
+                return False
+            session.commit()
+            session.expire_all()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(
+                f"[DB] save_character_equipment_cache failed guid={char_guid} realm={realm_id}: {exc}"
+            )
+            return False
 
     @staticmethod
     def get_creature_template(entry: int) -> dict | None:
