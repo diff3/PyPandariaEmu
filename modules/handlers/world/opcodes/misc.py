@@ -34,6 +34,7 @@ from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.login.packets import build_login_packet
 from server.modules.handlers.world.dispatcher import register
+from server.modules.game.inventory import persist_session_inventory
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.opcodes.movement import (
     _save_current_position_like_command as save_current_position_like_command,
@@ -105,6 +106,21 @@ def handle_ping(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
         return 1, None
 
 
+@register("CMSG_BATTLE_PAY_GET_PURCHASE_LIST")
+def handle_battle_pay_get_purchase_list(
+    session, ctx: PacketContext
+) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    log_cmsg(ctx)
+    payload = build_login_packet(
+        "SMSG_BATTLE_PAY_GET_PURCHASE_LIST_RESPONSE",
+        login_handlers._build_world_login_context(session),
+    )
+    if payload is None:
+        Logger.warning("[WorldHandlers] missing battle-pay purchase list response payload")
+        return 0, None
+    return 0, [("SMSG_BATTLE_PAY_GET_PURCHASE_LIST_RESPONSE", payload)]
+
+
 @register("CMSG_SET_ACTION_BUTTON")
 def handle_set_action_button(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     try:
@@ -149,6 +165,7 @@ def handle_logout_request(session, ctx: PacketContext) -> Tuple[int, Optional[li
     broadcast_player_remove(session)
     if USE_DB_ACCOUNT_DATA_137:
         flush_account_data_types_to_db(session, tuple(DB_ACCOUNT_DATA_137_TYPES), seed_defaults=True)
+    persist_session_inventory(session)
     save_current_position_like_command(session, reason="logout", online=0, force=True)
 
     try:

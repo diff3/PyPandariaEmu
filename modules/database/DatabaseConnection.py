@@ -9,7 +9,7 @@ from sqlalchemy.orm import scoped_session, sessionmaker
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
 
-from server.modules.database.AuthModel import Account, AccountAccess, RealmList
+from server.modules.auth.AuthConnection import AuthConnection
 from server.modules.database.CharactersModel import (
     Characters,
     CharacterAction,
@@ -37,10 +37,7 @@ from server.modules.database.WorldModel import (
 
 
 class DatabaseConnection:
-    """Handles separate DB connections for auth-db, characters-db, and world-db."""
-
-    _auth_engine = None
-    _auth_session = None
+    """Handles DB connections for characters-db and world-db."""
 
     _char_engine = None
     _char_session = None
@@ -62,22 +59,71 @@ class DatabaseConnection:
     _item_template_details_cache = {}
     _account_data_tables_ready = False
     _addon_tables_ready = False
+    _db_signature = None
+
+    @staticmethod
+    def _signature(db: dict) -> tuple:
+        return (
+            str(db.get("host", "")),
+            int(db.get("port", 3306) or 3306),
+            str(db.get("username", "")),
+            str(db.get("password", "")),
+            str(db.get("characters_db", "")),
+            str(db.get("world_db", "")),
+        )
+
+    @staticmethod
+    def _dispose_existing() -> None:
+        for session in (DatabaseConnection._char_session, DatabaseConnection._world_session):
+            if session is not None:
+                try:
+                    session.remove()
+                except Exception:
+                    pass
+
+        for engine in (DatabaseConnection._char_engine, DatabaseConnection._world_engine):
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+
+        DatabaseConnection._char_engine = None
+        DatabaseConnection._char_session = None
+        DatabaseConnection._world_engine = None
+        DatabaseConnection._world_session = None
+        DatabaseConnection._characters_db_name = None
+        DatabaseConnection._world_db_name = None
+        DatabaseConnection._db_signature = None
+
+    @staticmethod
+    def _reset_caches() -> None:
+        DatabaseConnection._world_cache_loaded = False
+        DatabaseConnection._cache_playercreateinfo = {}
+        DatabaseConnection._cache_playercreateinfo_items = {}
+        DatabaseConnection._cache_playercreateinfo_actions = {}
+        DatabaseConnection._cache_playercreateinfo_spell_rows = []
+        DatabaseConnection._cache_playercreateinfo_spells_by_pair = {}
+        DatabaseConnection._cache_levelstats = {}
+        DatabaseConnection._cache_levelstats_by_pair = {}
+        DatabaseConnection._cache_xp_for_level = {}
+        DatabaseConnection._item_template_cache = {}
+        DatabaseConnection._item_template_details_cache = {}
+        DatabaseConnection._account_data_tables_ready = False
+        DatabaseConnection._addon_tables_ready = False
 
     @staticmethod
     def initialize():
-        """Initialize BOTH auth and characters DB connections."""
+        """Initialize characters-db and optional world-db. Auth lives in AuthConnection."""
         config = ConfigLoader.load_config()
         db = config["database"]
+        signature = DatabaseConnection._signature(db)
 
-        # AUTH DATABASE
-        auth_url = (
-            f"mysql+pymysql://{db['username']}:{db['password']}@"
-            f"{db['host']}:{db['port']}/{db['auth_db']}?charset=utf8"
-        )
-        DatabaseConnection._auth_engine = create_engine(auth_url, pool_pre_ping=True)
-        DatabaseConnection._auth_session = scoped_session(
-            sessionmaker(bind=DatabaseConnection._auth_engine, autoflush=False)
-        )
+        if DatabaseConnection._char_session is not None and DatabaseConnection._db_signature == signature:
+            return
+
+        DatabaseConnection._dispose_existing()
+        DatabaseConnection._reset_caches()
 
         # CHARACTERS DATABASE
         char_url = (
@@ -89,6 +135,7 @@ class DatabaseConnection:
             sessionmaker(bind=DatabaseConnection._char_engine, autoflush=False)
         )
         DatabaseConnection._characters_db_name = db.get("characters_db")
+        DatabaseConnection._db_signature = signature
 
         # WORLD DATABASE (optional)
         world_db = db.get("world_db")
@@ -102,9 +149,9 @@ class DatabaseConnection:
                 sessionmaker(bind=DatabaseConnection._world_engine, autoflush=False)
             )
             DatabaseConnection._world_db_name = world_db
-            Logger.info("Database initialized (auth + characters + world)")
+            Logger.info("Database initialized (characters + world)")
         else:
-            Logger.info("Database initialized (auth + characters)")
+            Logger.info("Database initialized (characters)")
 
     # WORLD CACHE
     @staticmethod
@@ -220,9 +267,15 @@ class DatabaseConnection:
     # AUTH DB SESSION
     @staticmethod
     def auth():
-        if DatabaseConnection._auth_session is None:
-            raise RuntimeError("DatabaseConnection.initialize() not called.")
-        return DatabaseConnection._auth_session
+        return AuthConnection.session()
+
+    @staticmethod
+    def auth_legacy():
+        return AuthConnection.session()
+
+    @staticmethod
+    def auth_old():
+        return AuthConnection.session()
 
     # CHARACTERS DB SESSION
     @staticmethod
@@ -240,28 +293,20 @@ class DatabaseConnection:
 
     # AUTH QUERIES
     @staticmethod
-    def get_user_by_username(username):
-        return DatabaseConnection.auth().query(Account).filter(
-            Account.username == username
-        ).first()
+    def get_user_by_username_old(username):
+        return AuthConnection.get_user(username)
 
     @staticmethod
-    def get_account_id_by_username(username: str):
-        row = (
-            DatabaseConnection.auth()
-            .query(Account.id)
-            .filter(Account.username == username)
-            .first()
-        )
-        return row[0] if row else None
+    def get_account_id_by_username_old(username: str):
+        return AuthConnection.get_account_id(username)
 
     @staticmethod
-    def get_realmlist():
-        return DatabaseConnection.auth().query(RealmList).first()
+    def get_realmlist_old():
+        return AuthConnection.get_realmlist()
 
     @staticmethod
-    def get_all_realms():
-        return DatabaseConnection.auth().query(RealmList).all()
+    def get_all_realms_old():
+        return AuthConnection.get_all_realms()
 
     # CHARACTER QUERIES
     @staticmethod
@@ -1456,73 +1501,35 @@ class DatabaseConnection:
 
     # SRP helpers
     @staticmethod
-    def update_sessionkey(account, key_bytes):
-        s = DatabaseConnection.auth()
-        account.session_key = key_bytes
-        s.commit()
+    def update_sessionkey_old(account, key_bytes):
+        return AuthConnection.update_sessionkey(account, key_bytes)
 
     @staticmethod
-    def update_verifier_and_salt(account, verifier, salt):
-        s = DatabaseConnection.auth()
-        account.verifier = verifier
-        account.salt = salt
-        s.commit()
+    def update_verifier_and_salt_old(account, verifier, salt):
+        return AuthConnection.update_verifier(account, verifier, salt)
     
     # ACCOUNT ORM HELPERS
     @staticmethod
-    def get_user_by_username(username: str):
-        """Fetch Account row by username."""
-        return (
-            DatabaseConnection.auth()
-            .query(Account)
-            .filter(Account.username == username)
-            .first()
-        )
+    def create_or_update_account_old(username, salt, verifier):
+        return AuthConnection.create_or_update_account(username, salt, verifier)
 
     @staticmethod
-    def create_or_update_account(username, salt, verifier):
-        """
-        Create or update account using the ORM Account model.
-        Matches the style used by proxies.
-        """
-        session = DatabaseConnection.auth()
+    def set_gmlevel_old(account_id, gmlevel):
+        return AuthConnection.set_gmlevel(account_id, gmlevel)
 
-        acc = (
-            session.query(Account)
-            .filter(Account.username == username)
-            .first()
-        )
 
-        if acc is None:
-            acc = Account(username=username, salt=salt, verifier=verifier)
-            session.add(acc)
-            Logger.success(f"[DB] Created account {username}")
-        else:
-            acc.salt = salt
-            acc.verifier = verifier
-            Logger.success(f"[DB] Updated account {username}")
-
-        session.commit()
-        return acc.id
-
-    @staticmethod
-    def set_gmlevel(account_id, gmlevel):
-        """
-        Uses ORM model for account_access just like SkyFire expects.
-        """
-        session = DatabaseConnection.auth()
-
-        row = (
-            session.query(AccountAccess)
-            .filter(AccountAccess.id == account_id)
-            .first()
-        )
-
-        if row is None:
-            row = AccountAccess(id=account_id, gmlevel=gmlevel, RealmID=-1)
-            session.add(row)
-        else:
-            row.gmlevel = gmlevel
-
-        session.commit()
-        Logger.success(f"[DB] GM level set to {gmlevel} for account {account_id}")
+DatabaseConnection.auth = staticmethod(DatabaseConnection.auth_old)
+DatabaseConnection.get_user_by_username = staticmethod(DatabaseConnection.get_user_by_username_old)
+DatabaseConnection.get_account_id_by_username = staticmethod(
+    DatabaseConnection.get_account_id_by_username_old
+)
+DatabaseConnection.get_realmlist = staticmethod(DatabaseConnection.get_realmlist_old)
+DatabaseConnection.get_all_realms = staticmethod(DatabaseConnection.get_all_realms_old)
+DatabaseConnection.update_sessionkey = staticmethod(DatabaseConnection.update_sessionkey_old)
+DatabaseConnection.update_verifier_and_salt = staticmethod(
+    DatabaseConnection.update_verifier_and_salt_old
+)
+DatabaseConnection.create_or_update_account = staticmethod(
+    DatabaseConnection.create_or_update_account_old
+)
+DatabaseConnection.set_gmlevel = staticmethod(DatabaseConnection.set_gmlevel_old)

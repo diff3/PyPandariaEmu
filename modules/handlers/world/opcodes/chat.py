@@ -22,8 +22,9 @@ from server.modules.handlers.world.bootstrap.replay import (
     send_raw_packet,
 )
 from server.modules.handlers.world.inventory_sync import (
+    build_inventory_delta_responses,
     build_item_snapshot_responses,
-    build_login_inventory_sync_responses,
+    inventory_result_affects_equipment,
 )
 from server.modules.handlers.world.chat.router import chat_router
 from server.modules.handlers.world.chat.codec import (
@@ -42,7 +43,6 @@ from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.opcodes import entities as entities_handlers
 from server.modules.handlers.world.state.runtime import (
-    build_self_player_appearance_responses,
     resync_player_appearance,
 )
 from server.modules.handlers.world.opcodes import spells as spells_handlers
@@ -84,6 +84,7 @@ _PLAYER_FLAGS_AFK = 0x00000002
 _PLAYER_FLAGS_DND = 0x00000004
 _DEFAULT_AFK_MESSAGE = "Away from keyboard"
 _DEFAULT_DND_MESSAGE = "Do not disturb"
+_CHAT_MOUNT_DISPLAY_ID = 2404
 _TEXT_EMOTE_TO_STAND_STATE = {
     59: _STAND_STATE_KNEEL,
     86: _STAND_STATE_SITTING,
@@ -221,10 +222,8 @@ def _build_additem_sync_responses(session, result) -> list[tuple[str, bytes]]:
     return responses
 
 
-def _build_inventory_mutation_sync_responses(session) -> list[tuple[str, bytes]]:
-    responses = build_self_player_appearance_responses(session)
-    responses.extend(build_login_inventory_sync_responses(session))
-    return responses
+def _build_inventory_mutation_sync_responses(session, result) -> list[tuple[str, bytes]]:
+    return build_inventory_delta_responses(session, result)
 
 
 def _debug_feedback_response(message: str) -> list[tuple[str, bytes]]:
@@ -660,6 +659,25 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         broadcast_system_message(message, scope="world")
         return []
 
+    if command_lower == ".mount":
+        Logger.info(
+            "[Mount][Debug] chat .mount received char=%s mounted=%s mount_spell=%s display=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            bool(getattr(session, "is_mounted", False)),
+            int(getattr(session, "mount_spell", 0) or 0),
+            int(_CHAT_MOUNT_DISPLAY_ID),
+        )
+        if bool(getattr(session, "is_mounted", False)) or int(getattr(session, "mount_spell", 0) or 0):
+            Logger.info("[Mount] .mount -> dismount")
+            responses = spells_handlers.dismount(session)
+            Logger.info("[Mount][Debug] chat .mount dismount responses=%s", len(responses))
+            return responses
+
+        Logger.info(f"[Mount] .mount -> display={_CHAT_MOUNT_DISPLAY_ID}")
+        responses = spells_handlers.mount_direct(session, _CHAT_MOUNT_DISPLAY_ID)
+        Logger.info("[Mount][Debug] chat .mount returning responses=%s", len(responses))
+        return responses
+
     if command_lower.startswith(".additem"):
         parts = command.split()
         if len(parts) not in (2, 3):
@@ -673,7 +691,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         result = add_item_to_character(session, item_entry, item_count)
         level = "info" if result.ok else "warning"
         getattr(Logger, level)(f"[Inventory] .additem entry={item_entry} count={item_count} result={result.message}")
-        responses = _build_additem_sync_responses(session, result) if result.ok else []
+        responses = _build_inventory_mutation_sync_responses(session, result) if result.ok else []
         responses.extend(_notification_response(f"[Inventory] {result.message}"))
         return responses
 
@@ -692,8 +710,8 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         getattr(Logger, level)(
             f"[Inventory] .autoequip src=({src_bag},{src_slot}) result={result.message}"
         )
-        responses = _build_inventory_mutation_sync_responses(session) if result.ok else []
-        if result.ok:
+        responses = _build_inventory_mutation_sync_responses(session, result) if result.ok else []
+        if result.ok and inventory_result_affects_equipment(result):
             resync_player_appearance(session)
         responses.extend(_notification_response(f"[Inventory] {result.message}"))
         return responses
@@ -716,8 +734,8 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             "[Inventory] .swapitem src=(%s,%s) dst=(%s,%s) result=%s"
             % (src_bag, src_slot, dst_bag, dst_slot, result.message)
         )
-        responses = _build_inventory_mutation_sync_responses(session) if result.ok else []
-        if result.ok:
+        responses = _build_inventory_mutation_sync_responses(session, result) if result.ok else []
+        if result.ok and inventory_result_affects_equipment(result):
             resync_player_appearance(session)
         responses.extend(_notification_response(f"[Inventory] {result.message}"))
         return responses

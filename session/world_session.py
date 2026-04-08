@@ -145,6 +145,7 @@ class WorldSession:
     inventory_state: Any = None
     inventory_items: Dict[Any, Any] = field(default_factory=dict)
     inventory_by_guid: Dict[int, Any] = field(default_factory=dict)
+    inventory_dirty: bool = False
 
     known_spells: List[int] = field(default_factory=list)
     action_buttons: List[int] = field(default_factory=lambda: [0] * 132)

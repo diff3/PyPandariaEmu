@@ -6,15 +6,16 @@ from typing import Any, Optional
 from shared.Logger import Logger
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
-from server.modules.game.guid import GuidHelper, HighGuid
+from server.modules.game.guid import GuidHelper
 from server.modules.handlers.world.login.context import WorldLoginContext
-from server.modules.handlers.world.login.packets import build_login_packet
+from server.modules.handlers.world.login.packets import _resolve_update_world_guid, build_login_packet
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.handlers.world.bootstrap.replay import (
     build_single_u32_update_object_payload,
     make_update_object_response,
 )
 from server.modules.handlers.world.dispatcher import register
+from server.modules.handlers.world.opcodes.movement import build_move_set_run_speed_payload
 from server.modules.handlers.world.mount.mount_service import (
     ALL_MOUNT_SPELLS,
     get_mount_display_id,
@@ -288,13 +289,44 @@ def _extract_mount_spell_id_from_decoded(decoded: dict[str, Any] | None) -> Opti
     return None
 
 
+def _extract_packet_spell_id(ctx: PacketContext) -> Optional[int]:
+    decoded = ctx.decoded or {}
+    direct_keys = (
+        "spell_id",
+        "spellId",
+        "spellID",
+        "spell",
+        "cast_spell_id",
+        "castSpellId",
+        "cast_spell",
+        "castSpell",
+    )
+    for key in direct_keys:
+        value = decoded.get(key)
+        if isinstance(value, int) and 0 < int(value) <= 500000:
+            return int(value)
+
+    payload = bytes(ctx.payload or b"")
+    if len(payload) < 4:
+        return None
+
+    candidate_offsets = (0, 1, 2, 3, 4, 8, 12, 16, 20, 24, 28, 32)
+    for offset in candidate_offsets:
+        if offset + 4 > len(payload):
+            continue
+        value = struct.unpack_from("<I", payload, offset)[0]
+        if 0 < int(value) <= 500000:
+            return int(value)
+    return None
+
+
 def _extract_mount_spell_id_from_payload(payload: bytes) -> Optional[int]:
     if not payload or len(payload) < 4 or not ALL_MOUNT_SPELLS:
         return None
 
     unique_matches: list[int] = []
     seen: set[int] = set()
-    scan_limit = min(len(payload) - 3, 64)
+    scan_limit = len(payload) - 3
 
     for offset in range(0, scan_limit, 4):
         value = struct.unpack_from("<I", payload, offset)[0]
@@ -329,32 +361,22 @@ def extract_mount_spell_id(session, ctx: PacketContext) -> Optional[int]:
     return None
 
 
-def _resolve_player_world_guid(player) -> int:
-    world_guid = int(getattr(player, "world_guid", 0) or 0)
-    if world_guid > 0:
-        return world_guid
-
-    player_guid = int(getattr(player, "player_guid", 0) or 0)
-    if player_guid > 0xFFFFFFFF:
-        return player_guid
-
-    realm_id = int(getattr(player, "realm_id", 0) or 0)
-    char_guid = int(getattr(player, "char_guid", 0) or 0)
-    if char_guid > 0:
-        return int(
-            GuidHelper.make(
-                high=HighGuid.PLAYER,
-                realm=realm_id,
-                low=char_guid,
-            )
-        )
-
-    return player_guid
+def _resolve_player_update_guid(player) -> int:
+    ctx = WorldLoginContext.from_session(player)
+    return int(_resolve_update_world_guid(ctx))
 
 
 def _build_mount_display_update_response(player, display_id: int) -> Optional[tuple[str, bytes]]:
-    player_guid = _resolve_player_world_guid(player)
+    player_guid = _resolve_player_update_guid(player)
+    normal_update_guid = int(_resolve_update_world_guid(WorldLoginContext.from_session(player)))
     map_id = int(getattr(player, "map_id", 0) or 0)
+    Logger.info(
+        "[Mount][Debug] mount display guid mount_update_guid=0x%016X normal_player_update_guid=0x%016X char_guid=%s world_guid=0x%016X",
+        int(player_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(normal_update_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(getattr(player, "char_guid", 0) or 0),
+        int(getattr(player, "world_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+    )
     if player_guid <= 0 or map_id < 0:
         Logger.warning(
             "[Mount] skipping mount display update guid=%s map_id=%s display_id=%s",
@@ -363,13 +385,24 @@ def _build_mount_display_update_response(player, display_id: int) -> Optional[tu
             int(display_id),
         )
         return None
-    payload = _build_single_u32_update_object_payload(
-        map_id=map_id,
-        guid=player_guid,
-        field_index=_UNIT_FIELD_MOUNTDISPLAYID,
-        value=int(display_id) & 0xFFFFFFFF,
+    ctx = WorldLoginContext.from_session(player)
+    ctx.exact_0006_map_id = map_id
+    ctx.exact_0006_guid = int(player_guid)
+    ctx.exact_0006_extra_u32_fields = {int(_UNIT_FIELD_MOUNTDISPLAYID): int(display_id) & 0xFFFFFFFF}
+    built = build_login_packet("SMSG_UPDATE_OBJECT_1773613185_0006", ctx)
+    if built is None:
+        return None
+    Logger.info(
+        "[Mount][Debug] mount packet raw=%s update_type=0 guid=0x%016X guid_mask=0x%02X",
+        built.hex(),
+        int(player_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(GuidHelper.pack(int(player_guid) & 0xFFFFFFFFFFFFFFFF)[0]) if player_guid > 0 else 0,
     )
-    return _make_update_object_response(payload)
+    return _make_update_object_response(built)
+
+
+def _build_run_speed_update_response(player) -> tuple[str, bytes]:
+    return ("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(player))
 
 
 def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
@@ -379,6 +412,7 @@ def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
         display_packet = _build_mount_display_update_response(player, display_id)
         if display_packet is not None:
             responses.append(display_packet)
+    responses.append(_build_run_speed_update_response(player))
     responses.extend(_notification_response(f"Mounted spell={int(spell_id)} speed={float(player.run_speed):.2f}"))
     return responses
 
@@ -388,7 +422,39 @@ def send_dismount_update(player) -> list[tuple[str, bytes]]:
     display_packet = _build_mount_display_update_response(player, 0)
     if display_packet is not None:
         responses.append(display_packet)
+    responses.append(_build_run_speed_update_response(player))
     responses.extend(_notification_response(f"Dismounted speed={float(player.run_speed):.2f}"))
+    return responses
+
+
+def mount_direct(player, display_id: int, run_speed: float | None = None) -> list[tuple[str, bytes]]:
+    Logger.info(
+        "[Mount][Debug] mount_direct enter char=%s display=%s run_speed_arg=%s mounted_before=%s mount_spell_before=%s",
+        int(getattr(player, "char_guid", 0) or 0),
+        int(display_id),
+        "None" if run_speed is None else float(run_speed),
+        bool(getattr(player, "is_mounted", False)),
+        int(getattr(player, "mount_spell", 0) or 0),
+    )
+    player.is_mounted = True
+    player.mount_spell = None
+    if run_speed is None:
+        _apply_mount_movement_speeds(player)
+    else:
+        set_custom_run_speed(player, float(run_speed))
+
+    responses: list[tuple[str, bytes]] = []
+    display_packet = _build_mount_display_update_response(player, int(display_id))
+    Logger.info(
+        "[Mount][Debug] mount_direct display_packet=%s run_speed=%.2f",
+        "yes" if display_packet is not None else "no",
+        float(getattr(player, "run_speed", 0.0) or 0.0),
+    )
+    if display_packet is not None:
+        responses.append(display_packet)
+    responses.append(_build_run_speed_update_response(player))
+    responses.extend(_notification_response(f"Mounted display={int(display_id)} speed={float(player.run_speed):.2f}"))
+    Logger.info("[Mount][Debug] mount_direct total_responses=%s", len(responses))
     return responses
 
 
@@ -410,6 +476,11 @@ def dismount(player) -> list[tuple[str, bytes]]:
 @register("CMSG_CAST_SPELL")
 def handle_cast_spell(session, ctx: PacketContext):
     Logger.debug(f"[SPELL] opcode={ctx.name}")
+    packet_spell_id = _extract_packet_spell_id(ctx)
+    if packet_spell_id and is_mount_spell(packet_spell_id):
+        Logger.debug(f"[SPELL] packet mount spell_id={int(packet_spell_id)}")
+        return 0, handle_mount(session, int(packet_spell_id))
+
     spell_id = extract_mount_spell_id(session, ctx)
     if not spell_id:
         return 0, None

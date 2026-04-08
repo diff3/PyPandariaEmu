@@ -83,3 +83,12 @@ def test_get_mount_display_id_returns_known_test_mapping():
     assert mount_service.get_mount_display_id(72286) == 31007
     assert mount_service.get_mount_display_id(34769) == 31007
     assert mount_service.get_mount_display_id(999999) == 0
+
+
+def test_fallback_mount_cases_are_recognized_and_mapped():
+    mount_service.ALL_MOUNT_SPELLS.clear()
+    mount_service._load_fallback_mount_spells()
+
+    for spell_id in (59535, 61455, 63644, 87840, 134735):
+        assert mount_service.is_mount_spell(spell_id) is True
+        assert mount_service.get_mount_display_id(spell_id) == 31007

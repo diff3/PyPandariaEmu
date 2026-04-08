@@ -25,6 +25,33 @@ MOUNT_SUPPORT_SPELLS: tuple[int, ...] = (
     115913,  # Wisdom of the Four Winds
 )
 FALLBACK_MOUNT_SPELLS: tuple[int, ...] = (
+    59535,  # Black Polar Bear
+    59542,  # Black War Mammoth
+    61437,  # Grand Ice Mammoth
+    61455,  # Grand Black War Mammoth
+    63644,  # Argent Hippogryph
+    63645,  # White Skeletal Warhorse
+    68398,  # Big Love Rocket
+    68975,  # Wooly White Rhino
+    68976,  # X-53 Touring Rocket
+    68978,  # White Kodo
+    68992,  # Green Kodo
+    68996,  # Brown Kodo
+    76271,  # X-53 Touring Rocket
+    76282,  # X-53 Touring Rocket
+    76292,  # X-53 Touring Rocket
+    76294,  # X-53 Touring Rocket
+    79741,  # Vicious War Steed
+    79742,  # Vicious War Wolf
+    82246,  # Vicious War Steed
+    87840,  # Azure Water Strider
+    89832,  # Drake of the West Wind
+    89964,  # Vicious War Wolf
+    94293,  # Vicious War Steed
+    96220,  # Swift Red Hawkstrider
+    111621, # Yak
+    113873, # Pandaren Kite
+    134735, # Grand Expedition Yak
     72286,  # Invincible
     32235,  # Golden Gryphon
     61425,  # Traveler's Tundra Mammoth
@@ -32,6 +59,33 @@ FALLBACK_MOUNT_SPELLS: tuple[int, ...] = (
     578,    # Summon Felsteed
 )
 MOUNT_DISPLAY_BY_SPELL: dict[int, int] = {
+    59535: 31007,
+    59542: 31007,
+    61437: 31007,
+    61455: 31007,
+    63644: 31007,
+    63645: 31007,
+    68398: 31007,
+    68975: 31007,
+    68976: 31007,
+    68978: 31007,
+    68992: 31007,
+    68996: 31007,
+    76271: 31007,
+    76282: 31007,
+    76292: 31007,
+    76294: 31007,
+    79741: 31007,
+    79742: 31007,
+    82246: 31007,
+    87840: 31007,
+    89832: 31007,
+    89964: 31007,
+    94293: 31007,
+    96220: 31007,
+    111621: 31007,
+    113873: 31007,
+    134735: 31007,
     72286: 31007,  # Invincible
 }
 DEFAULT_TEST_MOUNT_DISPLAY_ID = 31007

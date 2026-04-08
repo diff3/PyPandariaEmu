@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy import func
 
 from shared.Logger import Logger
-from server.modules.database.CharactersModel import CharacterInventory, ItemInstance
+from server.modules.database.CharactersModel import CharacterInventory, Characters, ItemInstance
 from server.modules.database.DatabaseConnection import DatabaseConnection
 
 ITEM_CLASS_CONTAINER = 1
@@ -136,6 +136,9 @@ class InventoryResult:
     item: Optional[InventoryItem] = None
     changed_items: tuple[InventoryItem, ...] = ()
     created_item_guids: tuple[int, ...] = ()
+    changed_positions: tuple[tuple[int, int], ...] = ()
+    removed_item_guids: tuple[int, ...] = ()
+    equip_dst_slot: int = -1
 
 
 def _template_from_dict(data: dict | None) -> Optional[ItemTemplateInfo]:
@@ -207,6 +210,7 @@ def refresh_session_inventory(session, *, persist: bool = False) -> InventorySta
     session.inventory_by_guid = dict(state.items_by_guid)
     equipment_cache = build_equipment_cache_raw(state)
     session.equipment_cache_raw = equipment_cache
+    session.inventory_dirty = False
 
     if persist and char_guid > 0:
         equipment_cache_text = " ".join(str(value) for value in equipment_cache)
@@ -392,20 +396,100 @@ def _set_item_count(db_session, item_guid: int, count: int) -> None:
     row.count = max(1, int(count))
 
 
+def _delete_item_instance(db_session, item_guid: int) -> None:
+    db_session.query(ItemInstance).filter(ItemInstance.guid == int(item_guid)).delete(synchronize_session=False)
+
+
 def _save_equipment_cache_after_mutation(session, state: InventoryState) -> None:
     session.inventory_state = state
     session.inventory_items = dict(state.items_by_pos)
     session.inventory_by_guid = dict(state.items_by_guid)
-    equipment_cache = build_equipment_cache_raw(state)
-    session.equipment_cache_raw = equipment_cache
+    equipment_cache_text = build_equipment_cache_string(state)
+    session.equipment_cache_raw = [int(value) for value in equipment_cache_text.split()] if equipment_cache_text else []
+    character_row = getattr(session, "_character_row", None)
+    if character_row is not None:
+        character_row.equipmentCache = equipment_cache_text
+    session.inventory_dirty = True
+
+
+def persist_session_inventory(session) -> bool:
+    state = getattr(session, "inventory_state", None)
     char_guid = int(getattr(session, "char_guid", 0) or 0)
+    if not isinstance(state, InventoryState) or char_guid <= 0:
+        return False
+    if not bool(getattr(session, "inventory_dirty", False)):
+        return True
+
+    db_session = DatabaseConnection.chars()
+    current_items = list(state.items_by_guid.values())
+    current_guids = {int(item.item_guid) for item in current_items}
+    equipment_cache_text = build_equipment_cache_string(state)
     realm_id = int(getattr(session, "realm_id", 0) or 0)
-    if char_guid > 0 and realm_id >= 0:
-        DatabaseConnection.save_character_equipment_cache(
-            char_guid,
-            realm_id,
-            " ".join(str(value) for value in equipment_cache),
+
+    try:
+        db_session.query(CharacterInventory).filter(CharacterInventory.guid == char_guid).delete(synchronize_session=False)
+        stale_items_query = db_session.query(ItemInstance).filter(ItemInstance.owner_guid == char_guid)
+        if current_guids:
+            stale_items_query = stale_items_query.filter(~ItemInstance.guid.in_(current_guids))
+        stale_items_query.delete(synchronize_session=False)
+
+        character_row = (
+            db_session.query(Characters)
+            .filter(Characters.guid == char_guid, Characters.realm == realm_id)
+            .one_or_none()
         )
+        if character_row is not None:
+            character_row.equipmentCache = equipment_cache_text
+
+        for item in current_items:
+            row = db_session.query(ItemInstance).filter(ItemInstance.guid == int(item.item_guid)).one_or_none()
+            if row is None:
+                row = ItemInstance(
+                    guid=int(item.item_guid),
+                    itemEntry=int(item.entry),
+                    owner_guid=char_guid,
+                    creatorGuid=0,
+                    giftCreatorGuid=0,
+                    count=int(item.count),
+                    duration=0,
+                    charges="",
+                    flags=int(item.flags),
+                    enchantments="",
+                    randomPropertyId=int(item.random_property_id),
+                    reforgeID=0,
+                    durability=int(item.durability),
+                    playedTime=0,
+                    text=None,
+                )
+                db_session.add(row)
+            else:
+                row.itemEntry = int(item.entry)
+                row.owner_guid = char_guid
+                row.count = int(item.count)
+                row.flags = int(item.flags)
+                row.randomPropertyId = int(item.random_property_id)
+                row.durability = int(item.durability)
+
+            db_session.add(
+                CharacterInventory(
+                    guid=char_guid,
+                    bag=int(item.bag),
+                    slot=int(item.slot),
+                    item=int(item.item_guid),
+                )
+            )
+
+        db_session.commit()
+    except Exception as exc:
+        db_session.rollback()
+        Logger.warning(f"[Inventory] persist_session_inventory failed char={char_guid}: {exc}")
+        return False
+
+    character_row = getattr(session, "_character_row", None)
+    if character_row is not None:
+        character_row.equipmentCache = equipment_cache_text
+    session.inventory_dirty = False
+    return True
 
 
 def add_item_to_character(session, item_entry: int, count: int = 1) -> InventoryResult:
@@ -527,6 +611,9 @@ def add_item_to_character(session, item_entry: int, count: int = 1) -> Inventory
         item=first_item,
         changed_items=tuple(changed_items),
         created_item_guids=tuple(created_item_guids),
+        changed_positions=tuple(
+            dict.fromkeys((int(item.bag), int(item.slot)) for item in changed_items)
+        ),
     )
 
 
@@ -573,8 +660,6 @@ def swap_character_item(session, src_bag: int, src_slot: int, dst_bag: int, dst_
         if _bag_has_contents(state, dst_item.item_guid) and not _is_bag_slot(src_slot) and src_bag == 0:
             return InventoryResult(False, "cannot move non-empty equipped bag there yet")
 
-    db_session = DatabaseConnection.chars()
-    char_guid = int(getattr(session, "char_guid", 0) or 0)
     try:
         src_old_bag, src_old_slot = src_item.bag, src_item.slot
         dst_old_bag = dst_item.bag if dst_item else None
@@ -587,30 +672,41 @@ def swap_character_item(session, src_bag: int, src_slot: int, dst_bag: int, dst_
         src_item.bag = dst_bag
         src_item.slot = dst_slot
         state.put(src_item)
-        _persist_position(db_session, char_guid, src_item)
 
         if dst_item:
             dst_item.bag = src_old_bag
             dst_item.slot = src_old_slot
             state.put(dst_item)
-            _persist_position(db_session, char_guid, dst_item)
-
-        db_session.commit()
     except Exception as exc:
-        db_session.rollback()
         src_item.bag = src_old_bag
         src_item.slot = src_old_slot
+        state.put(src_item)
         if dst_item and dst_old_bag is not None and dst_old_slot is not None:
             dst_item.bag = dst_old_bag
             dst_item.slot = dst_old_slot
-        refresh_session_inventory(session)
+            state.put(dst_item)
         Logger.warning(
             f"[Inventory] swap_character_item failed src=({src_client_bag},{src_slot}) dst=({dst_client_bag},{dst_slot}): {exc}"
         )
-        return InventoryResult(False, "db error while moving item")
+        return InventoryResult(False, "runtime error while moving item")
 
     _save_equipment_cache_after_mutation(session, state)
-    return InventoryResult(True, "item moved", item=src_item)
+    equip_dst_slot = int(dst_slot) if int(dst_bag) == 0 and _is_equipment_slot(int(dst_slot)) else -1
+    return InventoryResult(
+        True,
+        "item equipped" if equip_dst_slot >= 0 else "item moved",
+        item=src_item,
+        changed_items=tuple(item for item in (src_item, dst_item) if item is not None),
+        changed_positions=tuple(
+            dict.fromkeys(
+                (
+                    (int(src_bag), int(src_slot)),
+                    (int(dst_bag), int(dst_slot)),
+                )
+            )
+        ),
+        equip_dst_slot=equip_dst_slot,
+    )
 
 
 def auto_equip_item(session, src_bag: int, src_slot: int) -> InventoryResult:
@@ -687,3 +783,50 @@ def move_item_to_root_slot_by_guid(session, item_guid: int, dst_slot: int) -> In
         return InventoryResult(False, "source bag not found")
 
     return swap_character_item(session, int(src_client_bag), int(item.slot), 0, int(dst_slot))
+
+
+def destroy_character_item(session, bag: int, slot: int, count: int = 0) -> InventoryResult:
+    state = getattr(session, "inventory_state", None)
+    if not isinstance(state, InventoryState):
+        state = refresh_session_inventory(session)
+
+    internal_bag = _resolve_internal_bag(state, int(bag))
+    if internal_bag is None:
+        return InventoryResult(False, "source bag not found")
+
+    item = state.get(internal_bag, int(slot))
+    if not item:
+        return InventoryResult(False, "source item not found")
+
+    destroy_count = max(0, int(count or 0))
+    if item.is_bag and _bag_has_contents(state, item.item_guid):
+        return InventoryResult(False, "cannot destroy non-empty bag")
+
+    try:
+        if 0 < destroy_count < int(item.count):
+            item.count = max(1, int(item.count) - destroy_count)
+            _save_equipment_cache_after_mutation(session, state)
+            return InventoryResult(
+                True,
+                "item destroyed",
+                item=item,
+                changed_items=(item,),
+                changed_positions=((int(internal_bag), int(slot)),),
+            )
+
+        state.remove(item)
+    except Exception as exc:
+        if state.get(internal_bag, int(slot)) is None:
+            state.put(item)
+        Logger.warning(
+            f"[Inventory] destroy_character_item failed bag={int(bag)} slot={int(slot)} count={destroy_count}: {exc}"
+        )
+        return InventoryResult(False, "runtime error while destroying item")
+
+    _save_equipment_cache_after_mutation(session, state)
+    return InventoryResult(
+        True,
+        "item destroyed",
+        changed_positions=((int(internal_bag), int(slot)),),
+        removed_item_guids=(int(item.item_guid),),
+    )

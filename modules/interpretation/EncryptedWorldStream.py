@@ -3,6 +3,7 @@
 """Encrypted world stream parser for ARC4-wrapped headers."""
 
 from typing import Any, Dict, List, Optional, Tuple
+
 from shared.Logger import Logger
 
 
@@ -11,9 +12,10 @@ class EncryptedWorldStream:
 
     AUTH_RESPONSE_OPCODE = 0x01F6
 
-    def __init__(self) -> None:
+    def __init__(self, *, server_auth_response_size_adjust: int = 0) -> None:
         """Initialize per-direction pending header state."""
         self._pending: Dict[str, Optional[Dict[str, Any]]] = {"C": None, "S": None}
+        self.server_auth_response_size_adjust = int(server_auth_response_size_adjust or 0)
 
     def feed(self, raw_buf: bytearray, *, crypto, direction: str) -> List[Tuple[bytes, Any, bytes]]:
         """
@@ -48,9 +50,8 @@ class EncryptedWorldStream:
                 header = crypto.unpack_data(dec_header)
                 size = header.size
                 cmd = header.cmd
-
-                if cmd == self.AUTH_RESPONSE_OPCODE:
-                    size = max(0, size - 4)
+                if direction == "S" and cmd == self.AUTH_RESPONSE_OPCODE:
+                    size = max(0, int(size) + int(self.server_auth_response_size_adjust))
 
                 self._pending[direction] = {
                     "size": size,

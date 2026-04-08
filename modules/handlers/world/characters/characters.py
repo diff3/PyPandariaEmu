@@ -45,6 +45,7 @@ from server.modules.protocol.PacketContext import PacketContext
 # WORLD_CLIENT_OPCODES, WORLD_SERVER_OPCODES, _ = load_world_opcodes()
 # Reverse map for server opcodes: name -> opcode int
 SERVER_OPCODE_BY_NAME = {name: code for code, name in WORLD_SERVER_OPCODES.items()}
+AUTH_RESPONSE_OPCODE = SERVER_OPCODE_BY_NAME.get("SMSG_AUTH_RESPONSE", 0x0ABA)
 _EQUIPMENT_SLOTS = 23
 
 _DEFAULT_EQUIPMENT_CACHE: Optional[str] = None
@@ -490,7 +491,7 @@ def build_world_packet(opcode_name: str, payload: bytes) -> bytes:
         raise KeyError(f"Unknown server opcode: {opcode_name}")
 
     size = len(payload)
-    if opcode == 0x01F6:  # legacy opcode uses size including header
+    if opcode == AUTH_RESPONSE_OPCODE:
         size += 4
 
     header = struct.pack("<I", (size << 13) | (opcode & 0x1FFF))

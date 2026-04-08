@@ -283,11 +283,37 @@ def debug_log_player_movement_flags(payload: bytes, *, update_index: int | None 
 
 
 def build_single_u32_update_object_payload(*, map_id: int, guid: int, field_index: int, value: int) -> bytes:
-    mask_words = (int(field_index) // 32) + 1
+    return build_multi_u32_update_object_payload(
+        map_id=map_id,
+        guid=guid,
+        field_updates=[(int(field_index), int(value))],
+    )
+
+
+def build_multi_u32_update_object_payload(*, map_id: int, guid: int, field_updates: list[tuple[int, int]]) -> bytes:
+    normalized_updates = [(int(field_index), int(value)) for field_index, value in (field_updates or [])]
+    if not normalized_updates:
+        return bytes(struct.pack("<HI", int(map_id) & 0xFFFF, 0))
+
+    highest_field_index = max(field_index for field_index, _value in normalized_updates)
+    mask_words = (highest_field_index // 32) + 1
     mask = bytearray(mask_words * 4)
-    mask_word = int(field_index) // 32
-    mask_bit = int(field_index) % 32
-    struct.pack_into("<I", mask, mask_word * 4, 1 << mask_bit)
+    values_by_field = {field_index: value for field_index, value in normalized_updates}
+    field_bytes = bytearray()
+
+    for field_index in sorted(values_by_field):
+        mask_word = int(field_index) // 32
+        mask_bit = int(field_index) % 32
+        current_word = struct.unpack_from("<I", mask, mask_word * 4)[0]
+        struct.pack_into("<I", mask, mask_word * 4, current_word | (1 << mask_bit))
+
+    for field_index in range(mask_words * 32):
+        mask_word = field_index // 32
+        mask_bit = field_index % 32
+        word_value = struct.unpack_from("<I", mask, mask_word * 4)[0]
+        if not (word_value & (1 << mask_bit)):
+            continue
+        field_bytes += struct.pack("<I", int(values_by_field.get(field_index, 0)) & 0xFFFFFFFF)
 
     payload = bytearray()
     payload += struct.pack("<HI", int(map_id) & 0xFFFF, 1)
@@ -295,7 +321,7 @@ def build_single_u32_update_object_payload(*, map_id: int, guid: int, field_inde
     payload += GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)
     payload += struct.pack("<B", mask_words)
     payload += bytes(mask)
-    payload += struct.pack("<I", int(value) & 0xFFFFFFFF)
+    payload += bytes(field_bytes)
     payload += struct.pack("<B", 0)
     return bytes(payload)
 

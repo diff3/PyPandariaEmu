@@ -330,6 +330,17 @@ def build_SMSG_FEATURE_SYSTEM_STATUS(ctx) -> bytes:
     return bytes(payload)
 
 
+def build_SMSG_BATTLE_PAY_GET_PURCHASE_LIST_RESPONSE(_ctx=None) -> bytes:
+    payload = _load_payload_packet("SMSG_BATTLE_PAY_GET_PURCHASE_LIST_RESPONSE")
+    if payload is not None:
+        return payload
+    payload = _load_payload_packet_focus("SMSG_BATTLE_PAY_GET_PURCHASE_LIST_RESPONSE")
+    if payload is not None:
+        return payload
+    # Minimal empty response captured from retail-compatible traffic.
+    return b"\x00" * 7
+
+
 def build_SMSG_MOTD_old(ctx) -> bytes:
     return _encode("SMSG_MOTD", {
         "motd": ctx.motd,
@@ -954,6 +965,51 @@ def _build_exact_update_object_value_update_entry(
     return bytes(payload)
 
 
+def _merge_exact_u32_field_updates(mask_bytes: bytes, field_bytes: bytes, extra_fields: dict[int, int] | None) -> tuple[bytes, bytes, list[int]]:
+    merged_fields: dict[int, int] = {}
+
+    bit_count = len(mask_bytes) * 8
+    byte_offset = 0
+    for field_index in range(bit_count):
+        mask_byte = mask_bytes[field_index // 8]
+        mask_bit = field_index % 8
+        if not (mask_byte & (1 << mask_bit)):
+            continue
+        if byte_offset + 4 > len(field_bytes):
+            break
+        merged_fields[int(field_index)] = int(struct.unpack_from("<I", field_bytes, byte_offset)[0])
+        byte_offset += 4
+
+    for field_index, value in (extra_fields or {}).items():
+        merged_fields[int(field_index)] = int(value) & 0xFFFFFFFF
+
+    if not merged_fields:
+        return bytes(mask_bytes), bytes(field_bytes), []
+
+    ordered_bits = sorted(merged_fields)
+    max_bit = ordered_bits[-1]
+    merged_mask = bytearray(((max_bit // 32) + 1) * 4)
+    merged_field_bytes = bytearray()
+    serialized_pairs: list[tuple[int, int]] = []
+
+    for field_index, field_value in sorted(merged_fields.items()):
+        word_index = field_index // 32
+        bit_index = field_index % 32
+        current_word = struct.unpack_from("<I", merged_mask, word_index * 4)[0]
+        struct.pack_into("<I", merged_mask, word_index * 4, current_word | (1 << bit_index))
+        value_u32 = int(field_value) & 0xFFFFFFFF
+        merged_field_bytes += struct.pack("<I", value_u32)
+        serialized_pairs.append((int(field_index), value_u32))
+
+    Logger.info(
+        "[UPDATE_OBJECT DEBUG] 0006 merge sorted_bits=%s serialized_pairs=%s",
+        ordered_bits,
+        serialized_pairs,
+    )
+
+    return bytes(merged_mask), bytes(merged_field_bytes), ordered_bits
+
+
 def _build_exact_update_object_1773613181_0005_body(
     *,
     stationary_y: float,
@@ -1076,6 +1132,13 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
     Logger.info(
         f"[UPDATE_OBJECT BUILD] 0004 map_id={map_id} guid=0x{guid:016X} "
         f"mask_blocks={len(mask_bytes)//4} packet_size={len(built)}"
+    )
+    Logger.info(
+        "[UPDATE_OBJECT DEBUG] 0004 raw=%s update_type=0 guid=0x%016X guid_mask=0x%02X mask_blocks=%s",
+        built.hex(),
+        int(guid) & 0xFFFFFFFFFFFFFFFF,
+        int(GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)[0]),
+        len(mask_bytes) // 4,
     )
     return built
 
@@ -1630,6 +1693,10 @@ def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:
     if len(field_bytes) >= 24:
         struct.pack_into("<I", field_bytes, 16, display_id)
         struct.pack_into("<I", field_bytes, 20, display_id)
+    extra_fields = getattr(ctx, "exact_0006_extra_u32_fields", None)
+    set_bits: list[int] | None = None
+    if extra_fields:
+        mask_bytes, field_bytes, set_bits = _merge_exact_u32_field_updates(mask_bytes, bytes(field_bytes), extra_fields)
     dynamic_mask_blocks = int(getattr(ctx, "exact_0006_dynamic_mask_blocks", 0))
 
     payload = bytearray()
@@ -1644,6 +1711,14 @@ def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:
     Logger.info(
         f"[UPDATE_OBJECT BUILD] 0006 map_id={map_id} guid=0x{guid:016X} "
         f"mask_blocks={len(mask_bytes)//4} packet_size={len(built)}"
+    )
+    Logger.info(
+        "[UPDATE_OBJECT DEBUG] 0006 raw=%s update_type=0 guid=0x%016X guid_mask=0x%02X mask_blocks=%s set_fields=%s",
+        built.hex(),
+        int(guid) & 0xFFFFFFFFFFFFFFFF,
+        int(GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)[0]),
+        len(mask_bytes) // 4,
+        set_bits if set_bits is not None else "template",
     )
     return built
 

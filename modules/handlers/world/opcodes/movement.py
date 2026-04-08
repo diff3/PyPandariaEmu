@@ -24,7 +24,10 @@ from server.modules.handlers.world.position.position_service import (
     save_player_position,
 )
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
-from server.modules.handlers.world.state.runtime import broadcast_player_state_update
+from server.modules.handlers.world.state.runtime import (
+    broadcast_player_state_update,
+    build_same_map_teleport_self_resync_responses,
+)
 
 
 def _append_guid_byte_seq(payload: bytearray, raw_guid: bytes, order: tuple[int, ...]) -> None:
@@ -1199,6 +1202,7 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
     _mark_position_dirty(session)
     _save_session_position(session, reason="near-teleport", online=1, force=True)
     broadcast_player_state_update(session, force=True)
+    self_resync_responses = build_same_map_teleport_self_resync_responses(session)
     Logger.info(
         "[Teleport] same-map teleport ack destination=%s pos=(%.2f %.2f %.2f %.2f)",
         str(getattr(session, "teleport_destination", "") or ""),
@@ -1207,7 +1211,7 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         float(getattr(session, "z", 0.0) or 0.0),
         float(getattr(session, "orientation", 0.0) or 0.0),
     )
-    return 0, [
+    responses = [
         (
             "SMSG_MESSAGECHAT",
             encode_skyfire_messagechat_system_payload(
@@ -1215,6 +1219,8 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
             ),
         )
     ]
+    responses.extend(self_resync_responses)
+    return 0, responses
 
 
 @register("CMSG_MOVE_FORCE_RUN_SPEED_CHANGE_ACK")

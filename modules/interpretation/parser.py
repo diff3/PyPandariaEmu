@@ -5,6 +5,9 @@
 from typing import Any, List, Optional, Tuple
 
 
+AUTH_RESPONSE_OPCODE = 0x01F6
+
+
 def parse_header(header: bytes) -> Tuple[Optional[int], Optional[int], Optional[str]]:
     """
     Parse a plaintext world header (size/opcode, little-endian).
@@ -77,7 +80,7 @@ def parse_plain_packets(raw_data: bytes, direction: str) -> List[Tuple[bytes, An
         # Header size includes opcode (2 bytes) in plain mode
         adj_size = max(0, size - 2)
         # MoP special: SMSG_AUTH_RESPONSE size includes full header
-        if cmd == 0x01F6:
+        if cmd == AUTH_RESPONSE_OPCODE:
             adj_size = max(0, size - 4)
 
         payload = raw_data[4:4 + adj_size]  # may be shorter than adj_size
