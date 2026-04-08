@@ -12,11 +12,17 @@ def _import_chat_handlers():
     stub_modules = {
         "server.modules.handlers.world.bootstrap.replay": {
             "load_sniff_payload": lambda path: b"",
+            "build_multi_u32_update_object_payload": lambda **fields: b"",
             "build_single_u32_update_object_payload": lambda **fields: b"",
             "send_raw_packet": lambda *args, **kwargs: ("SMSG_MESSAGECHAT", b""),
         },
         "server.modules.database.DatabaseConnection": {
             "DatabaseConnection": type("DatabaseConnection", (), {}),
+        },
+        "server.modules.game.inventory": {
+            "add_item_to_character": lambda *args, **kwargs: None,
+            "auto_equip_item": lambda *args, **kwargs: None,
+            "swap_character_item": lambda *args, **kwargs: None,
         },
         "server.modules.handlers.world.opcodes.login": {
             "_build_world_login_context": lambda session: SimpleNamespace(motd=""),
@@ -58,6 +64,7 @@ def _import_chat_handlers():
 def _import_chat_codec():
     module = types.ModuleType("server.modules.handlers.world.bootstrap.replay")
     module.load_sniff_payload = lambda path: b""
+    module.build_multi_u32_update_object_payload = lambda **fields: b""
     module.build_single_u32_update_object_payload = lambda **fields: b""
     module.send_raw_packet = lambda *args, **kwargs: ("SMSG_MESSAGECHAT", b"")
     sys.modules["server.modules.handlers.world.bootstrap.replay"] = module
@@ -546,6 +553,75 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
     assert responses == [
         ("SMSG_MOVE_SET_RUN_SPEED", b"speed|5.00"),
         ("SMSG_MESSAGECHAT", b"system|[Speed] run=5.00"),
+    ]
+
+
+def test_map_on_reveals_all_explored_zones(monkeypatch):
+    captured = {}
+
+    def fake_build_multi_u32_update_object_payload(**fields):
+        captured.update(fields)
+        return b"map-update"
+
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_multi_u32_update_object_payload",
+        fake_build_multi_u32_update_object_payload,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers._handle_chat_command(alice, "map on")
+
+    assert captured["map_id"] == 1
+    assert captured["guid"] == 1001
+    assert len(captured["field_updates"]) == 200
+    assert captured["field_updates"][0] == (chat_handlers._PLAYER_FIELD_EXPLORED_ZONES, 0xFFFFFFFF)
+    assert captured["field_updates"][-1] == (
+        chat_handlers._PLAYER_FIELD_EXPLORED_ZONES + 199,
+        0xFFFFFFFF,
+    )
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"map-update"),
+        ("SMSG_MESSAGECHAT", b"system|[Map] all explored"),
+    ]
+
+
+def test_map_zero_clears_all_explored_zones(monkeypatch):
+    captured = {}
+
+    def fake_build_multi_u32_update_object_payload(**fields):
+        captured.update(fields)
+        return b"map-update"
+
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_multi_u32_update_object_payload",
+        fake_build_multi_u32_update_object_payload,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers._handle_chat_command(alice, "map 0")
+
+    assert len(captured["field_updates"]) == 200
+    assert captured["field_updates"][0] == (chat_handlers._PLAYER_FIELD_EXPLORED_ZONES, 0)
+    assert captured["field_updates"][-1] == (chat_handlers._PLAYER_FIELD_EXPLORED_ZONES + 199, 0)
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"map-update"),
+        ("SMSG_MESSAGECHAT", b"system|[Map] exploration reset"),
     ]
 
 

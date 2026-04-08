@@ -1,5 +1,6 @@
 import sys
 import types
+import struct
 
 
 database_module = types.ModuleType("server.modules.database.DatabaseConnection")
@@ -25,6 +26,46 @@ class _FakeSession:
         self.orientation = 1.25
         self.map_id = 1
         self.char_guid = 7
+
+
+def test_same_map_teleport_payload_matches_pandaria548_capture_layout():
+    session = _FakeSession()
+    session.world_guid = 0x03
+    session.char_guid = 0x03
+    session.x = 16226.2001953125
+    session.y = 16257.0
+    session.z = 13.202199935913086
+    session.orientation = 1.6500699520111084
+    session.movement_state = types.SimpleNamespace(counter=14)
+
+    payload = movement.build_same_map_teleport_payload(session)
+
+    assert payload.hex().upper() == "900006363C534100047E46CD887D460E000000027E35D33F"
+    assert struct.unpack("<I", payload[15:19])[0] == 14
+    assert session.movement_state.counter == 15
+
+
+def test_movement_packets_advance_same_map_teleport_counter():
+    session = _FakeSession()
+    session.movement_state = types.SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        counter=11,
+    )
+
+    movement._record_movement_packet_state(session, "MSG_MOVE_HEARTBEAT", b"\x00" * 32)
+    movement._record_movement_packet_state(session, "MSG_MOVE_FALL_LAND", b"\x00" * 28)
+
+    payload = movement.build_same_map_teleport_payload(session)
+
+    assert struct.unpack("<I", payload[15:19])[0] == 13
+    assert session.movement_state.counter == 14
 
 
 def test_same_map_teleport_ack_builds_self_resync(monkeypatch):

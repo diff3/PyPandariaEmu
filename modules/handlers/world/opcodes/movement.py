@@ -255,33 +255,21 @@ def build_move_set_run_speed_payload(session) -> bytes:
 
 
 def build_same_map_teleport_payload(session) -> bytes:
-    raw_guid = int(_player_guid(session) or 0).to_bytes(8, "little", signed=False)
-
-    bits = BitWriter()
-    for index in (0, 6, 5, 7, 2):
-        bits.write_bits(1 if raw_guid[index] else 0, 1)
-    bits.write_bits(0, 1)  # has transport data
-    bits.write_bits(1 if raw_guid[4] else 0, 1)
-    for _ in range(8):
-        bits.write_bits(0, 1)  # empty transport guid mask
-    bits.write_bits(1 if raw_guid[3] else 0, 1)
-    bits.write_bits(1 if raw_guid[1] else 0, 1)
-    bits.write_bits(0, 1)  # zero bit
-
-    payload = bytearray(bits.getvalue())
-    _append_guid_byte_seq(payload, raw_guid, (4, 7))
-    payload.extend(struct.pack("<f", float(getattr(session, "z", 0.0) or 0.0)))
-    payload.extend(struct.pack("<f", float(getattr(session, "y", 0.0) or 0.0)))
-    _append_guid_byte_seq(payload, raw_guid, (2, 3, 5))
-    payload.extend(struct.pack("<f", float(getattr(session, "x", 0.0) or 0.0)))
-
     state = _movement_state(session)
     counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
-    payload.extend(struct.pack("<I", counter))
-    state.counter = (counter + 1) & 0xFFFFFFFF
+    guid_low = int(_player_guid(session) or 0) & 0xFF
 
-    _append_guid_byte_seq(payload, raw_guid, (0, 6, 1))
+    # Pandaria 5.4.8 focus captures show the same-map teleport payload as:
+    # fixed 3-byte prefix, z/y/x, counter, one low-guid byte, orientation.
+    payload = bytearray(b"\x90\x00\x06")
+    payload.extend(struct.pack("<f", float(getattr(session, "z", 0.0) or 0.0)))
+    payload.extend(struct.pack("<f", float(getattr(session, "y", 0.0) or 0.0)))
+    payload.extend(struct.pack("<f", float(getattr(session, "x", 0.0) or 0.0)))
+    payload.extend(struct.pack("<I", counter))
+    payload.append((guid_low ^ 1) & 0xFF)
     payload.extend(struct.pack("<f", float(getattr(session, "orientation", 0.0) or 0.0)))
+
+    state.counter = (counter + 1) & 0xFFFFFFFF
     return bytes(payload)
 
 
@@ -799,6 +787,8 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
         state.timestamp_ms = int(timestamp) & 0xFFFFFFFF
     else:
         state.timestamp_ms = _movement_timestamp_ms(session)
+    # Keep the same-map teleport counter in step with accepted client movement.
+    state.counter = (int(getattr(state, "counter", 0) or 0) + 1) & 0xFFFFFFFF
     return None
 
 

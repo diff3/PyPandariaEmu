@@ -18,6 +18,7 @@ from server.modules.game.inventory import (
     swap_character_item,
 )
 from server.modules.handlers.world.bootstrap.replay import (
+    build_multi_u32_update_object_payload,
     build_single_u32_update_object_payload,
     send_raw_packet,
 )
@@ -95,6 +96,8 @@ _ITEM_HIGHGUID = 0x400
 _ITEM_FIELD_STACK_COUNT = 0x10
 _PLAYER_FIELD_INV_SLOTS = (0x8 + 0x98) + 0x325
 _PLAYER_FIELD_PACK_SLOTS = (0x8 + 0x98) + 0x353
+_PLAYER_FIELD_EXPLORED_ZONES = (0x8 + 0x98) + 0x5BB
+_PLAYER_EXPLORED_ZONES_SIZE = 200
 _ITEM_CREATE_FLAGS = b"\x00\x00\x00\x00\x00\x00"
 _ITEM_CREATE_MASK = bytes.fromhex("f30581000000000000000000")
 
@@ -200,6 +203,21 @@ def _build_inventory_count_update_response(session, item) -> tuple[str, bytes]:
             guid=_make_item_world_guid(int(item.item_guid)),
             field_index=_ITEM_FIELD_STACK_COUNT,
             value=int(item.count),
+        ),
+    )
+
+
+def _build_map_exploration_update_response(session, reveal_all: bool) -> tuple[str, bytes]:
+    field_value = 0xFFFFFFFF if bool(reveal_all) else 0
+    return (
+        "SMSG_UPDATE_OBJECT",
+        build_multi_u32_update_object_payload(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            guid=_sender_chat_guid(session),
+            field_updates=[
+                (_PLAYER_FIELD_EXPLORED_ZONES + offset, field_value)
+                for offset in range(_PLAYER_EXPLORED_ZONES_SIZE)
+            ],
         ),
     )
 
@@ -901,6 +919,22 @@ def _handle_chat_command(session, message: str) -> Optional[list[tuple[str, byte
     command = str(message or "").strip()
 
     command_lower = command.lower()
+    command_parts = command.split(maxsplit=1)
+    command_name = command_parts[0].lower() if command_parts else ""
+
+    if command_name in {".map", "map"}:
+        argument = command_parts[1].strip().lower() if len(command_parts) == 2 else ""
+        if argument in {"on", "1", "all"}:
+            return [
+                _build_map_exploration_update_response(session, True),
+                ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Map] all explored")),
+            ]
+        if argument in {"0", "off", "reset", "none"}:
+            return [
+                _build_map_exploration_update_response(session, False),
+                ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Map] exploration reset")),
+            ]
+        return _notification_response("Usage: map <on|0>")
 
     if command_lower == ".sniffchat":
         Logger.info(f"[CHAT][SNIFF] replay source={RAW_SNIFFED_MESSAGECHAT_CAPTURE}")
