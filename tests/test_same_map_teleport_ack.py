@@ -96,7 +96,6 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
         movement,
         "build_same_map_teleport_self_resync_responses",
         lambda target: [
-            ("SMSG_UPDATE_OBJECT", b"0002"),
             ("SMSG_UPDATE_OBJECT", b"0006"),
         ],
     )
@@ -112,7 +111,6 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
     assert session.near_teleport_pending is False
     assert responses == [
         ("SMSG_MESSAGECHAT", b"[Teleport] same-map ack -> Orgrimmar"),
-        ("SMSG_UPDATE_OBJECT", b"0002"),
         ("SMSG_UPDATE_OBJECT", b"0006"),
     ]
     assert calls == [

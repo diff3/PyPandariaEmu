@@ -383,23 +383,27 @@ def _build_player_create_update_response(source_session) -> tuple[str, bytes] | 
 
 
 def build_self_player_appearance_responses(source_session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.inventory_sync import build_self_visible_item_update_responses
     from server.modules.handlers.world.login.context import WorldLoginContext
     from server.modules.handlers.world.login.packets import build_login_packet
 
     if int(getattr(source_session, "char_guid", 0) or 0) <= 0:
         return []
 
+    responses: list[tuple[str, bytes]] = []
     ctx = WorldLoginContext.from_session(source_session)
     ctx.exact_0002_mode = "barncastle"
     ctx.exact_0002_map_id = int(getattr(source_session, "map_id", 0) or 0)
     ctx.exact_0002_low_guid = int(getattr(source_session, "char_guid", 0) or 0)
     payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
-    if payload is None:
-        return []
-    return [("SMSG_UPDATE_OBJECT", payload)]
+    if payload is not None:
+        responses.append(("SMSG_UPDATE_OBJECT", payload))
+    responses.extend(build_self_visible_item_update_responses(source_session))
+    return responses
 
 
 def build_same_map_teleport_self_resync_responses(source_session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.inventory_sync import build_self_visible_item_update_responses
     from server.modules.handlers.world.login.context import WorldLoginContext
     from server.modules.handlers.world.login.packets import build_login_packet
 
@@ -407,7 +411,7 @@ def build_same_map_teleport_self_resync_responses(source_session) -> list[tuple[
     if guid <= 0:
         return []
 
-    responses = list(build_self_player_appearance_responses(source_session))
+    responses: list[tuple[str, bytes]] = []
 
     ctx = WorldLoginContext.from_session(source_session)
     ctx.exact_0006_map_id = int(getattr(source_session, "map_id", 0) or 0)
@@ -415,6 +419,7 @@ def build_same_map_teleport_self_resync_responses(source_session) -> list[tuple[
     payload_0006 = build_login_packet("SMSG_UPDATE_OBJECT_1773613185_0006", ctx)
     if payload_0006 is not None:
         responses.append(("SMSG_UPDATE_OBJECT", payload_0006))
+    responses.extend(build_self_visible_item_update_responses(source_session))
 
     source_session.player_object_sent = True
     return responses

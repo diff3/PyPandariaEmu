@@ -642,7 +642,6 @@ def swap_character_item(session, src_bag: int, src_slot: int, dst_bag: int, dst_
         return InventoryResult(True, "no-op", item=src_item)
 
     dst_item = state.get(dst_bag, dst_slot)
-
     if not _slot_allows_item(state, src_item, dst_bag, dst_slot):
         return InventoryResult(False, "destination slot does not fit item")
 
@@ -660,6 +659,7 @@ def swap_character_item(session, src_bag: int, src_slot: int, dst_bag: int, dst_
         if _bag_has_contents(state, dst_item.item_guid) and not _is_bag_slot(src_slot) and src_bag == 0:
             return InventoryResult(False, "cannot move non-empty equipped bag there yet")
 
+    changed_positions: list[tuple[int, int]] = [(int(src_bag), int(src_slot)), (int(dst_bag), int(dst_slot))]
     try:
         src_old_bag, src_old_slot = src_item.bag, src_item.slot
         dst_old_bag = dst_item.bag if dst_item else None
@@ -697,14 +697,7 @@ def swap_character_item(session, src_bag: int, src_slot: int, dst_bag: int, dst_
         "item equipped" if equip_dst_slot >= 0 else "item moved",
         item=src_item,
         changed_items=tuple(item for item in (src_item, dst_item) if item is not None),
-        changed_positions=tuple(
-            dict.fromkeys(
-                (
-                    (int(src_bag), int(src_slot)),
-                    (int(dst_bag), int(dst_slot)),
-                )
-            )
-        ),
+        changed_positions=tuple(dict.fromkeys(changed_positions)),
         equip_dst_slot=equip_dst_slot,
     )
 
@@ -742,7 +735,7 @@ def auto_store_item(session, src_bag: int, src_slot: int, dst_bag: int) -> Inven
     if not item:
         return InventoryResult(False, "source item not found")
 
-    if int(dst_bag) == 0:
+    if int(dst_bag) in (0, INVENTORY_SLOT_BAG_0):
         destination = _first_free_storage_slot(state, item)
         if destination is None:
             return InventoryResult(False, "inventory full")

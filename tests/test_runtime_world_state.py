@@ -1,5 +1,6 @@
 import sys
 import types
+from types import SimpleNamespace
 
 from server.modules.handlers.world.state.global_state import GlobalState
 from server.modules.handlers.world.state.region_manager import region_manager
@@ -105,4 +106,37 @@ def test_visible_peer_gets_value_updates_instead_of_remove_create(monkeypatch):
     assert changed_for_source is False
     assert changed_for_other is False
     assert updated_for_other is True
-    assert other.send_response_log == [[move_response, *value_responses]]
+    assert other.send_response_log == [[move_response]]
+
+
+def test_same_map_teleport_self_resync_includes_visible_item_update(monkeypatch):
+    packets_module = types.ModuleType("server.modules.handlers.world.login.packets")
+    packets_module.build_login_packet = lambda name, ctx: b"0006" if name == "SMSG_UPDATE_OBJECT_1773613185_0006" else None
+    sys.modules["server.modules.handlers.world.login.packets"] = packets_module
+
+    context_module = types.ModuleType("server.modules.handlers.world.login.context")
+
+    class _WorldLoginContext:
+        @staticmethod
+        def from_session(session):
+            return SimpleNamespace()
+
+    context_module.WorldLoginContext = _WorldLoginContext
+    sys.modules["server.modules.handlers.world.login.context"] = context_module
+
+    inventory_sync_module = types.ModuleType("server.modules.handlers.world.inventory_sync")
+    inventory_sync_module.build_self_visible_item_update_responses = lambda session: [
+        ("SMSG_UPDATE_OBJECT", b"visible-items")
+    ]
+    sys.modules["server.modules.handlers.world.inventory_sync"] = inventory_sync_module
+
+    session = WorldSession()
+    session.char_guid = 7
+    session.map_id = 1
+
+    responses = runtime.build_same_map_teleport_self_resync_responses(session)
+
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"0006"),
+        ("SMSG_UPDATE_OBJECT", b"visible-items"),
+    ]

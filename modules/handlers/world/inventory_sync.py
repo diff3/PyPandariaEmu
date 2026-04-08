@@ -12,10 +12,11 @@ _ITEM_HIGHGUID = 0x400
 _ITEM_FIELD_STACK_COUNT = 0x10
 _CONTAINER_FIELD_SLOTS = 0x45
 _CONTAINER_FIELD_NUM_SLOTS = 0x8D
+_PLAYER_FIELD_VISIBLE_ITEMS = (0x8 + 0x98) + 0x2F9
 _PLAYER_FIELD_INV_SLOTS = (0x8 + 0x98) + 0x325
 _PLAYER_FIELD_PACK_SLOTS = (0x8 + 0x98) + 0x353
+_PLAYER_VISIBLE_ITEM_SLOT_COUNT = 19
 _ITEM_CREATE_FLAGS = b"\x00\x00\x00\x00\x00\x00"
-_ITEM_CREATE_MASK = bytes.fromhex("f30581000000000000000000")
 
 
 def _make_skyfire_guid(low: int, entry: int, high: int) -> int:
@@ -31,31 +32,65 @@ def _make_item_world_guid(item_low_guid: int) -> int:
     return _make_skyfire_guid(int(item_low_guid), 0, _ITEM_HIGHGUID)
 
 
+def _pack_update_mask(field_indices: list[int], *, min_blocks: int = 3) -> bytes:
+    block_count = max(int(min_blocks), ((max(field_indices, default=-1) // 32) + 1))
+    mask = bytearray(block_count * 4)
+    for field_index in sorted({int(index) for index in field_indices if int(index) >= 0}):
+        mask[field_index // 8] |= 1 << (field_index % 8)
+    return bytes(mask)
+
+
 def _build_item_create_update_payload(session, item) -> bytes:
     item_guid = _make_item_world_guid(int(item.item_guid))
     object_type_mask = 7 if bool(getattr(item, "is_bag", False)) else 3
     object_type_id = 2 if bool(getattr(item, "is_bag", False)) else 1
-    field_values = (
-        int(item_guid & 0xFFFFFFFF),
-        int((item_guid >> 32) & 0xFFFFFFFF),
-        object_type_mask,
-        int(item.entry),
-        0,
-        0x3F800000,
-        int(getattr(session, "char_guid", 0) or 0),
-        int(getattr(session, "char_guid", 0) or 0),
-        int(item.count),
-        1,
-    )
+    owner_guid = int(getattr(session, "char_guid", 0) or 0)
+    contained_guid = owner_guid if int(getattr(item, "bag", 0) or 0) == 0 else _make_item_world_guid(int(item.bag))
+
+    field_values: dict[int, int] = {
+        0: int(item_guid & 0xFFFFFFFF),
+        1: int((item_guid >> 32) & 0xFFFFFFFF),
+        4: int(object_type_mask),
+        5: int(item.entry),
+        6: 0,
+        7: 0x3F800000,
+        8: int(owner_guid & 0xFFFFFFFF),
+        16: int(item.count),
+        23: 1,
+    }
+
+    owner_high = int((owner_guid >> 32) & 0xFFFFFFFF)
+    if owner_high:
+        field_values[9] = owner_high
+
+    contained_low = int(contained_guid & 0xFFFFFFFF)
+    contained_high = int((contained_guid >> 32) & 0xFFFFFFFF)
+    field_values[10] = contained_low
+    if contained_high:
+        field_values[11] = contained_high
+
+    if bool(getattr(item, "is_bag", False)):
+        field_values[_CONTAINER_FIELD_NUM_SLOTS] = int(getattr(item, "container_slots", 0) or 0)
+        state = getattr(session, "inventory_state", None)
+        if state is not None:
+            for slot in range(int(getattr(item, "container_slots", 0) or 0)):
+                contained = state.get(int(item.item_guid), slot)
+                contained_item_guid = _make_item_world_guid(int(contained.item_guid)) if contained else 0
+                field_index = _CONTAINER_FIELD_SLOTS + (slot * 2)
+                field_values[field_index] = int(contained_item_guid & 0xFFFFFFFF)
+                field_values[field_index + 1] = int((contained_item_guid >> 32) & 0xFFFFFFFF)
+
+    item_create_mask = _pack_update_mask(list(field_values.keys()))
 
     entry = bytearray()
     entry += struct.pack("<B", 1)
     entry += GuidHelper.pack(int(item_guid))
     entry += struct.pack("<B", object_type_id)
     entry += _ITEM_CREATE_FLAGS
-    entry += struct.pack("<B", len(_ITEM_CREATE_MASK) // 4)
-    entry += _ITEM_CREATE_MASK
-    for value in field_values:
+    entry += struct.pack("<B", len(item_create_mask) // 4)
+    entry += item_create_mask
+    for field_index in sorted(field_values):
+        value = field_values[field_index]
         entry += struct.pack("<I", int(value) & 0xFFFFFFFF)
     entry += struct.pack("<B", 0)
 
@@ -75,6 +110,51 @@ def _inventory_slot_field_index(bag: int, slot: int) -> int | None:
     if 23 <= slot < 39:
         return _PLAYER_FIELD_PACK_SLOTS + ((slot - 23) * 2)
     return None
+
+
+def _visible_item_cache_raw(session) -> list[int]:
+    cached = [int(value) for value in (getattr(session, "equipment_cache_raw", []) or [])]
+    required = _PLAYER_VISIBLE_ITEM_SLOT_COUNT * 2
+    if len(cached) >= required:
+        return cached[:required]
+
+    values = [0] * required
+    state = getattr(session, "inventory_state", None)
+    if state is None:
+        return values
+
+    for slot in range(_PLAYER_VISIBLE_ITEM_SLOT_COUNT):
+        item = state.get(0, slot)
+        if item is None:
+            continue
+        values[slot * 2] = int(getattr(item, "display_id", 0) or 0)
+    return values
+
+
+def build_self_visible_item_update_responses(session) -> list[tuple[str, bytes]]:
+    player_guid = int(getattr(session, "char_guid", 0) or 0)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    if player_guid <= 0:
+        return []
+
+    equipment_cache_raw = _visible_item_cache_raw(session)
+    field_updates: list[tuple[int, int]] = []
+    for slot in range(_PLAYER_VISIBLE_ITEM_SLOT_COUNT):
+        field_index = _PLAYER_FIELD_VISIBLE_ITEMS + (slot * 2)
+        display_id = int(equipment_cache_raw[slot * 2]) if (slot * 2) < len(equipment_cache_raw) else 0
+        field_updates.append((field_index, display_id))
+        field_updates.append((field_index + 1, 0))
+
+    return [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=map_id,
+                guid=player_guid,
+                field_updates=field_updates,
+            ),
+        )
+    ]
 
 
 def _build_inventory_slot_update_responses(session, item) -> list[tuple[str, bytes]]:
@@ -206,6 +286,7 @@ def build_login_inventory_sync_responses(session) -> list[tuple[str, bytes]]:
     responses.extend(build_equipped_bag_sync_responses(session))
     for item in root_items:
         responses.extend(build_item_snapshot_responses(session, item))
+    responses.extend(build_self_visible_item_update_responses(session))
     return responses
 
 

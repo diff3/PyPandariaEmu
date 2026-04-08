@@ -27,6 +27,13 @@ MOVEMENT_FOCUS_SEQUENCE = (
     ("SMSG_UPDATE_OBJECT", "SMSG_UPDATE_OBJECT_1773613185_0006.json"),
     ("SMSG_UPDATE_OBJECT", "SMSG_UPDATE_OBJECT_1773613205_0007.json"),
 )
+LOGIN_WORLD_ENTER_SEQUENCE = (
+    ("SMSG_MOVE_SET_ACTIVE_MOVER", "SMSG_MOVE_SET_ACTIVE_MOVER_1773613176_0001.json"),
+    ("SMSG_UPDATE_OBJECT", "SMSG_UPDATE_OBJECT_1775665925_0004.json"),
+    ("SMSG_UPDATE_OBJECT", "SMSG_UPDATE_OBJECT_1775665925_0005.json"),
+    ("SMSG_UPDATE_OBJECT", "SMSG_UPDATE_OBJECT_1775665925_0006.json"),
+    ("SMSG_UPDATE_OBJECT", "SMSG_UPDATE_OBJECT_1775665925_0009.json"),
+)
 
 USE_RAW_ACTIVE_MOVER = False
 USE_EXACT_UPDATE_OBJECT_REPLAY = True
@@ -53,6 +60,10 @@ EXACT_UPDATE_OBJECT_BUILDERS = {
     "SMSG_UPDATE_OBJECT_1773613181_0005.json": "SMSG_UPDATE_OBJECT_1773613181_0005",
     "SMSG_UPDATE_OBJECT_1773613185_0006.json": "SMSG_UPDATE_OBJECT_1773613185_0006",
     "SMSG_UPDATE_OBJECT_1773613205_0007.json": "SMSG_UPDATE_OBJECT_1773613205_0007",
+    "SMSG_UPDATE_OBJECT_1775665925_0004.json": "SMSG_UPDATE_OBJECT_1775665925_0004",
+    "SMSG_UPDATE_OBJECT_1775665925_0005.json": "SMSG_UPDATE_OBJECT_1775665925_0005",
+    "SMSG_UPDATE_OBJECT_1775665925_0006.json": "SMSG_UPDATE_OBJECT_1775665925_0006",
+    "SMSG_UPDATE_OBJECT_1775665925_0009.json": "SMSG_UPDATE_OBJECT_1775665925_0009",
 }
 
 _CAPTURE_DIR = get_captures_root(focus=True) / "debug"
@@ -471,6 +482,30 @@ def replay_movement_focus_sequence(session) -> list[tuple[str, bytes]]:
         Logger.info("[UPDATE_OBJECT MODE] exact-only")
 
     for index, (opcode_name, path) in enumerate(update_entries, start=1):
+        Logger.info(f"[WorldLoginReplay] packet {index}/{total} opcode={opcode_name}")
+        responses.append(
+            _build_replayed_update_object_packet(
+                session,
+                opcode_name,
+                path,
+                update_index=index,
+            )
+        )
+
+    return responses
+
+
+def replay_login_world_enter_sequence(session) -> list[tuple[str, bytes]]:
+    entries = [(opcode_name, _CAPTURE_DIR / filename) for opcode_name, filename in LOGIN_WORLD_ENTER_SEQUENCE]
+
+    session.player_object_sent = True
+    responses: list[tuple[str, bytes]] = []
+    responses.append(_build_dynamic_active_mover_packet(session))
+
+    total = len(entries) - 1
+    Logger.info("[UPDATE_OBJECT MODE] exact-only")
+
+    for index, (opcode_name, path) in enumerate(entries[1:], start=1):
         Logger.info(f"[WorldLoginReplay] packet {index}/{total} opcode={opcode_name}")
         responses.append(
             _build_replayed_update_object_packet(

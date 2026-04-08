@@ -1,7 +1,9 @@
+import json
 import importlib
 import struct
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 from DSL.modules.bitsHandler import BitInterPreter
@@ -37,6 +39,11 @@ def _import_login_flow():
 
 login_packets = _import_login_packets()
 login_flow = _import_login_flow()
+CAPTURE_DIR = Path(__file__).resolve().parents[2] / "data" / "pandaria548" / "captures" / "focus" / "debug"
+
+
+def _capture_payload(name: str) -> bytes:
+    return bytes.fromhex(json.loads((CAPTURE_DIR / name).read_text())["hex_compact"])
 
 
 def test_known_spells_packet_uses_initial_spells_shape():
@@ -153,3 +160,28 @@ def test_update_object_0004_matches_pandaria548_value_update_shape():
     assert update["fields"]["u32"] == [0, 15475, 15475, 0, 0]
     assert update["dynamic_mask_blocks"] == 1
     assert payload[-4:] == b"\x00\x00\x00\x00"
+
+
+def test_update_object_1775665925_0004_matches_sniff_exactly():
+    payload = login_packets.build_SMSG_UPDATE_OBJECT_1775665925_0004(SimpleNamespace(map_id=1))
+    assert payload == _capture_payload("SMSG_UPDATE_OBJECT_1775665925_0004.json")
+
+
+def test_update_object_1775665925_0005_matches_sniff_exactly():
+    payload = login_packets.build_SMSG_UPDATE_OBJECT_1775665925_0005(SimpleNamespace(map_id=1))
+    assert payload == _capture_payload("SMSG_UPDATE_OBJECT_1775665925_0005.json")
+
+
+def test_update_object_1775665925_0006_matches_sniff_exactly():
+    payload = login_packets.build_SMSG_UPDATE_OBJECT_1775665925_0006(SimpleNamespace(map_id=1))
+    assert payload == _capture_payload("SMSG_UPDATE_OBJECT_1775665925_0006.json")
+
+
+def test_update_object_1775665925_0009_matches_sniff_exactly():
+    ctx = SimpleNamespace(
+        map_id=1,
+        exact_1775665925_0009_guid=0x0000000700000003,
+        display_id=15475,
+    )
+    payload = login_packets.build_SMSG_UPDATE_OBJECT_1775665925_0009(ctx)
+    assert payload == _capture_payload("SMSG_UPDATE_OBJECT_1775665925_0009.json")
