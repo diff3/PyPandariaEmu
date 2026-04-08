@@ -16,6 +16,7 @@ They do NOT:
 """
 from pathlib import Path
 from typing import Dict, Any, Optional
+import os
 import time
 import json
 import struct
@@ -38,6 +39,13 @@ from server.modules.handlers.world.mount.mount_service import (
     MOUNT_RIDING_SKILL_VALUE,
     granted_mount_spells,
 )
+
+DEBUG_UPDATE_OBJECT_0002 = str(os.getenv("PP_DEBUG_UPDATE_OBJECT_0002", "")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _load_raw_from_path(path: Path) -> Optional[bytes]:
@@ -954,6 +962,7 @@ def _build_exact_update_object_value_update_entry(
     mask_bytes: bytes,
     field_bytes: bytes,
     dynamic_mask_blocks: int,
+    dynamic_mask_bytes: bytes = b"",
 ) -> bytes:
     payload = bytearray()
     payload += struct.pack("<B", 0)
@@ -962,6 +971,10 @@ def _build_exact_update_object_value_update_entry(
     payload += bytes(mask_bytes)
     payload += bytes(field_bytes)
     payload += struct.pack("<B", int(dynamic_mask_blocks))
+    if dynamic_mask_blocks > 0:
+        expected_len = int(dynamic_mask_blocks) * 4
+        normalized_dynamic_mask = bytes(dynamic_mask_bytes[:expected_len]).ljust(expected_len, b"\x00")
+        payload += normalized_dynamic_mask
     return bytes(payload)
 
 
@@ -1008,6 +1021,36 @@ def _merge_exact_u32_field_updates(mask_bytes: bytes, field_bytes: bytes, extra_
     )
 
     return bytes(merged_mask), bytes(merged_field_bytes), ordered_bits
+
+
+def _build_exact_fixed_u32_field_block(
+    fields: dict[int, int],
+    *,
+    mask_blocks: int,
+) -> tuple[bytes, bytes, list[int]]:
+    normalized_fields = {
+        int(field_index): int(field_value) & 0xFFFFFFFF
+        for field_index, field_value in (fields or {}).items()
+    }
+    if not normalized_fields:
+        return (b"\x00" * (int(mask_blocks) * 4), b"", [])
+
+    mask = bytearray(int(mask_blocks) * 4)
+    field_bytes = bytearray()
+    ordered_bits = sorted(normalized_fields)
+
+    for field_index in ordered_bits:
+        if field_index < 0:
+            continue
+        word_index = field_index // 32
+        bit_index = field_index % 32
+        if word_index >= int(mask_blocks):
+            raise ValueError(f"field index {field_index} exceeds fixed mask block count {mask_blocks}")
+        current_word = struct.unpack_from("<I", mask, word_index * 4)[0]
+        struct.pack_into("<I", mask, word_index * 4, current_word | (1 << bit_index))
+        field_bytes += struct.pack("<I", normalized_fields[field_index])
+
+    return bytes(mask), bytes(field_bytes), ordered_bits
 
 
 def _build_exact_update_object_1773613181_0005_body(
@@ -1086,23 +1129,7 @@ def build_SMSG_UPDATE_OBJECT_1773613181_0005(_ctx=None) -> bytes:
 def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
     map_id = _ctx_int_preserve_zero(ctx, "exact_0004_map_id", int(getattr(ctx, "map_id", 1)))
-    guid = int(getattr(ctx, "exact_0004_guid", _resolve_update_world_guid(ctx)))
-    mask_bytes = bytes(
-        getattr(
-            ctx,
-            "exact_0004_mask_bytes",
-            bytes.fromhex(
-                "4000001c00000080e0000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-            ),
-        )
-    )
-    field_bytes = bytearray(
-        getattr(
-            ctx,
-            "exact_0004_field_bytes",
-            bytes.fromhex("0000000000000000000000000000000000004000743c0000743c00000000000000000000"),
-        )
-    )
+    guid = _resolve_player_value_update_guid(ctx, "exact_0004_guid")
     display_id = int(
         getattr(
             ctx,
@@ -1115,18 +1142,28 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
         )
         or 15476
     )
-    if len(field_bytes) >= 28:
-        struct.pack_into("<I", field_bytes, 20, display_id)
-        struct.pack_into("<I", field_bytes, 24, display_id)
-    dynamic_mask_blocks = int(getattr(ctx, "exact_0004_dynamic_mask_blocks", 0))
+    base_fields = {
+        6: 0,
+        69: display_id,
+        70: display_id,
+        71: 0,
+        162: int(getattr(ctx, "player_flags", 0) or 0),
+    }
+    extra_fields = getattr(ctx, "exact_0004_extra_u32_fields", None)
+    if extra_fields:
+        base_fields.update({int(field_index): int(field_value) for field_index, field_value in extra_fields.items()})
+    mask_bytes, field_bytes, set_bits = _build_exact_fixed_u32_field_block(base_fields, mask_blocks=63)
+    dynamic_mask_blocks = int(getattr(ctx, "exact_0004_dynamic_mask_blocks", 1))
+    dynamic_mask_bytes = bytes(getattr(ctx, "exact_0004_dynamic_mask_bytes", b"\x00" * (dynamic_mask_blocks * 4)))
 
     payload = bytearray()
     payload += _build_update_object_packet_prefix(map_id, 1)
     payload += _build_exact_update_object_value_update_entry(
         guid=guid,
         mask_bytes=mask_bytes,
-        field_bytes=bytes(field_bytes),
+        field_bytes=field_bytes,
         dynamic_mask_blocks=dynamic_mask_blocks,
+        dynamic_mask_bytes=dynamic_mask_bytes,
     )
     built = bytes(payload)
     Logger.info(
@@ -1139,6 +1176,12 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
         int(guid) & 0xFFFFFFFFFFFFFFFF,
         int(GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)[0]),
         len(mask_bytes) // 4,
+    )
+    Logger.info(
+        "[UPDATE_OBJECT DEBUG] 0004 set_fields=%s dynamic_mask_blocks=%s dynamic_mask_bytes=%s",
+        set_bits,
+        dynamic_mask_blocks,
+        dynamic_mask_bytes.hex(),
     )
     return built
 
@@ -1209,6 +1252,7 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0002(_ctx=None) -> bytes:
     Logger.info(
         f"[UPDATE_OBJECT BUILD] 0002 mode={active_mode} map_id={map_id} packet_size={len(built)}"
     )
+    _debug_log_update_object_0002(built, mode=active_mode)
     return built
 
 
@@ -1220,6 +1264,59 @@ def _decode_packed_guid(mask: int, packed_bytes: bytes) -> int:
             raw[bit] = packed_bytes[offset]
             offset += 1
     return int.from_bytes(bytes(raw), "little", signed=False)
+
+
+def _debug_log_update_object_0002(payload: bytes, *, mode: str) -> None:
+    if not DEBUG_UPDATE_OBJECT_0002:
+        return
+
+    decoded = to_safe_json(dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {})
+    updates = list(decoded.get("updates") or [])
+    if not updates:
+        Logger.info("[UPDATE_OBJECT DEBUG] 0002 mode=%s size=%s raw=%s", mode, len(payload), payload.hex())
+        return
+
+    update = updates[0] or {}
+    mask = update.get("mask") or {}
+    movement_flags = update.get("movement_flags")
+    if movement_flags is None:
+        movement_flags = 0
+    movement_flags_extra = update.get("movement_flags_extra")
+    if movement_flags_extra is None:
+        movement_flags_extra = 0
+    guid_mask = int(update.get("guid_mask", 0) or 0) & 0xFF
+    packed_guid = GuidHelper.pack(int(update.get("guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF)
+
+    Logger.info(
+        "[UPDATE_OBJECT DEBUG] 0002 mode=%s size=%s update_type=%s object_type=%s guid=0x%016X guid_mask=0x%02X packed_guid=%s",
+        mode,
+        len(payload),
+        int(update.get("update_type", 0) or 0),
+        int(update.get("object_type", 0) or 0),
+        int(update.get("guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+        guid_mask,
+        packed_guid.hex(),
+    )
+    Logger.info(
+        "[UPDATE_OBJECT DEBUG] 0002 movement flags=0x%X flags_extra=0x%X ts=%s pos=(%s,%s,%s,%s) pitch=%s fall=%s transport=%s",
+        int(movement_flags or 0),
+        int(movement_flags_extra or 0),
+        update.get("timestamp"),
+        update.get("pos_x"),
+        update.get("pos_y"),
+        update.get("pos_z"),
+        update.get("orientation"),
+        update.get("pitch"),
+        "yes" if update.get("has_fall_data") else "no",
+        "yes" if update.get("has_transport_data") else "no",
+    )
+    Logger.info(
+        "[UPDATE_OBJECT DEBUG] 0002 mask_blocks=%s dynamic_mask_blocks=%s set_bits=%s raw=%s",
+        int(update.get("mask_blocks", 0) or 0),
+        int(update.get("dynamic_mask_blocks", 0) or 0),
+        list(mask.get("set_bits") or []),
+        payload.hex(),
+    )
 
 
 def _patch_u32(payload: bytearray, offset: int, value: int) -> None:
@@ -1661,23 +1758,7 @@ def format_update_object_player_create_diff_with_expected(session: Any, *, limit
 def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
     map_id = _ctx_int_preserve_zero(ctx, "exact_0006_map_id", int(getattr(ctx, "map_id", 1)))
-    guid = int(getattr(ctx, "exact_0006_guid", _resolve_update_world_guid(ctx)))
-    mask_bytes = bytes(
-        getattr(
-            ctx,
-            "exact_0006_mask_bytes",
-            bytes.fromhex(
-                "4000001c00000000e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-            ),
-        )
-    )
-    field_bytes = bytearray(
-        getattr(
-            ctx,
-            "exact_0006_field_bytes",
-            bytes.fromhex("00000000000000000000000000000000743c0000743c000000000000"),
-        )
-    )
+    guid = _resolve_player_value_update_guid(ctx, "exact_0006_guid")
     display_id = int(
         getattr(
             ctx,
@@ -1690,22 +1771,28 @@ def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:
         )
         or 15476
     )
-    if len(field_bytes) >= 24:
-        struct.pack_into("<I", field_bytes, 16, display_id)
-        struct.pack_into("<I", field_bytes, 20, display_id)
+    base_fields = {
+        6: 0,
+        69: display_id,
+        70: display_id,
+        71: 0,
+        162: int(getattr(ctx, "player_flags", 0) or 0),
+    }
     extra_fields = getattr(ctx, "exact_0006_extra_u32_fields", None)
-    set_bits: list[int] | None = None
     if extra_fields:
-        mask_bytes, field_bytes, set_bits = _merge_exact_u32_field_updates(mask_bytes, bytes(field_bytes), extra_fields)
-    dynamic_mask_blocks = int(getattr(ctx, "exact_0006_dynamic_mask_blocks", 0))
+        base_fields.update({int(field_index): int(field_value) for field_index, field_value in extra_fields.items()})
+    mask_bytes, field_bytes, set_bits = _build_exact_fixed_u32_field_block(base_fields, mask_blocks=63)
+    dynamic_mask_blocks = int(getattr(ctx, "exact_0006_dynamic_mask_blocks", 1))
+    dynamic_mask_bytes = bytes(getattr(ctx, "exact_0006_dynamic_mask_bytes", b"\x00" * (dynamic_mask_blocks * 4)))
 
     payload = bytearray()
     payload += _build_update_object_packet_prefix(map_id, 1)
     payload += _build_exact_update_object_value_update_entry(
         guid=guid,
         mask_bytes=mask_bytes,
-        field_bytes=bytes(field_bytes),
+        field_bytes=field_bytes,
         dynamic_mask_blocks=dynamic_mask_blocks,
+        dynamic_mask_bytes=dynamic_mask_bytes,
     )
     built = bytes(payload)
     Logger.info(
@@ -1718,7 +1805,12 @@ def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:
         int(guid) & 0xFFFFFFFFFFFFFFFF,
         int(GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)[0]),
         len(mask_bytes) // 4,
-        set_bits if set_bits is not None else "template",
+        set_bits,
+    )
+    Logger.info(
+        "[UPDATE_OBJECT DEBUG] 0006 dynamic_mask_blocks=%s dynamic_mask_bytes=%s",
+        dynamic_mask_blocks,
+        dynamic_mask_bytes.hex(),
     )
     return built
 
@@ -1769,6 +1861,21 @@ def _resolve_update_world_guid(ctx: Any) -> int:
             low=int(getattr(ctx, "char_guid", 0) or 0),
         )
     return int(world_guid)
+
+
+def _resolve_player_value_update_guid(ctx: Any, explicit_key: str) -> int:
+    guid_value = getattr(ctx, explicit_key, None)
+    if guid_value is None:
+        guid_value = getattr(ctx, "char_guid", None)
+    if guid_value is None:
+        guid_value = _resolve_update_world_guid(ctx)
+
+    raw_guid = int(guid_value) & 0xFFFFFFFFFFFFFFFF
+    low_guid = raw_guid & 0xFFFFFFFF
+    high_byte = (raw_guid >> 56) & 0xFF
+    if high_byte == 0:
+        high_byte = 0x07
+    return ((int(high_byte) & 0xFF) << 56) | int(low_guid)
 
 
 def _build_manual_active_mover_payload(mover_guid: int) -> bytes:

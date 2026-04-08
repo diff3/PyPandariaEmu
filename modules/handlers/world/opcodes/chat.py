@@ -48,7 +48,7 @@ from server.modules.handlers.world.state.runtime import (
 )
 from server.modules.handlers.world.opcodes import spells as spells_handlers
 from server.modules.handlers.world.opcodes.movement import (
-    build_move_set_run_speed_payload,
+    build_move_set_speed_payload,
     _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
@@ -242,6 +242,28 @@ def _build_additem_sync_responses(session, result) -> list[tuple[str, bytes]]:
 
 def _build_inventory_mutation_sync_responses(session, result) -> list[tuple[str, bytes]]:
     return build_inventory_delta_responses(session, result)
+
+
+def _build_speed_command_responses(session) -> list[tuple[str, bytes]]:
+    speed_packets = (
+        ("SMSG_MOVE_SET_WALK_SPEED", float(getattr(session, "walk_speed", 2.5) or 2.5)),
+        ("SMSG_MOVE_SET_RUN_SPEED", float(getattr(session, "run_speed", 7.0) or 7.0)),
+        ("SMSG_MOVE_SET_SWIM_SPEED", float(getattr(session, "swim_speed", 4.7) or 4.7)),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", float(getattr(session, "fly_speed", 7.0) or 7.0)),
+    )
+    responses = [
+        (opcode_name, build_move_set_speed_payload(session, opcode_name, speed_value))
+        for opcode_name, speed_value in speed_packets
+    ]
+    responses.append(
+        (
+            "SMSG_MESSAGECHAT",
+            encode_skyfire_messagechat_system_payload(
+                f"[Speed] run={float(getattr(session, 'run_speed', 0.0) or 0.0):.2f}"
+            ),
+        )
+    )
+    return responses
 
 
 def _debug_feedback_response(message: str) -> list[tuple[str, bytes]]:
@@ -552,29 +574,24 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
     if command_lower.startswith(".speed"):
         parts = command.split(maxsplit=1)
         if len(parts) != 2:
-            return _notification_response("Usage: .speed <run_speed|default>")
+            return _notification_response("Usage: .speed <multiplier|default>")
 
         value = parts[1].strip().lower()
         if value in {"default", "reset"}:
             spells_handlers._restore_default_movement_speeds(session)
         else:
             try:
-                run_speed = float(value)
+                speed_multiplier = float(value)
             except ValueError:
-                return _notification_response("Usage: .speed <run_speed|default>")
-            if not (0.1 <= run_speed <= 50.0):
+                return _notification_response("Usage: .speed <multiplier|default>")
+            if not (0.1 <= speed_multiplier <= 50.0):
                 return _notification_response("Usage: .speed <0.1-50.0>")
-            spells_handlers.set_custom_run_speed(session, run_speed)
+            spells_handlers.set_custom_run_speed(
+                session,
+                float(getattr(spells_handlers, "_DEFAULT_RUN_SPEED", 7.0) or 7.0) * speed_multiplier,
+            )
 
-        return [
-            ("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(session)),
-            (
-                "SMSG_MESSAGECHAT",
-                encode_skyfire_messagechat_system_payload(
-                    f"[Speed] run={float(getattr(session, 'run_speed', 0.0) or 0.0):.2f}"
-                ),
-            ),
-        ]
+        return _build_speed_command_responses(session)
 
     if command_lower.startswith(".weather"):
         parts = command.split()

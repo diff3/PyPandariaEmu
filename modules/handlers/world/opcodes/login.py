@@ -407,6 +407,11 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     Logger.info("[Teleport] replaying sniffed movement focus sequence")
     responses.extend(bootstrap_replay.replay_movement_focus_sequence(session))
 
+    inventory_packets = build_login_inventory_sync_responses(session)
+    if inventory_packets:
+        Logger.info(f"[Teleport] sending {len(inventory_packets)} inventory sync packets")
+        responses.extend(inventory_packets)
+
     time_sync = build_login_packet("SMSG_TIME_SYNC_REQUEST", ctx)
     if time_sync is not None:
         Logger.info("[Teleport] sending SMSG_TIME_SYNC_REQUEST")

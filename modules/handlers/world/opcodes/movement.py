@@ -233,25 +233,66 @@ def build_smsg_player_move_payload(session) -> bytes | None:
     return build_smsg_player_move_payload_stable_old(session)
 
 
-def build_move_set_run_speed_payload(session) -> bytes:
-    raw_guid = int(_player_guid(session) or 0).to_bytes(8, "little", signed=False)
+def _build_run_speed_refresh_response(session) -> tuple[str, bytes] | None:
+    _sync_session_from_movement_state(session)
+    payload = build_smsg_player_move_payload(session)
+    if not payload:
+        return None
+    return ("SMSG_PLAYER_MOVE", payload)
 
-    bits = BitWriter()
-    for index in (1, 7, 4, 2, 5, 3, 6, 0):
-        bits.write_bits(1 if raw_guid[index] else 0, 1)
 
-    payload = bytearray(bits.getvalue())
-    _append_guid_byte_seq(payload, raw_guid, (1,))
-
+def _next_speed_change_counter(session) -> int:
     state = _movement_state(session)
     counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
-    payload.extend(struct.pack("<I", counter))
-    state.counter = (counter + 1) & 0xFFFFFFFF
+    state.counter = (counter + 2) & 0xFFFFFFFF
+    return counter
 
-    _append_guid_byte_seq(payload, raw_guid, (7, 3, 0))
-    payload.extend(struct.pack("<f", float(getattr(session, "run_speed", 7.0) or 7.0)))
-    _append_guid_byte_seq(payload, raw_guid, (2, 4, 6, 5))
-    return bytes(payload)
+
+def build_move_set_speed_payload(session, opcode_name: str, speed: float) -> bytes:
+    raw_guid = int(_player_guid(session) or 0).to_bytes(8, "little", signed=False)
+    counter = _next_speed_change_counter(session)
+    low_guid_xor = (raw_guid[0] ^ 1) & 0xFF
+    realm_guid_xor = (raw_guid[4] ^ 1) & 0xFF
+
+    payload = bytearray()
+    opcode_name = str(opcode_name or "").strip().upper()
+
+    if opcode_name == "SMSG_MOVE_SET_WALK_SPEED":
+        payload.append(0x44)
+        payload.extend(struct.pack("<I", counter))
+        payload.extend(struct.pack("<f", float(speed)))
+        payload.extend(bytes((low_guid_xor, realm_guid_xor)))
+        return bytes(payload)
+
+    if opcode_name == "SMSG_MOVE_SET_RUN_SPEED":
+        payload.append(0x41)
+        payload.extend(struct.pack("<I", counter))
+        payload.extend(bytes((realm_guid_xor, low_guid_xor)))
+        payload.extend(struct.pack("<f", float(speed)))
+        return bytes(payload)
+
+    if opcode_name == "SMSG_MOVE_SET_SWIM_SPEED":
+        payload.append(0x48)
+        payload.extend(struct.pack("<I", counter))
+        payload.extend(struct.pack("<f", float(speed)))
+        payload.extend(bytes((realm_guid_xor, low_guid_xor)))
+        return bytes(payload)
+
+    if opcode_name == "SMSG_MOVE_SET_FLIGHT_SPEED":
+        payload.extend(struct.pack("<f", float(speed)))
+        payload.extend(struct.pack("<I", counter))
+        payload.extend(bytes((0x24, low_guid_xor, realm_guid_xor)))
+        return bytes(payload)
+
+    raise ValueError(f"Unsupported move-set speed opcode: {opcode_name}")
+
+
+def build_move_set_run_speed_payload(session) -> bytes:
+    return build_move_set_speed_payload(
+        session,
+        "SMSG_MOVE_SET_RUN_SPEED",
+        float(getattr(session, "run_speed", 7.0) or 7.0),
+    )
 
 
 def build_same_map_teleport_payload(session) -> bytes:
@@ -1220,4 +1261,7 @@ def handle_move_force_run_speed_change_ack(session, _ctx: PacketContext) -> Tupl
         _player_guid(session),
         float(getattr(session, "run_speed", 0.0) or 0.0),
     )
-    return 0, None
+    refresh_response = _build_run_speed_refresh_response(session)
+    if refresh_response is None:
+        return 0, None
+    return 0, [refresh_response]

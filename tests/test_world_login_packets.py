@@ -5,6 +5,7 @@ import types
 from types import SimpleNamespace
 
 from DSL.modules.bitsHandler import BitInterPreter
+from server.modules.interpretation.utils import dsl_decode
 
 
 def _import_login_packets():
@@ -108,3 +109,47 @@ def test_known_spells_packet_includes_common_for_alliance_race():
         for index in range(int(spell_count))
     ]
     assert 668 in spells
+
+
+def test_update_object_0006_matches_pandaria548_value_update_shape():
+    ctx = SimpleNamespace(
+        exact_0006_map_id=1,
+        exact_0006_guid=0x0000000700000003,
+        display_id=15475,
+        player_flags=32,
+    )
+
+    payload = login_packets.build_SMSG_UPDATE_OBJECT_1773613185_0006(ctx)
+    decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)
+    update = decoded["updates"][0]
+
+    assert len(payload) == 288
+    assert update["update_type"] == 0
+    assert update["guid"] == 0x0700000000000003
+    assert update["mask_blocks"] == 63
+    assert update["mask"]["set_bits"] == [6, 69, 70, 71, 162]
+    assert update["fields"]["u32"] == [0, 15475, 15475, 0, 32]
+    assert update["dynamic_mask_blocks"] == 1
+    assert payload[-4:] == b"\x00\x00\x00\x00"
+
+
+def test_update_object_0004_matches_pandaria548_value_update_shape():
+    ctx = SimpleNamespace(
+        exact_0004_map_id=1,
+        exact_0004_guid=0x0000000700000003,
+        display_id=15475,
+        player_flags=0,
+    )
+
+    payload = login_packets.build_SMSG_UPDATE_OBJECT_1773613176_0004(ctx)
+    decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)
+    update = decoded["updates"][0]
+
+    assert len(payload) == 288
+    assert update["update_type"] == 0
+    assert update["guid"] == 0x0700000000000003
+    assert update["mask_blocks"] == 63
+    assert update["mask"]["set_bits"] == [6, 69, 70, 71, 162]
+    assert update["fields"]["u32"] == [0, 15475, 15475, 0, 0]
+    assert update["dynamic_mask_blocks"] == 1
+    assert payload[-4:] == b"\x00\x00\x00\x00"

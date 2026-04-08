@@ -121,3 +121,70 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
         ("save", {"reason": "near-teleport", "online": 1, "force": True}),
         ("broadcast", True),
     ]
+
+
+def test_move_set_run_speed_payload_matches_pandaria548_live_layout():
+    session = _FakeSession()
+    session.world_guid = 0x0000000700000003
+    session.player_guid = session.world_guid
+    session.run_speed = 70.0
+    session.movement_state = types.SimpleNamespace(counter=27)
+
+    payload = movement.build_move_set_run_speed_payload(session)
+
+    assert payload == bytes.fromhex("411B000000060200008C42")
+    assert session.movement_state.counter == 29
+
+
+def test_move_set_speed_payloads_match_pandaria548_focus_captures():
+    session = _FakeSession()
+    session.world_guid = 0x0000000700000003
+    session.player_guid = session.world_guid
+    session.movement_state = types.SimpleNamespace(counter=70)
+
+    walk = movement.build_move_set_speed_payload(session, "SMSG_MOVE_SET_WALK_SPEED", 25.0)
+    run = movement.build_move_set_speed_payload(session, "SMSG_MOVE_SET_RUN_SPEED", 70.0)
+    swim = movement.build_move_set_speed_payload(session, "SMSG_MOVE_SET_SWIM_SPEED", 47.22221755981445)
+    flight = movement.build_move_set_speed_payload(session, "SMSG_MOVE_SET_FLIGHT_SPEED", 70.0)
+
+    assert walk.hex().upper() == "44460000000000C8410206"
+    assert run.hex().upper() == "4148000000060200008C42"
+    assert swim.hex().upper() == "484A0000008DE33C420602"
+    assert flight.hex().upper() == "00008C424C000000240206"
+    assert session.movement_state.counter == 78
+
+
+def test_run_speed_change_ack_returns_player_move_refresh(monkeypatch):
+    session = _FakeSession()
+    session.world_guid = 0x0000000700000003
+    session.player_guid = session.world_guid
+    session.run_speed = 35.0
+    session.movement_state = types.SimpleNamespace(
+        x=11.0,
+        y=22.0,
+        z=33.0,
+        orientation=1.5,
+        flags=0,
+        flags2=0,
+        timestamp_ms=123,
+        client_timestamp_ms=0,
+        counter=9,
+    )
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        movement,
+        "_sync_session_from_movement_state",
+        lambda target: calls.append(("sync", target)),
+    )
+    monkeypatch.setattr(
+        movement,
+        "build_smsg_player_move_payload",
+        lambda target: b"player-move",
+    )
+
+    status, responses = movement.handle_move_force_run_speed_change_ack(session, None)
+
+    assert status == 0
+    assert responses == [("SMSG_PLAYER_MOVE", b"player-move")]
+    assert calls == [("sync", session)]

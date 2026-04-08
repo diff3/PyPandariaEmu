@@ -32,10 +32,24 @@ def _import_chat_handlers():
             "build_query_player_name_response": lambda session, guid: b"",
         },
         "server.modules.handlers.world.opcodes.spells": {
-            "_restore_default_movement_speeds": lambda session: setattr(session, "run_speed", 7.0),
-            "set_custom_run_speed": lambda session, value: setattr(session, "run_speed", float(value)),
+            "_DEFAULT_RUN_SPEED": 7.0,
+            "_restore_default_movement_speeds": lambda session: (
+                setattr(session, "walk_speed", 2.5),
+                setattr(session, "run_speed", 7.0),
+                setattr(session, "swim_speed", 4.7),
+                setattr(session, "fly_speed", 7.0),
+            ),
+            "set_custom_run_speed": lambda session, value: (
+                setattr(session, "walk_speed", float(value) * (2.5 / 7.0)),
+                setattr(session, "run_speed", float(value)),
+                setattr(session, "swim_speed", float(value) * (4.7 / 7.0)),
+                setattr(session, "fly_speed", float(value)),
+            ),
         },
         "server.modules.handlers.world.opcodes.movement": {
+            "build_move_set_speed_payload": (
+                lambda session, opcode_name, value: f"{opcode_name}|{float(value):.2f}".encode()
+            ),
             "build_move_set_run_speed_payload": lambda session: b"speed-packet",
             "_save_current_position_like_command": lambda *args, **kwargs: True,
         },
@@ -531,12 +545,17 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
     monkeypatch.setattr(
         chat_handlers.spells_handlers,
         "set_custom_run_speed",
-        lambda session, value: setattr(session, "run_speed", float(value)),
+        lambda session, value: (
+            setattr(session, "walk_speed", float(value) * (2.5 / 7.0)),
+            setattr(session, "run_speed", float(value)),
+            setattr(session, "swim_speed", float(value) * (4.7 / 7.0)),
+            setattr(session, "fly_speed", float(value)),
+        ),
     )
     monkeypatch.setattr(
         chat_handlers,
-        "build_move_set_run_speed_payload",
-        lambda session: f"speed|{float(session.run_speed):.2f}".encode(),
+        "build_move_set_speed_payload",
+        lambda session, opcode_name, value: f"{opcode_name}|{float(value):.2f}".encode(),
     )
     monkeypatch.setattr(
         chat_handlers,
@@ -549,10 +568,13 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
 
     responses = chat_handlers._handle_chat_command(alice, ".speed 5")
 
-    assert alice.run_speed == 5.0
+    assert alice.run_speed == 35.0
     assert responses == [
-        ("SMSG_MOVE_SET_RUN_SPEED", b"speed|5.00"),
-        ("SMSG_MESSAGECHAT", b"system|[Speed] run=5.00"),
+        ("SMSG_MOVE_SET_WALK_SPEED", b"SMSG_MOVE_SET_WALK_SPEED|12.50"),
+        ("SMSG_MOVE_SET_RUN_SPEED", b"SMSG_MOVE_SET_RUN_SPEED|35.00"),
+        ("SMSG_MOVE_SET_SWIM_SPEED", b"SMSG_MOVE_SET_SWIM_SPEED|23.50"),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", b"SMSG_MOVE_SET_FLIGHT_SPEED|35.00"),
+        ("SMSG_MESSAGECHAT", b"system|[Speed] run=35.00"),
     ]
 
 
