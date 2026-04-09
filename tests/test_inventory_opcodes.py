@@ -91,7 +91,7 @@ def test_autostore_bag_item_prefers_decoded_fields_over_raw(monkeypatch):
     assert calls == [(0, 19, 0)]
 
 
-def test_failed_swap_resyncs_inventory_and_reports_message(monkeypatch):
+def test_failed_swap_returns_only_inventory_change_failure(monkeypatch):
     monkeypatch.setattr(
         inventory_handlers,
         "swap_character_item",
@@ -99,11 +99,6 @@ def test_failed_swap_resyncs_inventory_and_reports_message(monkeypatch):
             ok=False,
             message="cannot move non-empty equipped bag there yet",
         ),
-    )
-    monkeypatch.setattr(
-        inventory_handlers,
-        "build_login_inventory_sync_responses",
-        lambda session: [("SMSG_UPDATE_OBJECT", b"inventory-resync")],
     )
     monkeypatch.setattr(
         inventory_handlers,
@@ -121,11 +116,7 @@ def test_failed_swap_resyncs_inventory_and_reports_message(monkeypatch):
     status, responses = inventory_handlers.handle_swap_item(session, ctx)
 
     assert status == 0
-    assert responses == [
-        ("SMSG_INVENTORY_CHANGE_FAILURE", bytes.fromhex("000A0081411F")),
-        ("SMSG_UPDATE_OBJECT", b"inventory-resync"),
-        ("SMSG_MESSAGECHAT", b"[Inventory] cannot move non-empty equipped bag there yet"),
-    ]
+    assert responses == [("SMSG_INVENTORY_CHANGE_FAILURE", bytes.fromhex("000A0081411F"))]
 
 
 def test_open_item_prefers_decoded_fields(monkeypatch):

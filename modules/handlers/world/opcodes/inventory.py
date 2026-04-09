@@ -195,15 +195,14 @@ def _result_to_response(
     level = "info" if result.ok else "warning"
     getattr(Logger, level)(f"[Inventory] {prefix} -> {result.message}")
     if result.ok:
-        if inventory_result_affects_equipment(result):
-            resync_player_appearance(session)
-        responses = build_inventory_delta_responses(session, result)
-        return 0, responses or None
+        Logger.warning("[INV] forcing full resync (all success cases)")
+        return 0, build_login_inventory_sync_responses(session) or None
     responses: list[tuple[str, bytes]] = []
     if failure_payload:
         responses.append(("SMSG_INVENTORY_CHANGE_FAILURE", failure_payload))
     responses.extend(build_login_inventory_sync_responses(session))
-    responses.extend(_system_message(f"[Inventory] {result.message}"))
+    if not responses:
+        responses = _system_message(f"[Inventory] {result.message}")
     return 0, responses or None
 
 
