@@ -21,6 +21,7 @@ def _import_inventory_handlers():
         },
         "server.modules.handlers.world.state.runtime": {
             "resync_player_appearance": lambda session: None,
+            "build_self_player_appearance_responses": lambda session: [],
         },
     }
 
@@ -65,6 +66,30 @@ def test_swap_item_prefers_decoded_fields_over_raw(monkeypatch):
     assert status == 0
     assert responses is None
     assert calls == [(0, 19, 0, 23)]
+
+
+def test_swap_item_decodes_mop_bitpacked_payload_when_decoded_missing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        inventory_handlers,
+        "swap_character_item",
+        lambda session, src_bag, src_slot, dst_bag, dst_slot: (
+            calls.append((src_bag, src_slot, dst_bag, dst_slot)) or _ok_result("item moved")
+        ),
+    )
+    monkeypatch.setattr(inventory_handlers, "build_inventory_delta_responses", lambda session, result: [])
+
+    ctx = SimpleNamespace(
+        name="CMSG_SWAP_ITEM",
+        payload=bytes.fromhex("0113FF1880FF181301"),
+        decoded={},
+    )
+
+    status, responses = inventory_handlers.handle_swap_item(object(), ctx)
+
+    assert status == 0
+    assert responses is None
+    assert calls == [(19, 1, 255, 24)]
 
 
 def test_autostore_bag_item_prefers_decoded_fields_over_raw(monkeypatch):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 
+from shared.Logger import Logger
 from server.modules.game.guid import GuidHelper
 from server.modules.handlers.world.bootstrap.replay import (
     build_multi_u32_update_object_payload,
@@ -9,6 +10,8 @@ from server.modules.handlers.world.bootstrap.replay import (
 )
 
 _ITEM_HIGHGUID = 0x400
+_ITEM_FIELD_OWNER = 0x8
+_ITEM_FIELD_CONTAINED = 0xA
 _ITEM_FIELD_STACK_COUNT = 0x10
 _CONTAINER_FIELD_SLOTS = 0x45
 _CONTAINER_FIELD_NUM_SLOTS = 0x8D
@@ -40,7 +43,121 @@ def _pack_update_mask(field_indices: list[int], *, min_blocks: int = 3) -> bytes
     return bytes(mask)
 
 
-def _build_item_create_update_payload(session, item) -> bytes:
+def _known_inventory_guids(session) -> set[int]:
+    known = getattr(session, "known_inventory_guids", None)
+    if isinstance(known, set):
+        return known
+    known = set()
+    session.known_inventory_guids = known
+    return known
+
+
+def _clear_known_inventory_guids(session) -> None:
+    _known_inventory_guids(session).clear()
+
+
+def _mark_known_inventory_guid(session, guid: int) -> None:
+    _known_inventory_guids(session).add(int(guid))
+
+
+def _find_inventory_activation_bag(session) -> tuple[int, int] | None:
+    state = getattr(session, "inventory_state", None)
+    if state is None or not hasattr(state, "get"):
+        return None
+
+    for slot in range(19, 23):
+        item = state.get(0, slot)
+        if item is not None and bool(getattr(item, "is_bag", False)):
+            return int(slot), int(getattr(item, "item_guid", 0) or 0)
+
+    for slot in range(39):
+        item = state.get(0, slot)
+        if item is not None and bool(getattr(item, "is_bag", False)):
+            return int(slot), int(getattr(item, "item_guid", 0) or 0)
+
+    return None
+
+
+def trigger_inventory_activation(session) -> list[tuple[str, bytes]]:
+    if bool(getattr(session, "inventory_activated", False)):
+        Logger.debug("[INV_ACTIVATE] skipped (already active)")
+        return []
+
+    player_guid = int(getattr(session, "char_guid", 0) or 0)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    if player_guid <= 0:
+        Logger.debug("[INV_ACTIVATE] no valid bag found")
+        return []
+
+    selected = _find_inventory_activation_bag(session)
+    if selected is None:
+        Logger.debug("[INV_ACTIVATE] no valid bag found")
+        return []
+
+    slot, item_low_guid = selected
+    field_index = _inventory_slot_field_index(0, slot)
+    if field_index is None or item_low_guid <= 0:
+        Logger.debug("[INV_ACTIVATE] no valid bag found")
+        return []
+
+    item_guid = _make_item_world_guid(int(item_low_guid))
+    responses = [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=map_id,
+                guid=player_guid,
+                field_updates=[
+                    (field_index, 0),
+                    (field_index + 1, 0),
+                ],
+            ),
+        ),
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=map_id,
+                guid=player_guid,
+                field_updates=[
+                    (field_index, int(item_guid & 0xFFFFFFFF)),
+                    (field_index + 1, int((item_guid >> 32) & 0xFFFFFFFF)),
+                ],
+            ),
+        ),
+    ]
+    session.inventory_activated = True
+    Logger.debug("[INV_ACTIVATE] triggered slot=%s guid=%s", int(slot), int(item_guid))
+    return responses
+
+
+def maybe_trigger_inventory_activation(session, src_container: int, dst_container: int) -> list[tuple[str, bytes]]:
+    if int(src_container) == int(dst_container):
+        return []
+    Logger.debug(
+        "[INV_ACTIVATE] triggered after move src=%s dst=%s",
+        int(src_container),
+        int(dst_container),
+    )
+    return trigger_inventory_activation(session)
+
+
+def _append_bag_container_field_values(field_values: dict[int, int], session, bag_item) -> None:
+    field_values[_CONTAINER_FIELD_NUM_SLOTS] = int(getattr(bag_item, "container_slots", 0) or 0)
+    state = getattr(session, "inventory_state", None)
+    if state is None:
+        return
+
+    for slot in range(int(getattr(bag_item, "container_slots", 0) or 0)):
+        contained = state.get(int(bag_item.item_guid), slot)
+        if contained is None:
+            continue
+        contained_item_guid = _make_item_world_guid(int(contained.item_guid))
+        field_index = _CONTAINER_FIELD_SLOTS + (slot * 2)
+        field_values[field_index] = int(contained_item_guid & 0xFFFFFFFF)
+        field_values[field_index + 1] = int((contained_item_guid >> 32) & 0xFFFFFFFF)
+
+
+def _build_item_create_update_payload_old(session, item) -> bytes:
     item_guid = _make_item_world_guid(int(item.item_guid))
     object_type_mask = 7 if bool(getattr(item, "is_bag", False)) else 3
     object_type_id = 2 if bool(getattr(item, "is_bag", False)) else 1
@@ -70,15 +187,7 @@ def _build_item_create_update_payload(session, item) -> bytes:
         field_values[11] = contained_high
 
     if bool(getattr(item, "is_bag", False)):
-        field_values[_CONTAINER_FIELD_NUM_SLOTS] = int(getattr(item, "container_slots", 0) or 0)
-        state = getattr(session, "inventory_state", None)
-        if state is not None:
-            for slot in range(int(getattr(item, "container_slots", 0) or 0)):
-                contained = state.get(int(item.item_guid), slot)
-                contained_item_guid = _make_item_world_guid(int(contained.item_guid)) if contained else 0
-                field_index = _CONTAINER_FIELD_SLOTS + (slot * 2)
-                field_values[field_index] = int(contained_item_guid & 0xFFFFFFFF)
-                field_values[field_index + 1] = int((contained_item_guid >> 32) & 0xFFFFFFFF)
+        _append_bag_container_field_values(field_values, session, item)
 
     item_create_mask = _pack_update_mask(list(field_values.keys()))
 
@@ -100,6 +209,165 @@ def _build_item_create_update_payload(session, item) -> bytes:
     return bytes(payload)
 
 
+def _build_item_release_update_payload_old(session, item) -> bytes:
+    item_guid = _make_item_world_guid(int(item.item_guid))
+    object_type_mask = 7 if bool(getattr(item, "is_bag", False)) else 3
+    object_type_id = 2 if bool(getattr(item, "is_bag", False)) else 1
+    owner_guid = int(getattr(session, "char_guid", 0) or 0)
+
+    field_values: dict[int, int] = {
+        0: int(item_guid & 0xFFFFFFFF),
+        1: int((item_guid >> 32) & 0xFFFFFFFF),
+        4: int(object_type_mask),
+        5: int(item.entry),
+        6: 0,
+        7: 0x3F800000,
+        8: int(owner_guid & 0xFFFFFFFF),
+        16: int(item.count),
+        23: 1,
+    }
+
+    owner_high = int((owner_guid >> 32) & 0xFFFFFFFF)
+    if owner_high:
+        field_values[9] = owner_high
+
+    if bool(getattr(item, "is_bag", False)):
+        _append_bag_container_field_values(field_values, session, item)
+
+    item_create_mask = _pack_update_mask(list(field_values.keys()))
+
+    entry = bytearray()
+    entry += struct.pack("<B", 1)
+    entry += GuidHelper.pack(int(item_guid))
+    entry += struct.pack("<B", object_type_id)
+    entry += _ITEM_CREATE_FLAGS
+    entry += struct.pack("<B", len(item_create_mask) // 4)
+    entry += item_create_mask
+    for field_index in sorted(field_values):
+        entry += struct.pack("<I", int(field_values[field_index]) & 0xFFFFFFFF)
+    entry += struct.pack("<B", 0)
+
+    payload = bytearray()
+    payload += struct.pack("<HI", int(getattr(session, "map_id", 0) or 0) & 0xFFFF, 1)
+    payload += entry
+    return bytes(payload)
+
+
+def build_create_object(session, obj) -> bytes:
+    return _build_item_create_update_payload_old(session, obj)
+
+
+def build_values_update(session, guid: int, changed_fields: list[tuple[int, int]]) -> bytes:
+    return build_multi_u32_update_object_payload(
+        map_id=int(getattr(session, "map_id", 0) or 0),
+        guid=int(guid),
+        field_updates=[(int(field_index), int(value)) for field_index, value in (changed_fields or [])],
+    )
+
+
+def _contained_guid_for_item(session, item) -> int:
+    owner_guid = int(getattr(session, "char_guid", 0) or 0)
+    return owner_guid if int(getattr(item, "bag", 0) or 0) == 0 else _make_item_world_guid(int(item.bag))
+
+
+def _build_item_values_field_updates(session, item, changed_fields: list[int] | tuple[int, ...] | None = None) -> list[tuple[int, int]]:
+    contained_guid = _contained_guid_for_item(session, item)
+    owner_guid = int(getattr(session, "char_guid", 0) or 0)
+    updates_by_field: dict[int, int] = {}
+    for field_index in sorted({int(field) for field in (changed_fields or [])}):
+        if field_index == _ITEM_FIELD_OWNER:
+            updates_by_field[field_index] = int(owner_guid & 0xFFFFFFFF)
+        elif field_index == (_ITEM_FIELD_OWNER + 1):
+            updates_by_field[field_index] = int((owner_guid >> 32) & 0xFFFFFFFF)
+        elif field_index == _ITEM_FIELD_CONTAINED:
+            updates_by_field[field_index] = int(contained_guid & 0xFFFFFFFF)
+        elif field_index == (_ITEM_FIELD_CONTAINED + 1):
+            updates_by_field[field_index] = int((contained_guid >> 32) & 0xFFFFFFFF)
+        elif field_index == _ITEM_FIELD_STACK_COUNT:
+            updates_by_field[field_index] = int(getattr(item, "count", 0) or 0)
+    return [(field_index, updates_by_field[field_index]) for field_index in sorted(updates_by_field)]
+
+
+def _determine_item_changed_fields(session, item, previous_item=None, *, default_to_stack: bool = False) -> list[int]:
+    changed_fields: list[int] = []
+    if previous_item is not None:
+        if _contained_guid_for_item(session, previous_item) != _contained_guid_for_item(session, item):
+            changed_fields.extend([_ITEM_FIELD_CONTAINED, _ITEM_FIELD_CONTAINED + 1])
+        if int(getattr(previous_item, "count", 0) or 0) != int(getattr(item, "count", 0) or 0):
+            changed_fields.append(_ITEM_FIELD_STACK_COUNT)
+        return changed_fields
+    if default_to_stack:
+        changed_fields.append(_ITEM_FIELD_STACK_COUNT)
+    return changed_fields
+
+
+def build_item_values_update(session, item, changed_fields: list[int] | tuple[int, ...] | None = None) -> bytes | None:
+    field_updates = _build_item_values_field_updates(session, item, changed_fields)
+    if not field_updates:
+        return None
+    return build_values_update(session, _make_item_world_guid(int(item.item_guid)), field_updates)
+
+
+def _build_container_values_field_updates(session, bag_item, changed_slots: list[int] | tuple[int, ...] | None = None) -> list[tuple[int, int]]:
+    state = getattr(session, "inventory_state", None)
+    if state is None:
+        return []
+
+    field_updates: list[tuple[int, int]] = []
+    for slot in sorted({int(slot) for slot in (changed_slots or [])}):
+        contained = state.get(int(bag_item.item_guid), slot)
+        contained_guid = _make_item_world_guid(int(contained.item_guid)) if contained else 0
+        field_index = _CONTAINER_FIELD_SLOTS + (slot * 2)
+        field_updates.append((field_index, int(contained_guid & 0xFFFFFFFF)))
+        field_updates.append((field_index + 1, int((contained_guid >> 32) & 0xFFFFFFFF)))
+    return field_updates
+
+
+def build_container_values_update(session, bag_item, changed_slots: list[int] | tuple[int, ...] | None = None) -> bytes | None:
+    changed_fields = _build_container_values_field_updates(session, bag_item, changed_slots)
+    if not changed_fields:
+        return None
+    return build_values_update(session, _make_item_world_guid(int(bag_item.item_guid)), changed_fields)
+
+
+def sync_known_item(session, item, changed_fields: list[int] | tuple[int, ...] | None = None) -> list[tuple[str, bytes]]:
+    item_guid = _make_item_world_guid(int(item.item_guid))
+    payload = build_item_values_update(session, item, changed_fields)
+    if payload is None:
+        return []
+    Logger.debug(f"[INV] VALUES item guid={item_guid} fields={sorted({int(field) for field in (changed_fields or [])})}")
+    return [("SMSG_UPDATE_OBJECT", payload)]
+
+
+def sync_item(session, item, changed_fields: list[int] | tuple[int, ...] | None = None) -> list[tuple[str, bytes]]:
+    item_guid = _make_item_world_guid(int(item.item_guid))
+    known_guids = _known_inventory_guids(session)
+    if item_guid not in known_guids:
+        _mark_known_inventory_guid(session, item_guid)
+        Logger.debug(f"[INV] CREATE guid={item_guid} type=item")
+        return [("SMSG_UPDATE_OBJECT", build_create_object(session, item))]
+    return sync_known_item(session, item, changed_fields)
+
+
+def sync_known_container(session, bag_item, changed_slots: list[int] | tuple[int, ...] | None = None) -> list[tuple[str, bytes]]:
+    bag_guid = _make_item_world_guid(int(bag_item.item_guid))
+    payload = build_container_values_update(session, bag_item, changed_slots)
+    if payload is None:
+        return []
+    Logger.debug(f"[INV] VALUES container guid={bag_guid} slots={sorted({int(slot) for slot in (changed_slots or [])})}")
+    return [("SMSG_UPDATE_OBJECT", payload)]
+
+
+def sync_container(session, bag_item, changed_slots: list[int] | tuple[int, ...] | None = None) -> list[tuple[str, bytes]]:
+    bag_guid = _make_item_world_guid(int(bag_item.item_guid))
+    known_guids = _known_inventory_guids(session)
+    if bag_guid not in known_guids:
+        _mark_known_inventory_guid(session, bag_guid)
+        Logger.debug(f"[INV] CREATE guid={bag_guid} type=container")
+        return [("SMSG_UPDATE_OBJECT", build_create_object(session, bag_item))]
+    return sync_known_container(session, bag_item, changed_slots)
+
+
 def _inventory_slot_field_index(bag: int, slot: int) -> int | None:
     bag = int(bag)
     slot = int(slot)
@@ -110,6 +378,10 @@ def _inventory_slot_field_index(bag: int, slot: int) -> int | None:
     if 23 <= slot < 39:
         return _PLAYER_FIELD_PACK_SLOTS + ((slot - 23) * 2)
     return None
+
+
+def _is_equipment_position(bag: int, slot: int) -> bool:
+    return int(bag) == 0 and 0 <= int(slot) < 19
 
 
 def _visible_item_cache_raw(session) -> list[int]:
@@ -189,6 +461,39 @@ def _build_inventory_position_update_responses(session, bag: int, slot: int) -> 
     ]
 
 
+def _build_player_slot_values_responses(session, slot: int, item_world_guid: int) -> list[tuple[str, bytes]]:
+    field_index = _inventory_slot_field_index(0, int(slot))
+    if field_index is None:
+        return []
+
+    return [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                guid=int(getattr(session, "char_guid", 0) or 0),
+                field_updates=[
+                    (field_index, int(item_world_guid) & 0xFFFFFFFF),
+                    (field_index + 1, int((int(item_world_guid) >> 32) & 0xFFFFFFFF)),
+                ],
+            ),
+        )
+    ]
+
+
+def _build_storage_slot_update_responses(session, bag: int, slot: int, item_world_guid: int | None = None) -> list[tuple[str, bytes]]:
+    if int(bag) == 0:
+        return _build_player_slot_values_responses(session, int(slot), int(item_world_guid or 0))
+
+    state = getattr(session, "inventory_state", None)
+    if state is None:
+        return []
+    bag_item = state.items_by_guid.get(int(bag))
+    if bag_item is None or not bool(getattr(bag_item, "is_bag", False)):
+        return []
+    return sync_container(session, bag_item, [int(slot)])
+
+
 def _build_container_slot_update_responses(session, bag_guid: int, slot: int) -> list[tuple[str, bytes]]:
     state = getattr(session, "inventory_state", None)
     if state is None:
@@ -229,10 +534,11 @@ def _build_inventory_count_update_response(session, item) -> tuple[str, bytes]:
 
 
 def build_item_snapshot_responses(session, item) -> list[tuple[str, bytes]]:
-    responses = [("SMSG_UPDATE_OBJECT", _build_item_create_update_payload(session, item))]
-    responses.append(_build_inventory_count_update_response(session, item))
-    responses.extend(_build_container_field_update_responses(session, item))
-    return responses
+    return [("SMSG_UPDATE_OBJECT", build_create_object(session, item))]
+
+
+def build_item_release_responses(session, item) -> list[tuple[str, bytes]]:
+    return [("SMSG_UPDATE_OBJECT", _build_item_release_update_payload_old(session, item))]
 
 
 def _build_container_field_update_responses(session, bag_item) -> list[tuple[str, bytes]]:
@@ -248,6 +554,77 @@ def _build_container_field_update_responses(session, bag_item) -> list[tuple[str
     field_updates: list[tuple[int, int]] = [
         (_CONTAINER_FIELD_NUM_SLOTS, int(getattr(bag_item, "container_slots", 0) or 0)),
     ]
+
+
+def _position_snapshot(item, *, bag: int, slot: int):
+    return type(
+        "_InventoryPositionSnapshot",
+        (),
+        {
+            "item_guid": int(getattr(item, "item_guid", 0) or 0),
+            "bag": int(bag),
+            "slot": int(slot),
+            "count": int(getattr(item, "count", 0) or 0),
+        },
+    )()
+
+
+def _build_simple_equipment_transition_responses(session, moved_item, old_bag: int, old_slot: int, new_bag: int, new_slot: int) -> list[tuple[str, bytes]]:
+    item_guid = _make_item_world_guid(int(getattr(moved_item, "item_guid", 0) or 0))
+    item_fields = _determine_item_changed_fields(
+        session,
+        moved_item,
+        _position_snapshot(moved_item, bag=old_bag, slot=old_slot),
+    )
+    responses: list[tuple[str, bytes]] = []
+    if _is_equipment_position(old_bag, old_slot):
+        Logger.debug(f"[UNEQUIP] slot={int(old_slot)} item={int(getattr(moved_item, 'item_guid', 0) or 0)}")
+        Logger.debug("[UNEQUIP_ORDER] player→item→container")
+        responses.extend(_build_player_slot_values_responses(session, int(old_slot), 0))
+        responses.extend(sync_item(session, moved_item, item_fields))
+        responses.extend(_build_storage_slot_update_responses(session, int(new_bag), int(new_slot), int(item_guid)))
+        return responses
+
+    Logger.debug(f"[EQUIP] slot={int(new_slot)} item={int(getattr(moved_item, 'item_guid', 0) or 0)}")
+    Logger.debug("[EQUIP_ORDER] container→item→player")
+    responses.extend(_build_storage_slot_update_responses(session, int(old_bag), int(old_slot), 0))
+    responses.extend(sync_item(session, moved_item, item_fields))
+    responses.extend(_build_player_slot_values_responses(session, int(new_slot), int(item_guid)))
+    return responses
+
+
+def _build_equipment_swap_responses(session, equip_slot: int, storage_bag: int, storage_slot: int) -> list[tuple[str, bytes]]:
+    state = getattr(session, "inventory_state", None)
+    if state is None:
+        return []
+
+    equipped_item = state.get(0, int(equip_slot))
+    storage_item = state.get(int(storage_bag), int(storage_slot))
+    if equipped_item is None or storage_item is None:
+        return []
+
+    equipped_guid = _make_item_world_guid(int(getattr(equipped_item, "item_guid", 0) or 0))
+    equipped_fields = _determine_item_changed_fields(
+        session,
+        equipped_item,
+        _position_snapshot(equipped_item, bag=int(storage_bag), slot=int(storage_slot)),
+    )
+    storage_fields = _determine_item_changed_fields(
+        session,
+        storage_item,
+        _position_snapshot(storage_item, bag=0, slot=int(equip_slot)),
+    )
+
+    Logger.debug(f"[EQUIP] slot={int(equip_slot)} item={int(getattr(equipped_item, 'item_guid', 0) or 0)}")
+    Logger.debug("[EQUIP_ORDER] player-clear→old-item→container→new-item→player-set")
+
+    responses: list[tuple[str, bytes]] = []
+    responses.extend(_build_player_slot_values_responses(session, int(equip_slot), 0))
+    responses.extend(sync_item(session, storage_item, storage_fields))
+    responses.extend(_build_storage_slot_update_responses(session, int(storage_bag), int(storage_slot), int(_make_item_world_guid(int(getattr(storage_item, "item_guid", 0) or 0)))))
+    responses.extend(sync_item(session, equipped_item, equipped_fields))
+    responses.extend(_build_player_slot_values_responses(session, int(equip_slot), int(equipped_guid)))
+    return responses
 
     for slot in range(int(getattr(bag_item, "container_slots", 0) or 0)):
         contained = state.get(int(bag_item.item_guid), slot)
@@ -269,14 +646,21 @@ def _build_container_field_update_responses(session, bag_item) -> list[tuple[str
 
 def build_login_inventory_sync_responses(session) -> list[tuple[str, bytes]]:
     state = getattr(session, "inventory_state", None)
-    if state is None:
+    if state is None or not hasattr(state, "get") or not hasattr(state, "items_by_pos"):
         return []
+    cleared_known_guids = len(_known_inventory_guids(session))
+    _clear_known_inventory_guids(session)
+    session.inventory_activated = False
 
     root_items = sorted(
         (
             item
             for item in getattr(state, "items_by_pos", {}).values()
             if int(getattr(item, "bag", -1)) == 0
+            and not (
+                bool(getattr(item, "is_bag", False))
+                and 19 <= int(getattr(item, "slot", -1) or -1) < 23
+            )
         ),
         key=lambda item: (int(getattr(item, "slot", 0) or 0), int(getattr(item, "item_guid", 0) or 0)),
     )
@@ -285,8 +669,11 @@ def build_login_inventory_sync_responses(session) -> list[tuple[str, bytes]]:
     responses.extend(build_root_inventory_slot_sync_responses(session))
     responses.extend(build_equipped_bag_sync_responses(session))
     for item in root_items:
-        responses.extend(build_item_snapshot_responses(session, item))
+        responses.extend(sync_item(session, item))
     responses.extend(build_self_visible_item_update_responses(session))
+    Logger.debug(
+        f"[INV] FULL_RESYNC cleared_known_guids={cleared_known_guids} rebuilt={len(_known_inventory_guids(session))}"
+    )
     return responses
 
 
@@ -382,14 +769,32 @@ def build_container_open_responses(session, bag_item) -> list[tuple[str, bytes]]
     if state is None:
         return []
 
+    known_guids = _known_inventory_guids(session)
+    bag_world_guid = _make_item_world_guid(int(bag_item.item_guid))
+    bag_known = bag_world_guid in known_guids
+    created_items = 0
+    values_items = 0
     responses: list[tuple[str, bytes]] = []
-    responses.extend(build_item_snapshot_responses(session, bag_item))
+    responses.extend(sync_container(session, bag_item))
 
     for slot in range(int(getattr(bag_item, "container_slots", 0) or 0)):
         item = state.get(int(bag_item.item_guid), slot)
         if item is None:
             continue
-        responses.extend(build_item_snapshot_responses(session, item))
+        item_world_guid = _make_item_world_guid(int(item.item_guid))
+        item_known = item_world_guid in known_guids
+        item_responses = sync_item(session, item)
+        if item_responses:
+            if item_known:
+                values_items += 1
+            else:
+                created_items += 1
+        responses.extend(item_responses)
+
+    Logger.debug(
+        f"[INV] BAG_OPEN bag={int(bag_item.item_guid)} known={bag_known} "
+        f"create_items={created_items} values_items={values_items}"
+    )
 
     return responses
 
@@ -412,6 +817,9 @@ def _build_item_remove_responses(session, item_low_guids: list[int]) -> list[tup
     world_guids = [_make_item_world_guid(int(item_guid)) for item_guid in item_low_guids if int(item_guid) > 0]
     if not world_guids:
         return []
+    known_guids = _known_inventory_guids(session)
+    for world_guid in world_guids:
+        known_guids.discard(int(world_guid))
 
     ctx = WorldLoginContext.from_session(session)
     ctx.exact_0007_map_id = int(getattr(session, "map_id", 0) or 0)
@@ -428,45 +836,196 @@ def build_inventory_delta_responses(session, result) -> list[tuple[str, bytes]]:
         return []
 
     responses: list[tuple[str, bytes]] = []
+    known_guids = _known_inventory_guids(session)
     changed_positions = list(
         dict.fromkeys((int(bag), int(slot)) for bag, slot in (getattr(result, "changed_positions", ()) or ()))
     )
+    changed_items = list(
+        dict.fromkeys(
+            int(getattr(item, "item_guid", 0) or 0)
+            for item in (getattr(result, "changed_items", ()) or ())
+            if int(getattr(item, "item_guid", 0) or 0) > 0
+        )
+    )
+    released_items = [
+        item for item in (getattr(result, "released_items", ()) or ()) if int(getattr(item, "item_guid", 0) or 0) > 0
+    ]
     removed_item_guids = [
         int(item_guid) for item_guid in (getattr(result, "removed_item_guids", ()) or ()) if int(item_guid) > 0
     ]
+    created_item_guids = {
+        int(item_guid) for item_guid in (getattr(result, "created_item_guids", ()) or ()) if int(item_guid) > 0
+    }
+    released_by_guid = {
+        int(getattr(item, "item_guid", 0) or 0): item
+        for item in released_items
+        if int(getattr(item, "item_guid", 0) or 0) > 0
+    }
 
-    root_equipment_changed = any(int(bag) == 0 and 0 <= int(slot) < 23 for bag, slot in changed_positions)
-    root_backpack_changed = any(int(bag) == 0 and 23 <= int(slot) < 39 for bag, slot in changed_positions)
-    affected_bag_guids: set[int] = {int(bag) for bag, _slot in changed_positions if int(bag) != 0}
+    if len(released_items) == 1 and len(changed_items) == 1 and len(changed_positions) >= 2:
+        released_item = released_items[0]
+        moved_item = state.items_by_guid.get(int(changed_items[0]))
+        old_bag = int(getattr(released_item, "bag", 0) or 0)
+        old_slot = int(getattr(released_item, "slot", 0) or 0)
+        new_bag = int(getattr(moved_item, "bag", 0) or 0) if moved_item is not None else old_bag
+        new_slot = int(getattr(moved_item, "slot", 0) or 0) if moved_item is not None else old_slot
+        item_fields = _determine_item_changed_fields(session, moved_item, released_item) if moved_item is not None else []
+        if moved_item is not None and not _is_equipment_position(old_bag, old_slot) and _is_equipment_position(new_bag, new_slot):
+            Logger.debug(
+                f"[INV] EQUIP item={int(getattr(moved_item, 'item_guid', 0) or 0)} "
+                f"src=({old_bag},{old_slot}) equip_slot={new_slot} fields={item_fields}"
+            )
+        elif moved_item is not None and _is_equipment_position(old_bag, old_slot) and not _is_equipment_position(new_bag, new_slot):
+            Logger.debug(
+                f"[INV] UNEQUIP item={int(getattr(moved_item, 'item_guid', 0) or 0)} "
+                f"equip_slot={old_slot} dst=({new_bag},{new_slot}) fields={item_fields}"
+            )
+        else:
+            Logger.debug(
+                f"[INV] MOVE item={int(getattr(moved_item, 'item_guid', 0) or 0)} "
+                f"src=({old_bag},{old_slot}) dst=({new_bag},{new_slot}) "
+                f"item_fields={item_fields} src_slot_clear=True dst_slot_set=True"
+            )
+        if moved_item is not None and (_is_equipment_position(old_bag, old_slot) or _is_equipment_position(new_bag, new_slot)):
+            responses.extend(
+                _build_simple_equipment_transition_responses(
+                    session,
+                    moved_item,
+                    old_bag,
+                    old_slot,
+                    new_bag,
+                    new_slot,
+                )
+            )
+        else:
+            if old_bag == 0:
+                responses.extend(_build_inventory_position_update_responses(session, old_bag, old_slot))
+            else:
+                bag_item = state.items_by_guid.get(old_bag)
+                if bag_item is not None and bool(getattr(bag_item, "is_bag", False)):
+                    responses.extend(sync_container(session, bag_item, [old_slot]))
 
-    for _bag, slot in changed_positions:
-        if not (int(_bag) == 0 and 19 <= int(slot) < 23):
-            continue
-        bag_item = state.get(0, int(slot))
-        if bag_item is not None and bool(getattr(bag_item, "is_bag", False)):
-            affected_bag_guids.add(int(bag_item.item_guid))
+            if moved_item is not None:
+                if new_bag == 0:
+                    responses.extend(_build_inventory_position_update_responses(session, new_bag, new_slot))
+                else:
+                    bag_item = state.items_by_guid.get(new_bag)
+                    if bag_item is None or not bool(getattr(bag_item, "is_bag", False)):
+                        pass
+                    else:
+                        responses.extend(sync_container(session, bag_item, [new_slot]))
 
-    if root_equipment_changed:
-        responses.extend(_build_root_slot_range_sync_responses(session, 0, 23))
-    if root_backpack_changed:
-        responses.extend(_build_root_slot_range_sync_responses(session, 23, 39))
+                responses.extend(sync_item(session, moved_item, item_fields))
+                responses.extend(maybe_trigger_inventory_activation(session, old_bag, new_bag))
+    else:
+        if len(changed_items) == 2 and len(changed_positions) == 2:
+            equip_positions = [(int(bag), int(slot)) for bag, slot in changed_positions if _is_equipment_position(int(bag), int(slot))]
+            storage_positions = [(int(bag), int(slot)) for bag, slot in changed_positions if not _is_equipment_position(int(bag), int(slot))]
+            if len(equip_positions) == 1 and len(storage_positions) == 1:
+                equip_slot = int(equip_positions[0][1])
+                storage_bag, storage_slot = storage_positions[0]
+                responses.extend(_build_equipment_swap_responses(session, equip_slot, storage_bag, storage_slot))
+            else:
+                changed_slots_by_bag: dict[int, list[int]] = {}
+                for bag, slot in changed_positions:
+                    if int(bag) == 0:
+                        responses.extend(_build_inventory_position_update_responses(session, bag, slot))
+                    else:
+                        changed_slots_by_bag.setdefault(int(bag), []).append(int(slot))
 
-    synced_bag_guids: set[int] = set()
-    for bag_guid in sorted(affected_bag_guids):
-        if int(bag_guid) <= 0 or int(bag_guid) in synced_bag_guids:
-            continue
-        bag_item = state.items_by_guid.get(int(bag_guid))
-        if bag_item is None or not bool(getattr(bag_item, "is_bag", False)):
-            continue
-        responses.extend(build_container_open_responses(session, bag_item))
-        synced_bag_guids.add(int(bag_guid))
+                for bag_guid, slots in sorted(changed_slots_by_bag.items()):
+                    bag_item = state.items_by_guid.get(int(bag_guid))
+                    if bag_item is None or not bool(getattr(bag_item, "is_bag", False)):
+                        continue
+                    responses.extend(sync_container(session, bag_item, sorted(dict.fromkeys(int(slot) for slot in slots))))
+
+                for item_guid in changed_items:
+                    item = state.items_by_guid.get(int(item_guid))
+                    if item is None:
+                        continue
+                    item_world_guid = _make_item_world_guid(int(item_guid))
+                    if int(item_guid) in created_item_guids:
+                        Logger.debug(
+                            f"[INV] ADDITEM item={int(item_guid)} dst=({int(getattr(item, 'bag', 0) or 0)},{int(getattr(item, 'slot', 0) or 0)}) "
+                            f"create={item_world_guid not in known_guids}"
+                        )
+                    previous_item = released_by_guid.get(int(item_guid))
+                    changed_fields = _determine_item_changed_fields(
+                        session,
+                        item,
+                        previous_item,
+                        default_to_stack=(previous_item is None and not changed_positions),
+                    )
+                    responses.extend(sync_item(session, item, changed_fields))
+                    if previous_item is not None and not (
+                        _is_equipment_position(int(getattr(previous_item, "bag", 0) or 0), int(getattr(previous_item, "slot", 0) or 0))
+                        or _is_equipment_position(int(getattr(item, "bag", 0) or 0), int(getattr(item, "slot", 0) or 0))
+                    ):
+                        responses.extend(
+                            maybe_trigger_inventory_activation(
+                                session,
+                                int(getattr(previous_item, "bag", 0) or 0),
+                                int(getattr(item, "bag", 0) or 0),
+                            )
+                        )
+        else:
+            changed_slots_by_bag: dict[int, list[int]] = {}
+            for bag, slot in changed_positions:
+                if int(bag) == 0:
+                    responses.extend(_build_inventory_position_update_responses(session, bag, slot))
+                else:
+                    changed_slots_by_bag.setdefault(int(bag), []).append(int(slot))
+
+            for bag_guid, slots in sorted(changed_slots_by_bag.items()):
+                bag_item = state.items_by_guid.get(int(bag_guid))
+                if bag_item is None or not bool(getattr(bag_item, "is_bag", False)):
+                    continue
+                responses.extend(sync_container(session, bag_item, sorted(dict.fromkeys(int(slot) for slot in slots))))
+
+            for item_guid in changed_items:
+                item = state.items_by_guid.get(int(item_guid))
+                if item is None:
+                    continue
+                item_world_guid = _make_item_world_guid(int(item_guid))
+                if int(item_guid) in created_item_guids:
+                    Logger.debug(
+                        f"[INV] ADDITEM item={int(item_guid)} dst=({int(getattr(item, 'bag', 0) or 0)},{int(getattr(item, 'slot', 0) or 0)}) "
+                        f"create={item_world_guid not in known_guids}"
+                    )
+                previous_item = released_by_guid.get(int(item_guid))
+                changed_fields = _determine_item_changed_fields(
+                    session,
+                    item,
+                    previous_item,
+                    default_to_stack=(previous_item is None and not changed_positions),
+                )
+                responses.extend(sync_item(session, item, changed_fields))
+                if previous_item is not None and not (
+                    _is_equipment_position(int(getattr(previous_item, "bag", 0) or 0), int(getattr(previous_item, "slot", 0) or 0))
+                    or _is_equipment_position(int(getattr(item, "bag", 0) or 0), int(getattr(item, "slot", 0) or 0))
+                ):
+                    responses.extend(
+                        maybe_trigger_inventory_activation(
+                            session,
+                            int(getattr(previous_item, "bag", 0) or 0),
+                            int(getattr(item, "bag", 0) or 0),
+                        )
+                    )
 
     if inventory_result_affects_equipment(result):
         from server.modules.handlers.world.state.runtime import build_self_player_appearance_responses
 
         responses.extend(build_self_player_appearance_responses(session))
 
+    removed_known_before = {int(item_guid): (int(_make_item_world_guid(int(item_guid))) in known_guids) for item_guid in removed_item_guids}
     responses.extend(_build_item_remove_responses(session, removed_item_guids))
+    for index, item_guid in enumerate(removed_item_guids):
+        bag, slot = changed_positions[index] if index < len(changed_positions) else (-1, -1)
+        Logger.debug(
+            f"[INV] REMOVE item={int(item_guid)} from=({int(bag)},{int(slot)}) "
+            f"known_before={removed_known_before.get(int(item_guid), False)} "
+            f"known_after={int(_make_item_world_guid(int(item_guid))) in known_guids}"
+        )
     return responses
 
 
@@ -480,10 +1039,10 @@ def build_equipped_bag_sync_responses(session) -> list[tuple[str, bytes]]:
         bag_item = state.get(0, slot)
         if bag_item is None or not bool(getattr(bag_item, "is_bag", False)):
             continue
-        responses.extend(build_item_snapshot_responses(session, bag_item))
+        responses.extend(sync_container(session, bag_item))
         for bag_slot in range(int(getattr(bag_item, "container_slots", 0) or 0)):
             item = state.get(int(bag_item.item_guid), bag_slot)
             if item is None:
                 continue
-            responses.extend(build_item_snapshot_responses(session, item))
+            responses.extend(sync_item(session, item))
     return responses

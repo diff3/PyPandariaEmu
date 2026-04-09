@@ -43,7 +43,10 @@ from server.modules.handlers.world.constants.character_data import (
     PLAYER_FACTION_TEMPLATE_BY_RACE,
 )
 from server.modules.handlers.world.dispatcher import register
-from server.modules.handlers.world.inventory_sync import build_login_inventory_sync_responses
+from server.modules.handlers.world.inventory_sync import (
+    build_login_inventory_sync_responses,
+    trigger_inventory_activation,
+)
 from server.modules.handlers.world.opcodes import misc as misc_handlers
 from server.modules.handlers.world.opcodes.movement import (
     _capture_persist_position_from_session as capture_persist_position_from_session,
@@ -323,6 +326,7 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     session.teleport_pending = False
     session.teleport_destination = None
     session.near_teleport_pending = False
+    session.inventory_activated = False
 
 
 def _build_world_login_context(session) -> WorldLoginContext:
@@ -371,6 +375,7 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
     if inventory_packets:
         Logger.info(f"[WorldLogin] sending {len(inventory_packets)} inventory sync packets")
         responses.extend(inventory_packets)
+        responses.extend(trigger_inventory_activation(session))
     for opcode_name, payload in post_update_packets:
         Logger.info(f"[WorldLogin] sending {opcode_name}")
         responses.append((opcode_name, payload))
@@ -411,6 +416,7 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     if inventory_packets:
         Logger.info(f"[Teleport] sending {len(inventory_packets)} inventory sync packets")
         responses.extend(inventory_packets)
+        responses.extend(trigger_inventory_activation(session))
 
     time_sync = build_login_packet("SMSG_TIME_SYNC_REQUEST", ctx)
     if time_sync is not None:

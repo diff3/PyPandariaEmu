@@ -3,7 +3,7 @@ from __future__ import annotations
 import struct
 from typing import Optional, Tuple
 
-from DSL.modules.bitsHandler import BitWriter
+from DSL.modules.bitsHandler import BitInterPreter, BitWriter
 from shared.Logger import Logger
 from server.modules.game.inventory import (
     auto_equip_item,
@@ -20,6 +20,7 @@ from server.modules.handlers.world.inventory_sync import (
     build_inventory_delta_responses,
     build_container_open_responses,
     inventory_result_affects_equipment,
+    trigger_inventory_activation,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
 from server.modules.protocol.PacketContext import PacketContext
@@ -148,6 +149,51 @@ def build_inventory_change_failure_payload(
     return bytes(payload)
 
 
+def _decode_swap_item_payload(raw: bytes) -> tuple[int, int, int, int] | None:
+    if len(raw) < 9:
+        return None
+
+    src_slot_alt = int(raw[0])
+    src_bag_alt = int(raw[1])
+    dst_bag_alt = int(raw[2])
+    dst_slot_alt = int(raw[3])
+
+    byte_pos = 4
+    bit_pos = 0
+    count, byte_pos, bit_pos = BitInterPreter.read_bits(raw, byte_pos, bit_pos, 2)
+    if int(count) != 2:
+        return None
+
+    has_slot: list[bool] = []
+    has_bag: list[bool] = []
+    for _ in range(2):
+        slot_bit, byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        bag_bit, byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
+        has_slot.append(not bool(slot_bit))
+        has_bag.append(not bool(bag_bit))
+
+    if bit_pos != 0:
+        byte_pos += 1
+        bit_pos = 0
+
+    def _read_u8() -> int | None:
+        nonlocal byte_pos
+        if byte_pos >= len(raw):
+            return None
+        value = int(raw[byte_pos])
+        byte_pos += 1
+        return value
+
+    dst_bag = _read_u8() if has_bag[0] else dst_bag_alt
+    dst_slot = _read_u8() if has_slot[0] else dst_slot_alt
+    src_bag = _read_u8() if has_bag[1] else src_bag_alt
+    src_slot = _read_u8() if has_slot[1] else src_slot_alt
+
+    if None in (src_bag, src_slot, dst_bag, dst_slot):
+        return None
+    return int(src_bag), int(src_slot), int(dst_bag), int(dst_slot)
+
+
 def _inventory_error_code_for_message(message: str) -> int:
     text = str(message or "")
     mapping = {
@@ -195,15 +241,23 @@ def _result_to_response(
     level = "info" if result.ok else "warning"
     getattr(Logger, level)(f"[Inventory] {prefix} -> {result.message}")
     if result.ok:
-        Logger.warning("[INV] forcing full resync (all success cases)")
-        return 0, build_login_inventory_sync_responses(session) or None
+        responses = build_inventory_delta_responses(session, result)
+        if inventory_result_affects_equipment(result):
+            resync_player_appearance(session)
+        return 0, responses or None
     responses: list[tuple[str, bytes]] = []
+
     if failure_payload:
         responses.append(("SMSG_INVENTORY_CHANGE_FAILURE", failure_payload))
+
+    # Force full resync (already exists, keep it)
     responses.extend(build_login_inventory_sync_responses(session))
-    if not responses:
-        responses = _system_message(f"[Inventory] {result.message}")
-    return 0, responses or None
+    responses.extend(trigger_inventory_activation(session))
+
+    # IMPORTANT: force client UI reset (fixes grey/locked items)
+    resync_player_appearance(session)
+
+    return 0, responses
 
 
 @register("CMSG_AUTOEQUIP_ITEM")
@@ -326,6 +380,19 @@ def handle_swap_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tu
     src_bag = _decoded_first_int(decoded, "src_bag", "srcBag", "source_bag")
     dst_bag = _decoded_first_int(decoded, "dst_bag", "dstBag", "dest_bag", "target_bag")
     dst_slot = _decoded_first_int(decoded, "dst_slot", "dstSlot", "dest_slot", "target_slot")
+
+    if None in (src_slot, src_bag, dst_bag, dst_slot):
+        parsed = _decode_swap_item_payload(raw)
+        if parsed is not None:
+            parsed_src_bag, parsed_src_slot, parsed_dst_bag, parsed_dst_slot = parsed
+            if src_bag is None:
+                src_bag = parsed_src_bag
+            if src_slot is None:
+                src_slot = parsed_src_slot
+            if dst_bag is None:
+                dst_bag = parsed_dst_bag
+            if dst_slot is None:
+                dst_slot = parsed_dst_slot
 
     if src_slot is None and len(raw) >= 1:
         src_slot = int(raw[0])

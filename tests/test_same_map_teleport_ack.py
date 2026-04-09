@@ -94,10 +94,60 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
     )
     monkeypatch.setattr(
         movement,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode("utf-8"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "server.modules.handlers.world.opcodes.chat",
+        types.SimpleNamespace(
+            _build_fixplayer_responses=lambda target: [("SMSG_UPDATE_OBJECT", b"fixplayer")]
+        ),
+    )
+
+    status, responses = movement.handle_move_teleport_ack(session, None)
+
+    assert status == 0
+    assert session.near_teleport_pending is False
+    assert responses == [
+        ("SMSG_MESSAGECHAT", b"[Teleport] same-map ack -> Orgrimmar"),
+        ("SMSG_UPDATE_OBJECT", b"fixplayer"),
+    ]
+    assert calls == [
+        ("capture", session),
+        ("dirty", session),
+        ("save", {"reason": "near-teleport", "online": 1, "force": True}),
+        ("broadcast", True),
+    ]
+
+
+def test_same_map_teleport_ack_with_fixspeed_refreshes_speed_and_player_move(monkeypatch):
+    session = _FakeSession()
+    session.fixspeed_pending = True
+    session.teleport_destination = "FixSpeed"
+    session.walk_speed = 2.5
+    session.run_speed = 35.0
+    session.swim_speed = 23.5
+    session.fly_speed = 35.0
+
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
+    monkeypatch.setattr(movement, "_save_session_position", lambda target, **kwargs: None)
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, *, force=False: None)
+    monkeypatch.setattr(
+        movement,
         "build_same_map_teleport_self_resync_responses",
-        lambda target: [
-            ("SMSG_UPDATE_OBJECT", b"0006"),
-        ],
+        lambda target: [("SMSG_UPDATE_OBJECT", b"0006")],
+    )
+    monkeypatch.setattr(
+        movement,
+        "build_move_set_speed_payload",
+        lambda target, opcode_name, speed: f"{opcode_name}|{float(speed):.2f}".encode(),
+    )
+    monkeypatch.setattr(
+        movement,
+        "_build_run_speed_refresh_response",
+        lambda target: ("SMSG_PLAYER_MOVE", b"player-move"),
     )
     monkeypatch.setattr(
         movement,
@@ -109,15 +159,16 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
 
     assert status == 0
     assert session.near_teleport_pending is False
+    assert session.fixspeed_pending is False
     assert responses == [
-        ("SMSG_MESSAGECHAT", b"[Teleport] same-map ack -> Orgrimmar"),
+        ("SMSG_MESSAGECHAT", b"[Teleport] same-map ack -> FixSpeed"),
+        ("SMSG_MESSAGECHAT", b"[FixSpeed] same-map ack -> speed refresh"),
         ("SMSG_UPDATE_OBJECT", b"0006"),
-    ]
-    assert calls == [
-        ("capture", session),
-        ("dirty", session),
-        ("save", {"reason": "near-teleport", "online": 1, "force": True}),
-        ("broadcast", True),
+        ("SMSG_MOVE_SET_WALK_SPEED", b"SMSG_MOVE_SET_WALK_SPEED|2.50"),
+        ("SMSG_MOVE_SET_RUN_SPEED", b"SMSG_MOVE_SET_RUN_SPEED|35.00"),
+        ("SMSG_MOVE_SET_SWIM_SPEED", b"SMSG_MOVE_SET_SWIM_SPEED|23.50"),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", b"SMSG_MOVE_SET_FLIGHT_SPEED|35.00"),
+        ("SMSG_PLAYER_MOVE", b"player-move"),
     ]
 
 

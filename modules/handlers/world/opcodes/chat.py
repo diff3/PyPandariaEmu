@@ -23,9 +23,11 @@ from server.modules.handlers.world.bootstrap.replay import (
     send_raw_packet,
 )
 from server.modules.handlers.world.inventory_sync import (
+    build_login_inventory_sync_responses,
     build_inventory_delta_responses,
     build_item_snapshot_responses,
     inventory_result_affects_equipment,
+    trigger_inventory_activation,
 )
 from server.modules.handlers.world.chat.router import chat_router
 from server.modules.handlers.world.chat.codec import (
@@ -59,6 +61,7 @@ from server.modules.handlers.world.state.runtime import (
     pack_wow_game_time,
     resolve_weather_type,
 )
+from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.handlers.world.teleport.runtime import teleport_player
 from server.modules.handlers.world.teleport.teleport_service import (
     add_teleport as add_named_teleport,
@@ -106,6 +109,15 @@ def _notification_response(message: str) -> list[tuple[str, bytes]]:
     # Fallback if we need to restore center-screen notifications:
     # return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
     return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
+
+
+def _append_feedback_response(
+    responses: list[tuple[str, bytes]] | None,
+    message: str,
+) -> list[tuple[str, bytes]]:
+    merged = list(responses or [])
+    merged.extend(_notification_response(message))
+    return merged
 
 
 def _make_skyfire_guid(low: int, entry: int, high: int) -> int:
@@ -264,6 +276,140 @@ def _build_speed_command_responses(session) -> list[tuple[str, bytes]]:
         )
     )
     return responses
+
+
+def _build_fixplayer_responses(session, mode: int = 0) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.bootstrap import replay as bootstrap_replay
+    from server.modules.handlers.world.state.runtime import (
+        _build_player_create_update_response,
+        _build_player_move_response,
+        _build_player_value_update_responses,
+    )
+
+    guid = int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    x = float(getattr(session, "x", 0.0) or 0.0)
+    y = float(getattr(session, "y", 0.0) or 0.0)
+    z = float(getattr(session, "z", 0.0) or 0.0)
+    run_speed = float(getattr(session, "run_speed", 7.0) or 7.0)
+    Logger.info(
+        "[FIXPLAYER] guid=%s mode=%s run=%.2f pos=(%.2f,%.2f,%.2f)",
+        guid,
+        int(mode),
+        run_speed,
+        x,
+        y,
+        z,
+    )
+
+    responses: list[tuple[str, bytes]] = []
+    normalized_mode = int(mode)
+    if normalized_mode >= 2:
+        ctx = login_handlers._build_world_login_context(session)
+        for opcode_name in (
+            "SMSG_LOGIN_VERIFY_WORLD",
+            "SMSG_LOGIN_SET_TIME_SPEED",
+            "SMSG_BIND_POINT_UPDATE",
+        ):
+            payload = build_login_packet(opcode_name, ctx)
+            if payload is None:
+                continue
+            responses.append((opcode_name, payload))
+
+        responses.append(bootstrap_replay._build_dynamic_active_mover_packet(session))
+        create_response = _build_player_create_update_response(session)
+        if create_response is not None:
+            responses.append(create_response)
+        responses.extend(_build_player_value_update_responses(session))
+        responses.extend(build_login_inventory_sync_responses(session))
+        responses.extend(trigger_inventory_activation(session))
+
+        time_sync = build_login_packet("SMSG_TIME_SYNC_REQUEST", ctx)
+        if time_sync is not None:
+            responses.append(("SMSG_TIME_SYNC_REQUEST", time_sync))
+
+        for opcode_name in (
+            "SMSG_PHASE_SHIFT_CHANGE",
+            "SMSG_INIT_WORLD_STATES",
+            "SMSG_WEATHER",
+            "SMSG_QUERY_TIME_RESPONSE",
+        ):
+            payload = build_login_packet(opcode_name, ctx)
+            if payload is None:
+                continue
+            responses.append((opcode_name, payload))
+    elif normalized_mode == 1:
+        responses.append(bootstrap_replay._build_dynamic_active_mover_packet(session))
+        create_response = _build_player_create_update_response(session)
+        if create_response is not None:
+            responses.append(create_response)
+        responses.extend(_build_player_value_update_responses(session))
+    else:
+        responses.extend(_build_player_value_update_responses(session))
+
+    for opcode_name, speed_value in (
+        ("SMSG_MOVE_SET_WALK_SPEED", float(getattr(session, "walk_speed", 2.5) or 2.5)),
+        ("SMSG_MOVE_SET_RUN_SPEED", run_speed),
+        ("SMSG_MOVE_SET_SWIM_SPEED", float(getattr(session, "swim_speed", 4.7) or 4.7)),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", float(getattr(session, "fly_speed", 7.0) or 7.0)),
+    ):
+        responses.append((opcode_name, build_move_set_speed_payload(session, opcode_name, speed_value)))
+
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+    move_response = None
+    refresh_builder = getattr(movement_handlers, "_build_run_speed_refresh_response", None)
+    if callable(refresh_builder):
+        move_response = refresh_builder(session)
+    if move_response is None:
+        move_response = _build_player_move_response(session)
+    if move_response is not None:
+        responses.append(move_response)
+    return responses
+
+
+def _apply_fixplayer_destination(session, destination_name: str) -> str | None:
+    destination = find_teleport(destination_name)
+    if destination is None:
+        return None
+
+    map_id = int(destination["map"])
+    x = float(destination["x"])
+    y = float(destination["y"])
+    z = float(destination["z"])
+    orientation = float(destination["o"])
+    session.map_id = map_id
+    session.x = x
+    session.y = y
+    session.z = z
+    session.orientation = orientation
+    session.zone = int(resolve_zone_from_position(map_id, x, y) or int(getattr(session, "zone", 0) or 0))
+    session.instance_id = 0
+    session.teleport_destination = str(destination["name"])
+    return str(destination["name"])
+
+
+def _build_fixspeed_responses(session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.opcodes.movement import build_same_map_teleport_payload
+
+    session.teleport_pending = False
+    session.near_teleport_pending = True
+    session.fixspeed_pending = True
+    Logger.info(
+        "[FIXSPEED] guid=%s queued same-map teleport pos=(%.2f,%.2f,%.2f,%.2f) run=%.2f",
+        int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+        float(getattr(session, "run_speed", 7.0) or 7.0),
+    )
+    return [
+        (
+            "SMSG_MESSAGECHAT",
+            encode_skyfire_messagechat_system_payload("[FixSpeed] queued same-map resync"),
+        ),
+        ("SMSG_MOVE_TELEPORT", build_same_map_teleport_payload(session)),
+    ]
 
 
 def _debug_feedback_response(message: str) -> list[tuple[str, bytes]]:
@@ -561,6 +707,14 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         return [("SMSG_MESSAGECHAT", payload)]
 
     if command_lower == ".getxy":
+        feedback = (
+            "[GetXY] "
+            f"map={int(getattr(session, 'map_id', 0) or 0)} "
+            f"x={float(getattr(session, 'x', 0.0) or 0.0):.2f} "
+            f"y={float(getattr(session, 'y', 0.0) or 0.0):.2f} "
+            f"z={float(getattr(session, 'z', 0.0) or 0.0):.2f} "
+            f"o={float(getattr(session, 'orientation', 0.0) or 0.0):.2f}"
+        )
         Logger.info(
             "[GETXY] "
             f"map={int(getattr(session, 'map_id', 0) or 0)} "
@@ -569,7 +723,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             f"z={float(getattr(session, 'z', 0.0) or 0.0):.2f} "
             f"o={float(getattr(session, 'orientation', 0.0) or 0.0):.2f}"
         )
-        return []
+        return _notification_response(feedback)
 
     if command_lower.startswith(".speed"):
         parts = command.split(maxsplit=1)
@@ -628,7 +782,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             abrupt,
             announce=f"[Weather] type={int(weather_type)} density={float(density):.2f}",
         )
-        return []
+        return _notification_response(f"[Weather] type={int(weather_type)} density={float(density):.2f}")
 
     if command_lower.startswith(".time"):
         parts = command.split(maxsplit=1)
@@ -684,7 +838,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             int(minute),
             announce=f"[Time] {hour:02d}:{minute:02d}",
         )
-        return []
+        return _notification_response(f"[Time] {hour:02d}:{minute:02d}")
 
     if command_lower.startswith(".system "):
         message = str(command[8:] or "").strip()
@@ -692,7 +846,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             return _notification_response("Usage: .system <message>")
         Logger.info(f"[SystemChat] message={message!r}")
         broadcast_system_message(message, scope="world")
-        return []
+        return _notification_response(f"[System] sent: {message}")
 
     if command_lower == ".mount":
         Logger.info(
@@ -706,12 +860,12 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
             Logger.info("[Mount] .mount -> dismount")
             responses = spells_handlers.dismount(session)
             Logger.info("[Mount][Debug] chat .mount dismount responses=%s", len(responses))
-            return responses
+            return _append_feedback_response(responses, "[Mount] dismount requested")
 
         Logger.info(f"[Mount] .mount -> display={_CHAT_MOUNT_DISPLAY_ID}")
         responses = spells_handlers.mount_direct(session, _CHAT_MOUNT_DISPLAY_ID)
         Logger.info("[Mount][Debug] chat .mount returning responses=%s", len(responses))
-        return responses
+        return _append_feedback_response(responses, "[Mount] mount requested")
 
     if command_lower.startswith(".additem"):
         parts = command.split()
@@ -729,6 +883,31 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         responses = _build_inventory_mutation_sync_responses(session, result) if result.ok else []
         responses.extend(_notification_response(f"[Inventory] {result.message}"))
         return responses
+
+    if command_lower == ".invfix":
+        resync_player_appearance(session)
+        responses = list(build_login_inventory_sync_responses(session))
+        responses.extend(trigger_inventory_activation(session))
+        return _append_feedback_response(responses, "[InvFix] full inventory resync sent")
+
+    if command_lower == ".fixplayer":
+        return _append_feedback_response(_build_fixplayer_responses(session, 0), "[FixPlayer] mode=0 resync sent")
+
+    if command_lower.startswith(".fixplayer "):
+        parts = command.split(maxsplit=1)
+        destination_name = parts[1].strip()
+        if not destination_name:
+            return _notification_response("Usage: .fixplayer <teleport>")
+        applied_name = _apply_fixplayer_destination(session, destination_name)
+        if applied_name is None:
+            return _notification_response("Teleport not found")
+        return _append_feedback_response(
+            _build_fixplayer_responses(session, 2),
+            f"[FixPlayer] destination={applied_name}",
+        )
+
+    if command_lower == ".fixspeed":
+        return _build_fixspeed_responses(session)
 
     if command_lower.startswith(".autoequip"):
         parts = command.split()

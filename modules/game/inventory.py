@@ -135,6 +135,7 @@ class InventoryResult:
     added: int = 0
     item: Optional[InventoryItem] = None
     changed_items: tuple[InventoryItem, ...] = ()
+    released_items: tuple[InventoryItem, ...] = ()
     created_item_guids: tuple[int, ...] = ()
     changed_positions: tuple[tuple[int, int], ...] = ()
     removed_item_guids: tuple[int, ...] = ()
@@ -660,10 +661,26 @@ def swap_character_item(session, src_bag: int, src_slot: int, dst_bag: int, dst_
             return InventoryResult(False, "cannot move non-empty equipped bag there yet")
 
     changed_positions: list[tuple[int, int]] = [(int(src_bag), int(src_slot)), (int(dst_bag), int(dst_slot))]
+    released_items: list[InventoryItem] = []
     try:
         src_old_bag, src_old_slot = src_item.bag, src_item.slot
         dst_old_bag = dst_item.bag if dst_item else None
         dst_old_slot = dst_item.slot if dst_item else None
+
+        if dst_item is None:
+            released_items.append(
+                InventoryItem(
+                    item_guid=int(src_item.item_guid),
+                    owner_guid=int(src_item.owner_guid),
+                    bag=int(src_item.bag),
+                    slot=int(src_item.slot),
+                    count=int(src_item.count),
+                    template=src_item.template,
+                    flags=int(src_item.flags),
+                    durability=int(src_item.durability),
+                    random_property_id=int(src_item.random_property_id),
+                )
+            )
 
         state.remove(src_item)
         if dst_item:
@@ -697,6 +714,7 @@ def swap_character_item(session, src_bag: int, src_slot: int, dst_bag: int, dst_
         "item equipped" if equip_dst_slot >= 0 else "item moved",
         item=src_item,
         changed_items=tuple(item for item in (src_item, dst_item) if item is not None),
+        released_items=tuple(released_items),
         changed_positions=tuple(dict.fromkeys(changed_positions)),
         equip_dst_slot=equip_dst_slot,
     )

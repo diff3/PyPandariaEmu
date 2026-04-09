@@ -1229,11 +1229,18 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         return 0, [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Teleport] unexpected near-teleport ack ignored"))]
 
     session.near_teleport_pending = False
+    fixspeed_pending = bool(getattr(session, "fixspeed_pending", False))
+    session.fixspeed_pending = False
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     _save_session_position(session, reason="near-teleport", online=1, force=True)
     broadcast_player_state_update(session, force=True)
-    self_resync_responses = build_same_map_teleport_self_resync_responses(session)
+    if fixspeed_pending:
+        self_resync_responses = build_same_map_teleport_self_resync_responses(session)
+    else:
+        from server.modules.handlers.world.opcodes.chat import _build_fixplayer_responses
+
+        self_resync_responses = _build_fixplayer_responses(session)
     Logger.info(
         "[Teleport] same-map teleport ack destination=%s pos=(%.2f %.2f %.2f %.2f)",
         str(getattr(session, "teleport_destination", "") or ""),
@@ -1251,6 +1258,24 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         )
     ]
     responses.extend(self_resync_responses)
+    if fixspeed_pending:
+        for opcode_name, speed_value in (
+            ("SMSG_MOVE_SET_WALK_SPEED", float(getattr(session, "walk_speed", 2.5) or 2.5)),
+            ("SMSG_MOVE_SET_RUN_SPEED", float(getattr(session, "run_speed", 7.0) or 7.0)),
+            ("SMSG_MOVE_SET_SWIM_SPEED", float(getattr(session, "swim_speed", 4.7) or 4.7)),
+            ("SMSG_MOVE_SET_FLIGHT_SPEED", float(getattr(session, "fly_speed", 7.0) or 7.0)),
+        ):
+            responses.append((opcode_name, build_move_set_speed_payload(session, opcode_name, speed_value)))
+        refresh_response = _build_run_speed_refresh_response(session)
+        if refresh_response is not None:
+            responses.append(refresh_response)
+        responses.insert(
+            1,
+            (
+                "SMSG_MESSAGECHAT",
+                encode_skyfire_messagechat_system_payload("[FixSpeed] same-map ack -> speed refresh"),
+            ),
+        )
     return 0, responses
 
 
