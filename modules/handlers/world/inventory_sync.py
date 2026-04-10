@@ -549,6 +549,34 @@ def build_self_visible_item_update_responses(session) -> list[tuple[str, bytes]]
     ]
 
 
+def _build_self_visible_item_slot_update_responses(session, slot: int, display_id: int = 0) -> list[tuple[str, bytes]]:
+    if not (0 <= int(slot) < _PLAYER_VISIBLE_ITEM_SLOT_COUNT):
+        return []
+
+    cached = list(getattr(session, "equipment_cache_raw", []) or [])
+    required = _PLAYER_VISIBLE_ITEM_SLOT_COUNT * 2
+    if len(cached) < required:
+        cached.extend([0] * (required - len(cached)))
+    cached[int(slot) * 2] = int(display_id)
+    cached[int(slot) * 2 + 1] = 0
+    session.equipment_cache_raw = cached
+
+    field_index = _PLAYER_FIELD_VISIBLE_ITEMS + (int(slot) * 2)
+    return [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                guid=int(getattr(session, "char_guid", 0) or 0),
+                field_updates=[
+                    (field_index, int(display_id)),
+                    (field_index + 1, 0),
+                ],
+            ),
+        )
+    ]
+
+
 def _build_inventory_slot_update_responses(session, item) -> list[tuple[str, bytes]]:
     return _build_inventory_position_update_responses(session, int(item.bag), int(item.slot))
 
@@ -740,6 +768,7 @@ def _build_simple_equipment_transition_responses(session, moved_item, old_bag: i
         validate_item_links(moved_item, session, bag_item)
         batch = build_update_batch()
         add_update(batch, "PLAYER", _build_player_slot_values_responses(session, int(old_slot), 0))
+        add_update(batch, "PLAYER_VISIBLE", _build_self_visible_item_slot_update_responses(session, int(old_slot), 0))
         add_update(batch, "ITEM", sync_known_item(session, moved_item, item_fields))
         if int(new_bag) == 0:
             add_update(batch, "CONTAINER", _build_storage_slot_update_responses(session, int(new_bag), int(new_slot), int(item_guid)))

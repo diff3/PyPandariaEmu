@@ -824,19 +824,23 @@ def test_inventory_delta_unequip_known_item_clears_equip_slot_and_sets_destinati
         decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
         updates.extend(decoded.get("updates", []))
     equip_field = inventory_sync._inventory_slot_field_index(0, 5)
+    visible_field = inventory_sync._PLAYER_FIELD_VISIBLE_ITEMS + (5 * 2)
     assert any(update["mask"]["set_bits"] == [equip_field, equip_field + 1] for update in updates if update.get("guid") == 7)
+    assert any(update["mask"]["set_bits"] == [visible_field, visible_field + 1] for update in updates if update.get("guid") == 7)
     assert any(update["mask"]["set_bits"] == [71, 72] for update in updates if update.get("guid") == inventory_sync._make_item_world_guid(1000))
     assert not any(update["update_type"] == 1 for update in updates if update.get("guid") == inventory_sync._make_item_world_guid(2000))
     relevant = [
         update for update in updates
         if (
             (update.get("guid") == 7 and update["mask"]["set_bits"] == [equip_field, equip_field + 1])
+            or (update.get("guid") == 7 and update["mask"]["set_bits"] == [visible_field, visible_field + 1])
             or (update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["mask"]["set_bits"] == [8, 9, 10, 11])
             or (update.get("guid") == inventory_sync._make_item_world_guid(1000) and update["mask"]["set_bits"] == [71, 72])
         )
     ]
-    assert [(update.get("guid"), update["mask"]["set_bits"]) for update in relevant[:3]] == [
+    assert [(update.get("guid"), update["mask"]["set_bits"]) for update in relevant[:4]] == [
         (7, [equip_field, equip_field + 1]),
+        (7, [visible_field, visible_field + 1]),
         (inventory_sync._make_item_world_guid(2000), [8, 9, 10, 11]),
         (inventory_sync._make_item_world_guid(1000), [71, 72]),
     ]
