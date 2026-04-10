@@ -629,6 +629,42 @@ def _build_player_slot_values_responses(session, slot: int, item_world_guid: int
     ]
 
 
+def _build_player_equip_values_responses(
+    session,
+    slot: int,
+    item_world_guid: int,
+    visible_entry: int,
+) -> list[tuple[str, bytes]]:
+    field_index = _inventory_slot_field_index(0, int(slot))
+    if field_index is None or not _is_equipment_position(0, int(slot)):
+        return []
+
+    visible_field_index = _PLAYER_FIELD_VISIBLE_ITEMS + (int(slot) * 2)
+    Logger.debug(
+        "[EQUIP_VISIBLE] slot=%s entry=%s field=%s",
+        int(slot),
+        int(visible_entry),
+        int(visible_field_index),
+    )
+    field_updates = [
+        (visible_field_index, int(visible_entry)),
+        (visible_field_index + 1, 0),
+        (field_index, int(item_world_guid) & 0xFFFFFFFF),
+        (field_index + 1, int((int(item_world_guid) >> 32) & 0xFFFFFFFF)),
+    ]
+    field_updates.sort(key=lambda item: int(item[0]))
+    return [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                guid=int(getattr(session, "char_guid", 0) or 0),
+                field_updates=field_updates,
+            ),
+        )
+    ]
+
+
 def _build_storage_slot_update_responses(session, bag: int, slot: int, item_world_guid: int | None = None) -> list[tuple[str, bytes]]:
     if int(bag) == 0:
         return _build_player_slot_values_responses(session, int(slot), int(item_world_guid or 0))
@@ -788,7 +824,16 @@ def _build_simple_equipment_transition_responses(session, moved_item, old_bag: i
     elif source_bag_item is not None:
         add_update(batch, "CONTAINER", sync_known_container(session, source_bag_item, [int(old_slot)]))
     add_update(batch, "ITEM", sync_known_item(session, moved_item, item_fields))
-    add_update(batch, "PLAYER", _build_player_slot_values_responses(session, int(new_slot), int(item_guid)))
+    add_update(
+        batch,
+        "PLAYER",
+        _build_player_equip_values_responses(
+            session,
+            int(new_slot),
+            int(item_guid),
+            int(getattr(moved_item, "entry", 0) or 0),
+        ),
+    )
     return send_update_batch(session, batch)
 
 
@@ -857,7 +902,16 @@ def _build_equipment_swap_responses(session, equip_slot: int, storage_bag: int, 
     elif bag_item is not None:
         add_update(batch, "CONTAINER", sync_known_container(session, bag_item, [int(storage_slot)]))
     add_update(batch, "ITEM", sync_known_item(session, equipped_item, equipped_fields))
-    add_update(batch, "PLAYER", _build_player_slot_values_responses(session, int(equip_slot), int(equipped_guid)))
+    add_update(
+        batch,
+        "PLAYER",
+        _build_player_equip_values_responses(
+            session,
+            int(equip_slot),
+            int(equipped_guid),
+            int(getattr(equipped_item, "entry", 0) or 0),
+        ),
+    )
     return send_update_batch(session, batch)
 
 

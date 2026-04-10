@@ -760,19 +760,21 @@ def test_inventory_delta_equip_known_item_uses_slot_updates_and_values_only():
     assert all(update["update_type"] == 0 for update in item_updates)
     assert any(update["mask"]["set_bits"] == [8, 9, 10, 11] for update in item_updates)
     equip_field = inventory_sync._inventory_slot_field_index(0, 5)
-    assert any(update["mask"]["set_bits"] == [equip_field, equip_field + 1] for update in updates if update.get("guid") == 7)
+    visible_field = inventory_sync._PLAYER_FIELD_VISIBLE_ITEMS + (5 * 2)
+    player_bits = [visible_field, visible_field + 1, equip_field, equip_field + 1]
+    assert any(update["mask"]["set_bits"] == player_bits for update in updates if update.get("guid") == 7)
     relevant = [
         update for update in updates
         if (
             (update.get("guid") == inventory_sync._make_item_world_guid(1000) and update["mask"]["set_bits"] == [69, 70])
             or (update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["mask"]["set_bits"] == [8, 9, 10, 11])
-            or (update.get("guid") == 7 and update["mask"]["set_bits"] == [equip_field, equip_field + 1])
+            or (update.get("guid") == 7 and update["mask"]["set_bits"] == player_bits)
         )
     ]
     assert [(update.get("guid"), update["mask"]["set_bits"]) for update in relevant[:3]] == [
         (inventory_sync._make_item_world_guid(1000), [69, 70]),
         (inventory_sync._make_item_world_guid(2000), [8, 9, 10, 11]),
-        (7, [equip_field, equip_field + 1]),
+        (7, player_bits),
     ]
 
 
@@ -896,6 +898,8 @@ def test_inventory_delta_equip_swap_updates_in_expected_order():
         updates.extend(decoded.get("updates", []))
 
     equip_field = inventory_sync._inventory_slot_field_index(0, 5)
+    visible_field = inventory_sync._PLAYER_FIELD_VISIBLE_ITEMS + (5 * 2)
+    player_set_bits = [visible_field, visible_field + 1, equip_field, equip_field + 1]
     relevant = [
         update for update in updates
         if (
@@ -903,6 +907,7 @@ def test_inventory_delta_equip_swap_updates_in_expected_order():
             or (update.get("guid") == inventory_sync._make_item_world_guid(3000) and update["mask"]["set_bits"] == [8, 9, 10, 11])
             or (update.get("guid") == inventory_sync._make_item_world_guid(1000) and update["mask"]["set_bits"] == [69, 70])
             or (update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["mask"]["set_bits"] == [8, 9, 10, 11])
+            or (update.get("guid") == 7 and update["mask"]["set_bits"] == player_set_bits)
         )
     ]
     assert [(update.get("guid"), update["mask"]["set_bits"]) for update in relevant[:5]] == [
@@ -910,7 +915,7 @@ def test_inventory_delta_equip_swap_updates_in_expected_order():
         (inventory_sync._make_item_world_guid(3000), [8, 9, 10, 11]),
         (inventory_sync._make_item_world_guid(1000), [69, 70]),
         (inventory_sync._make_item_world_guid(2000), [8, 9, 10, 11]),
-        (7, [equip_field, equip_field + 1]),
+        (7, player_set_bits),
     ]
 
 
