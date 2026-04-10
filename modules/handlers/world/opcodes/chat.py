@@ -298,10 +298,19 @@ def _build_inventory_mutation_sync_responses(session, result) -> list[tuple[str,
     return build_inventory_delta_responses(session, result)
 
 
+def send_run_speed(player, speed: float) -> tuple[str, bytes]:
+    guid = int(getattr(player, "char_guid", 0) or getattr(player, "player_guid", 0) or 0)
+    run_speed = float(speed)
+    Logger.info("[SPEED] guid=%s speed=%.2f", guid, run_speed)
+    return (
+        "SMSG_MOVE_SET_RUN_SPEED",
+        build_move_set_speed_payload(player, "SMSG_MOVE_SET_RUN_SPEED", run_speed),
+    )
+
+
 def _build_speed_command_responses(session) -> list[tuple[str, bytes]]:
     speed_packets = (
         ("SMSG_MOVE_SET_WALK_SPEED", float(getattr(session, "walk_speed", 2.5) or 2.5)),
-        ("SMSG_MOVE_SET_RUN_SPEED", float(getattr(session, "run_speed", 7.0) or 7.0)),
         ("SMSG_MOVE_SET_SWIM_SPEED", float(getattr(session, "swim_speed", 4.7) or 4.7)),
         ("SMSG_MOVE_SET_FLIGHT_SPEED", float(getattr(session, "fly_speed", 7.0) or 7.0)),
     )
@@ -309,6 +318,7 @@ def _build_speed_command_responses(session) -> list[tuple[str, bytes]]:
         (opcode_name, build_move_set_speed_payload(session, opcode_name, speed_value))
         for opcode_name, speed_value in speed_packets
     ]
+    responses.insert(1, send_run_speed(session, float(getattr(session, "run_speed", 7.0) or 7.0)))
     responses.append(
         (
             "SMSG_MESSAGECHAT",

@@ -665,6 +665,30 @@ def _build_player_equip_values_responses(
     ]
 
 
+def _build_login_player_inventory_sync_responses(session) -> list[tuple[str, bytes]]:
+    state = getattr(session, "inventory_state", None)
+    if state is None:
+        return []
+
+    responses: list[tuple[str, bytes]] = []
+    for slot in range(39):
+        item = state.get(0, slot)
+        item_world_guid = _make_item_world_guid(int(item.item_guid)) if item else 0
+        if _is_equipment_position(0, slot):
+            visible_entry = int(getattr(item, "entry", 0) or 0) if item else 0
+            responses.extend(
+                _build_player_equip_values_responses(
+                    session,
+                    int(slot),
+                    int(item_world_guid),
+                    int(visible_entry),
+                )
+            )
+            continue
+        responses.extend(_build_player_slot_values_responses(session, int(slot), int(item_world_guid)))
+    return responses
+
+
 def _build_storage_slot_update_responses(session, bag: int, slot: int, item_world_guid: int | None = None) -> list[tuple[str, bytes]]:
     if int(bag) == 0:
         return _build_player_slot_values_responses(session, int(slot), int(item_world_guid or 0))
@@ -922,6 +946,7 @@ def build_login_inventory_sync_responses(session) -> list[tuple[str, bytes]]:
     cleared_known_guids = len(_known_inventory_guids(session))
     _clear_known_inventory_guids(session)
     session.inventory_activated = False
+    Logger.debug("[LOGIN_SYNC] syncing inventory + equip + visible")
 
     root_items = sorted(
         (
@@ -937,11 +962,10 @@ def build_login_inventory_sync_responses(session) -> list[tuple[str, bytes]]:
     )
 
     responses: list[tuple[str, bytes]] = []
-    responses.extend(build_root_inventory_slot_sync_responses(session))
+    responses.extend(_build_login_player_inventory_sync_responses(session))
     responses.extend(build_equipped_bag_sync_responses(session))
     for item in root_items:
         responses.extend(sync_item(session, item))
-    responses.extend(build_self_visible_item_update_responses(session))
     Logger.debug(
         f"[INV] FULL_RESYNC cleared_known_guids={cleared_known_guids} rebuilt={len(_known_inventory_guids(session))}"
     )

@@ -1235,6 +1235,36 @@ def test_login_inventory_sync_does_not_duplicate_equipped_bag_create():
     assert inventory_sync._make_item_world_guid(3000) in session.known_inventory_guids
 
 
+def test_login_inventory_sync_uses_live_equip_player_fields_for_equipped_item():
+    session = _FakeSession()
+    state = _InventoryState()
+    session.inventory_state = state
+
+    equipped = _Item(
+        item_guid=1000,
+        bag=0,
+        slot=15,
+        count=1,
+        template=_Template(entry=19019, display_id=2000, inventory_type=13),
+    )
+    state.put(equipped)
+
+    responses = inventory_sync.build_login_inventory_sync_responses(session)
+
+    equip_field = inventory_sync._inventory_slot_field_index(0, 15)
+    visible_field = inventory_sync._PLAYER_FIELD_VISIBLE_ITEMS + (15 * 2)
+    player_bits = [visible_field, visible_field + 1, equip_field, equip_field + 1]
+
+    player_updates = [
+        dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)["updates"][0]
+        for opcode, payload in responses
+        if opcode == "SMSG_UPDATE_OBJECT"
+        and (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates", [{}])[0].get("guid") == 7
+    ]
+
+    assert any(update["mask"]["set_bits"] == player_bits for update in player_updates)
+
+
 def test_root_inventory_slot_sync_skips_occupied_equipped_bag_slots():
     session = _FakeSession()
     state = _InventoryState()
