@@ -659,27 +659,19 @@ def test_map_zero_clears_all_explored_zones(monkeypatch):
     ]
 
 
-def test_invfix_returns_full_inventory_sync_and_resyncs_appearance(monkeypatch):
-    resync_calls = []
+def test_invfix_returns_full_inventory_sync_via_login_pipeline(monkeypatch):
+    captured = {}
+
     monkeypatch.setattr(
         chat_handlers,
         "build_login_inventory_sync_responses",
-        lambda session: [("SMSG_UPDATE_OBJECT", b"invfix")],
-    )
-    monkeypatch.setattr(
-        chat_handlers,
-        "trigger_inventory_activation",
-        lambda session: [("SMSG_UPDATE_OBJECT", b"invfix-trigger-1"), ("SMSG_UPDATE_OBJECT", b"invfix-trigger-2")],
-    )
-    monkeypatch.setattr(
-        chat_handlers,
-        "_build_forced_inventory_slot_resend_responses",
-        lambda session: [("SMSG_UPDATE_OBJECT", b"invfix-slot-resend")],
-    )
-    monkeypatch.setattr(
-        chat_handlers,
-        "resync_player_appearance",
-        lambda session: resync_calls.append(int(getattr(session, "char_guid", 0) or 0)),
+        lambda session: captured.update(
+            {
+                "known_inventory_guids": set(getattr(session, "known_inventory_guids", set())),
+                "inventory_activated": bool(getattr(session, "inventory_activated", True)),
+            }
+        )
+        or [("SMSG_UPDATE_OBJECT", b"invfix")],
     )
     monkeypatch.setattr(
         chat_handlers,
@@ -689,17 +681,19 @@ def test_invfix_returns_full_inventory_sync_and_resyncs_appearance(monkeypatch):
 
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
+    alice.known_inventory_guids = {111, 222}
+    alice.inventory_activated = True
 
     responses = chat_handlers._handle_chat_command(alice, ".invfix")
 
     assert responses == [
         ("SMSG_UPDATE_OBJECT", b"invfix"),
-        ("SMSG_UPDATE_OBJECT", b"invfix-trigger-1"),
-        ("SMSG_UPDATE_OBJECT", b"invfix-trigger-2"),
-        ("SMSG_UPDATE_OBJECT", b"invfix-slot-resend"),
         ("SMSG_MESSAGECHAT", b"system|[InvFix] full inventory resync sent"),
     ]
-    assert resync_calls == [1001]
+    assert captured["known_inventory_guids"] == set()
+    assert captured["inventory_activated"] is False
+    assert alice.known_inventory_guids == set()
+    assert alice.inventory_activated is False
 
 
 def test_forced_inventory_slot_resend_uses_minimal_player_values_update(monkeypatch):

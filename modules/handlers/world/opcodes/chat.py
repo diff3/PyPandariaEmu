@@ -89,6 +89,25 @@ _PLAYER_FLAGS_DND = 0x00000004
 _DEFAULT_AFK_MESSAGE = "Away from keyboard"
 _DEFAULT_DND_MESSAGE = "Do not disturb"
 _CHAT_MOUNT_DISPLAY_ID = 2404
+_TIER_SET_ITEMS: dict[tuple[str, int], tuple[int, ...]] = {
+    # Mage Tier 1 (Arcanist) – stable baseline set
+    ("mage", 1): (
+        16795,  # Head
+        16797,  # Shoulder
+        16798,  # Chest
+        16800,  # Hands
+        16796,  # Legs
+    ),
+
+    # Shaman Tier 1 (Earthfury) – also stable
+    ("shaman", 1): (
+        16814,  # Head (Earthfury Helmet)
+        16817,  # Shoulder (Earthfury Epaulets)
+        16816,  # Chest (Earthfury Vestments)
+        16812,  # Hands (Earthfury Gauntlets)
+        16813,  # Legs (Earthfury Legguards)
+    ),
+}
 _TEXT_EMOTE_TO_STAND_STATE = {
     59: _STAND_STATE_KNEEL,
     86: _STAND_STATE_SITTING,
@@ -296,6 +315,61 @@ def _build_additem_sync_responses(session, result) -> list[tuple[str, bytes]]:
 
 def _build_inventory_mutation_sync_responses(session, result) -> list[tuple[str, bytes]]:
     return build_inventory_delta_responses(session, result)
+
+
+def _handle_additem(session, entry: int, count: int) -> list[tuple[str, bytes]]:
+    result = add_item_to_character(session, entry, count)
+
+    responses: list[tuple[str, bytes]] = []
+
+    if result.ok:
+        # Use the same sync path as .additem
+        responses.extend(_build_inventory_mutation_sync_responses(session, result))
+
+    responses.extend(
+        _notification_response(f"[Inventory] {result.message}")
+    )
+
+    return responses
+
+
+def handle_addtier_command(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if len(args) != 2:
+        return _notification_response("Usage: .addtier <class> <tier>")
+
+    class_name = str(args[0]).strip().lower()
+    try:
+        tier = int(args[1], 0)
+    except ValueError:
+        return _notification_response("Usage: .addtier <class> <tier>")
+
+    item_entries = _TIER_SET_ITEMS.get((class_name, int(tier)))
+    if not item_entries:
+        return _notification_response(f"[AddTier] unsupported class/tier: {class_name} {tier}")
+
+    Logger.info(
+        "[ADDTIER] class=%s tier=%s items=%s",
+        class_name,
+        int(tier),
+        len(item_entries),
+    )
+
+    responses: list[tuple[str, bytes]] = []
+
+    # Reuse additem logic for each item
+    for item_entry in item_entries:
+        responses.extend(_handle_additem(session, int(item_entry), 1))
+
+    # Optional but recommended: force full resync for stability
+    responses.extend(build_login_inventory_sync_responses(session))
+
+    responses.extend(
+        _notification_response(
+            f"[AddTier] {class_name} T{int(tier)} items={len(item_entries)}"
+        )
+    )
+
+    return responses
 
 
 def send_run_speed(player, speed: float) -> tuple[str, bytes]:
@@ -937,10 +1011,16 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         return responses
 
     if command_lower == ".invfix":
-        resync_player_appearance(session)
+        Logger.info("[INVFIX] start")
+        known_guids = getattr(session, "known_inventory_guids", None)
+        if isinstance(known_guids, set):
+            known_guids.clear()
+        else:
+            session.known_inventory_guids = set()
+        Logger.info("[INVFIX] cleared known guids")
+        session.inventory_activated = False
         responses = list(build_login_inventory_sync_responses(session))
-        responses.extend(trigger_inventory_activation(session))
-        responses.extend(_build_forced_inventory_slot_resend_responses(session))
+        Logger.info("[INVFIX] responses=%s", len(responses))
         return _append_feedback_response(responses, "[InvFix] full inventory resync sent")
 
     if command_lower == ".fixplayer":
@@ -1184,6 +1264,10 @@ def _handle_chat_command(session, message: str) -> Optional[list[tuple[str, byte
                 ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Map] exploration reset")),
             ]
         return _notification_response("Usage: map <on|0>")
+    
+    if command_lower.startswith(".addtier"):
+        parts = command.split()
+        return handle_addtier_command(session, parts[1:])
 
     if command_lower == ".sniffchat":
         Logger.info(f"[CHAT][SNIFF] replay source={RAW_SNIFFED_MESSAGECHAT_CAPTURE}")
