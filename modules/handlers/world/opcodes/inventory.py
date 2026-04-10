@@ -19,7 +19,6 @@ from server.modules.handlers.world.inventory_sync import (
     build_login_inventory_sync_responses,
     build_inventory_delta_responses,
     build_container_open_responses,
-    inventory_result_affects_equipment,
     trigger_inventory_activation,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
@@ -242,8 +241,6 @@ def _result_to_response(
     getattr(Logger, level)(f"[Inventory] {prefix} -> {result.message}")
     if result.ok:
         responses = build_inventory_delta_responses(session, result)
-        if inventory_result_affects_equipment(result):
-            resync_player_appearance(session)
         return 0, responses or None
     responses: list[tuple[str, bytes]] = []
 
@@ -428,13 +425,23 @@ def handle_swap_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tu
 @register("CMSG_DESTROY_ITEM")
 def handle_destroy_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     log_cmsg(ctx)
+    decoded = ctx.decoded or {}
     raw = bytes(ctx.payload or b"")
-    if len(raw) < 2:
-        return 0, _system_message("[Inventory] malformed destroy-item packet")
+    slot = _decoded_first_int(decoded, "slot", "src_slot", "srcSlot")
+    bag = _decoded_first_int(decoded, "bag", "bag_index", "bagIndex", "src_bag")
+    count = _decoded_first_int(decoded, "count", "destroy_count", "stack_count")
 
-    slot = int(raw[0])
-    bag = int(raw[1])
-    count = int(raw[2]) if len(raw) > 2 else 0
+    if slot is None and len(raw) >= 5:
+        slot = int(raw[4])
+    if bag is None and len(raw) >= 6:
+        bag = int(raw[5])
+    if count is None and len(raw) >= 4:
+        count = int(struct.unpack_from("<I", raw, 0)[0])
+
+    if slot is None or bag is None:
+        return 0, _system_message("[Inventory] malformed destroy-item packet")
+    if count is None:
+        count = 0
     result = destroy_character_item(session, bag, slot, count)
     return _result_to_response(session, f"destroy bag={bag} slot={slot} count={count}", result)
 

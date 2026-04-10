@@ -546,12 +546,12 @@ def test_inventory_delta_backpack_to_bag_updates_root_slot_container_slot_and_co
     )
 
     responses = inventory_sync.build_inventory_delta_responses(session, result)
-    updates = [
-        (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates", [{}])[0]
-        for opcode, payload in responses
-        if opcode == "SMSG_UPDATE_OBJECT"
-        and (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates")
-    ]
+    updates = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
+        updates.extend(decoded.get("updates", []))
     player_updates = [u for u in updates if u.get("guid") == session.char_guid]
     bag_updates = [u for u in updates if u.get("guid") == inventory_sync._make_item_world_guid(1000)]
     item_updates = [u for u in updates if u.get("guid") == inventory_sync._make_item_world_guid(2000)]
@@ -603,12 +603,12 @@ def test_inventory_delta_bag_to_backpack_updates_container_slot_root_slot_and_co
     )
 
     responses = inventory_sync.build_inventory_delta_responses(session, result)
-    updates = [
-        (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates", [{}])[0]
-        for opcode, payload in responses
-        if opcode == "SMSG_UPDATE_OBJECT"
-        and (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates")
-    ]
+    updates = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
+        updates.extend(decoded.get("updates", []))
     player_updates = [u for u in updates if u.get("guid") == session.char_guid]
     bag_updates = [u for u in updates if u.get("guid") == inventory_sync._make_item_world_guid(1000)]
     item_updates = [u for u in updates if u.get("guid") == inventory_sync._make_item_world_guid(2000)]
@@ -666,12 +666,12 @@ def test_inventory_delta_swap_within_same_container_updates_only_changed_slots()
     )
 
     responses = inventory_sync.build_inventory_delta_responses(session, result)
-    updates = [
-        (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates", [{}])[0]
-        for opcode, payload in responses
-        if opcode == "SMSG_UPDATE_OBJECT"
-        and (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates")
-    ]
+    updates = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
+        updates.extend(decoded.get("updates", []))
 
     bag_updates = [u for u in updates if u.get("guid") == inventory_sync._make_item_world_guid(1000)]
     item_updates = [
@@ -749,28 +749,29 @@ def test_inventory_delta_equip_known_item_uses_slot_updates_and_values_only():
     )
 
     responses = inventory_sync.build_inventory_delta_responses(session, result)
-    updates = [
-        (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates", [{}])[0]
-        for opcode, payload in responses
-        if opcode == "SMSG_UPDATE_OBJECT"
-        and (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates")
-    ]
+    assert len([opcode for opcode, _payload in responses if opcode == "SMSG_UPDATE_OBJECT"]) >= 1
+    updates = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
+        updates.extend(decoded.get("updates", []))
     item_updates = [u for u in updates if u.get("guid") == inventory_sync._make_item_world_guid(2000)]
     assert all(update["update_type"] == 0 for update in item_updates)
-    assert any(update["mask"]["set_bits"] == [10, 11] for update in item_updates)
+    assert any(update["mask"]["set_bits"] == [8, 9, 10, 11] for update in item_updates)
     equip_field = inventory_sync._inventory_slot_field_index(0, 5)
     assert any(update["mask"]["set_bits"] == [equip_field, equip_field + 1] for update in updates if update.get("guid") == 7)
     relevant = [
         update for update in updates
         if (
             (update.get("guid") == inventory_sync._make_item_world_guid(1000) and update["mask"]["set_bits"] == [69, 70])
-            or (update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["mask"]["set_bits"] == [10, 11])
+            or (update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["mask"]["set_bits"] == [8, 9, 10, 11])
             or (update.get("guid") == 7 and update["mask"]["set_bits"] == [equip_field, equip_field + 1])
         )
     ]
     assert [(update.get("guid"), update["mask"]["set_bits"]) for update in relevant[:3]] == [
         (inventory_sync._make_item_world_guid(1000), [69, 70]),
-        (inventory_sync._make_item_world_guid(2000), [10, 11]),
+        (inventory_sync._make_item_world_guid(2000), [8, 9, 10, 11]),
         (7, [equip_field, equip_field + 1]),
     ]
 
@@ -815,12 +816,13 @@ def test_inventory_delta_unequip_known_item_clears_equip_slot_and_sets_destinati
     )
 
     responses = inventory_sync.build_inventory_delta_responses(session, result)
-    updates = [
-        (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates", [{}])[0]
-        for opcode, payload in responses
-        if opcode == "SMSG_UPDATE_OBJECT"
-        and (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates")
-    ]
+    assert len([opcode for opcode, _payload in responses if opcode == "SMSG_UPDATE_OBJECT"]) == 1
+    updates = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
+        updates.extend(decoded.get("updates", []))
     equip_field = inventory_sync._inventory_slot_field_index(0, 5)
     assert any(update["mask"]["set_bits"] == [equip_field, equip_field + 1] for update in updates if update.get("guid") == 7)
     assert any(update["mask"]["set_bits"] == [71, 72] for update in updates if update.get("guid") == inventory_sync._make_item_world_guid(1000))
@@ -829,13 +831,13 @@ def test_inventory_delta_unequip_known_item_clears_equip_slot_and_sets_destinati
         update for update in updates
         if (
             (update.get("guid") == 7 and update["mask"]["set_bits"] == [equip_field, equip_field + 1])
-            or (update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["mask"]["set_bits"] == [10, 11])
+            or (update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["mask"]["set_bits"] == [8, 9, 10, 11])
             or (update.get("guid") == inventory_sync._make_item_world_guid(1000) and update["mask"]["set_bits"] == [71, 72])
         )
     ]
     assert [(update.get("guid"), update["mask"]["set_bits"]) for update in relevant[:3]] == [
         (7, [equip_field, equip_field + 1]),
-        (inventory_sync._make_item_world_guid(2000), [10, 11]),
+        (inventory_sync._make_item_world_guid(2000), [8, 9, 10, 11]),
         (inventory_sync._make_item_world_guid(1000), [71, 72]),
     ]
 
@@ -882,28 +884,28 @@ def test_inventory_delta_equip_swap_updates_in_expected_order():
     )
 
     responses = inventory_sync.build_inventory_delta_responses(session, result)
-    updates = [
-        (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates", [{}])[0]
-        for opcode, payload in responses
-        if opcode == "SMSG_UPDATE_OBJECT"
-        and (dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}).get("updates")
-    ]
+    updates = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
+        updates.extend(decoded.get("updates", []))
 
     equip_field = inventory_sync._inventory_slot_field_index(0, 5)
     relevant = [
         update for update in updates
         if (
             (update.get("guid") == 7 and update["mask"]["set_bits"] == [equip_field, equip_field + 1])
-            or (update.get("guid") == inventory_sync._make_item_world_guid(3000) and update["mask"]["set_bits"] == [10, 11])
+            or (update.get("guid") == inventory_sync._make_item_world_guid(3000) and update["mask"]["set_bits"] == [8, 9, 10, 11])
             or (update.get("guid") == inventory_sync._make_item_world_guid(1000) and update["mask"]["set_bits"] == [69, 70])
-            or (update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["mask"]["set_bits"] == [10, 11])
+            or (update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["mask"]["set_bits"] == [8, 9, 10, 11])
         )
     ]
     assert [(update.get("guid"), update["mask"]["set_bits"]) for update in relevant[:5]] == [
         (7, [equip_field, equip_field + 1]),
-        (inventory_sync._make_item_world_guid(3000), [10, 11]),
+        (inventory_sync._make_item_world_guid(3000), [8, 9, 10, 11]),
         (inventory_sync._make_item_world_guid(1000), [69, 70]),
-        (inventory_sync._make_item_world_guid(2000), [10, 11]),
+        (inventory_sync._make_item_world_guid(2000), [8, 9, 10, 11]),
         (7, [equip_field, equip_field + 1]),
     ]
 
@@ -922,14 +924,21 @@ def test_inventory_delta_destroy_known_item_clears_slot_and_removes_guid_from_ca
     )
 
     responses = inventory_sync.build_inventory_delta_responses(session, result)
-    updates = [
-        dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)["updates"][0]
-        for opcode, payload in responses
-        if opcode == "SMSG_UPDATE_OBJECT"
-    ]
+    assert len([opcode for opcode, _payload in responses if opcode == "SMSG_UPDATE_OBJECT"]) == 2
+    updates = []
+    decoded_packets = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
+        decoded_packets.append(decoded)
+        updates.extend(decoded.get("updates", []))
 
     root_field = inventory_sync._inventory_slot_field_index(0, 23)
     assert any(update["guid"] == 7 and update["mask"]["set_bits"] == [root_field, root_field + 1] for update in updates)
+    assert any(update["update_type"] == 3 and update.get("out_of_range_count") == 1 for update in updates)
+    assert decoded_packets[0]["updates"][0]["update_type"] == 0
+    assert decoded_packets[1]["updates"][0]["update_type"] == 3
     assert inventory_sync._make_item_world_guid(2000) not in session.known_inventory_guids
     assert not any(update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["update_type"] == 0 for update in updates)
 

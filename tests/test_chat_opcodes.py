@@ -673,6 +673,11 @@ def test_invfix_returns_full_inventory_sync_and_resyncs_appearance(monkeypatch):
     )
     monkeypatch.setattr(
         chat_handlers,
+        "_build_forced_inventory_slot_resend_responses",
+        lambda session: [("SMSG_UPDATE_OBJECT", b"invfix-slot-resend")],
+    )
+    monkeypatch.setattr(
+        chat_handlers,
         "resync_player_appearance",
         lambda session: resync_calls.append(int(getattr(session, "char_guid", 0) or 0)),
     )
@@ -691,9 +696,44 @@ def test_invfix_returns_full_inventory_sync_and_resyncs_appearance(monkeypatch):
         ("SMSG_UPDATE_OBJECT", b"invfix"),
         ("SMSG_UPDATE_OBJECT", b"invfix-trigger-1"),
         ("SMSG_UPDATE_OBJECT", b"invfix-trigger-2"),
+        ("SMSG_UPDATE_OBJECT", b"invfix-slot-resend"),
         ("SMSG_MESSAGECHAT", b"system|[InvFix] full inventory resync sent"),
     ]
     assert resync_calls == [1001]
+
+
+def test_forced_inventory_slot_resend_uses_minimal_player_values_update(monkeypatch):
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.inventory_state = SimpleNamespace(
+        get=lambda bag, slot: SimpleNamespace(item_guid=2000) if (bag, slot) == (0, 23) else None
+    )
+    captured = {}
+
+    def fake_build_multi_u32_update_object_payload(**fields):
+        captured.update(fields)
+        return b"slot-resend"
+
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_multi_u32_update_object_payload",
+        fake_build_multi_u32_update_object_payload,
+    )
+
+    responses = chat_handlers._build_forced_inventory_slot_resend_responses(alice)
+
+    assert len(responses) == 1
+    opcode, payload = responses[0]
+    assert opcode == "SMSG_UPDATE_OBJECT"
+    field_index = chat_handlers._inventory_slot_field_index(0, 23)
+    item_guid = chat_handlers._make_item_world_guid(2000)
+    assert payload == b"slot-resend"
+    assert captured["map_id"] == 1
+    assert captured["guid"] == 1001
+    assert captured["field_updates"] == [
+        (field_index, int(item_guid & 0xFFFFFFFF)),
+        (field_index + 1, int((item_guid >> 32) & 0xFFFFFFFF)),
+    ]
 
 
 def test_fixplayer_default_returns_values_then_speed_then_movement(monkeypatch):

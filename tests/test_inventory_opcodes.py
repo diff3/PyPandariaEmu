@@ -1,4 +1,5 @@
 import importlib
+import struct
 import sys
 import types
 from types import SimpleNamespace
@@ -163,6 +164,30 @@ def test_open_item_prefers_decoded_fields(monkeypatch):
 
     assert status == 0
     assert responses == [("SMSG_UPDATE_OBJECT", b"open-bag")]
+
+
+def test_destroy_item_decodes_mop_layout_count_slot_bag(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        inventory_handlers,
+        "destroy_character_item",
+        lambda session, bag, slot, count: (
+            calls.append((bag, slot, count)) or _ok_result("item destroyed")
+        ),
+    )
+    monkeypatch.setattr(inventory_handlers, "build_inventory_delta_responses", lambda session, result: [])
+
+    ctx = SimpleNamespace(
+        name="CMSG_DESTROY_ITEM",
+        payload=struct.pack("<IBB", 0, 24, 255),
+        decoded={},
+    )
+
+    status, responses = inventory_handlers.handle_destroy_item(object(), ctx)
+
+    assert status == 0
+    assert responses is None
+    assert calls == [(255, 24, 0)]
 
 
 def test_inventory_change_failure_matches_skyfire548_nonempty_bag_sniff():

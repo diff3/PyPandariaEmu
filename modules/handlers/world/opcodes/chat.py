@@ -207,6 +207,48 @@ def _build_inventory_slot_update_responses(session, item) -> list[tuple[str, byt
     ]
 
 
+def _build_forced_inventory_slot_resend_responses(session) -> list[tuple[str, bytes]]:
+    state = getattr(session, "inventory_state", None)
+    if state is None or not hasattr(state, "get"):
+        return []
+
+    selected_slot = None
+    item_world_guid = 0
+    for slot in range(39):
+        item = state.get(0, slot)
+        if item is None:
+            continue
+        selected_slot = int(slot)
+        item_world_guid = _make_item_world_guid(int(getattr(item, "item_guid", 0) or 0))
+        break
+
+    if selected_slot is None:
+        selected_slot = 0
+
+    field_index = _inventory_slot_field_index(0, int(selected_slot))
+    if field_index is None:
+        return []
+
+    Logger.debug(
+        "[INVTEST] forced PLAYER_FIELD_INV_SLOT resend slot=%s value=%s",
+        int(selected_slot),
+        int(item_world_guid),
+    )
+    return [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                guid=int(getattr(session, "char_guid", 0) or 0),
+                field_updates=[
+                    (field_index, int(item_world_guid & 0xFFFFFFFF)),
+                    (field_index + 1, int((item_world_guid >> 32) & 0xFFFFFFFF)),
+                ],
+            ),
+        )
+    ]
+
+
 def _build_inventory_count_update_response(session, item) -> tuple[str, bytes]:
     return (
         "SMSG_UPDATE_OBJECT",
@@ -888,6 +930,7 @@ def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, 
         resync_player_appearance(session)
         responses = list(build_login_inventory_sync_responses(session))
         responses.extend(trigger_inventory_activation(session))
+        responses.extend(_build_forced_inventory_slot_resend_responses(session))
         return _append_feedback_response(responses, "[InvFix] full inventory resync sent")
 
     if command_lower == ".fixplayer":
