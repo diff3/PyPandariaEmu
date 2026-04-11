@@ -64,6 +64,7 @@ from server.modules.handlers.world.position.position_service import (
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.handlers.world.state.runtime import (
     attach_session_to_world_state,
+    build_explored_zones_update_response,
     pack_wow_game_time,
     sync_all_players_on_map,
     sync_player_visibility,
@@ -376,6 +377,10 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
         Logger.info(f"[WorldLogin] sending {len(inventory_packets)} inventory sync packets")
         responses.extend(inventory_packets)
         responses.extend(trigger_inventory_activation(session))
+    explored_response = build_explored_zones_update_response(session)
+    if explored_response is not None:
+        Logger.info("[WorldLogin] sending persisted explored zones state")
+        responses.append(explored_response)
     for opcode_name, payload in post_update_packets:
         Logger.info(f"[WorldLogin] sending {opcode_name}")
         responses.append((opcode_name, payload))
@@ -417,6 +422,10 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         Logger.info(f"[Teleport] sending {len(inventory_packets)} inventory sync packets")
         responses.extend(inventory_packets)
         responses.extend(trigger_inventory_activation(session))
+    explored_response = build_explored_zones_update_response(session)
+    if explored_response is not None:
+        Logger.info("[Teleport] sending persisted explored zones state")
+        responses.append(explored_response)
 
     time_sync = build_login_packet("SMSG_TIME_SYNC_REQUEST", ctx)
     if time_sync is not None:
