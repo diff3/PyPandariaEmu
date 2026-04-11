@@ -127,6 +127,8 @@ class WorldSession:
     fly_back_speed: float = 4.5
     turn_speed: float = 3.1415926
     pitch_speed: float = 3.1415926
+    can_fly: bool = False
+    is_flying: bool = False
 
     # --------------------------------------------------
     # Gameplay

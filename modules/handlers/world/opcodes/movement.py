@@ -340,6 +340,38 @@ def build_move_set_run_speed_payload(session) -> bytes:
     )
 
 
+def build_move_set_flight_speed_payload(session) -> bytes:
+    return build_move_set_speed_payload(
+        session,
+        "SMSG_MOVE_SET_FLIGHT_SPEED",
+        float(getattr(session, "fly_speed", 7.0) or 7.0),
+    )
+
+
+def build_move_set_can_fly_payload(session, enabled: bool) -> bytes:
+    # Keep fly toggles on the same mover/counter path as speed updates.
+    guid_value = int(_movement_sync_guid(session) or 0)
+    raw_guid = guid_value.to_bytes(8, "little", signed=False)
+    counter = _next_speed_change_counter(session)
+    low_guid_xor = (raw_guid[0] ^ 1) & 0xFF
+    realm_guid_xor = (raw_guid[4] ^ 1) & 0xFF
+
+    payload = bytearray()
+    payload.extend(struct.pack("<I", counter))
+    payload.extend(bytes((low_guid_xor, realm_guid_xor)))
+    payload.append(1 if enabled else 0)
+
+    encoded = bytes(payload)
+    Logger.debug(
+        "[FLY_PACKET] opcode=%s size=%s guid=0x%X hex=%s",
+        "SMSG_MOVE_SET_CAN_FLY" if enabled else "SMSG_MOVE_UNSET_CAN_FLY",
+        len(encoded),
+        guid_value,
+        encoded.hex().upper(),
+    )
+    return encoded
+
+
 def build_same_map_teleport_payload(session) -> bytes:
     state = _movement_state(session)
     counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF

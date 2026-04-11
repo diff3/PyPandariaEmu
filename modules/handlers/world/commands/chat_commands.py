@@ -395,6 +395,49 @@ def cmd_speed(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
+@register_command("fly", ".fly <on|off>")
+def cmd_fly(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Toggle self flying in the sandbox."""
+    from server.modules.handlers.world.opcodes.movement import (
+        build_move_set_can_fly_payload,
+        build_move_set_flight_speed_payload,
+        resync_movement,
+    )
+
+    if len(args) != 1:
+        return _notification_response("Usage: .fly <on|off>")
+
+    enabled = str(args[0]).strip().lower()
+    if enabled not in {"on", "off"}:
+        return _notification_response("Usage: .fly <on|off>")
+
+    fly_enabled = enabled == "on"
+    session.can_fly = fly_enabled
+    session.is_flying = fly_enabled
+    Logger.info(
+        "[FLY] enabled=%s guid=0x%X",
+        fly_enabled,
+        int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or getattr(session, "world_guid", 0) or 0),
+    )
+
+    responses: list[tuple[str, bytes]] = [
+        (
+            "SMSG_MOVE_SET_CAN_FLY" if fly_enabled else "SMSG_MOVE_UNSET_CAN_FLY",
+            build_move_set_can_fly_payload(session, fly_enabled),
+        )
+    ]
+    if fly_enabled:
+        responses.append(
+            ("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session))
+        )
+    movement_responses = list(resync_movement(session))
+    if movement_responses:
+        responses.extend(movement_responses)
+        Logger.info("[FLY] movement resync sent guid=0x%X", int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or getattr(session, "world_guid", 0) or 0))
+    responses.extend(_notification_response(f"[Fly] {'on' if fly_enabled else 'off'}"))
+    return responses
+
+
 @register_command("weather", ".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
 def cmd_weather(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Broadcast region weather to nearby players."""
@@ -550,8 +593,6 @@ def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
 @register_command("morph", ".morph <displayId|name>", require_args=True)
 def cmd_morph(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Morph the player into a target display id."""
-    from server.modules.handlers.world.state.runtime import resync_player_appearance
-
     if len(args) != 1:
         return _notification_response("Usage: .morph <displayId|name>")
 
@@ -568,12 +609,9 @@ def cmd_morph(session, args: list[str]) -> list[tuple[str, bytes]]:
     session.display_id = int(display_id)
     session.morph_display_id = int(display_id)
     session.is_morphed = True
-    Logger.info("[MORPH] display_id=%s morphed=%s", int(display_id), True)
+    Logger.info("[MORPH] display_id=%s", int(display_id))
 
-    responses = _helper("build_state_responses")(session, {
-        UNIT_FIELD_DISPLAYID: int(display_id),
-    })
-    resync_player_appearance(session)
+    responses = _helper("build_display_id_responses")(session, int(display_id))
     responses.extend(_notification_response(f"[Morph] display={int(display_id)}"))
     return responses
 
@@ -581,8 +619,6 @@ def cmd_morph(session, args: list[str]) -> list[tuple[str, bytes]]:
 @register_command("demorph", ".demorph", allow_args=False)
 def cmd_demorph(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Restore the player's native display id."""
-    from server.modules.handlers.world.state.runtime import resync_player_appearance
-
     display_id = int(
         getattr(session, "original_display_id", 0)
         or getattr(session, "native_display_id", 0)
@@ -593,20 +629,14 @@ def cmd_demorph(session, args: list[str]) -> list[tuple[str, bytes]]:
     if display_id <= 0 or (not is_morphed and (current_display_id <= 0 or current_display_id == display_id)):
         return _notification_response("Not morphed")
 
-    Logger.info("[DEMORPH] restoring display_id=%s", int(display_id))
+    Logger.info("[DEMORPH] restored display_id=%s", int(display_id))
     session.display_id = int(display_id)
     session.morph_display_id = None
     session.is_morphed = False
     session.original_display_id = None
-    session.native_display_id = None
+    session.native_display_id = int(display_id)
 
-    responses = _helper("build_state_responses")(session, {
-        UNIT_FIELD_DISPLAYID: int(display_id),
-    })
-    # Full self inventory sync restores visible gear fields the client can keep stale.
-    responses.extend(_build_login_inventory_sync(session))
-    resync_player_appearance(session)
-    Logger.info("[DEMORPH] armor restored")
+    responses = _helper("build_display_id_responses")(session, int(display_id))
     responses.extend(_notification_response(f"[Morph] restored={int(display_id)}"))
     return responses
 
@@ -926,6 +956,7 @@ PRIMARY_COMMANDS = {
     "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),
     "level": Command(handler=cmd_level, usage=".level [delta]|set <level>"),
     "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
+    "fly": Command(handler=cmd_fly, usage=".fly <on|off>"),
     "weather": Command(handler=cmd_weather, usage=".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]"),
     "time": Command(handler=cmd_time, usage=".time <HH:MM|day|night|dawn|dusk|noon|midnight>"),
     "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),

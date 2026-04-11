@@ -588,9 +588,6 @@ def apply_state_and_resync(
 
 
 def _build_field_update_responses(session, field_updates: dict[int, int]) -> list[tuple[str, bytes]]:
-    # Display changes need the full self appearance path.
-    from server.modules.handlers.world.state.runtime import build_self_player_appearance_responses
-
     guid = int(
         getattr(session, "world_guid", 0)
         or getattr(session, "player_guid", 0)
@@ -602,13 +599,7 @@ def _build_field_update_responses(session, field_updates: dict[int, int]) -> lis
         int(field_index): int(field_value) & 0xFFFFFFFF
         for field_index, field_value in (field_updates or {}).items()
     }
-    if _UNIT_FIELD_DISPLAYID in normalized_fields:
-        normalized_fields[_UNIT_FIELD_NATIVE_DISPLAYID] = (
-            int(normalized_fields[_UNIT_FIELD_DISPLAYID]) & 0xFFFFFFFF
-        )
     normalized = sorted(normalized_fields.items())
-    if bool(getattr(session, "is_morphed", False)) or _UNIT_FIELD_DISPLAYID in normalized_fields:
-        return list(build_self_player_appearance_responses(session))
     if guid > 0 and normalized:
         return [
             (
@@ -623,6 +614,50 @@ def _build_field_update_responses(session, field_updates: dict[int, int]) -> lis
     if guid > 0:
         return list(build_self_visible_item_update_responses(session))
     return []
+
+
+def build_display_id_responses(session, display_id: int) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.state.runtime import (
+        _visible_guid_set,
+        dispatch_responses_to_sessions,
+        iter_in_world_sessions,
+    )
+
+    source_guid = int(getattr(session, "char_guid", 0) or 0)
+    # Self value updates use the player guid path, not the full world guid.
+    self_guid = int(source_guid or getattr(session, "player_guid", 0) or 0)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    display_id = int(display_id) & 0xFFFFFFFF
+    if self_guid <= 0:
+        return []
+
+    self_response = (
+        "SMSG_UPDATE_OBJECT",
+        build_multi_u32_update_object_payload(
+            map_id=map_id,
+            guid=self_guid,
+            field_updates=[(_UNIT_FIELD_DISPLAYID, display_id)],
+        ),
+    )
+
+    if source_guid > 0:
+        peer_response = (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=map_id,
+                guid=source_guid,
+                field_updates=[(_UNIT_FIELD_DISPLAYID, display_id)],
+            ),
+        )
+        peers = [
+            peer
+            for peer in iter_in_world_sessions(map_id=map_id)
+            if peer is not session and source_guid in _visible_guid_set(peer)
+        ]
+        if peers:
+            dispatch_responses_to_sessions(peers, [peer_response])
+
+    return [self_response]
 
 
 def build_state_responses(session, field_updates: dict[int, int]) -> list[tuple[str, bytes]]:
@@ -772,6 +807,7 @@ def _configure_chat_commands() -> None:
         ),
         apply_state_and_resync=lambda session, responses: apply_state_and_resync(session, responses),
         apply_player_state_change=lambda session, **kwargs: apply_player_state_change(session, **kwargs),
+        build_display_id_responses=lambda session, display_id: build_display_id_responses(session, display_id),
         build_state_responses=lambda session, field_updates: build_state_responses(session, field_updates),
         build_speed_command_responses=lambda session: _build_speed_command_responses(session),
         chat_mount_display_id=_CHAT_MOUNT_DISPLAY_ID,

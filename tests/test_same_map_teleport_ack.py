@@ -303,6 +303,18 @@ def test_move_set_speed_payloads_fall_back_to_world_guid_when_char_guid_missing(
     assert session.movement_state.counter == 78
 
 
+def test_move_set_can_fly_payload_uses_movement_sync_guid():
+    session = _FakeSession()
+    session.world_guid = 0x0000000700000003
+    session.player_guid = session.world_guid
+    session.movement_state = types.SimpleNamespace(counter=27)
+
+    payload = movement.build_move_set_can_fly_payload(session, True)
+
+    assert payload == bytes.fromhex("1B000000060101")
+    assert session.movement_state.counter == 29
+
+
 def test_run_speed_change_ack_returns_player_move_refresh(monkeypatch):
     session = _FakeSession()
     session.world_guid = 0x0000000700000003
