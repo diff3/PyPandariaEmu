@@ -150,7 +150,7 @@ def test_self_visible_item_update_clears_slots_without_equipment():
     assert update["fields"]["u32"] == [0] * 38
 
 
-def test_self_visible_item_update_clears_slots_when_morphed():
+def test_self_visible_item_update_keeps_slots_when_morphed():
     session = _FakeSession()
     session.is_morphed = True
     session.equipment_cache_raw[0] = 1234
@@ -161,7 +161,7 @@ def test_self_visible_item_update_clears_slots_when_morphed():
     decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)
     update = decoded["updates"][0]
 
-    assert update["fields"]["u32"] == [0] * 38
+    assert update["fields"]["u32"][:2] == [1234, 0]
 
 
 def test_item_snapshot_uses_bag_guid_as_contained_in_for_bag_contents():

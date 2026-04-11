@@ -519,9 +519,6 @@ def _is_equipment_position(bag: int, slot: int) -> bool:
 
 def _visible_item_cache_raw(session) -> list[int]:
     required = _PLAYER_VISIBLE_ITEM_SLOT_COUNT * 2
-    if bool(getattr(session, "is_morphed", False)):
-        return [0] * required
-
     cached = [int(value) for value in (getattr(session, "equipment_cache_raw", []) or [])]
     if len(cached) >= required:
         return cached[:required]

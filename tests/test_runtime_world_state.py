@@ -110,8 +110,12 @@ def test_visible_peer_gets_value_updates_instead_of_remove_create(monkeypatch):
 
 
 def test_same_map_teleport_self_resync_includes_visible_item_update(monkeypatch):
+    captured = []
     packets_module = types.ModuleType("server.modules.handlers.world.login.packets")
-    packets_module.build_login_packet = lambda name, ctx: b"0006" if name == "SMSG_UPDATE_OBJECT_1773613185_0006" else None
+    packets_module.build_login_packet = lambda name, ctx: (
+        captured.append((name, list(getattr(ctx, "equipment_cache_raw", []) or [])))
+        or (b"0006" if name == "SMSG_UPDATE_OBJECT_1773613185_0006" else None)
+    )
     sys.modules["server.modules.handlers.world.login.packets"] = packets_module
 
     context_module = types.ModuleType("server.modules.handlers.world.login.context")
@@ -119,7 +123,7 @@ def test_same_map_teleport_self_resync_includes_visible_item_update(monkeypatch)
     class _WorldLoginContext:
         @staticmethod
         def from_session(session):
-            return SimpleNamespace()
+            return SimpleNamespace(equipment_cache_raw=list(getattr(session, "equipment_cache_raw", []) or []))
 
     context_module.WorldLoginContext = _WorldLoginContext
     sys.modules["server.modules.handlers.world.login.context"] = context_module
@@ -133,6 +137,8 @@ def test_same_map_teleport_self_resync_includes_visible_item_update(monkeypatch)
     session = WorldSession()
     session.char_guid = 7
     session.map_id = 1
+    session.is_morphed = True
+    session.equipment_cache_raw = [111, 0, 222, 0]
 
     responses = runtime.build_same_map_teleport_self_resync_responses(session)
 
@@ -140,3 +146,75 @@ def test_same_map_teleport_self_resync_includes_visible_item_update(monkeypatch)
         ("SMSG_UPDATE_OBJECT", b"0006"),
         ("SMSG_UPDATE_OBJECT", b"visible-items"),
     ]
+    assert captured == [("SMSG_UPDATE_OBJECT_1773613185_0006", [111, 0, 222, 0])]
+
+
+def test_self_player_appearance_keeps_equipment_cache_when_morphed(monkeypatch):
+    captured = []
+    packets_module = types.ModuleType("server.modules.handlers.world.login.packets")
+    packets_module.build_login_packet = lambda name, ctx: (
+        captured.append((name, list(getattr(ctx, "equipment_cache_raw", []) or [])))
+        or (b"0002" if name == "SMSG_UPDATE_OBJECT_1773613176_0002" else None)
+    )
+    sys.modules["server.modules.handlers.world.login.packets"] = packets_module
+
+    context_module = types.ModuleType("server.modules.handlers.world.login.context")
+
+    class _WorldLoginContext:
+        @staticmethod
+        def from_session(session):
+            return SimpleNamespace(equipment_cache_raw=list(getattr(session, "equipment_cache_raw", []) or []))
+
+    context_module.WorldLoginContext = _WorldLoginContext
+    sys.modules["server.modules.handlers.world.login.context"] = context_module
+
+    inventory_sync_module = types.ModuleType("server.modules.handlers.world.inventory_sync")
+    inventory_sync_module.build_self_visible_item_update_responses = lambda session: [
+        ("SMSG_UPDATE_OBJECT", b"visible-items")
+    ]
+    sys.modules["server.modules.handlers.world.inventory_sync"] = inventory_sync_module
+
+    session = WorldSession()
+    session.char_guid = 7
+    session.map_id = 1
+    session.is_morphed = True
+    session.equipment_cache_raw = [111, 0, 222, 0]
+
+    responses = runtime.build_self_player_appearance_responses(session)
+
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"0002"),
+        ("SMSG_UPDATE_OBJECT", b"visible-items"),
+    ]
+    assert captured == [("SMSG_UPDATE_OBJECT_1773613176_0002", [111, 0, 222, 0])]
+
+
+def test_remote_player_create_keeps_equipment_cache_when_morphed(monkeypatch):
+    captured = []
+    packets_module = types.ModuleType("server.modules.handlers.world.login.packets")
+    packets_module.build_login_packet = lambda name, ctx: (
+        captured.append((name, list(getattr(ctx, "equipment_cache_raw", []) or [])))
+        or (b"0002-remote" if name == "SMSG_UPDATE_OBJECT_1773613176_0002" else None)
+    )
+    sys.modules["server.modules.handlers.world.login.packets"] = packets_module
+
+    context_module = types.ModuleType("server.modules.handlers.world.login.context")
+
+    class _WorldLoginContext:
+        @staticmethod
+        def from_session(session):
+            return SimpleNamespace(equipment_cache_raw=list(getattr(session, "equipment_cache_raw", []) or []))
+
+    context_module.WorldLoginContext = _WorldLoginContext
+    sys.modules["server.modules.handlers.world.login.context"] = context_module
+
+    session = WorldSession()
+    session.char_guid = 7
+    session.map_id = 1
+    session.is_morphed = True
+    session.equipment_cache_raw = [111, 0, 222, 0]
+
+    response = runtime._build_player_create_update_response(session)
+
+    assert response == ("SMSG_UPDATE_OBJECT", b"0002-remote")
+    assert captured == [("SMSG_UPDATE_OBJECT_1773613176_0002", [111, 0, 222, 0])]

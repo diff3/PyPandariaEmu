@@ -57,6 +57,11 @@ COMMANDS: dict[str, Command] = {}
 HELPERS: dict[str, Any] = {}
 MORPH_NAME_TO_DISPLAY = {
     "sylvanas": 28213,
+    "arthas": 22234,
+    "jaina": 30863,
+    "deathwing": 32809,
+    "illidan": 21137,
+    "trall": 4527
 }
 UNIT_FIELD_DISPLAYID = 69
 
@@ -354,8 +359,10 @@ def cmd_speed(session, args: list[str]) -> list[tuple[str, bytes]]:
         return _notification_response("Usage: .speed <multiplier|default>")
 
     value = str(args[0]).strip().lower()
+    multiplier_label = value
     if value in {"default", "reset"}:
         spells_handlers._restore_default_movement_speeds(session)
+        multiplier_label = "1.0"
     else:
         try:
             speed_multiplier = float(value)
@@ -367,10 +374,24 @@ def cmd_speed(session, args: list[str]) -> list[tuple[str, bytes]]:
             session,
             float(getattr(spells_handlers, "_DEFAULT_RUN_SPEED", 7.0) or 7.0) * speed_multiplier,
         )
+        multiplier_label = f"{float(speed_multiplier):.1f}"
 
+    Logger.info(
+        "[Speed] multiplier=%s run=%.2f",
+        multiplier_label,
+        float(getattr(session, "run_speed", 0.0) or 0.0),
+    )
     responses = list(_helper("build_speed_command_responses")(session))
     responses.extend(resync_movement(session))
     Logger.debug("[SPEED] resync applied")
+    responses.append(
+        (
+            "SMSG_MESSAGECHAT",
+            encode_skyfire_messagechat_system_payload(
+                f"[Speed] run={float(getattr(session, 'run_speed', 0.0) or 0.0):.2f}"
+            ),
+        )
+    )
     return responses
 
 

@@ -253,7 +253,7 @@ def test_same_map_teleport_ack_with_fixspeed_refreshes_speed_and_player_move(mon
     ]
 
 
-def test_move_set_run_speed_payload_matches_pandaria548_live_layout():
+def test_move_set_run_speed_payload_uses_movement_sync_guid():
     session = _FakeSession()
     session.world_guid = 0x0000000700000003
     session.player_guid = session.world_guid
@@ -262,12 +262,31 @@ def test_move_set_run_speed_payload_matches_pandaria548_live_layout():
 
     payload = movement.build_move_set_run_speed_payload(session)
 
-    assert payload == bytes.fromhex("411B000000060200008C42")
+    assert payload == bytes.fromhex("411B000000010600008C42")
     assert session.movement_state.counter == 29
 
 
-def test_move_set_speed_payloads_match_pandaria548_focus_captures():
+def test_move_set_speed_payloads_match_movement_sync_guid_layout():
     session = _FakeSession()
+    session.world_guid = 0x0000000700000003
+    session.player_guid = session.world_guid
+    session.movement_state = types.SimpleNamespace(counter=70)
+
+    walk = movement.build_move_set_speed_payload(session, "SMSG_MOVE_SET_WALK_SPEED", 25.0)
+    run = movement.build_move_set_speed_payload(session, "SMSG_MOVE_SET_RUN_SPEED", 70.0)
+    swim = movement.build_move_set_speed_payload(session, "SMSG_MOVE_SET_SWIM_SPEED", 47.22221755981445)
+    flight = movement.build_move_set_speed_payload(session, "SMSG_MOVE_SET_FLIGHT_SPEED", 70.0)
+
+    assert walk.hex().upper() == "44460000000000C8410601"
+    assert run.hex().upper() == "4148000000010600008C42"
+    assert swim.hex().upper() == "484A0000008DE33C420106"
+    assert flight.hex().upper() == "00008C424C000000240601"
+    assert session.movement_state.counter == 78
+
+
+def test_move_set_speed_payloads_fall_back_to_world_guid_when_char_guid_missing():
+    session = _FakeSession()
+    session.char_guid = 0
     session.world_guid = 0x0000000700000003
     session.player_guid = session.world_guid
     session.movement_state = types.SimpleNamespace(counter=70)

@@ -645,14 +645,12 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
             setattr(session, "fly_speed", float(value)),
         ),
     )
-    movement_module = _install_movement_stub(monkeypatch)
+    _install_movement_stub(monkeypatch)
     monkeypatch.setattr(
-        movement_module,
-        "resync_movement",
-        lambda session: [("SMSG_PLAYER_MOVE", f"speed|{float(getattr(session, 'run_speed', 0.0) or 0.0):.2f}".encode())],
-        raising=False,
+        chat_handlers.chat_commands,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
     )
-    monkeypatch.setattr(chat_handlers, "encode_skyfire_messagechat_system_payload", lambda message: f"system|{message}".encode())
 
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
@@ -665,8 +663,8 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
         ("SMSG_MOVE_SET_RUN_SPEED", b"SMSG_MOVE_SET_RUN_SPEED|35.00"),
         ("SMSG_MOVE_SET_SWIM_SPEED", b"SMSG_MOVE_SET_SWIM_SPEED|23.50"),
         ("SMSG_MOVE_SET_FLIGHT_SPEED", b"SMSG_MOVE_SET_FLIGHT_SPEED|35.00"),
+        ("SMSG_PLAYER_MOVE", b"move-resync"),
         ("SMSG_MESSAGECHAT", b"system|[Speed] run=35.00"),
-        ("SMSG_PLAYER_MOVE", b"speed|35.00"),
     ]
 
 
@@ -1359,8 +1357,6 @@ def test_apply_state_and_resync_appends_player_move_when_missing(monkeypatch):
 
 
 def test_build_state_responses_uses_self_appearance_when_morphed(monkeypatch):
-    called = []
-
     monkeypatch.setattr(
         chat_handlers,
         "_build_movement_resync_responses",
@@ -1369,7 +1365,7 @@ def test_build_state_responses_uses_self_appearance_when_morphed(monkeypatch):
     monkeypatch.setattr(
         sys.modules["server.modules.handlers.world.state.runtime"],
         "build_self_player_appearance_responses",
-        lambda session: called.append(session) or [("SMSG_UPDATE_OBJECT", b"self-appearance")],
+        lambda session: [("SMSG_UPDATE_OBJECT", b"self-appearance")],
         raising=False,
     )
 
@@ -1379,7 +1375,27 @@ def test_build_state_responses_uses_self_appearance_when_morphed(monkeypatch):
 
     responses = chat_handlers.build_state_responses(alice, {})
 
-    assert called == [alice]
+    assert responses == [("SMSG_UPDATE_OBJECT", b"self-appearance")]
+
+
+def test_build_state_responses_updates_display_and_visible_items_without_self_create(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [],
+    )
+    monkeypatch.setattr(
+        sys.modules["server.modules.handlers.world.state.runtime"],
+        "build_self_player_appearance_responses",
+        lambda session: [("SMSG_UPDATE_OBJECT", b"self-appearance")],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers.build_state_responses(alice, {69: 28213})
+
     assert responses == [("SMSG_UPDATE_OBJECT", b"self-appearance")]
 
 

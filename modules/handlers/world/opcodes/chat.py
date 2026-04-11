@@ -414,14 +414,6 @@ def _build_speed_command_responses(session) -> list[tuple[str, bytes]]:
         for opcode_name, speed_value in speed_packets
     ]
     responses.insert(1, send_run_speed(session, float(getattr(session, "run_speed", 7.0) or 7.0)))
-    responses.append(
-        (
-            "SMSG_MESSAGECHAT",
-            encode_skyfire_messagechat_system_payload(
-                f"[Speed] run={float(getattr(session, 'run_speed', 0.0) or 0.0):.2f}"
-            ),
-        )
-    )
     return responses
 
 

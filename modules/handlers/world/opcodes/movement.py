@@ -257,7 +257,8 @@ def _next_speed_change_counter(session) -> int:
 
 
 def build_move_set_speed_payload(session, opcode_name: str, speed: float) -> bytes:
-    raw_guid = int(_player_guid(session) or 0).to_bytes(8, "little", signed=False)
+    guid_value = int(_movement_sync_guid(session) or 0)
+    raw_guid = guid_value.to_bytes(8, "little", signed=False)
     counter = _next_speed_change_counter(session)
     low_guid_xor = (raw_guid[0] ^ 1) & 0xFF
     realm_guid_xor = (raw_guid[4] ^ 1) & 0xFF
@@ -270,27 +271,63 @@ def build_move_set_speed_payload(session, opcode_name: str, speed: float) -> byt
         payload.extend(struct.pack("<I", counter))
         payload.extend(struct.pack("<f", float(speed)))
         payload.extend(bytes((low_guid_xor, realm_guid_xor)))
-        return bytes(payload)
+        encoded = bytes(payload)
+        Logger.debug(
+            "[SPEED_PACKET] opcode=%s size=%s guid=0x%X speed=%.3f hex=%s",
+            opcode_name,
+            len(encoded),
+            guid_value,
+            float(speed),
+            encoded.hex().upper(),
+        )
+        return encoded
 
     if opcode_name == "SMSG_MOVE_SET_RUN_SPEED":
         payload.append(0x41)
         payload.extend(struct.pack("<I", counter))
         payload.extend(bytes((realm_guid_xor, low_guid_xor)))
         payload.extend(struct.pack("<f", float(speed)))
-        return bytes(payload)
+        encoded = bytes(payload)
+        Logger.debug(
+            "[SPEED_PACKET] opcode=%s size=%s guid=0x%X speed=%.3f hex=%s",
+            opcode_name,
+            len(encoded),
+            guid_value,
+            float(speed),
+            encoded.hex().upper(),
+        )
+        return encoded
 
     if opcode_name == "SMSG_MOVE_SET_SWIM_SPEED":
         payload.append(0x48)
         payload.extend(struct.pack("<I", counter))
         payload.extend(struct.pack("<f", float(speed)))
         payload.extend(bytes((realm_guid_xor, low_guid_xor)))
-        return bytes(payload)
+        encoded = bytes(payload)
+        Logger.debug(
+            "[SPEED_PACKET] opcode=%s size=%s guid=0x%X speed=%.3f hex=%s",
+            opcode_name,
+            len(encoded),
+            guid_value,
+            float(speed),
+            encoded.hex().upper(),
+        )
+        return encoded
 
     if opcode_name == "SMSG_MOVE_SET_FLIGHT_SPEED":
         payload.extend(struct.pack("<f", float(speed)))
         payload.extend(struct.pack("<I", counter))
         payload.extend(bytes((0x24, low_guid_xor, realm_guid_xor)))
-        return bytes(payload)
+        encoded = bytes(payload)
+        Logger.debug(
+            "[SPEED_PACKET] opcode=%s size=%s guid=0x%X speed=%.3f hex=%s",
+            opcode_name,
+            len(encoded),
+            guid_value,
+            float(speed),
+            encoded.hex().upper(),
+        )
+        return encoded
 
     raise ValueError(f"Unsupported move-set speed opcode: {opcode_name}")
 
