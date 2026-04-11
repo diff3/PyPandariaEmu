@@ -144,6 +144,7 @@ class WorldSession:
     unit_flags: int = 0
     mount_display_id: int = 0
     equipment_cache_raw: List[int] = field(default_factory=list)
+    explored_zones_raw: str = ""
     inventory_state: Any = None
     inventory_items: Dict[Any, Any] = field(default_factory=dict)
     inventory_by_guid: Dict[int, Any] = field(default_factory=dict)

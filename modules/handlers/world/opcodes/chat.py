@@ -44,7 +44,9 @@ from server.modules.handlers.world.commands import chat_commands
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.state.runtime import (
+    build_explored_zones_update_response,
     resync_player_appearance,
+    set_session_explored_zones_state,
 )
 from server.modules.handlers.world.opcodes import spells as spells_handlers
 from server.modules.handlers.world.opcodes.movement import (
@@ -86,6 +88,7 @@ _PLAYER_FLAGS_DND = 0x00000004
 _DEFAULT_AFK_MESSAGE = "Away from keyboard"
 _DEFAULT_DND_MESSAGE = "Do not disturb"
 _CHAT_MOUNT_DISPLAY_ID = 2404
+_PLAYER_FIELD_LEVEL = 55
 _TIER_SET_ITEMS: dict[tuple[str, int], tuple[int, ...]] = {
     # Mage Tier 1 (Arcanist) – stable baseline set
     ("mage", 1): (
@@ -281,6 +284,20 @@ def _build_inventory_count_update_response(session, item) -> tuple[str, bytes]:
 
 
 def _build_map_exploration_update_response(session, reveal_all: bool) -> tuple[str, bytes]:
+    explored_zones = set_session_explored_zones_state(session, bool(reveal_all))
+    char_guid = int(getattr(session, "char_guid", 0) or 0)
+    realm_id = int(getattr(session, "realm_id", 0) or 0)
+    if char_guid > 0 and realm_id > 0:
+        DatabaseConnection.save_character_explored_zones(
+            char_guid,
+            realm_id,
+            explored_zones,
+        )
+
+    response = build_explored_zones_update_response(session)
+    if response is not None:
+        return response
+
     field_value = 0xFFFFFFFF if bool(reveal_all) else 0
     return (
         "SMSG_UPDATE_OBJECT",
@@ -538,6 +555,28 @@ def _build_fixspeed_responses(session) -> list[tuple[str, bytes]]:
     ]
 
 
+def _build_level_command_responses(session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.state.runtime import _build_player_value_update_responses
+
+    responses = list(_build_player_value_update_responses(session))
+    guid = int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    if guid <= 0:
+        return responses
+
+    responses.append(
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_single_u32_update_object_payload(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                guid=guid,
+                field_index=_PLAYER_FIELD_LEVEL,
+                value=int(getattr(session, "level", 1) or 1),
+            ),
+        )
+    )
+    return responses
+
+
 _CHAT_COMMANDS_CONFIGURED = False
 
 
@@ -558,6 +597,7 @@ def _configure_chat_commands() -> None:
         build_fixplayer_responses=lambda session, mode=0: _build_fixplayer_responses(session, mode),
         build_fixspeed_responses=lambda session: _build_fixspeed_responses(session),
         build_login_inventory_sync_responses=lambda session: build_login_inventory_sync_responses(session),
+        build_level_command_responses=lambda session: _build_level_command_responses(session),
         build_map_exploration_update_response=lambda session, reveal_all: _build_map_exploration_update_response(
             session,
             reveal_all,

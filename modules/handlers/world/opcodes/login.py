@@ -637,6 +637,7 @@ def handle_player_login(session, ctx: PacketContext):
         for value in str(getattr(row, "equipmentCache", "") or "").split()
         if value.strip()
     ]
+    session.explored_zones_raw = str(getattr(row, "exploredZones", "") or "")
     refresh_session_inventory(session)
     attach_session_to_world_state(session, map_id=int(session.map_id))
 

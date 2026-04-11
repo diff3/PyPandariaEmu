@@ -14,8 +14,6 @@ from server.modules.game.inventory import (
     add_item_to_character,
 )
 from server.modules.handlers.world.chat.codec import (
-    CHAT_MSG_SAY,
-    encode_messagechat_payload,
     encode_skyfire_messagechat_system_payload,
 )
 from server.modules.handlers.world.inventory_sync import (
@@ -155,6 +153,11 @@ def _split_command(message: str) -> tuple[str, list[str]] | None:
     return head, parts[1:]
 
 
+def _is_explicit_command(message: str) -> bool:
+    """Treat leading dot as an explicit command attempt."""
+    return str(message or "").strip().startswith(".")
+
+
 def _call_command(name: str, session, args: list[str]) -> list[tuple[str, bytes]]:
     """Call a command from the runtime lookup map."""
     return COMMANDS[name].handler(session, args)
@@ -172,6 +175,45 @@ def _gps_strings(session) -> tuple[str, str]:
     return feedback, telxyz
 
 
+def _resolve_max_level(session) -> int:
+    """Use class level stats as the safest level cap source."""
+    rows = DatabaseConnection.get_level_stats_for_class(
+        int(getattr(session, "race", 0) or 0),
+        int(getattr(session, "class_id", 0) or 0),
+    )
+    if rows:
+        return max(int(getattr(row, "level", 0) or 0) for row in rows)
+    return 90
+
+
+def _clamp_level(session, level: int) -> int:
+    """Keep level in a valid range."""
+    return max(1, min(int(level), int(_resolve_max_level(session))))
+
+
+def _parse_level_target(session, args: list[str]) -> tuple[int, str] | None:
+    """Parse .level forms into a target level."""
+    current_level = int(getattr(session, "level", 1) or 1)
+
+    if not args:
+        return current_level + 1, "add"
+
+    if len(args) == 1:
+        try:
+            delta = int(args[0], 0)
+        except ValueError:
+            return None
+        return current_level + int(delta), "add"
+
+    if len(args) == 2 and str(args[0]).strip().lower() == "set":
+        try:
+            return int(args[1], 0), "set"
+        except ValueError:
+            return None
+
+    return None
+
+
 def _help_lines() -> list[str]:
     """Return help lines for real commands only."""
     return [command.usage for command in PRIMARY_COMMANDS.values()]
@@ -187,19 +229,24 @@ def dump_command_map() -> None:
 
 def handle_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
     """Parse, resolve, validate, and dispatch one command."""
+    explicit_command = _is_explicit_command(message)
     parsed = _split_command(message)
     if parsed is None:
+        if explicit_command:
+            return _notification_response(f"Unknown command: {str(message or '').strip()}")
         return None
 
     command_name, args = parsed
     command = COMMANDS.get(command_name)
     if command is None:
+        if explicit_command:
+            return _notification_response(f"Unknown command: {str(message or '').strip()}")
         return None
 
     if not command.allow_args and args:
-        return None
+        return _notification_response(f"Usage: {command.usage}")
     if command.require_args and not args:
-        return None
+        return _notification_response(f"Usage: {command.usage}")
 
     return command.handler(session, args)
 
@@ -215,19 +262,11 @@ def cmd_help(session, args: list[str]) -> list[tuple[str, bytes]]:
 
 @register_command("roll", ".roll")
 def cmd_roll(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Roll 1-100 and echo the result in say chat."""
+    """Roll 1-100 and broadcast the result as a system message."""
     roll = random.randint(1, 100)
-    msg = f"{session.player_name} rolls {roll} (1-100)"
-    payload = encode_messagechat_payload(
-        chat_type=CHAT_MSG_SAY,
-        language=0,
-        sender_guid=session.player_guid,
-        sender_name=session.player_name,
-        target_guid=0,
-        target_name="",
-        message=msg,
-    )
-    return [("SMSG_MESSAGECHAT", payload)]
+    message = f"{session.player_name} rolls {roll} (1-100)"
+    broadcast_system_message(message, scope="world")
+    return []
 
 
 @register_command("gps", ".gps", allow_args=False)
@@ -237,6 +276,45 @@ def cmd_gps(session, args: list[str]) -> list[tuple[str, bytes]]:
     Logger.info(feedback)
     Logger.info(telxyz)
     return _notification_response(feedback)
+
+
+@register_command("level", ".level [delta]|set <level>")
+def cmd_level(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Adjust or set player level."""
+    parsed = _parse_level_target(session, args)
+    if parsed is None:
+        return _notification_response("Usage: .level [delta]|set <level>")
+
+    requested_level, mode = parsed
+    current_level = int(getattr(session, "level", 1) or 1)
+    target_level = _clamp_level(session, requested_level)
+    char_guid = int(getattr(session, "char_guid", 0) or 0)
+    realm_id = int(getattr(session, "realm_id", 0) or 0)
+
+    session.level = int(target_level)
+    if char_guid > 0 and realm_id > 0:
+        DatabaseConnection.save_character_level(
+            char_guid,
+            realm_id,
+            int(target_level),
+            xp=0,
+        )
+
+    Logger.info(
+        "[Level] mode=%s guid=%s level=%s->%s requested=%s",
+        mode,
+        char_guid,
+        current_level,
+        target_level,
+        requested_level,
+    )
+    responses = list(_helper("build_level_command_responses")(session))
+    responses.extend(
+        _notification_response(
+            f"[Level] {current_level} -> {target_level}"
+        )
+    )
+    return responses
 
 
 @register_command("speed", ".speed <multiplier|default>")
@@ -706,6 +784,7 @@ PRIMARY_COMMANDS = {
     "help": Command(handler=cmd_help, usage=".help"),
     "roll": Command(handler=cmd_roll, usage=".roll"),
     "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),
+    "level": Command(handler=cmd_level, usage=".level [delta]|set <level>"),
     "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
     "weather": Command(handler=cmd_weather, usage=".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]"),
     "time": Command(handler=cmd_time, usage=".time <HH:MM|day|night|dawn|dusk|noon|midnight>"),

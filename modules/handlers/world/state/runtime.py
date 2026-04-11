@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from typing import Iterable
 
@@ -13,6 +14,8 @@ from server.modules.handlers.world.state.global_state import global_state
 from server.modules.handlers.world.state.region_manager import region_manager
 
 PLAYER_VISIBILITY_DISTANCE = 120.0
+_PLAYER_FIELD_EXPLORED_ZONES = (0x8 + 0x98) + 0x5BB
+_PLAYER_EXPLORED_ZONES_SIZE = 200
 
 
 WEATHER_TYPES: dict[str, int] = {
@@ -159,6 +162,44 @@ def iter_region_sessions(target_session=None, *, region=None, map_id: int | None
 
 def _session_guid(session) -> int:
     return int(getattr(session, "char_guid", 0) or 0)
+
+
+def _normalized_explored_zones(raw: str | None, *, size: int = _PLAYER_EXPLORED_ZONES_SIZE) -> list[int]:
+    values = [
+        max(0, min(0xFFFFFFFF, int(token)))
+        for token in re.findall(r"-?\d+", str(raw or ""))
+    ]
+    if len(values) < int(size):
+        values.extend([0] * (int(size) - len(values)))
+    return values[: int(size)]
+
+
+def set_session_explored_zones_state(session, reveal_all: bool, *, size: int = _PLAYER_EXPLORED_ZONES_SIZE) -> str:
+    field_value = 0xFFFFFFFF if bool(reveal_all) else 0
+    raw = " ".join(str(field_value) for _ in range(int(size)))
+    session.explored_zones_raw = raw
+    return raw
+
+
+def build_explored_zones_update_response(session) -> tuple[str, bytes] | None:
+    from server.modules.handlers.world.bootstrap.replay import build_multi_u32_update_object_payload
+
+    guid = int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0)
+    if guid <= 0:
+        return None
+
+    values = _normalized_explored_zones(getattr(session, "explored_zones_raw", ""))
+    return (
+        "SMSG_UPDATE_OBJECT",
+        build_multi_u32_update_object_payload(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            guid=guid,
+            field_updates=[
+                (_PLAYER_FIELD_EXPLORED_ZONES + offset, int(value))
+                for offset, value in enumerate(values)
+            ],
+        ),
+    )
 
 
 def _visible_guid_set(session) -> set[int]:
@@ -456,6 +497,9 @@ def _build_player_value_update_responses(source_session) -> list[tuple[str, byte
     payload_0006 = build_login_packet("SMSG_UPDATE_OBJECT_1773613185_0006", ctx)
     if payload_0006 is not None:
         responses.append(("SMSG_UPDATE_OBJECT", payload_0006))
+    explored_response = build_explored_zones_update_response(source_session)
+    if explored_response is not None:
+        responses.append(explored_response)
     return responses
 
 

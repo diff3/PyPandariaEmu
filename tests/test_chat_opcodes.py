@@ -219,6 +219,59 @@ def test_whisper_returns_afk_auto_reply(monkeypatch):
     assert bob.send_response_log == [[("SMSG_MESSAGECHAT", b"7|Alice|Bob|psst")]]
 
 
+def test_unknown_dot_command_returns_system_message_and_does_not_broadcast(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_messagechat_payload",
+        lambda **fields: f"{fields['chat_type']}|{fields['sender_name']}|{fields['message']}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    bob = _make_session(state, "Bob", 1002)
+    ctx = SimpleNamespace(
+        name="CMSG_MESSAGECHAT_SAY",
+        payload=b"",
+        decoded={"msg": ".notacommand", "language": 0},
+    )
+
+    code, responses = chat_handlers.handle_messagechat_say(alice, ctx)
+
+    assert code == 0
+    assert responses == [("SMSG_MESSAGECHAT", b"system|Unknown command: .notacommand")]
+    assert alice.send_response_log == []
+    assert bob.send_response_log == []
+
+
+def test_dot_inside_normal_text_still_broadcasts_as_chat(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_messagechat_payload",
+        lambda **fields: f"{fields['chat_type']}|{fields['sender_name']}|{fields['message']}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    bob = _make_session(state, "Bob", 1002)
+    ctx = SimpleNamespace(
+        name="CMSG_MESSAGECHAT_SAY",
+        payload=b"",
+        decoded={"msg": "hej. detta ar vanlig text", "language": 0},
+    )
+
+    code, responses = chat_handlers.handle_messagechat_say(alice, ctx)
+
+    assert code == 0
+    assert responses is None
+    assert alice.send_response_log == [[("SMSG_MESSAGECHAT", b"1|Alice|hej. detta ar vanlig text")]]
+    assert bob.send_response_log == [[("SMSG_MESSAGECHAT", b"1|Alice|hej. detta ar vanlig text")]]
+
+
 def test_afk_toggle_sets_player_flags(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
@@ -590,17 +643,242 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
     ]
 
 
+def test_roll_command_broadcasts_world_system_message(monkeypatch):
+    monkeypatch.setattr(chat_handlers.random, "randint", lambda start, end: 42)
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    bob = _make_session(state, "Bob", 1002)
+    sent = []
+
+    def fake_broadcast_system_message(message, **kwargs):
+        responses = [("SMSG_MESSAGECHAT", f"system|{message}".encode())]
+        alice.send_response(responses)
+        bob.send_response(responses)
+        sent.append((message, kwargs))
+
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "broadcast_system_message",
+        fake_broadcast_system_message,
+    )
+
+    responses = chat_handlers._handle_chat_command(alice, ".roll")
+
+    assert responses == []
+    expected = [("SMSG_MESSAGECHAT", b"system|Alice rolls 42 (1-100)")]
+    assert sent == [("Alice rolls 42 (1-100)", {"scope": "world"})]
+    assert alice.send_response_log == [expected]
+    assert bob.send_response_log == [expected]
+
+
+def test_level_without_args_adds_one_level(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        chat_handlers.DatabaseConnection,
+        "get_level_stats_for_class",
+        staticmethod(lambda race, class_id: [SimpleNamespace(level=value) for value in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.DatabaseConnection,
+        "save_character_level",
+        staticmethod(
+            lambda char_guid, realm_id, level, xp=0: captured.update(
+                {
+                    "char_guid": int(char_guid),
+                    "realm_id": int(realm_id),
+                    "level": int(level),
+                    "xp": int(xp),
+                }
+            )
+            or True
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_helper",
+        lambda name: (
+            (lambda session: [("SMSG_UPDATE_OBJECT", b"level-update")])
+            if name == "build_level_command_responses"
+            else (lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())])
+        ),
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.level = 5
+    alice.race = 2
+    alice.class_id = 8
+
+    responses = chat_handlers._handle_chat_command(alice, ".level")
+
+    assert alice.level == 6
+    assert captured == {"char_guid": 1001, "realm_id": 1, "level": 6, "xp": 0}
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"level-update"),
+        ("SMSG_MESSAGECHAT", b"system|[Level] 5 -> 6"),
+    ]
+
+
+def test_level_relative_change_clamps_to_valid_range(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        chat_handlers.DatabaseConnection,
+        "get_level_stats_for_class",
+        staticmethod(lambda race, class_id: [SimpleNamespace(level=value) for value in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.DatabaseConnection,
+        "save_character_level",
+        staticmethod(
+            lambda char_guid, realm_id, level, xp=0: captured.update({"level": int(level), "xp": int(xp)}) or True
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_helper",
+        lambda name: (
+            (lambda session: [("SMSG_UPDATE_OBJECT", b"level-update")])
+            if name == "build_level_command_responses"
+            else (lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())])
+        ),
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.level = 5
+    alice.race = 2
+    alice.class_id = 8
+
+    responses = chat_handlers._handle_chat_command(alice, ".level -10")
+
+    assert alice.level == 1
+    assert captured == {"level": 1, "xp": 0}
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"level-update"),
+        ("SMSG_MESSAGECHAT", b"system|[Level] 5 -> 1"),
+    ]
+
+
+def test_level_set_uses_exact_level(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        chat_handlers.DatabaseConnection,
+        "get_level_stats_for_class",
+        staticmethod(lambda race, class_id: [SimpleNamespace(level=value) for value in range(1, 91)]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.DatabaseConnection,
+        "save_character_level",
+        staticmethod(
+            lambda char_guid, realm_id, level, xp=0: captured.update({"level": int(level), "xp": int(xp)}) or True
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_helper",
+        lambda name: (
+            (lambda session: [("SMSG_UPDATE_OBJECT", b"level-update")])
+            if name == "build_level_command_responses"
+            else (lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())])
+        ),
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.level = 5
+    alice.race = 2
+    alice.class_id = 8
+
+    responses = chat_handlers._handle_chat_command(alice, ".level set 42")
+
+    assert alice.level == 42
+    assert captured == {"level": 42, "xp": 0}
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"level-update"),
+        ("SMSG_MESSAGECHAT", b"system|[Level] 5 -> 42"),
+    ]
+
+
+def test_build_level_command_responses_appends_explicit_level_field(monkeypatch):
+    runtime_module = sys.modules["server.modules.handlers.world.state.runtime"]
+    monkeypatch.setattr(
+        runtime_module,
+        "_build_player_value_update_responses",
+        lambda session: [("SMSG_UPDATE_OBJECT", b"base-values")],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_single_u32_update_object_payload",
+        lambda *, map_id, guid, field_index, value: (
+            f"map={int(map_id)}|guid={int(guid)}|field={int(field_index)}|value={int(value)}".encode()
+        ),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.level = 42
+
+    responses = chat_handlers._build_level_command_responses(alice)
+
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"base-values"),
+        ("SMSG_UPDATE_OBJECT", b"map=1|guid=1001|field=55|value=42"),
+    ]
+
+
 def test_map_on_reveals_all_explored_zones(monkeypatch):
     captured = {}
 
-    def fake_build_multi_u32_update_object_payload(**fields):
-        captured.update(fields)
-        return b"map-update"
-
     monkeypatch.setattr(
         chat_handlers,
-        "build_multi_u32_update_object_payload",
-        fake_build_multi_u32_update_object_payload,
+        "build_explored_zones_update_response",
+        lambda session: captured.update({"explored_zones_raw": session.explored_zones_raw})
+        or ("SMSG_UPDATE_OBJECT", b"map-update"),
+    )
+    monkeypatch.setattr(
+        chat_handlers.DatabaseConnection,
+        "save_character_explored_zones",
+        staticmethod(
+            lambda char_guid, realm_id, explored_zones: captured.update(
+                {
+                    "char_guid": int(char_guid),
+                    "realm_id": int(realm_id),
+                    "saved_explored_zones": str(explored_zones),
+                }
+            )
+            or True
+        ),
+        raising=False,
     )
     monkeypatch.setattr(
         chat_handlers,
@@ -610,17 +888,15 @@ def test_map_on_reveals_all_explored_zones(monkeypatch):
 
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
 
     responses = chat_handlers._handle_chat_command(alice, "map on")
 
-    assert captured["map_id"] == 1
-    assert captured["guid"] == 1001
-    assert len(captured["field_updates"]) == 200
-    assert captured["field_updates"][0] == (chat_handlers._PLAYER_FIELD_EXPLORED_ZONES, 0xFFFFFFFF)
-    assert captured["field_updates"][-1] == (
-        chat_handlers._PLAYER_FIELD_EXPLORED_ZONES + 199,
-        0xFFFFFFFF,
-    )
+    assert captured["char_guid"] == 1001
+    assert captured["realm_id"] == 1
+    assert len(captured["saved_explored_zones"].split()) == 200
+    assert set(captured["saved_explored_zones"].split()) == {"4294967295"}
+    assert captured["explored_zones_raw"] == captured["saved_explored_zones"]
     assert responses == [
         ("SMSG_UPDATE_OBJECT", b"map-update"),
         ("SMSG_MESSAGECHAT", b"system|[Map] all explored"),
@@ -630,14 +906,26 @@ def test_map_on_reveals_all_explored_zones(monkeypatch):
 def test_map_zero_clears_all_explored_zones(monkeypatch):
     captured = {}
 
-    def fake_build_multi_u32_update_object_payload(**fields):
-        captured.update(fields)
-        return b"map-update"
-
     monkeypatch.setattr(
         chat_handlers,
-        "build_multi_u32_update_object_payload",
-        fake_build_multi_u32_update_object_payload,
+        "build_explored_zones_update_response",
+        lambda session: captured.update({"explored_zones_raw": session.explored_zones_raw})
+        or ("SMSG_UPDATE_OBJECT", b"map-update"),
+    )
+    monkeypatch.setattr(
+        chat_handlers.DatabaseConnection,
+        "save_character_explored_zones",
+        staticmethod(
+            lambda char_guid, realm_id, explored_zones: captured.update(
+                {
+                    "char_guid": int(char_guid),
+                    "realm_id": int(realm_id),
+                    "saved_explored_zones": str(explored_zones),
+                }
+            )
+            or True
+        ),
+        raising=False,
     )
     monkeypatch.setattr(
         chat_handlers,
@@ -647,15 +935,51 @@ def test_map_zero_clears_all_explored_zones(monkeypatch):
 
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
 
     responses = chat_handlers._handle_chat_command(alice, "map 0")
 
-    assert len(captured["field_updates"]) == 200
-    assert captured["field_updates"][0] == (chat_handlers._PLAYER_FIELD_EXPLORED_ZONES, 0)
-    assert captured["field_updates"][-1] == (chat_handlers._PLAYER_FIELD_EXPLORED_ZONES + 199, 0)
+    assert captured["char_guid"] == 1001
+    assert captured["realm_id"] == 1
+    assert len(captured["saved_explored_zones"].split()) == 200
+    assert set(captured["saved_explored_zones"].split()) == {"0"}
+    assert captured["explored_zones_raw"] == captured["saved_explored_zones"]
     assert responses == [
         ("SMSG_UPDATE_OBJECT", b"map-update"),
         ("SMSG_MESSAGECHAT", b"system|[Map] exploration reset"),
+    ]
+
+
+def test_player_value_updates_include_persisted_map_exploration(monkeypatch):
+    runtime_module = sys.modules["server.modules.handlers.world.state.runtime"]
+    context_module = importlib.import_module("server.modules.handlers.world.login.context")
+    packets_module = importlib.import_module("server.modules.handlers.world.login.packets")
+
+    monkeypatch.setattr(
+        context_module.WorldLoginContext,
+        "from_session",
+        staticmethod(lambda session: SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        packets_module,
+        "build_login_packet",
+        lambda opcode_name, ctx: f"{opcode_name}|pkt".encode(),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "build_explored_zones_update_response",
+        lambda session: ("SMSG_UPDATE_OBJECT", b"explored-zones"),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = runtime_module._build_player_value_update_responses(alice)
+
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"SMSG_UPDATE_OBJECT_1773613176_0004|pkt"),
+        ("SMSG_UPDATE_OBJECT", b"SMSG_UPDATE_OBJECT_1773613185_0006|pkt"),
+        ("SMSG_UPDATE_OBJECT", b"explored-zones"),
     ]
 
 

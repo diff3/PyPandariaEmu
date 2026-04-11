@@ -818,6 +818,64 @@ class DatabaseConnection:
             return False
 
     @staticmethod
+    def save_character_explored_zones(char_guid: int, realm_id: int, explored_zones: str) -> bool:
+        session = DatabaseConnection.chars()
+        try:
+            updated = (
+                session.query(Characters)
+                .filter(
+                    Characters.guid == int(char_guid),
+                    Characters.realm == int(realm_id),
+                )
+                .update({Characters.exploredZones: str(explored_zones or "")}, synchronize_session=False)
+            )
+            session.commit()
+            if updated <= 0:
+                Logger.warning(
+                    f"[DB] save_character_explored_zones missing character guid={char_guid} realm={realm_id}"
+                )
+                return False
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.error(
+                f"[DB] save_character_explored_zones failed guid={char_guid} realm={realm_id}: {exc}"
+            )
+            return False
+
+    @staticmethod
+    def save_character_level(char_guid: int, realm_id: int, level: int, *, xp: int = 0) -> bool:
+        session = DatabaseConnection.chars()
+        try:
+            updated = (
+                session.query(Characters)
+                .filter(
+                    Characters.guid == int(char_guid),
+                    Characters.realm == int(realm_id),
+                )
+                .update(
+                    {
+                        Characters.level: int(level),
+                        Characters.xp: int(xp),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            session.commit()
+            if updated <= 0:
+                Logger.warning(
+                    f"[DB] save_character_level missing character guid={char_guid} realm={realm_id}"
+                )
+                return False
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.error(
+                f"[DB] save_character_level failed guid={char_guid} realm={realm_id}: {exc}"
+            )
+            return False
+
+    @staticmethod
     def get_creature_template(entry: int) -> dict | None:
         if int(entry or 0) <= 0:
             return None
