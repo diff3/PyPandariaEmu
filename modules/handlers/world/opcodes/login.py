@@ -629,6 +629,8 @@ def handle_player_login(session, ctx: PacketContext):
     session.player_bytes = int(row.playerBytes or 0)
     session.player_bytes2 = int(row.playerBytes2 or 0)
     session.player_flags = int(row.playerFlags or 0)
+    session.unit_flags = int(getattr(session, "unit_flags", 0) or 0)
+    session.mount_display_id = int(getattr(session, "mount_display_id", 0) or 0)
     session.player_name = selected_name
     session.equipment_cache_raw = [
         int(value)

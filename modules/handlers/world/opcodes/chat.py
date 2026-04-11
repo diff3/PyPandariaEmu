@@ -7,7 +7,6 @@ from typing import Optional, Tuple
 
 from DSL.modules.EncoderHandler import EncoderHandler
 from shared.Logger import Logger
-from shared.PathUtils import get_captures_root
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.login.packets import build_login_packet
@@ -20,7 +19,6 @@ from server.modules.game.inventory import (
 from server.modules.handlers.world.bootstrap.replay import (
     build_multi_u32_update_object_payload,
     build_single_u32_update_object_payload,
-    send_raw_packet,
 )
 from server.modules.handlers.world.inventory_sync import (
     build_login_inventory_sync_responses,
@@ -42,9 +40,9 @@ from server.modules.handlers.world.chat.codec import (
     encode_skyfire_messagechat_system_payload,
     encode_text_emote_payload,
 )
+from server.modules.handlers.world.commands import chat_commands
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
-from server.modules.handlers.world.opcodes import entities as entities_handlers
 from server.modules.handlers.world.state.runtime import (
     resync_player_appearance,
 )
@@ -76,7 +74,6 @@ from server.modules.handlers.world.teleport.teleport_service import (
 # entity/chat packet builders are isolated from the old monolith.
 RAW_REPLAY_SAY_CHAT_PROFILE = None
 USE_SYSTEM_CHAT_FALLBACK = True
-RAW_SNIFFED_MESSAGECHAT_CAPTURE = "SMSG_MESSAGECHAT_1774505644_0004.json"
 _UNIT_FIELD_ANIMTIER = 0x4C
 _UNIT_FIELD_EMOTE_STATE = 0x59
 _PLAYER_FIELD_PLAYER_FLAGS = 0xA2
@@ -541,52 +538,36 @@ def _build_fixspeed_responses(session) -> list[tuple[str, bytes]]:
     ]
 
 
-def _debug_feedback_response(message: str) -> list[tuple[str, bytes]]:
-    # Fallback if we need both notification + system chat again:
-    # return [
-    #     ("SMSG_NOTIFICATION", build_motd_notification_payload(message)),
-    #     ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message)),
-    # ]
-    return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
+_CHAT_COMMANDS_CONFIGURED = False
 
 
-def _list_sniffed_messagechat_captures() -> list[str]:
-    capture_dir = get_captures_root(focus=True) / "debug"
-    return sorted(path.name for path in capture_dir.glob("SMSG_MESSAGECHAT*.json"))
+def _configure_chat_commands() -> None:
+    global _CHAT_COMMANDS_CONFIGURED
+    if _CHAT_COMMANDS_CONFIGURED:
+        return
 
-
-def _sniffed_messagechat_response(capture_name: str | None = None) -> list[tuple[str, bytes]]:
-    selected_capture = str(capture_name or RAW_SNIFFED_MESSAGECHAT_CAPTURE)
-    capture_path = get_captures_root(focus=True) / "debug" / selected_capture
-    if not capture_path.exists():
-        Logger.warning(f"[CHAT][SNIFF] missing capture path={capture_path}")
-        return _notification_response(f"Missing chat sniff: {selected_capture}")
-    opcode_name, payload = send_raw_packet(None, "SMSG_MESSAGECHAT", capture_path)
-    return [(opcode_name, payload)]
-
-
-def _namequery_response(session, query_arg: str) -> list[tuple[str, bytes]]:
-    query_value = str(query_arg or "").strip().lower()
-    if query_value in ("", "self", "me"):
-        guid = int(getattr(session, "world_guid", 0) or 0)
-    else:
-        try:
-            numeric = int(query_value, 16) if query_value.startswith("0x") else int(query_value)
-        except ValueError:
-            return _notification_response("Usage: send namequery <self|guid>")
-        if numeric <= 0:
-            return _notification_response("Usage: send namequery <self|guid>")
-        guid = numeric
-        if guid <= 0xFFFFFFFF:
-            realm_id = int(getattr(session, "realm_id", 0) or 0)
-            guid = (int(realm_id & 0xFFFF) << 40) | (0x0003 << 48) | int(guid & 0xFFFFFFFF)
-
-    if guid <= 0:
-        return _notification_response("No valid guid for namequery")
-
-    payload = entities_handlers.build_query_player_name_response(session, guid)
-    Logger.info(f"[CHAT][NAMEQUERY] guid=0x{int(guid):016X} size={len(payload)}")
-    return [("SMSG_QUERY_PLAYER_NAME_RESPONSE", payload)]
+    chat_commands.configure(
+        apply_fixplayer_destination=lambda session, destination_name: _apply_fixplayer_destination(
+            session,
+            destination_name,
+        ),
+        append_feedback_response=lambda responses, message: _append_feedback_response(
+            responses,
+            message,
+        ),
+        build_fixplayer_responses=lambda session, mode=0: _build_fixplayer_responses(session, mode),
+        build_fixspeed_responses=lambda session: _build_fixspeed_responses(session),
+        build_login_inventory_sync_responses=lambda session: build_login_inventory_sync_responses(session),
+        build_map_exploration_update_response=lambda session, reveal_all: _build_map_exploration_update_response(
+            session,
+            reveal_all,
+        ),
+        build_speed_command_responses=lambda session: _build_speed_command_responses(session),
+        chat_mount_display_id=_CHAT_MOUNT_DISPLAY_ID,
+        notification_response=lambda message: _notification_response(message),
+        tier_set_items=_TIER_SET_ITEMS,
+    )
+    _CHAT_COMMANDS_CONFIGURED = True
 
 
 def _dispatch_responses_to_sessions(targets, responses) -> None:
@@ -818,536 +799,13 @@ def _toggle_dnd(session, message: str):
 
 
 def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, bytes]]]:
-    command = str(message or "").strip()
-    command_lower = command.lower()
-
-    if command_lower.startswith(".roll"):
-        roll = random.randint(1, 100)
-        msg = f"{session.player_name} rolls {roll} (1-100)"
-        payload = encode_messagechat_payload(
-            chat_type=CHAT_MSG_SAY,
-            language=0,
-            sender_guid=session.player_guid,
-            sender_name=session.player_name,
-            target_guid=0,
-            target_name="",
-            message=msg,
-        )
-        return [("SMSG_MESSAGECHAT", payload)]
-
-    if command_lower == ".getxy":
-        feedback = (
-            "[GetXY] "
-            f"map={int(getattr(session, 'map_id', 0) or 0)} "
-            f"x={float(getattr(session, 'x', 0.0) or 0.0):.2f} "
-            f"y={float(getattr(session, 'y', 0.0) or 0.0):.2f} "
-            f"z={float(getattr(session, 'z', 0.0) or 0.0):.2f} "
-            f"o={float(getattr(session, 'orientation', 0.0) or 0.0):.2f}"
-        )
-        Logger.info(
-            "[GETXY] "
-            f"map={int(getattr(session, 'map_id', 0) or 0)} "
-            f"x={float(getattr(session, 'x', 0.0) or 0.0):.2f} "
-            f"y={float(getattr(session, 'y', 0.0) or 0.0):.2f} "
-            f"z={float(getattr(session, 'z', 0.0) or 0.0):.2f} "
-            f"o={float(getattr(session, 'orientation', 0.0) or 0.0):.2f}"
-        )
-        return _notification_response(feedback)
-
-    if command_lower.startswith(".speed"):
-        parts = command.split(maxsplit=1)
-        if len(parts) != 2:
-            return _notification_response("Usage: .speed <multiplier|default>")
-
-        value = parts[1].strip().lower()
-        if value in {"default", "reset"}:
-            spells_handlers._restore_default_movement_speeds(session)
-        else:
-            try:
-                speed_multiplier = float(value)
-            except ValueError:
-                return _notification_response("Usage: .speed <multiplier|default>")
-            if not (0.1 <= speed_multiplier <= 50.0):
-                return _notification_response("Usage: .speed <0.1-50.0>")
-            spells_handlers.set_custom_run_speed(
-                session,
-                float(getattr(spells_handlers, "_DEFAULT_RUN_SPEED", 7.0) or 7.0) * speed_multiplier,
-            )
-
-        return _build_speed_command_responses(session)
-
-    if command_lower.startswith(".weather"):
-        parts = command.split()
-        if len(parts) not in (2, 3):
-            Logger.info("[Weather] Usage: .weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
-            return []
-
-        weather_key = parts[1].strip().lower()
-        density = 0.0 if weather_key in ("clear", "fine", "sun") else 1.0
-        abrupt = 1
-        if len(parts) == 3:
-            try:
-                density = max(0.0, min(1.0, float(parts[2])))
-            except ValueError:
-                Logger.info(f"[Weather] Invalid density command={command!r}")
-                return []
-
-        try:
-            weather_type = int(weather_key)
-        except ValueError:
-            weather_type = resolve_weather_type(weather_key, density)
-
-        if weather_type < 0:
-            Logger.info(f"[Weather] Unknown weather command={command!r}")
-            return []
-
-        Logger.info(
-            f"[Weather] type={int(weather_type)} density={float(density):.2f} abrupt={abrupt}"
-        )
-        broadcast_region_weather(
-            session,
-            int(weather_type),
-            float(density),
-            abrupt,
-            announce=f"[Weather] type={int(weather_type)} density={float(density):.2f}",
-        )
-        return _notification_response(f"[Weather] type={int(weather_type)} density={float(density):.2f}")
-
-    if command_lower.startswith(".time"):
-        parts = command.split(maxsplit=1)
-        if len(parts) != 2:
-            Logger.info("[Time] Usage: .time <HH:MM|day|night|dawn|dusk|noon|midnight>")
-            return []
-
-        arg = parts[1].strip().lower()
-        presets = {
-            "day": (12, 0),
-            "noon": (12, 0),
-            "night": (0, 0),
-            "midnight": (0, 0),
-            "dawn": (6, 0),
-            "dusk": (18, 0),
-            "sunrise": (6, 0),
-            "sunset": (18, 0),
-        }
-
-        if arg in presets:
-            hour, minute = presets[arg]
-        else:
-            time_parts = arg.split(":", 1)
-            if len(time_parts) != 2:
-                Logger.info(f"[Time] Invalid time command={command!r}")
-                return []
-            try:
-                hour = int(time_parts[0])
-                minute = int(time_parts[1])
-            except ValueError:
-                Logger.info(f"[Time] Invalid time command={command!r}")
-                return []
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                Logger.info(f"[Time] Out-of-range time command={command!r}")
-                return []
-
-        now = int(time.time())
-        lt = time.localtime(now)
-        current_seconds = int(lt.tm_hour) * 3600 + int(lt.tm_min) * 60 + int(lt.tm_sec)
-        target_seconds = int(hour) * 3600 + int(minute) * 60 + int(lt.tm_sec)
-
-        session.server_time = now
-        session.time_offset = target_seconds - current_seconds
-        session.time_speed = 0.01666667
-        session.game_time = pack_wow_game_time(session.server_time + session.time_offset)
-
-        Logger.info(
-            f"[Time] hour={hour:02d} minute={minute:02d} "
-            f"offset={int(session.time_offset)} packed=0x{int(session.game_time):08X}"
-        )
-        broadcast_world_time(
-            int(hour),
-            int(minute),
-            announce=f"[Time] {hour:02d}:{minute:02d}",
-        )
-        return _notification_response(f"[Time] {hour:02d}:{minute:02d}")
-
-    if command_lower.startswith(".system "):
-        message = str(command[8:] or "").strip()
-        if not message:
-            return _notification_response("Usage: .system <message>")
-        Logger.info(f"[SystemChat] message={message!r}")
-        broadcast_system_message(message, scope="world")
-        return _notification_response(f"[System] sent: {message}")
-
-    if command_lower == ".mount":
-        Logger.info(
-            "[Mount][Debug] chat .mount received char=%s mounted=%s mount_spell=%s display=%s",
-            int(getattr(session, "char_guid", 0) or 0),
-            bool(getattr(session, "is_mounted", False)),
-            int(getattr(session, "mount_spell", 0) or 0),
-            int(_CHAT_MOUNT_DISPLAY_ID),
-        )
-        if bool(getattr(session, "is_mounted", False)) or int(getattr(session, "mount_spell", 0) or 0):
-            Logger.info("[Mount] .mount -> dismount")
-            responses = spells_handlers.dismount(session)
-            Logger.info("[Mount][Debug] chat .mount dismount responses=%s", len(responses))
-            return _append_feedback_response(responses, "[Mount] dismount requested")
-
-        Logger.info(f"[Mount] .mount -> display={_CHAT_MOUNT_DISPLAY_ID}")
-        responses = spells_handlers.mount_direct(session, _CHAT_MOUNT_DISPLAY_ID)
-        Logger.info("[Mount][Debug] chat .mount returning responses=%s", len(responses))
-        return _append_feedback_response(responses, "[Mount] mount requested")
-
-    if command_lower.startswith(".additem"):
-        parts = command.split()
-        if len(parts) not in (2, 3):
-            return _notification_response("Usage: .additem <itemEntry> [count]")
-        try:
-            item_entry = int(parts[1], 0)
-            item_count = int(parts[2], 0) if len(parts) == 3 else 1
-        except ValueError:
-            return _notification_response("Usage: .additem <itemEntry> [count]")
-
-        result = add_item_to_character(session, item_entry, item_count)
-        level = "info" if result.ok else "warning"
-        getattr(Logger, level)(f"[Inventory] .additem entry={item_entry} count={item_count} result={result.message}")
-        responses = _build_inventory_mutation_sync_responses(session, result) if result.ok else []
-        responses.extend(_notification_response(f"[Inventory] {result.message}"))
-        return responses
-
-    if command_lower == ".invfix":
-        Logger.info("[INVFIX] start")
-        known_guids = getattr(session, "known_inventory_guids", None)
-        if isinstance(known_guids, set):
-            known_guids.clear()
-        else:
-            session.known_inventory_guids = set()
-        Logger.info("[INVFIX] cleared known guids")
-        session.inventory_activated = False
-        responses = list(build_login_inventory_sync_responses(session))
-        Logger.info("[INVFIX] responses=%s", len(responses))
-        return _append_feedback_response(responses, "[InvFix] full inventory resync sent")
-
-    if command_lower == ".fixplayer":
-        return _append_feedback_response(_build_fixplayer_responses(session, 0), "[FixPlayer] mode=0 resync sent")
-
-    if command_lower.startswith(".fixplayer "):
-        parts = command.split(maxsplit=1)
-        destination_name = parts[1].strip()
-        if not destination_name:
-            return _notification_response("Usage: .fixplayer <teleport>")
-        applied_name = _apply_fixplayer_destination(session, destination_name)
-        if applied_name is None:
-            return _notification_response("Teleport not found")
-        return _append_feedback_response(
-            _build_fixplayer_responses(session, 2),
-            f"[FixPlayer] destination={applied_name}",
-        )
-
-    if command_lower == ".fixspeed":
-        return _build_fixspeed_responses(session)
-
-    if command_lower.startswith(".autoequip"):
-        parts = command.split()
-        if len(parts) != 3:
-            return _notification_response("Usage: .autoequip <bag> <slot>")
-        try:
-            src_bag = int(parts[1], 0)
-            src_slot = int(parts[2], 0)
-        except ValueError:
-            return _notification_response("Usage: .autoequip <bag> <slot>")
-
-        result = auto_equip_item(session, src_bag, src_slot)
-        level = "info" if result.ok else "warning"
-        getattr(Logger, level)(
-            f"[Inventory] .autoequip src=({src_bag},{src_slot}) result={result.message}"
-        )
-        responses = _build_inventory_mutation_sync_responses(session, result) if result.ok else []
-        if result.ok and inventory_result_affects_equipment(result):
-            resync_player_appearance(session)
-        responses.extend(_notification_response(f"[Inventory] {result.message}"))
-        return responses
-
-    if command_lower.startswith(".swapitem"):
-        parts = command.split()
-        if len(parts) != 5:
-            return _notification_response("Usage: .swapitem <srcBag> <srcSlot> <dstBag> <dstSlot>")
-        try:
-            src_bag = int(parts[1], 0)
-            src_slot = int(parts[2], 0)
-            dst_bag = int(parts[3], 0)
-            dst_slot = int(parts[4], 0)
-        except ValueError:
-            return _notification_response("Usage: .swapitem <srcBag> <srcSlot> <dstBag> <dstSlot>")
-
-        result = swap_character_item(session, src_bag, src_slot, dst_bag, dst_slot)
-        level = "info" if result.ok else "warning"
-        getattr(Logger, level)(
-            "[Inventory] .swapitem src=(%s,%s) dst=(%s,%s) result=%s"
-            % (src_bag, src_slot, dst_bag, dst_slot, result.message)
-        )
-        responses = _build_inventory_mutation_sync_responses(session, result) if result.ok else []
-        if result.ok and inventory_result_affects_equipment(result):
-            resync_player_appearance(session)
-        responses.extend(_notification_response(f"[Inventory] {result.message}"))
-        return responses
-
-    if command_lower == ".save":
-        ok = save_current_position_like_command(session, reason="command", online=1, force=True)
-
-        map_id = int(getattr(session, "persist_map_id", 0) or 0)
-        zone = int(getattr(session, "persist_zone", 0) or 0)
-        x = float(getattr(session, "persist_x", 0.0) or 0.0)
-        y = float(getattr(session, "persist_y", 0.0) or 0.0)
-        z = float(getattr(session, "persist_z", 0.0) or 0.0)
-        orientation = float(getattr(session, "persist_orientation", 0.0) or 0.0)
-        player_name = (
-            str(getattr(session, "player_name", "") or "").strip()
-            or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
-        )
-
-        if ok:
-            message = (
-                f"[Save] {player_name} map={map_id} zone={zone} "
-                f"x={x:.2f} y={y:.2f} z={z:.2f} o={orientation:.2f}"
-            )
-            Logger.info(message)
-        else:
-            message = f"[Save] failed for {player_name}"
-            Logger.warning(message)
-
-        # Fallback if we need to restore center-screen notifications:
-        # return [("SMSG_NOTIFICATION", build_motd_notification_payload(message))]
-        return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
-
-    if command_lower.startswith(".telxyz"):
-        parts = command.split()
-        player_name = (
-            str(getattr(session, "player_name", "") or "").strip()
-            or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
-        )
-        if len(parts) != 6:
-            Logger.info(f"[Teleport] Invalid .telxyz syntax command={command!r}")
-            payload_out = encode_messagechat_payload(
-                chat_type=CHAT_MSG_SAY,
-                language=0,
-                sender_guid=int(getattr(session, "player_guid", 0) or getattr(session, "world_guid", 0) or 0),
-                sender_name=player_name,
-                target_guid=0,
-                target_name="",
-                message="Usage: .telxyz <map> <x> <y> <z> <orientation>",
-            )
-            return [("SMSG_MESSAGECHAT", payload_out)]
-
-        try:
-            map_id = int(parts[1])
-            x = float(parts[2])
-            y = float(parts[3])
-            z = float(parts[4])
-            orientation = float(parts[5])
-        except (TypeError, ValueError):
-            Logger.info(f"[Teleport] Invalid .telxyz args command={command!r}")
-            return []
-
-        Logger.info(
-            f"[Teleport] {player_name} -> manual ({map_id} {x:.2f} {y:.2f} {z:.2f} {orientation:.2f})"
-        )
-        return teleport_player(
-            session,
-            map_id,
-            x,
-            y,
-            z,
-            orientation,
-            destination_name=f"manual:{map_id}:{x:.2f}:{y:.2f}:{z:.2f}:{orientation:.2f}",
-        )
-
-    if not command.startswith(".tel"):
-        return None
-
-    parts = command.split()
-    if len(parts) == 1:
-        return _notification_response("Usage: .tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel nearest")
-
-    action = parts[1].strip().lower()
-    if action == "search":
-        query = command.split(None, 2)[2] if len(parts) >= 3 else ""
-        matches = search_teleports(query)
-        if not matches:
-            return _notification_response("Matches: none")
-        return _notification_response(f"Matches: {', '.join(matches)}")
-
-    if action == "add":
-        name = command.split(None, 2)[2].strip() if len(parts) >= 3 else ""
-        if not name:
-            return _notification_response("Usage: .tel add <name>")
-        try:
-            entry = add_named_teleport(
-                DatabaseConnection.world(),
-                name,
-                int(getattr(session, "map_id", 0) or 0),
-                float(getattr(session, "x", 0.0) or 0.0),
-                float(getattr(session, "y", 0.0) or 0.0),
-                float(getattr(session, "z", 0.0) or 0.0),
-                float(getattr(session, "orientation", 0.0) or 0.0),
-            )
-        except Exception as exc:
-            Logger.warning(f"[Teleport] add failed name={name!r}: {exc}")
-            return _notification_response("Teleport add failed")
-        return _notification_response(f"Teleport added: {entry['name']}")
-
-    if action == "rm":
-        name = command.split(None, 2)[2].strip() if len(parts) >= 3 else ""
-        if not name:
-            return _notification_response("Usage: .tel rm <name>")
-        try:
-            removed = remove_named_teleport(DatabaseConnection.world(), name)
-        except Exception as exc:
-            Logger.warning(f"[Teleport] rm failed name={name!r}: {exc}")
-            return _notification_response("Teleport remove failed")
-        if not removed:
-            return _notification_response("Teleport not found")
-        return _notification_response("Teleport removed")
-
-    if action == "nearest":
-        nearest = nearest_teleport(
-            int(getattr(session, "map_id", 0) or 0),
-            float(getattr(session, "x", 0.0) or 0.0),
-            float(getattr(session, "y", 0.0) or 0.0),
-        )
-        if nearest is None:
-            return _notification_response("Nearest: none")
-        return _notification_response(f"Nearest: {nearest['name']}")
-
-    destination_name = command.split(None, 1)[1].strip() if len(parts) >= 2 else ""
-    destination = find_teleport(destination_name)
-    if destination is None:
-        Logger.info(f"[Teleport] Unknown destination command={command!r}")
-        return _notification_response("Teleport not found")
-
-    map_id = int(destination["map"])
-    x = float(destination["x"])
-    y = float(destination["y"])
-    z = float(destination["z"])
-    orientation = float(destination["o"])
-    player_name = (
-        str(getattr(session, "player_name", "") or "").strip()
-        or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
-    )
-
-    Logger.info(
-        f"[Teleport] {player_name} -> {destination['name']} ({x:.2f} {y:.2f} {z:.2f})"
-    )
-    return teleport_player(
-        session,
-        map_id,
-        x,
-        y,
-        z,
-        orientation,
-        destination_name=str(destination["name"]),
-    )
+    _configure_chat_commands()
+    return chat_commands.handle_command(session, message)
 
 
 def _handle_chat_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
-    command = str(message or "").strip()
-
-    command_lower = command.lower()
-    command_parts = command.split(maxsplit=1)
-    command_name = command_parts[0].lower() if command_parts else ""
-
-    if command_name in {".map", "map"}:
-        argument = command_parts[1].strip().lower() if len(command_parts) == 2 else ""
-        if argument in {"on", "1", "all"}:
-            return [
-                _build_map_exploration_update_response(session, True),
-                ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Map] all explored")),
-            ]
-        if argument in {"0", "off", "reset", "none"}:
-            return [
-                _build_map_exploration_update_response(session, False),
-                ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Map] exploration reset")),
-            ]
-        return _notification_response("Usage: map <on|0>")
-    
-    if command_lower.startswith(".addtier"):
-        parts = command.split()
-        return handle_addtier_command(session, parts[1:])
-
-    if command_lower == ".sniffchat":
-        Logger.info(f"[CHAT][SNIFF] replay source={RAW_SNIFFED_MESSAGECHAT_CAPTURE}")
-        responses = _debug_feedback_response(f"send chatsniff 1: {RAW_SNIFFED_MESSAGECHAT_CAPTURE}")
-        responses.extend(_sniffed_messagechat_response())
-        return responses
-
-    send_prefixes = (".send chatsniff", "send chatsniff")
-    if command_lower.startswith(send_prefixes):
-        parts = command.split()
-        captures = _list_sniffed_messagechat_captures()
-        if not captures:
-            return _notification_response("No sniff chat captures found")
-
-        capture_index = 1
-        if len(parts) >= 3:
-            try:
-                capture_index = int(parts[2])
-            except ValueError:
-                return _notification_response("Usage: .send chatsniff <1-n>")
-
-        if capture_index < 1 or capture_index > len(captures):
-            return _notification_response(
-                f"Usage: .send chatsniff <1-{len(captures)}>"
-            )
-
-        selected_capture = captures[capture_index - 1]
-        Logger.info(
-            f"[CHAT][SNIFF] replay index={capture_index}/{len(captures)} "
-            f"source={selected_capture}"
-        )
-        responses = _debug_feedback_response(
-            f"send chatsniff {capture_index}: {selected_capture}"
-        )
-        responses.extend(_sniffed_messagechat_response(selected_capture))
-        return responses
-
-    namequery_prefixes = (".send namequery", "send namequery")
-    if command_lower.startswith(namequery_prefixes):
-        parts = command.split(maxsplit=2)
-        query_arg = parts[2] if len(parts) >= 3 else "self"
-        responses = _debug_feedback_response(f"send namequery {query_arg}")
-        responses.extend(_namequery_response(session, query_arg))
-        return responses
-
-    chatsniffnq_prefixes = (".send chatsniffnq", "send chatsniffnq")
-    if command_lower.startswith(chatsniffnq_prefixes):
-        parts = command.split()
-        captures = _list_sniffed_messagechat_captures()
-        if not captures:
-            return _notification_response("No sniff chat captures found")
-
-        capture_index = 1
-        if len(parts) >= 3:
-            try:
-                capture_index = int(parts[2])
-            except ValueError:
-                return _notification_response("Usage: .send chatsniffnq <1-n>")
-
-        if capture_index < 1 or capture_index > len(captures):
-            return _notification_response(
-                f"Usage: .send chatsniffnq <1-{len(captures)}>"
-            )
-
-        selected_capture = captures[capture_index - 1]
-        Logger.info(
-            f"[CHAT][SNIFFNQ] replay index={capture_index}/{len(captures)} "
-            f"source={selected_capture}"
-        )
-        responses = _debug_feedback_response(
-            f"send chatsniffnq {capture_index}: {selected_capture}"
-        )
-        responses.extend(_namequery_response(session, "self"))
-        responses.extend(_sniffed_messagechat_response(selected_capture))
-        return responses
-
-    return _handle_chat_command_old(session, message)
+    _configure_chat_commands()
+    return chat_commands.handle_command(session, message)
 
 
 def _handle_chat_message_old(session, ctx: PacketContext):

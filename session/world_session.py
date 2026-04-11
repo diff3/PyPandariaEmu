@@ -141,6 +141,8 @@ class WorldSession:
     player_bytes: int = 0
     player_bytes2: int = 0
     player_flags: int = 0
+    unit_flags: int = 0
+    mount_display_id: int = 0
     equipment_cache_raw: List[int] = field(default_factory=list)
     inventory_state: Any = None
     inventory_items: Dict[Any, Any] = field(default_factory=dict)

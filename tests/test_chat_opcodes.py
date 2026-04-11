@@ -696,6 +696,60 @@ def test_invfix_returns_full_inventory_sync_via_login_pipeline(monkeypatch):
     assert alice.inventory_activated is False
 
 
+def test_mount_command_sends_minimal_visual_update(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+    monkeypatch.setattr(
+        chat_handlers.spells_handlers,
+        "build_mount_visual_responses",
+        lambda session, display_id: [("SMSG_UPDATE_OBJECT", f"mount|{int(display_id)}".encode())],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers._handle_chat_command(alice, ".mount")
+
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"mount|2404"),
+        ("SMSG_MESSAGECHAT", b"system|[Mount] mount requested"),
+    ]
+    assert alice.is_mounted is True
+    assert alice.mount_spell is None
+
+
+def test_dismount_command_clears_mount_display(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+    monkeypatch.setattr(
+        chat_handlers.spells_handlers,
+        "build_mount_visual_responses",
+        lambda session, display_id: [("SMSG_UPDATE_OBJECT", f"mount|{int(display_id)}".encode())],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.is_mounted = True
+    alice.mount_spell = 123
+
+    responses = chat_handlers._handle_chat_command(alice, ".dismount")
+
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"mount|0"),
+        ("SMSG_MESSAGECHAT", b"system|[Mount] dismount requested"),
+    ]
+    assert alice.is_mounted is False
+    assert alice.mount_spell is None
+
+
 def test_forced_inventory_slot_resend_uses_minimal_player_values_update(monkeypatch):
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
@@ -979,13 +1033,23 @@ def test_fixspeed_queues_same_map_teleport_resync(monkeypatch):
     ]
 
 
-def test_getxy_returns_feedback_to_player():
+def test_gps_returns_feedback_and_logs_telxyz():
     monkeypatch = __import__("pytest").MonkeyPatch()
+    logged_messages = []
+
     monkeypatch.setattr(
         chat_handlers,
         "encode_skyfire_messagechat_system_payload",
         lambda message: message.encode(),
     )
+    monkeypatch.setattr(
+        chat_handlers.Logger,
+        "info",
+        lambda message, *args: logged_messages.append(
+            message % args if args else message
+        ),
+    )
+
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
     alice.map_id = 1
@@ -994,14 +1058,16 @@ def test_getxy_returns_feedback_to_player():
     alice.z = 56.5
     alice.orientation = 1.25
 
-    responses = chat_handlers._handle_chat_command(alice, ".getxy")
+    responses = chat_handlers._handle_chat_command(alice, ".gps")
 
     assert responses == [
         (
             "SMSG_MESSAGECHAT",
-            b"[GetXY] map=1 x=12.50 y=34.50 z=56.50 o=1.25",
+            b"[GPS] map=1 x=12.50 y=34.50 z=56.50 o=1.25",
         )
     ]
+    assert "[GPS] map=1 x=12.50 y=34.50 z=56.50 o=1.25" in logged_messages
+    assert ".telxyz 1 12.50 34.50 56.50 1.25" in logged_messages
     monkeypatch.undo()
 
 
