@@ -97,6 +97,9 @@ _TIER_SET_ITEMS: dict[tuple[str, int], tuple[int, ...]] = {
         16798,  # Chest
         16800,  # Hands
         16796,  # Legs
+        16799,  # Bindings
+        16801,  # Gloves
+        16802,  # Belt
     ),
 
     # Shaman Tier 1 (Earthfury) – also stable
