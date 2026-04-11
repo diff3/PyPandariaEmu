@@ -417,6 +417,15 @@ def _build_speed_command_responses(session) -> list[tuple[str, bytes]]:
     return responses
 
 
+def _resolve_chat_mount_spell_id() -> int:
+    mount_spells = list(getattr(spells_handlers, "granted_mount_spells", lambda: [])() or [])
+    for spell_id in mount_spells:
+        display_id = int(getattr(spells_handlers, "get_mount_display_id", lambda _spell_id: 0)(spell_id) or 0)
+        if display_id > 0:
+            return int(spell_id)
+    return 59535
+
+
 def _build_fixplayer_responses(session, mode: int = 0) -> list[tuple[str, bytes]]:
     from server.modules.handlers.world.bootstrap import replay as bootstrap_replay
     from server.modules.handlers.world.state.runtime import (
@@ -799,6 +808,10 @@ def _configure_chat_commands() -> None:
         ),
         build_fixplayer_responses=lambda session, mode=0: _build_fixplayer_responses(session, mode),
         build_fixspeed_responses=lambda session: _build_fixspeed_responses(session),
+        build_mount_visual_responses=lambda session, display_id: spells_handlers.build_mount_visual_responses(
+            session,
+            display_id,
+        ),
         build_login_inventory_sync_responses=lambda session: build_login_inventory_sync_responses(session),
         build_level_command_responses=lambda session: _build_level_command_responses(session),
         build_map_exploration_update_response=lambda session, reveal_all: _build_map_exploration_update_response(
@@ -809,8 +822,10 @@ def _configure_chat_commands() -> None:
         apply_player_state_change=lambda session, **kwargs: apply_player_state_change(session, **kwargs),
         build_display_id_responses=lambda session, display_id: build_display_id_responses(session, display_id),
         build_state_responses=lambda session, field_updates: build_state_responses(session, field_updates),
+        send_run_speed=lambda session, speed: send_run_speed(session, speed),
         build_speed_command_responses=lambda session: _build_speed_command_responses(session),
         chat_mount_display_id=_CHAT_MOUNT_DISPLAY_ID,
+        chat_mount_spell_id=_resolve_chat_mount_spell_id(),
         notification_response=lambda message: _notification_response(message),
         tier_set_items=_TIER_SET_ITEMS,
     )

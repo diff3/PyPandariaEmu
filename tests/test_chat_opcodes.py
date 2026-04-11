@@ -33,11 +33,20 @@ def _import_chat_handlers():
         },
         "server.modules.handlers.world.opcodes.spells": {
             "_DEFAULT_RUN_SPEED": 7.0,
+            "_UNIT_FIELD_FLAGS": 0x60,
+            "_UNIT_FIELD_MOUNTDISPLAYID": 0x6A,
+            "_UNIT_FLAG_MOUNT": 0x08000000,
             "_restore_default_movement_speeds": lambda session: (
                 setattr(session, "walk_speed", 2.5),
                 setattr(session, "run_speed", 7.0),
                 setattr(session, "swim_speed", 4.7),
                 setattr(session, "fly_speed", 7.0),
+            ),
+            "_apply_mount_movement_speeds": lambda session: (
+                setattr(session, "walk_speed", 2.5),
+                setattr(session, "run_speed", 14.0),
+                setattr(session, "swim_speed", 9.4),
+                setattr(session, "fly_speed", 14.0),
             ),
             "set_custom_run_speed": lambda session, value: (
                 setattr(session, "walk_speed", float(value) * (2.5 / 7.0)),
@@ -45,6 +54,8 @@ def _import_chat_handlers():
                 setattr(session, "swim_speed", float(value) * (4.7 / 7.0)),
                 setattr(session, "fly_speed", float(value)),
             ),
+            "handle_mount": lambda session, spell_id: [],
+            "dismount": lambda session: [],
         },
         "server.modules.handlers.world.opcodes.movement": {
             "build_move_set_speed_payload": (
@@ -1096,17 +1107,28 @@ def test_invfix_returns_full_inventory_sync_via_login_pipeline(monkeypatch):
     assert alice.inventory_activated is False
 
 
-def test_mount_command_sends_minimal_visual_update(monkeypatch):
+def test_mount_command_updates_visuals_speed_and_movement(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
         "encode_skyfire_messagechat_system_payload",
         lambda message: f"system|{message}".encode(),
     )
     monkeypatch.setattr(
-        chat_handlers,
-        "apply_player_state_change",
-        lambda session, **kwargs: [("SMSG_UPDATE_OBJECT", f"mount|{int(kwargs['mount_display_id'])}".encode())],
+        chat_handlers.chat_commands,
+        "_helper",
+        lambda name: {"chat_mount_spell_id": 59535}[name],
     )
+    monkeypatch.setattr(
+        chat_handlers.spells_handlers,
+        "handle_mount",
+        lambda session, spell_id: (
+            setattr(session, "mount_spell", int(spell_id)),
+            setattr(session, "is_mounted", True),
+            setattr(session, "run_speed", 14.0),
+            [("SMSG_UPDATE_OBJECT", f"mount-spell|{int(spell_id)}".encode())],
+        )[3],
+    )
+    _install_movement_stub(monkeypatch, resync_movement=lambda session: [("SMSG_PLAYER_MOVE", b"move-resync")])
 
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
@@ -1114,38 +1136,53 @@ def test_mount_command_sends_minimal_visual_update(monkeypatch):
     responses = chat_handlers._handle_chat_command(alice, ".mount")
 
     assert responses == [
-        ("SMSG_UPDATE_OBJECT", b"mount|2404"),
+        ("SMSG_UPDATE_OBJECT", b"mount-spell|59535"),
+        ("SMSG_PLAYER_MOVE", b"move-resync"),
         ("SMSG_MESSAGECHAT", b"system|[Mount] mount requested"),
     ]
     assert alice.is_mounted is True
-    assert alice.mount_spell is None
+    assert alice.mount_spell == 59535
+    assert alice.run_speed == 14.0
 
 
-def test_dismount_command_clears_mount_display(monkeypatch):
+def test_dismount_command_clears_mount_display_and_restores_speed(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
         "encode_skyfire_messagechat_system_payload",
         lambda message: f"system|{message}".encode(),
     )
     monkeypatch.setattr(
-        chat_handlers,
-        "apply_player_state_change",
-        lambda session, **kwargs: [("SMSG_UPDATE_OBJECT", f"mount|{int(kwargs['mount_display_id'])}".encode())],
+        chat_handlers.spells_handlers,
+        "dismount",
+        lambda session: (
+            setattr(session, "mount_display_id", 0),
+            setattr(session, "mount_spell", None),
+            setattr(session, "is_mounted", False),
+            setattr(session, "run_speed", 7.0),
+            [("SMSG_UPDATE_OBJECT", b"dismount-spell")],
+        )[4],
     )
+    _install_movement_stub(monkeypatch, resync_movement=lambda session: [("SMSG_PLAYER_MOVE", b"move-resync")])
 
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
     alice.is_mounted = True
     alice.mount_spell = 123
+    alice.unit_flags = 0x08000000
+    alice.mount_display_id = 2404
+    alice.run_speed = 14.0
 
     responses = chat_handlers._handle_chat_command(alice, ".dismount")
 
     assert responses == [
-        ("SMSG_UPDATE_OBJECT", b"mount|0"),
+        ("SMSG_UPDATE_OBJECT", b"dismount-spell"),
+        ("SMSG_PLAYER_MOVE", b"move-resync"),
         ("SMSG_MESSAGECHAT", b"system|[Mount] dismount requested"),
     ]
     assert alice.is_mounted is False
     assert alice.mount_spell is None
+    assert alice.mount_display_id == 0
+    assert alice.run_speed == 7.0
 
 
 def test_morph_command_uses_display_only_update(monkeypatch):

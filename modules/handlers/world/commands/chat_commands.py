@@ -555,22 +555,26 @@ def cmd_system(session, args: list[str]) -> list[tuple[str, bytes]]:
 @register_command("mount", ".mount", allow_args=False)
 def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Apply the debug mount display."""
-    mount_display_id = int(_helper("chat_mount_display_id"))
+    from server.modules.handlers.world.opcodes.movement import resync_movement
+
+    mount_spell_id = int(_helper("chat_mount_spell_id"))
     Logger.info(
-        "[Mount][Debug] chat .mount received char=%s mounted=%s mount_spell=%s display=%s",
+        "[Mount][Debug] chat .mount received char=%s mounted=%s mount_spell=%s debug_spell=%s",
         int(getattr(session, "char_guid", 0) or 0),
         bool(getattr(session, "is_mounted", False)),
         int(getattr(session, "mount_spell", 0) or 0),
-        mount_display_id,
+        mount_spell_id,
     )
-    Logger.info("[Mount] .mount -> display=%s", mount_display_id)
-    session.is_mounted = True
-    session.mount_spell = None
-    responses = _helper("apply_player_state_change")(
-        session,
-        mount_display_id=mount_display_id,
-        set_flags=int(getattr(spells_handlers, "_UNIT_FLAG_MOUNT", 0) or 0),
+    Logger.info("[Mount] spell_id=%s", mount_spell_id)
+    responses = list(spells_handlers.handle_mount(session, int(mount_spell_id)))
+    Logger.info(
+        "[Mount] spell_id=%s speed=%.2f",
+        mount_spell_id,
+        float(getattr(session, "run_speed", 0.0) or 0.0),
     )
+    responses.extend(resync_movement(session))
+    Logger.info("[Mount] aura applied")
+    Logger.info("[Mount] committed")
     Logger.info("[Mount][Debug] chat .mount returning responses=%s", len(responses))
     return _append_feedback_response(responses, "[Mount] mount requested")
 
@@ -578,14 +582,17 @@ def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
 @register_command("dismount", ".dismount", allow_args=False)
 def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Clear the debug mount display."""
+    from server.modules.handlers.world.opcodes.movement import resync_movement
+
     Logger.info("[Mount] .dismount -> clear display")
-    session.is_mounted = False
-    session.mount_spell = None
-    responses = _helper("apply_player_state_change")(
-        session,
-        mount_display_id=0,
-        clear_flags=int(getattr(spells_handlers, "_UNIT_FLAG_MOUNT", 0) or 0),
+    responses = list(spells_handlers.dismount(session))
+    Logger.info(
+        "[Mount] spell_id=%s speed=%.2f",
+        int(getattr(session, "mount_spell", 0) or 0),
+        float(getattr(session, "run_speed", 0.0) or 0.0),
     )
+    responses.extend(resync_movement(session))
+    Logger.info("[Mount] committed")
     Logger.info("[Mount][Debug] chat .dismount responses=%s", len(responses))
     return _append_feedback_response(responses, "[Mount] dismount requested")
 
