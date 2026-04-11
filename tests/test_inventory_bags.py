@@ -26,6 +26,7 @@ from server.modules.game.inventory import (
     InventoryItem,
     InventoryState,
     ItemTemplateInfo,
+    _save_equipment_cache_after_mutation,
     auto_store_item,
     swap_character_item,
 )
@@ -162,3 +163,50 @@ def test_auto_store_item_treats_client_bag_255_as_backpack():
     assert result.ok is True
     assert state.get(0, 19) is None
     assert state.get(0, 23).item_guid == 1000
+
+
+def test_auto_store_item_accepts_logical_bag_index_for_fourth_bag():
+    bag_template = _template(entry=100, display_id=2000, inventory_type=18, container_slots=6)
+    item_template = _template(entry=201, display_id=3100, inventory_type=0)
+
+    equipped_bag = _item(guid=1000, bag=0, slot=22, template=bag_template)
+    backpack_item = _item(guid=2000, bag=0, slot=23, template=item_template)
+
+    state = InventoryState()
+    for item in (equipped_bag, backpack_item):
+        state.put(item)
+    session = _FakeSession(state)
+
+    result = auto_store_item(session, 0, 23, 4)
+
+    assert result.ok is True
+    assert state.get(0, 23) is None
+    assert state.get(1000, 0).item_guid == 2000
+
+
+def test_save_equipment_cache_after_mutation_rebuilds_session_inventory_for_all_bags():
+    bag_one = _template(entry=100, display_id=2000, inventory_type=18, container_slots=6)
+    bag_four = _template(entry=101, display_id=2001, inventory_type=18, container_slots=10)
+    reagent = _template(entry=200, display_id=3000, inventory_type=0)
+
+    first_bag = _item(guid=1000, bag=0, slot=19, template=bag_one)
+    fourth_bag = _item(guid=1001, bag=0, slot=22, template=bag_four)
+    backpack_item = _item(guid=2000, bag=0, slot=23, template=reagent)
+    first_bag_item = _item(guid=2001, bag=1000, slot=0, template=reagent)
+    fourth_bag_item = _item(guid=2002, bag=1001, slot=9, template=reagent)
+
+    state = InventoryState()
+    for item in (first_bag, fourth_bag, backpack_item, first_bag_item, fourth_bag_item):
+        state.put(item)
+    session = _FakeSession(state)
+
+    _save_equipment_cache_after_mutation(session, state)
+
+    assert len(session.inventory[0]) == 16
+    assert len(session.inventory[1]) == 6
+    assert len(session.inventory[2]) == 0
+    assert len(session.inventory[3]) == 0
+    assert len(session.inventory[4]) == 10
+    assert session.inventory[0][0].item_guid == 2000
+    assert session.inventory[1][0].item_guid == 2001
+    assert session.inventory[4][9].item_guid == 2002

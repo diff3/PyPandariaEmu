@@ -212,6 +212,8 @@ def _resolve_internal_bag(state, client_bag: int) -> int | None:
     client_bag = int(client_bag)
     if client_bag in (0, 255):
         return 0
+    if 1 <= client_bag <= 4:
+        client_bag = 18 + client_bag
     bag_item = state.get(0, client_bag) if state is not None else None
     if bag_item and bool(getattr(bag_item, "is_bag", False)):
         return int(getattr(bag_item, "item_guid", 0) or 0)

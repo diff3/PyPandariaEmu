@@ -209,6 +209,7 @@ def refresh_session_inventory(session, *, persist: bool = False) -> InventorySta
     session.inventory_state = state
     session.inventory_items = dict(state.items_by_pos)
     session.inventory_by_guid = dict(state.items_by_guid)
+    session.inventory = _build_session_inventory_view(state)
     equipment_cache = build_equipment_cache_raw(state)
     session.equipment_cache_raw = equipment_cache
     session.inventory_dirty = False
@@ -242,6 +243,32 @@ def _is_storage_position(bag: int, slot: int) -> bool:
     return slot >= 0
 
 
+def _equipped_bag_items(state: InventoryState) -> list[InventoryItem]:
+    bags: list[InventoryItem] = []
+    for item in state.items_by_pos.values():
+        if int(item.bag) != 0 or not item.is_bag or not _is_bag_slot(int(item.slot)):
+            continue
+        bags.append(item)
+    bags.sort(key=lambda item: (int(item.slot), int(item.item_guid)))
+    return bags
+
+
+def _build_session_inventory_view(state: InventoryState) -> dict[int, list[Optional[InventoryItem]]]:
+    inventory: dict[int, list[Optional[InventoryItem]]] = {
+        0: [state.get(0, slot) for slot in range(INVENTORY_SLOT_ITEM_START, INVENTORY_SLOT_ITEM_END)],
+    }
+
+    for bag_slot in range(INVENTORY_SLOT_BAG_START, INVENTORY_SLOT_BAG_END):
+        bag_index = (int(bag_slot) - INVENTORY_SLOT_BAG_START) + 1
+        bag_item = state.get(0, bag_slot)
+        bag_size = int(getattr(bag_item, "container_slots", 0) or 0) if bag_item and bag_item.is_bag else 0
+        inventory[bag_index] = [
+            state.get(int(getattr(bag_item, "item_guid", 0) or 0), slot) if bag_item and bag_item.is_bag else None
+            for slot in range(bag_size)
+        ]
+    return inventory
+
+
 def _bag_item_for_container(state: InventoryState, bag_guid: int) -> Optional[InventoryItem]:
     if int(bag_guid) <= 0:
         return None
@@ -255,6 +282,8 @@ def _resolve_internal_bag(state: InventoryState, client_bag: int) -> Optional[in
     client_bag = int(client_bag)
     if client_bag in (0, INVENTORY_SLOT_BAG_0):
         return 0
+    if 1 <= client_bag <= (INVENTORY_SLOT_BAG_END - INVENTORY_SLOT_BAG_START):
+        client_bag = INVENTORY_SLOT_BAG_START + client_bag - 1
     bag_item = state.get(0, client_bag)
     if bag_item and bag_item.is_bag:
         return int(bag_item.item_guid)
@@ -326,10 +355,7 @@ def _first_free_storage_slot(state: InventoryState, item: InventoryItem) -> Opti
         if state.get(0, slot) is None:
             return (0, slot)
 
-    for bag_slot in range(INVENTORY_SLOT_BAG_START, INVENTORY_SLOT_BAG_END):
-        bag_item = state.get(0, bag_slot)
-        if not bag_item or not bag_item.is_bag:
-            continue
+    for bag_item in _equipped_bag_items(state):
         if bag_item.container_slots <= 0:
             continue
         for slot in range(int(bag_item.container_slots)):
@@ -345,10 +371,7 @@ def _find_merge_target(state: InventoryState, entry: int, stackable: int) -> Opt
         item = state.get(0, slot)
         if item and item.entry == int(entry) and item.count < stackable:
             return item
-    for bag_slot in range(INVENTORY_SLOT_BAG_START, INVENTORY_SLOT_BAG_END):
-        bag_item = state.get(0, bag_slot)
-        if not bag_item or not bag_item.is_bag:
-            continue
+    for bag_item in _equipped_bag_items(state):
         for slot in range(int(bag_item.container_slots)):
             item = state.get(bag_item.item_guid, slot)
             if item and item.entry == int(entry) and item.count < stackable:
@@ -405,6 +428,7 @@ def _save_equipment_cache_after_mutation(session, state: InventoryState) -> None
     session.inventory_state = state
     session.inventory_items = dict(state.items_by_pos)
     session.inventory_by_guid = dict(state.items_by_guid)
+    session.inventory = _build_session_inventory_view(state)
     equipment_cache_text = build_equipment_cache_string(state)
     session.equipment_cache_raw = [int(value) for value in equipment_cache_text.split()] if equipment_cache_text else []
     character_row = getattr(session, "_character_row", None)
@@ -534,6 +558,12 @@ def add_item_to_character(session, item_entry: int, count: int = 1) -> Inventory
                 else:
                     merge_target.count += move_count
                     _set_item_count(db_session, merge_target.item_guid, merge_target.count)
+                    Logger.info(
+                        "[INV_DEBUG] bag=%s slot=%s entry=%s",
+                        int(merge_target.bag),
+                        int(merge_target.slot),
+                        int(item_entry),
+                    )
                     _track_changed(merge_target)
                     added += move_count
                     remaining -= move_count
@@ -583,6 +613,12 @@ def add_item_to_character(session, item_entry: int, count: int = 1) -> Inventory
                 template=template,
             )
             state.put(item)
+            Logger.info(
+                "[INV_DEBUG] bag=%s slot=%s entry=%s",
+                int(item.bag),
+                int(item.slot),
+                int(item_entry),
+            )
             _persist_position(db_session, char_guid, item)
             _track_changed(item, created=True)
             added += chunk_count

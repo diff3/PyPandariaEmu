@@ -60,15 +60,28 @@ def _mark_known_inventory_guid(session, guid: int) -> None:
     _known_inventory_guids(session).add(int(guid))
 
 
+def _equipped_bag_items(state) -> list:
+    bags = []
+    for item in getattr(state, "items_by_pos", {}).values():
+        if int(getattr(item, "bag", -1)) != 0:
+            continue
+        if not bool(getattr(item, "is_bag", False)):
+            continue
+        slot = int(getattr(item, "slot", -1))
+        if not (19 <= slot < 23):
+            continue
+        bags.append(item)
+    bags.sort(key=lambda item: (int(getattr(item, "slot", 0) or 0), int(getattr(item, "item_guid", 0) or 0)))
+    return bags
+
+
 def _find_inventory_activation_bag(session) -> tuple[int, int] | None:
     state = getattr(session, "inventory_state", None)
     if state is None or not hasattr(state, "get"):
         return None
 
-    for slot in range(19, 23):
-        item = state.get(0, slot)
-        if item is not None and bool(getattr(item, "is_bag", False)):
-            return int(slot), int(getattr(item, "item_guid", 0) or 0)
+    for item in _equipped_bag_items(state):
+        return int(getattr(item, "slot", 0) or 0), int(getattr(item, "item_guid", 0) or 0)
 
     for slot in range(39):
         item = state.get(0, slot)
@@ -947,6 +960,10 @@ def build_login_inventory_sync_responses(session) -> list[tuple[str, bytes]]:
     _clear_known_inventory_guids(session)
     session.inventory_activated = False
     Logger.debug("[LOGIN_SYNC] syncing inventory + equip + visible")
+    equipped_bag_slots = {
+        int(getattr(item, "slot", 0) or 0)
+        for item in _equipped_bag_items(state)
+    }
 
     root_items = sorted(
         (
@@ -955,7 +972,7 @@ def build_login_inventory_sync_responses(session) -> list[tuple[str, bytes]]:
             if int(getattr(item, "bag", -1)) == 0
             and not (
                 bool(getattr(item, "is_bag", False))
-                and 19 <= int(getattr(item, "slot", -1) or -1) < 23
+                and int(getattr(item, "slot", -1) or -1) in equipped_bag_slots
             )
         ),
         key=lambda item: (int(getattr(item, "slot", 0) or 0), int(getattr(item, "item_guid", 0) or 0)),
@@ -1341,10 +1358,7 @@ def build_equipped_bag_sync_responses(session) -> list[tuple[str, bytes]]:
         return []
 
     responses: list[tuple[str, bytes]] = []
-    for slot in range(19, 23):
-        bag_item = state.get(0, slot)
-        if bag_item is None or not bool(getattr(bag_item, "is_bag", False)):
-            continue
+    for bag_item in _equipped_bag_items(state):
         responses.extend(sync_container(session, bag_item))
         for bag_slot in range(int(getattr(bag_item, "container_slots", 0) or 0)):
             item = state.get(int(bag_item.item_guid), bag_slot)

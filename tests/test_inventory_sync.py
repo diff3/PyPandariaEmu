@@ -1265,6 +1265,35 @@ def test_login_inventory_sync_uses_live_equip_player_fields_for_equipped_item():
     assert any(update["mask"]["set_bits"] == player_bits for update in player_updates)
 
 
+def test_equipped_bag_sync_includes_fourth_bag_and_contents():
+    session = _FakeSession()
+    state = _InventoryState()
+    session.inventory_state = state
+
+    bag = _Item(
+        item_guid=1000,
+        bag=0,
+        slot=22,
+        count=1,
+        template=_Template(entry=100, display_id=2000, inventory_type=18, container_slots=10),
+    )
+    contained = _Item(
+        item_guid=2000,
+        bag=1000,
+        slot=9,
+        count=1,
+        template=_Template(entry=200, display_id=3000, inventory_type=0),
+    )
+    state.put(bag)
+    state.put(contained)
+
+    responses = inventory_sync.build_equipped_bag_sync_responses(session)
+
+    assert inventory_sync._make_item_world_guid(1000) in session.known_inventory_guids
+    assert inventory_sync._make_item_world_guid(2000) in session.known_inventory_guids
+    assert len(responses) == 2
+
+
 def test_root_inventory_slot_sync_skips_occupied_equipped_bag_slots():
     session = _FakeSession()
     state = _InventoryState()
