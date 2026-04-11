@@ -112,6 +112,8 @@ class WorldLoginContext:
     player_bytes: int = 0
     player_bytes2: int = 0
     player_flags: int = 0
+    display_id: int = 0
+    native_display_id: int = 0
     equipment_cache_raw: list[int] = field(default_factory=list)
 
     known_spells: list = field(default_factory=list)
@@ -192,6 +194,13 @@ class WorldLoginContext:
             player_bytes=session.player_bytes,
             player_bytes2=session.player_bytes2,
             player_flags=session.player_flags,
+            display_id=int(getattr(session, "display_id", 0) or 0),
+            native_display_id=int(
+                getattr(session, "original_display_id", 0)
+                or getattr(session, "native_display_id", 0)
+                or getattr(session, "display_id", 0)
+                or 0
+            ),
             equipment_cache_raw=list(getattr(session, "equipment_cache_raw", []) or []),
 
             known_spells=session.known_spells,

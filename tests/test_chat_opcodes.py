@@ -51,12 +51,14 @@ def _import_chat_handlers():
                 lambda session, opcode_name, value: f"{opcode_name}|{float(value):.2f}".encode()
             ),
             "build_move_set_run_speed_payload": lambda session: b"speed-packet",
+            "resync_movement": lambda session: [("SMSG_PLAYER_MOVE", b"move-resync")],
             "_save_current_position_like_command": lambda *args, **kwargs: True,
         },
         "server.modules.handlers.world.inventory_sync": {
             "build_login_inventory_sync_responses": lambda session: [],
             "build_inventory_delta_responses": lambda session, result: [],
             "build_item_snapshot_responses": lambda session, item: [],
+            "build_self_visible_item_update_responses": lambda session: [],
             "inventory_result_affects_equipment": lambda result: False,
             "trigger_inventory_activation": lambda session: [],
         },
@@ -113,6 +115,32 @@ def _make_session(state: GlobalState, name: str, guid: int):
     state.sessions.add(session)
     state.chat_channels.setdefault("world", set()).add(session)
     return session
+
+
+def _install_movement_stub(monkeypatch, **overrides):
+    module = types.ModuleType("server.modules.handlers.world.opcodes.movement")
+    module.build_move_set_speed_payload = (
+        lambda session, opcode_name, value: f"{opcode_name}|{float(value):.2f}".encode()
+    )
+    module.build_move_set_run_speed_payload = lambda session: b"speed-packet"
+    module.resync_movement = lambda session: [("SMSG_PLAYER_MOVE", b"move-resync")]
+    module.build_same_map_teleport_payload = lambda session: b"teleport-payload"
+    module._save_current_position_like_command = lambda *args, **kwargs: True
+    module._capture_persist_position_from_session = lambda session: None
+    module._mark_position_dirty = lambda session: None
+    module._movement_state = lambda session: SimpleNamespace(
+        x=float(getattr(session, "x", 0.0) or 0.0),
+        y=float(getattr(session, "y", 0.0) or 0.0),
+        z=float(getattr(session, "z", 0.0) or 0.0),
+        orientation=float(getattr(session, "orientation", 0.0) or 0.0),
+        flags=0,
+        flags2=0,
+        counter=0,
+    )
+    for name, value in overrides.items():
+        setattr(module, name, value)
+    monkeypatch.setitem(sys.modules, "server.modules.handlers.world.opcodes.movement", module)
+    return module
 
 
 def test_yell_broadcasts_to_world_sessions(monkeypatch):
@@ -617,16 +645,14 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
             setattr(session, "fly_speed", float(value)),
         ),
     )
+    movement_module = _install_movement_stub(monkeypatch)
     monkeypatch.setattr(
-        chat_handlers,
-        "build_move_set_speed_payload",
-        lambda session, opcode_name, value: f"{opcode_name}|{float(value):.2f}".encode(),
+        movement_module,
+        "resync_movement",
+        lambda session: [("SMSG_PLAYER_MOVE", f"speed|{float(getattr(session, 'run_speed', 0.0) or 0.0):.2f}".encode())],
+        raising=False,
     )
-    monkeypatch.setattr(
-        chat_handlers,
-        "encode_skyfire_messagechat_system_payload",
-        lambda message: f"system|{message}".encode(),
-    )
+    monkeypatch.setattr(chat_handlers, "encode_skyfire_messagechat_system_payload", lambda message: f"system|{message}".encode())
 
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
@@ -640,6 +666,7 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
         ("SMSG_MOVE_SET_SWIM_SPEED", b"SMSG_MOVE_SET_SWIM_SPEED|23.50"),
         ("SMSG_MOVE_SET_FLIGHT_SPEED", b"SMSG_MOVE_SET_FLIGHT_SPEED|35.00"),
         ("SMSG_MESSAGECHAT", b"system|[Speed] run=35.00"),
+        ("SMSG_PLAYER_MOVE", b"speed|35.00"),
     ]
 
 
@@ -1027,10 +1054,9 @@ def test_mount_command_sends_minimal_visual_update(monkeypatch):
         lambda message: f"system|{message}".encode(),
     )
     monkeypatch.setattr(
-        chat_handlers.spells_handlers,
-        "build_mount_visual_responses",
-        lambda session, display_id: [("SMSG_UPDATE_OBJECT", f"mount|{int(display_id)}".encode())],
-        raising=False,
+        chat_handlers,
+        "apply_player_state_change",
+        lambda session, **kwargs: [("SMSG_UPDATE_OBJECT", f"mount|{int(kwargs['mount_display_id'])}".encode())],
     )
 
     state = GlobalState()
@@ -1053,10 +1079,9 @@ def test_dismount_command_clears_mount_display(monkeypatch):
         lambda message: f"system|{message}".encode(),
     )
     monkeypatch.setattr(
-        chat_handlers.spells_handlers,
-        "build_mount_visual_responses",
-        lambda session, display_id: [("SMSG_UPDATE_OBJECT", f"mount|{int(display_id)}".encode())],
-        raising=False,
+        chat_handlers,
+        "apply_player_state_change",
+        lambda session, **kwargs: [("SMSG_UPDATE_OBJECT", f"mount|{int(kwargs['mount_display_id'])}".encode())],
     )
 
     state = GlobalState()
@@ -1072,6 +1097,420 @@ def test_dismount_command_clears_mount_display(monkeypatch):
     ]
     assert alice.is_mounted is False
     assert alice.mount_spell is None
+
+
+def test_morph_command_uses_display_id_and_resyncs_appearance(monkeypatch):
+    resync_calls = []
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_state_responses",
+        lambda session, field_updates: [("SMSG_UPDATE_OBJECT", f"state|{field_updates[69]}".encode())],
+    )
+    monkeypatch.setattr(
+        sys.modules["server.modules.handlers.world.state.runtime"],
+        "resync_player_appearance",
+        lambda session: resync_calls.append(session),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.display_id = 12345
+
+    responses = chat_handlers._handle_chat_command(alice, ".morph 29266")
+
+    assert alice.original_display_id == 12345
+    assert alice.native_display_id == 12345
+    assert alice.morph_display_id == 29266
+    assert alice.display_id == 29266
+    assert alice.is_morphed is True
+    assert resync_calls == [alice]
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"state|29266"),
+        ("SMSG_MESSAGECHAT", b"system|[Morph] display=29266"),
+    ]
+
+
+def test_morph_command_resolves_name_lookup(monkeypatch):
+    monkeypatch.setattr(
+        sys.modules["server.modules.handlers.world.state.runtime"],
+        "resync_player_appearance",
+        lambda session: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_state_responses",
+        lambda session, field_updates: [("SMSG_UPDATE_OBJECT", f"state|{field_updates[69]}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.display_id = 12345
+
+    responses = chat_handlers._handle_chat_command(alice, ".morph sylvanas")
+
+    assert alice.display_id == 28213
+    assert alice.is_morphed is True
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"state|28213"),
+        ("SMSG_MESSAGECHAT", b"system|[Morph] display=28213"),
+    ]
+
+
+def test_demorph_restores_native_display_and_gear_state(monkeypatch):
+    resync_calls = []
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_state_responses",
+        lambda session, field_updates: [("SMSG_UPDATE_OBJECT", f"state|{field_updates[69]}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_login_inventory_sync_responses",
+        lambda session: [("SMSG_UPDATE_OBJECT", b"inv-sync")],
+    )
+    monkeypatch.setattr(
+        sys.modules["server.modules.handlers.world.state.runtime"],
+        "resync_player_appearance",
+        lambda session: resync_calls.append(session),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.display_id = 29266
+    alice.original_display_id = 15476
+    alice.native_display_id = 15476
+    alice.morph_display_id = 29266
+    alice.is_morphed = True
+
+    responses = chat_handlers._handle_chat_command(alice, ".demorph")
+
+    assert alice.display_id == 15476
+    assert alice.original_display_id is None
+    assert alice.native_display_id is None
+    assert alice.morph_display_id is None
+    assert alice.is_morphed is False
+    assert resync_calls == [alice]
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"state|15476"),
+        ("SMSG_UPDATE_OBJECT", b"inv-sync"),
+        ("SMSG_MESSAGECHAT", b"system|[Morph] restored=15476"),
+    ]
+
+
+def test_morph_chain_keeps_original_display_until_demorph(monkeypatch):
+    monkeypatch.setattr(
+        sys.modules["server.modules.handlers.world.state.runtime"],
+        "resync_player_appearance",
+        lambda session: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_state_responses",
+        lambda session, field_updates: [("SMSG_UPDATE_OBJECT", f"state|{field_updates[69]}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.display_id = 12345
+
+    chat_handlers._handle_chat_command(alice, ".morph 29266")
+    chat_handlers._handle_chat_command(alice, ".morph 28213")
+    responses = chat_handlers._handle_chat_command(alice, ".demorph")
+
+    assert alice.display_id == 12345
+    assert alice.original_display_id is None
+    assert alice.morph_display_id is None
+    assert alice.is_morphed is False
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"state|12345"),
+        ("SMSG_MESSAGECHAT", b"system|[Morph] restored=12345"),
+    ]
+
+
+def test_demorph_returns_not_morphed_when_idle(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers._handle_chat_command(alice, ".demorph")
+
+    assert responses == [("SMSG_MESSAGECHAT", b"system|Not morphed")]
+
+
+def test_demorph_restores_native_display_when_morph_flag_is_missing(monkeypatch):
+    resync_calls = []
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_state_responses",
+        lambda session, field_updates: [("SMSG_UPDATE_OBJECT", f"state|{field_updates[69]}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_login_inventory_sync_responses",
+        lambda session: [("SMSG_UPDATE_OBJECT", b"inv-sync")],
+    )
+    monkeypatch.setattr(
+        sys.modules["server.modules.handlers.world.state.runtime"],
+        "resync_player_appearance",
+        lambda session: resync_calls.append(session),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.display_id = 28213
+    alice.native_display_id = 15476
+    alice.is_morphed = False
+
+    responses = chat_handlers._handle_chat_command(alice, ".demorph")
+
+    assert alice.display_id == 15476
+    assert alice.original_display_id is None
+    assert alice.native_display_id is None
+    assert alice.morph_display_id is None
+    assert alice.is_morphed is False
+    assert resync_calls == [alice]
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"state|15476"),
+        ("SMSG_UPDATE_OBJECT", b"inv-sync"),
+        ("SMSG_MESSAGECHAT", b"system|[Morph] restored=15476"),
+    ]
+
+
+def test_build_state_responses_duplicates_display_id_into_native_display(monkeypatch):
+    called = []
+
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_self_visible_item_update_responses",
+        lambda session: [],
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [],
+    )
+    monkeypatch.setattr(
+        sys.modules["server.modules.handlers.world.state.runtime"],
+        "build_self_player_appearance_responses",
+        lambda session: called.append(session) or [("SMSG_UPDATE_OBJECT", b"self-appearance")],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers.build_state_responses(alice, {69: 29266})
+
+    assert called == [alice]
+    assert responses == [("SMSG_UPDATE_OBJECT", b"self-appearance")]
+
+
+def test_apply_state_and_resync_appends_player_move_when_missing(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [("SMSG_PLAYER_MOVE", b"move")],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers.apply_state_and_resync(alice, [("SMSG_UPDATE_OBJECT", b"values")])
+
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"values"),
+        ("SMSG_PLAYER_MOVE", b"move"),
+    ]
+
+
+def test_build_state_responses_uses_self_appearance_when_morphed(monkeypatch):
+    called = []
+
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [],
+    )
+    monkeypatch.setattr(
+        sys.modules["server.modules.handlers.world.state.runtime"],
+        "build_self_player_appearance_responses",
+        lambda session: called.append(session) or [("SMSG_UPDATE_OBJECT", b"self-appearance")],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.is_morphed = True
+
+    responses = chat_handlers.build_state_responses(alice, {})
+
+    assert called == [alice]
+    assert responses == [("SMSG_UPDATE_OBJECT", b"self-appearance")]
+
+
+def test_apply_player_state_change_mount_updates_fields_and_resyncs_movement(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_field_update_responses",
+        lambda session, field_updates: (
+            captured.setdefault("field_updates", dict(field_updates)),
+            [("SMSG_UPDATE_OBJECT", b"values")],
+        )[1],
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [("SMSG_PLAYER_MOVE", b"move")],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers.apply_player_state_change(alice, mount_display_id=2404)
+
+    assert alice.mount_display_id == 2404
+    assert alice.unit_flags & 0x08000000
+    assert captured["field_updates"][0x60] & 0x08000000
+    assert captured["field_updates"][0x6A] == 2404
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"values"),
+        ("SMSG_PLAYER_MOVE", b"move"),
+    ]
+
+
+def test_apply_player_state_change_same_map_position_queues_near_teleport(monkeypatch):
+    movement_module = _install_movement_stub(monkeypatch)
+    monkeypatch.setattr(
+        movement_module,
+        "_movement_state",
+        lambda session: SimpleNamespace(x=0.0, y=0.0, z=0.0, orientation=0.0, flags=1, flags2=2),
+        raising=False,
+    )
+    monkeypatch.setattr(movement_module, "_capture_persist_position_from_session", lambda session: None, raising=False)
+    monkeypatch.setattr(movement_module, "_mark_position_dirty", lambda session: None, raising=False)
+    monkeypatch.setattr(movement_module, "build_same_map_teleport_payload", lambda session: b"teleport", raising=False)
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_field_update_responses",
+        lambda session, field_updates: [("SMSG_UPDATE_OBJECT", b"pre-resync")],
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [("SMSG_PLAYER_MOVE", b"move")],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.zone = 12
+
+    responses = chat_handlers.apply_player_state_change(
+        alice,
+        position=(10.0, 20.0, 30.0, 1.5),
+        map_id=1,
+    )
+
+    assert alice.x == 10.0
+    assert alice.y == 20.0
+    assert alice.z == 30.0
+    assert alice.orientation == 1.5
+    assert alice.near_teleport_pending is True
+    assert alice.teleport_pending is False
+    assert len(responses) == 2
+    assert responses[0][0] == "SMSG_MOVE_TELEPORT"
+    assert responses[1] == ("SMSG_PLAYER_MOVE", b"move")
+
+
+def test_apply_player_state_change_cross_map_position_returns_transfer_packets(monkeypatch):
+    movement_module = _install_movement_stub(monkeypatch)
+    monkeypatch.setattr(
+        movement_module,
+        "_movement_state",
+        lambda session: SimpleNamespace(x=0.0, y=0.0, z=0.0, orientation=0.0, flags=1, flags2=2),
+        raising=False,
+    )
+    monkeypatch.setattr(movement_module, "_capture_persist_position_from_session", lambda session: None, raising=False)
+    monkeypatch.setattr(movement_module, "_mark_position_dirty", lambda session: None, raising=False)
+    monkeypatch.setattr(chat_handlers, "_build_field_update_responses", lambda session, field_updates: [])
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_login_packet",
+        lambda opcode_name, ctx: f"{opcode_name}|{getattr(ctx, 'map_id', 0)}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.zone = 12
+
+    responses = chat_handlers.apply_player_state_change(
+        alice,
+        position=(10.0, 20.0, 30.0, 1.5),
+        map_id=0,
+    )
+
+    assert alice.map_id == 0
+    assert alice.teleport_pending is True
+    assert alice.near_teleport_pending is False
+    assert responses == [
+        ("SMSG_TRANSFER_PENDING", b"SMSG_TRANSFER_PENDING|0"),
+        ("SMSG_NEW_WORLD", b"SMSG_NEW_WORLD|0"),
+    ]
+
+
+def test_morph_unknown_name_returns_feedback(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers._handle_chat_command(alice, ".morph unknown")
+
+    assert responses == [
+        ("SMSG_MESSAGECHAT", b"system|Morph target not found"),
+    ]
 
 
 def test_forced_inventory_slot_resend_uses_minimal_player_values_update(monkeypatch):
@@ -1326,7 +1765,7 @@ def test_fixplayer_unknown_teleport_returns_feedback(monkeypatch):
 
 
 def test_fixspeed_queues_same_map_teleport_resync(monkeypatch):
-    movement_module = sys.modules["server.modules.handlers.world.opcodes.movement"]
+    movement_module = _install_movement_stub(monkeypatch)
     monkeypatch.setattr(
         movement_module,
         "build_same_map_teleport_payload",

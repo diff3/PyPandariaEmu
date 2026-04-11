@@ -518,8 +518,11 @@ def _is_equipment_position(bag: int, slot: int) -> bool:
 
 
 def _visible_item_cache_raw(session) -> list[int]:
-    cached = [int(value) for value in (getattr(session, "equipment_cache_raw", []) or [])]
     required = _PLAYER_VISIBLE_ITEM_SLOT_COUNT * 2
+    if bool(getattr(session, "is_morphed", False)):
+        return [0] * required
+
+    cached = [int(value) for value in (getattr(session, "equipment_cache_raw", []) or [])]
     if len(cached) >= required:
         return cached[:required]
 
@@ -1338,6 +1341,13 @@ def build_inventory_delta_responses(session, result) -> list[tuple[str, bytes]]:
             if int(bag) >= 0 and int(slot) >= 0:
                 clear_batch = build_update_batch()
                 add_update(clear_batch, "CONTAINER", _build_storage_slot_update_responses(session, int(bag), int(slot), 0))
+                # Destroying equipped items must also clear visible gear immediately.
+                if _is_equipment_position(int(bag), int(slot)):
+                    add_update(
+                        clear_batch,
+                        "PLAYER_VISIBLE",
+                        _build_self_visible_item_slot_update_responses(session, int(slot), 0),
+                    )
                 responses.extend(send_update_batch(session, clear_batch))
             remove_batch = build_update_batch()
             add_out_of_range(remove_batch, session, int(item_guid))

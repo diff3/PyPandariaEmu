@@ -1,6 +1,7 @@
 import sys
 import types
 import struct
+from types import SimpleNamespace
 
 
 database_module = types.ModuleType("server.modules.database.DatabaseConnection")
@@ -13,7 +14,9 @@ class _DatabaseConnection:
 database_module.DatabaseConnection = _DatabaseConnection
 sys.modules.setdefault("server.modules.database.DatabaseConnection", database_module)
 
+sys.modules.pop("server.modules.handlers.world.opcodes.movement", None)
 from server.modules.handlers.world.opcodes import movement
+sys.modules.pop("server.modules.handlers.world.opcodes.movement", None)
 
 
 class _FakeSession:
@@ -26,6 +29,86 @@ class _FakeSession:
         self.orientation = 1.25
         self.map_id = 1
         self.char_guid = 7
+
+
+def test_first_movement_packet_clears_teleport_pending_and_continues(monkeypatch):
+    session = _FakeSession()
+    session.teleport_pending = True
+    session.near_teleport_pending = False
+    session.movement_state = SimpleNamespace(
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=0.5,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        counter=0,
+    )
+    calls = []
+
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda target: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args: (10.0, 20.0, 30.0, 1.5))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args: True)
+    monkeypatch.setattr(
+        movement,
+        "_store_authoritative_movement",
+        lambda target, opcode_name, payload, movement_data: calls.append(("store", opcode_name, movement_data)) or True,
+    )
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: calls.append(("capture", target)))
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: calls.append(("dirty", target)))
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, force=False: calls.append(("broadcast", force)))
+
+    status, responses = movement.handle_movement_packet(
+        session,
+        SimpleNamespace(name="MSG_MOVE_HEARTBEAT", opcode=0, payload=b"", decoded={}),
+    )
+
+    assert status == 0
+    assert responses is None
+    assert session.teleport_pending is False
+    assert session.near_teleport_pending is False
+    assert session.x == 10.0
+    assert session.y == 20.0
+    assert session.z == 30.0
+    assert session.orientation == 1.25
+    assert calls[0] == ("store", "MSG_MOVE_HEARTBEAT", (10.0, 20.0, 30.0, 1.5))
+
+
+def test_first_movement_packet_clears_near_teleport_pending_and_continues(monkeypatch):
+    session = _FakeSession()
+    session.teleport_pending = False
+    session.near_teleport_pending = True
+    session.movement_state = SimpleNamespace(
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=0.5,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        counter=0,
+    )
+
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda target: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args: (10.0, 20.0, 30.0, 1.5))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args: True)
+    monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args: True)
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, force=False: None)
+
+    status, responses = movement.handle_movement_packet(
+        session,
+        SimpleNamespace(name="MSG_MOVE_START_FORWARD", opcode=0, payload=b"", decoded={}),
+    )
+
+    assert status == 0
+    assert responses is None
+    assert session.teleport_pending is False
+    assert session.near_teleport_pending is False
 
 
 def test_same_map_teleport_payload_matches_pandaria548_capture_layout():
@@ -94,15 +177,13 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
     )
     monkeypatch.setattr(
         movement,
+        "build_same_map_teleport_self_resync_responses",
+        lambda target: [("SMSG_UPDATE_OBJECT", b"0006")],
+    )
+    monkeypatch.setattr(
+        movement,
         "encode_skyfire_messagechat_system_payload",
         lambda message: message.encode("utf-8"),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "server.modules.handlers.world.opcodes.chat",
-        types.SimpleNamespace(
-            _build_fixplayer_responses=lambda target: [("SMSG_UPDATE_OBJECT", b"fixplayer")]
-        ),
     )
 
     status, responses = movement.handle_move_teleport_ack(session, None)
@@ -111,7 +192,7 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
     assert session.near_teleport_pending is False
     assert responses == [
         ("SMSG_MESSAGECHAT", b"[Teleport] same-map ack -> Orgrimmar"),
-        ("SMSG_UPDATE_OBJECT", b"fixplayer"),
+        ("SMSG_UPDATE_OBJECT", b"0006"),
     ]
     assert calls == [
         ("capture", session),

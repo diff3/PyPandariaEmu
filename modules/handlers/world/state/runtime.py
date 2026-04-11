@@ -417,6 +417,8 @@ def _build_player_create_update_response(source_session) -> tuple[str, bytes] | 
     ctx.exact_0002_remote_player = True
     ctx.exact_0002_map_id = int(getattr(source_session, "map_id", 0) or 0)
     ctx.exact_0002_low_guid = int(getattr(source_session, "char_guid", 0) or 0)
+    if bool(getattr(source_session, "is_morphed", False)):
+        ctx.equipment_cache_raw = [0] * len(list(getattr(ctx, "equipment_cache_raw", []) or []))
     payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
     if payload is None:
         return None
@@ -436,6 +438,8 @@ def build_self_player_appearance_responses(source_session) -> list[tuple[str, by
     ctx.exact_0002_mode = "barncastle"
     ctx.exact_0002_map_id = int(getattr(source_session, "map_id", 0) or 0)
     ctx.exact_0002_low_guid = int(getattr(source_session, "char_guid", 0) or 0)
+    if bool(getattr(source_session, "is_morphed", False)):
+        ctx.equipment_cache_raw = [0] * len(list(getattr(ctx, "equipment_cache_raw", []) or []))
     payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
     if payload is not None:
         responses.append(("SMSG_UPDATE_OBJECT", payload))
@@ -457,6 +461,8 @@ def build_same_map_teleport_self_resync_responses(source_session) -> list[tuple[
     ctx = WorldLoginContext.from_session(source_session)
     ctx.exact_0006_map_id = int(getattr(source_session, "map_id", 0) or 0)
     ctx.exact_0006_guid = guid
+    if bool(getattr(source_session, "is_morphed", False)):
+        ctx.equipment_cache_raw = [0] * len(list(getattr(ctx, "equipment_cache_raw", []) or []))
     payload_0006 = build_login_packet("SMSG_UPDATE_OBJECT_1773613185_0006", ctx)
     if payload_0006 is not None:
         responses.append(("SMSG_UPDATE_OBJECT", payload_0006))

@@ -241,6 +241,14 @@ def _build_run_speed_refresh_response(session) -> tuple[str, bytes] | None:
     return ("SMSG_PLAYER_MOVE", payload)
 
 
+def resync_movement(session) -> list[tuple[str, bytes]]:
+    # Speed changes apply more reliably after a fresh move packet.
+    response = _build_run_speed_refresh_response(session)
+    if response is None:
+        return []
+    return [response]
+
+
 def _next_speed_change_counter(session) -> int:
     state = _movement_state(session)
     counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
@@ -316,6 +324,15 @@ def build_same_map_teleport_payload(session) -> bytes:
 
 def _is_teleporting(session) -> bool:
     return bool(getattr(session, "near_teleport_pending", False) or getattr(session, "teleport_pending", False))
+
+
+def _consume_pending_teleport_on_movement(session, opcode_name: str) -> None:
+    # Some clients resume with movement before any explicit teleport ack.
+    if not _is_teleporting(session):
+        return
+    session.teleport_pending = False
+    session.near_teleport_pending = False
+    Logger.debug("[Teleport] cleared pending state on %s", str(opcode_name))
 
 
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
@@ -1062,9 +1079,7 @@ def _maybe_periodic_position_save(
 def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     opcode_name = str(ctx.name or f"0x{int(ctx.opcode):04X}")
     Logger.debug(f"[MOVE] opcode={opcode_name}")
-    if _is_teleporting(session):
-        Logger.debug(f"[Movement] ignoring {opcode_name} while teleport is pending")
-        return 0, None
+    _consume_pending_teleport_on_movement(session, opcode_name)
     _clear_dance_emote_state_on_move(session)
 
     movement = parse_movement_info(session, opcode_name, ctx.payload, ctx.decoded)
@@ -1185,9 +1200,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
 
 @register("MSG_MOVE_SET_FACING")
 def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
-    if _is_teleporting(session):
-        Logger.debug("[Movement] ignoring MSG_MOVE_SET_FACING while teleport is pending")
-        return 0, None
+    _consume_pending_teleport_on_movement(session, "MSG_MOVE_SET_FACING")
     payload = bytes(ctx.payload or b"")
     if len(payload) < 4:
         Logger.warning("[Movement] MSG_MOVE_SET_FACING payload too short")
@@ -1238,9 +1251,7 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
     if fixspeed_pending:
         self_resync_responses = build_same_map_teleport_self_resync_responses(session)
     else:
-        from server.modules.handlers.world.opcodes.chat import _build_fixplayer_responses
-
-        self_resync_responses = _build_fixplayer_responses(session)
+        self_resync_responses = build_same_map_teleport_self_resync_responses(session)
     Logger.info(
         "[Teleport] same-map teleport ack destination=%s pos=(%.2f %.2f %.2f %.2f)",
         str(getattr(session, "teleport_destination", "") or ""),

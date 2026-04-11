@@ -24,6 +24,7 @@ from server.modules.handlers.world.inventory_sync import (
     build_login_inventory_sync_responses,
     build_inventory_delta_responses,
     build_item_snapshot_responses,
+    build_self_visible_item_update_responses,
     inventory_result_affects_equipment,
     trigger_inventory_activation,
 )
@@ -45,7 +46,6 @@ from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.state.runtime import (
     build_explored_zones_update_response,
-    resync_player_appearance,
     set_session_explored_zones_state,
 )
 from server.modules.handlers.world.opcodes import spells as spells_handlers
@@ -62,7 +62,6 @@ from server.modules.handlers.world.state.runtime import (
     resolve_weather_type,
 )
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
-from server.modules.handlers.world.teleport.runtime import teleport_player
 from server.modules.handlers.world.teleport.teleport_service import (
     add_teleport as add_named_teleport,
     find_teleport,
@@ -89,6 +88,11 @@ _DEFAULT_AFK_MESSAGE = "Away from keyboard"
 _DEFAULT_DND_MESSAGE = "Do not disturb"
 _CHAT_MOUNT_DISPLAY_ID = 2404
 _PLAYER_FIELD_LEVEL = 55
+_UNIT_FIELD_DISPLAYID = 69
+_UNIT_FIELD_NATIVE_DISPLAYID = 70
+_UNIT_FIELD_FLAGS = 0x60
+_UNIT_FIELD_MOUNTDISPLAYID = 0x6A
+_UNIT_FLAG_MOUNT = 0x08000000
 _TIER_SET_ITEMS: dict[tuple[str, int], tuple[int, ...]] = {
     # Mage Tier 1 (Arcanist) – stable baseline set
     ("mage", 1): (
@@ -497,16 +501,7 @@ def _build_fixplayer_responses(session, mode: int = 0) -> list[tuple[str, bytes]
     ):
         responses.append((opcode_name, build_move_set_speed_payload(session, opcode_name, speed_value)))
 
-    from server.modules.handlers.world.opcodes import movement as movement_handlers
-
-    move_response = None
-    refresh_builder = getattr(movement_handlers, "_build_run_speed_refresh_response", None)
-    if callable(refresh_builder):
-        move_response = refresh_builder(session)
-    if move_response is None:
-        move_response = _build_player_move_response(session)
-    if move_response is not None:
-        responses.append(move_response)
+    responses.extend(_build_movement_resync_responses(session))
     return responses
 
 
@@ -577,6 +572,187 @@ def _build_level_command_responses(session) -> list[tuple[str, bytes]]:
     return responses
 
 
+def _build_movement_resync_responses(session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.state.runtime import _build_player_move_response
+
+    response = _build_player_move_response(session)
+    if response is None:
+        return []
+    return [response]
+
+
+def apply_state_and_resync(
+    session,
+    responses: list[tuple[str, bytes]] | None,
+) -> list[tuple[str, bytes]]:
+    """
+    Pure state updates are unreliable until the client sees movement too.
+    """
+    merged = list(responses or [])
+    if any(opcode_name == "SMSG_PLAYER_MOVE" for opcode_name, _payload in merged):
+        return merged
+    merged.extend(_build_movement_resync_responses(session))
+    return merged
+
+
+def _build_field_update_responses(session, field_updates: dict[int, int]) -> list[tuple[str, bytes]]:
+    # Display changes need the full self appearance path.
+    from server.modules.handlers.world.state.runtime import build_self_player_appearance_responses
+
+    guid = int(
+        getattr(session, "world_guid", 0)
+        or getattr(session, "player_guid", 0)
+        or getattr(session, "char_guid", 0)
+        or 0
+    )
+    responses: list[tuple[str, bytes]] = []
+    normalized_fields = {
+        int(field_index): int(field_value) & 0xFFFFFFFF
+        for field_index, field_value in (field_updates or {}).items()
+    }
+    if _UNIT_FIELD_DISPLAYID in normalized_fields:
+        normalized_fields[_UNIT_FIELD_NATIVE_DISPLAYID] = (
+            int(normalized_fields[_UNIT_FIELD_DISPLAYID]) & 0xFFFFFFFF
+        )
+    normalized = sorted(normalized_fields.items())
+    if bool(getattr(session, "is_morphed", False)) or _UNIT_FIELD_DISPLAYID in normalized_fields:
+        return list(build_self_player_appearance_responses(session))
+    if guid > 0 and normalized:
+        return [
+            (
+                "SMSG_UPDATE_OBJECT",
+                build_multi_u32_update_object_payload(
+                    map_id=int(getattr(session, "map_id", 0) or 0),
+                    guid=guid,
+                    field_updates=normalized,
+                ),
+            )
+        ]
+    if guid > 0:
+        return list(build_self_visible_item_update_responses(session))
+    return []
+
+
+def build_state_responses(session, field_updates: dict[int, int]) -> list[tuple[str, bytes]]:
+    """
+    Apply player field updates, refresh self visuals, then resend movement.
+    """
+    return apply_state_and_resync(session, _build_field_update_responses(session, field_updates))
+
+
+def apply_player_state_change(
+    session,
+    *,
+    display_id: int | None = None,
+    mount_display_id: int | None = None,
+    speed: float | None = None,
+    position: tuple[float, float, float, float] | None = None,
+    map_id: int | None = None,
+    set_flags: int | None = None,
+    clear_flags: int | None = None,
+) -> list[tuple[str, bytes]]:
+    """
+    Mutate session state first, then derive the packets from that state.
+    """
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+    field_updates: dict[int, int] = {}
+
+    if display_id is not None:
+        session.display_id = int(display_id)
+        field_updates[_UNIT_FIELD_DISPLAYID] = int(display_id)
+
+    if mount_display_id is not None or set_flags is not None or clear_flags is not None:
+        unit_flags = int(getattr(session, "unit_flags", 0) or 0)
+        if set_flags is not None:
+            unit_flags |= int(set_flags)
+        if clear_flags is not None:
+            unit_flags &= ~int(clear_flags)
+        if mount_display_id is not None:
+            session.mount_display_id = int(mount_display_id)
+            field_updates[_UNIT_FIELD_MOUNTDISPLAYID] = int(mount_display_id)
+            if int(mount_display_id) > 0:
+                unit_flags |= _UNIT_FLAG_MOUNT
+            else:
+                unit_flags &= ~_UNIT_FLAG_MOUNT
+        session.unit_flags = int(unit_flags)
+        field_updates[_UNIT_FIELD_FLAGS] = int(unit_flags)
+
+    if position is not None:
+        target_map_id = int(getattr(session, "map_id", 0) or 0) if map_id is None else int(map_id)
+        same_map = int(getattr(session, "map_id", 0) or 0) == target_map_id
+        x, y, z, orientation = position
+        session.x = float(x)
+        session.y = float(y)
+        session.z = float(z)
+        session.orientation = float(orientation)
+        session.map_id = target_map_id
+        session.zone = int(
+            resolve_zone_from_position(target_map_id, float(x), float(y))
+            or int(getattr(session, "zone", 0) or 0)
+        )
+        session.instance_id = 0
+        movement_state = movement_handlers._movement_state(session)
+        movement_state.x = float(x)
+        movement_state.y = float(y)
+        movement_state.z = float(z)
+        movement_state.orientation = float(orientation)
+        movement_state.flags = 0
+        movement_state.flags2 = 0
+        movement_handlers._capture_persist_position_from_session(session)
+        movement_handlers._mark_position_dirty(session)
+        if same_map:
+            session.teleport_pending = False
+            session.near_teleport_pending = True
+            return apply_state_and_resync(
+                session,
+                [("SMSG_MOVE_TELEPORT", movement_handlers.build_same_map_teleport_payload(session))],
+            )
+
+        session.teleport_pending = True
+        session.near_teleport_pending = False
+        return [
+            (
+                "SMSG_TRANSFER_PENDING",
+                build_login_packet(
+                    "SMSG_TRANSFER_PENDING",
+                    type("Ctx", (), {"map_id": int(target_map_id)})(),
+                ),
+            ),
+            (
+                "SMSG_NEW_WORLD",
+                build_login_packet(
+                    "SMSG_NEW_WORLD",
+                    type(
+                        "Ctx",
+                        (),
+                        {
+                            "map_id": int(target_map_id),
+                            "x": float(x),
+                            "y": float(y),
+                            "z": float(z),
+                            "orientation": float(orientation),
+                        },
+                    )(),
+                ),
+            ),
+        ]
+
+    responses = _build_field_update_responses(session, field_updates)
+
+    if speed is not None:
+        session.run_speed = float(speed)
+        for opcode_name, speed_value in (
+            ("SMSG_MOVE_SET_WALK_SPEED", float(getattr(session, "walk_speed", 2.5) or 2.5)),
+            ("SMSG_MOVE_SET_RUN_SPEED", float(getattr(session, "run_speed", 7.0) or 7.0)),
+            ("SMSG_MOVE_SET_SWIM_SPEED", float(getattr(session, "swim_speed", 4.7) or 4.7)),
+            ("SMSG_MOVE_SET_FLIGHT_SPEED", float(getattr(session, "fly_speed", 7.0) or 7.0)),
+        ):
+            responses.append((opcode_name, build_move_set_speed_payload(session, opcode_name, speed_value)))
+
+    return apply_state_and_resync(session, responses)
+
+
 _CHAT_COMMANDS_CONFIGURED = False
 
 
@@ -602,6 +778,9 @@ def _configure_chat_commands() -> None:
             session,
             reveal_all,
         ),
+        apply_state_and_resync=lambda session, responses: apply_state_and_resync(session, responses),
+        apply_player_state_change=lambda session, **kwargs: apply_player_state_change(session, **kwargs),
+        build_state_responses=lambda session, field_updates: build_state_responses(session, field_updates),
         build_speed_command_responses=lambda session: _build_speed_command_responses(session),
         chat_mount_display_id=_CHAT_MOUNT_DISPLAY_ID,
         notification_response=lambda message: _notification_response(message),

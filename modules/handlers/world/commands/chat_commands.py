@@ -32,7 +32,6 @@ from server.modules.handlers.world.state.runtime import (
     pack_wow_game_time,
     resolve_weather_type,
 )
-from server.modules.handlers.world.teleport.runtime import teleport_player
 from server.modules.handlers.world.teleport.teleport_service import (
     add_teleport as add_named_teleport,
     find_teleport,
@@ -56,6 +55,10 @@ PRIMARY_COMMANDS: dict[str, Command] = {}
 ALIASES: dict[str, str] = {}
 COMMANDS: dict[str, Command] = {}
 HELPERS: dict[str, Any] = {}
+MORPH_NAME_TO_DISPLAY = {
+    "sylvanas": 28213,
+}
+UNIT_FIELD_DISPLAYID = 69
 
 
 def configure(**helpers: Any) -> None:
@@ -219,6 +222,31 @@ def _help_lines() -> list[str]:
     return [command.usage for command in PRIMARY_COMMANDS.values()]
 
 
+def _resolve_morph_display_id(arg: str) -> int:
+    """Resolve a morph target from display id or simple name."""
+    value = str(arg or "").strip()
+    if not value:
+        return 0
+    try:
+        return int(value, 0)
+    except ValueError:
+        return int(MORPH_NAME_TO_DISPLAY.get(value.casefold(), 0) or 0)
+
+
+def _resolve_native_display_id(session) -> int:
+    """Resolve the normal player display id for demorph fallback."""
+    from server.modules.handlers.world.login.packets import _resolve_player_display_id
+
+    race = int(getattr(session, "race", 0) or 0)
+    gender = int(getattr(session, "gender", 0) or 0)
+    fallback = int(
+        getattr(session, "original_display_id", 0)
+        or getattr(session, "native_display_id", 0)
+        or 15476
+    )
+    return int(_resolve_player_display_id(race, gender, fallback) or fallback)
+
+
 def dump_command_map() -> None:
     """Log the command map in a simple name -> usage format."""
     for name, command in PRIMARY_COMMANDS.items():
@@ -320,6 +348,8 @@ def cmd_level(session, args: list[str]) -> list[tuple[str, bytes]]:
 @register_command("speed", ".speed <multiplier|default>")
 def cmd_speed(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Change or reset movement speeds."""
+    from server.modules.handlers.world.opcodes.movement import resync_movement
+
     if len(args) != 1:
         return _notification_response("Usage: .speed <multiplier|default>")
 
@@ -338,7 +368,10 @@ def cmd_speed(session, args: list[str]) -> list[tuple[str, bytes]]:
             float(getattr(spells_handlers, "_DEFAULT_RUN_SPEED", 7.0) or 7.0) * speed_multiplier,
         )
 
-    return _helper("build_speed_command_responses")(session)
+    responses = list(_helper("build_speed_command_responses")(session))
+    responses.extend(resync_movement(session))
+    Logger.debug("[SPEED] resync applied")
+    return responses
 
 
 @register_command("weather", ".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
@@ -469,7 +502,11 @@ def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
     Logger.info("[Mount] .mount -> display=%s", mount_display_id)
     session.is_mounted = True
     session.mount_spell = None
-    responses = spells_handlers.build_mount_visual_responses(session, mount_display_id)
+    responses = _helper("apply_player_state_change")(
+        session,
+        mount_display_id=mount_display_id,
+        set_flags=int(getattr(spells_handlers, "_UNIT_FLAG_MOUNT", 0) or 0),
+    )
     Logger.info("[Mount][Debug] chat .mount returning responses=%s", len(responses))
     return _append_feedback_response(responses, "[Mount] mount requested")
 
@@ -480,9 +517,77 @@ def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
     Logger.info("[Mount] .dismount -> clear display")
     session.is_mounted = False
     session.mount_spell = None
-    responses = spells_handlers.build_mount_visual_responses(session, 0)
+    responses = _helper("apply_player_state_change")(
+        session,
+        mount_display_id=0,
+        clear_flags=int(getattr(spells_handlers, "_UNIT_FLAG_MOUNT", 0) or 0),
+    )
     Logger.info("[Mount][Debug] chat .dismount responses=%s", len(responses))
     return _append_feedback_response(responses, "[Mount] dismount requested")
+
+
+@register_command("morph", ".morph <displayId|name>", require_args=True)
+def cmd_morph(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Morph the player into a target display id."""
+    from server.modules.handlers.world.state.runtime import resync_player_appearance
+
+    if len(args) != 1:
+        return _notification_response("Usage: .morph <displayId|name>")
+
+    display_id = _resolve_morph_display_id(args[0])
+    if display_id <= 0:
+        return _notification_response("Morph target not found")
+
+    original_display_id = int(getattr(session, "original_display_id", 0) or 0)
+    if original_display_id <= 0:
+        original_display_id = int(getattr(session, "display_id", 0) or 0)
+        session.original_display_id = int(original_display_id)
+        session.native_display_id = int(original_display_id)
+
+    session.display_id = int(display_id)
+    session.morph_display_id = int(display_id)
+    session.is_morphed = True
+    Logger.info("[MORPH] display_id=%s morphed=%s", int(display_id), True)
+
+    responses = _helper("build_state_responses")(session, {
+        UNIT_FIELD_DISPLAYID: int(display_id),
+    })
+    resync_player_appearance(session)
+    responses.extend(_notification_response(f"[Morph] display={int(display_id)}"))
+    return responses
+
+
+@register_command("demorph", ".demorph", allow_args=False)
+def cmd_demorph(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Restore the player's native display id."""
+    from server.modules.handlers.world.state.runtime import resync_player_appearance
+
+    display_id = int(
+        getattr(session, "original_display_id", 0)
+        or getattr(session, "native_display_id", 0)
+        or _resolve_native_display_id(session)
+    )
+    current_display_id = int(getattr(session, "display_id", 0) or 0)
+    is_morphed = bool(getattr(session, "is_morphed", False))
+    if display_id <= 0 or (not is_morphed and (current_display_id <= 0 or current_display_id == display_id)):
+        return _notification_response("Not morphed")
+
+    Logger.info("[DEMORPH] restoring display_id=%s", int(display_id))
+    session.display_id = int(display_id)
+    session.morph_display_id = None
+    session.is_morphed = False
+    session.original_display_id = None
+    session.native_display_id = None
+
+    responses = _helper("build_state_responses")(session, {
+        UNIT_FIELD_DISPLAYID: int(display_id),
+    })
+    # Full self inventory sync restores visible gear fields the client can keep stale.
+    responses.extend(_build_login_inventory_sync(session))
+    resync_player_appearance(session)
+    Logger.info("[DEMORPH] armor restored")
+    responses.extend(_notification_response(f"[Morph] restored={int(display_id)}"))
+    return responses
 
 
 @register_command("additem", ".additem <itemEntry> [count]")
@@ -658,14 +763,21 @@ def cmd_telxyz(session, args: list[str]) -> list[tuple[str, bytes]]:
         z,
         orientation,
     )
-    return teleport_player(
+    current_map_id = int(getattr(session, "map_id", 0) or 0)
+    session.teleport_destination = f"manual:{map_id}:{x:.2f}:{y:.2f}:{z:.2f}:{orientation:.2f}"
+    responses = _helper("apply_player_state_change")(
         session,
-        map_id,
-        x,
-        y,
-        z,
-        orientation,
-        destination_name=f"manual:{map_id}:{x:.2f}:{y:.2f}:{z:.2f}:{orientation:.2f}",
+        position=(x, y, z, orientation),
+        map_id=map_id,
+    )
+    if current_map_id == int(map_id):
+        return _append_feedback_response(
+            responses,
+            f"[Teleport] near start -> {session.teleport_destination} ({x:.1f} {y:.1f} {z:.1f})",
+        )
+    return _append_feedback_response(
+        responses,
+        f"[Teleport] transfer start -> {session.teleport_destination} map={int(map_id)} ({x:.1f} {y:.1f} {z:.1f})",
     )
 
 
@@ -751,14 +863,21 @@ def cmd_tel(session, args: list[str]) -> list[tuple[str, bytes]]:
         y,
         z,
     )
-    return teleport_player(
+    current_map_id = int(getattr(session, "map_id", 0) or 0)
+    session.teleport_destination = str(destination["name"])
+    responses = _helper("apply_player_state_change")(
         session,
-        map_id,
-        x,
-        y,
-        z,
-        orientation,
-        destination_name=str(destination["name"]),
+        position=(x, y, z, orientation),
+        map_id=map_id,
+    )
+    if current_map_id == int(map_id):
+        return _append_feedback_response(
+            responses,
+            f"[Teleport] near start -> {session.teleport_destination} ({x:.1f} {y:.1f} {z:.1f})",
+        )
+    return _append_feedback_response(
+        responses,
+        f"[Teleport] transfer start -> {session.teleport_destination} map={int(map_id)} ({x:.1f} {y:.1f} {z:.1f})",
     )
 
 
@@ -791,6 +910,8 @@ PRIMARY_COMMANDS = {
     "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),
     "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
     "dismount": Command(handler=cmd_dismount, usage=".dismount", allow_args=False),
+    "morph": Command(handler=cmd_morph, usage=".morph <displayId|name>", require_args=True),
+    "demorph": Command(handler=cmd_demorph, usage=".demorph", allow_args=False),
     "additem": Command(handler=cmd_additem, usage=".additem <itemEntry> [count]"),
     "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>"),
     "invfix": Command(handler=cmd_invfix, usage=".invfix", allow_args=False),

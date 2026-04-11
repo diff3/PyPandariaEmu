@@ -15,6 +15,9 @@ class _DatabaseConnection:
 database_module.DatabaseConnection = _DatabaseConnection
 sys.modules.setdefault("server.modules.database.DatabaseConnection", database_module)
 
+sys.modules.pop("server.modules.handlers.world.bootstrap.replay", None)
+sys.modules.pop("server.modules.handlers.world.inventory_sync", None)
+
 from server.modules.handlers.world import inventory_sync
 
 
@@ -138,6 +141,20 @@ def test_self_visible_item_update_writes_all_equipment_slots():
 
 def test_self_visible_item_update_clears_slots_without_equipment():
     session = _FakeSession()
+
+    responses = inventory_sync.build_self_visible_item_update_responses(session)
+    payload = responses[0][1]
+    decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)
+    update = decoded["updates"][0]
+
+    assert update["fields"]["u32"] == [0] * 38
+
+
+def test_self_visible_item_update_clears_slots_when_morphed():
+    session = _FakeSession()
+    session.is_morphed = True
+    session.equipment_cache_raw[0] = 1234
+    session.equipment_cache_raw[1] = 77
 
     responses = inventory_sync.build_self_visible_item_update_responses(session)
     payload = responses[0][1]
@@ -950,6 +967,44 @@ def test_inventory_delta_destroy_known_item_clears_slot_and_removes_guid_from_ca
     assert decoded_packets[1]["updates"][0]["update_type"] == 3
     assert inventory_sync._make_item_world_guid(2000) not in session.known_inventory_guids
     assert not any(update.get("guid") == inventory_sync._make_item_world_guid(2000) and update["update_type"] == 0 for update in updates)
+
+
+def test_inventory_delta_destroy_equipped_item_clears_visible_slot_immediately():
+    session = _FakeSession()
+    state = _InventoryState()
+    session.inventory_state = state
+    session.known_inventory_guids = {inventory_sync._make_item_world_guid(2000)}
+    state.put(
+        _Item(
+            item_guid=2000,
+            bag=0,
+            slot=1,
+            count=1,
+            template=_Template(entry=1234, display_id=5678, inventory_type=1),
+        )
+    )
+
+    result = SimpleNamespace(
+        changed_positions=((0, 1),),
+        changed_items=(),
+        released_items=(),
+        removed_item_guids=(2000,),
+    )
+
+    responses = inventory_sync.build_inventory_delta_responses(session, result)
+
+    updates = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
+        updates.extend(decoded.get("updates", []))
+
+    equip_field = inventory_sync._inventory_slot_field_index(0, 1)
+    visible_field = inventory_sync._PLAYER_FIELD_VISIBLE_ITEMS + (1 * 2)
+    assert any(update["guid"] == 7 and update["mask"]["set_bits"] == [equip_field, equip_field + 1] for update in updates)
+    assert any(update["guid"] == 7 and update["mask"]["set_bits"] == [visible_field, visible_field + 1] for update in updates)
+    assert any(update["update_type"] == 3 and update.get("out_of_range_count") == 1 for update in updates)
 
 
 def test_trigger_inventory_activation_detaches_and_reattaches_equipped_bag_once():

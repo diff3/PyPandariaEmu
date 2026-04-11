@@ -15,6 +15,7 @@ from server.modules.handlers.world.characters.characters import (
 )
 from server.modules.handlers.world.login.context import WorldLoginContext
 from server.modules.handlers.world.login.packets import (
+    _resolve_player_display_id,
     build_ENUM_CHARACTERS_RESULT,
     build_login_packet,
 )
@@ -330,6 +331,16 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     session.inventory_activated = False
 
 
+def _reset_morph_state(session, race: int, gender: int) -> None:
+    # Morph is session-only and must not survive relog.
+    native_display_id = int(_resolve_player_display_id(race, gender, 15476) or 15476)
+    session.display_id = native_display_id
+    session.is_morphed = False
+    session.morph_display_id = None
+    session.original_display_id = None
+    session.native_display_id = native_display_id
+
+
 def _build_world_login_context(session) -> WorldLoginContext:
     ctx = WorldLoginContext.from_session(session)
     ctx.exact_0002_mode = str(bootstrap_replay.UPDATE_OBJECT_1773613176_0002_MODE or "barncastle")
@@ -619,14 +630,14 @@ def handle_player_login(session, ctx: PacketContext):
         online=1,
     )
 
-    spells_handlers._restore_default_movement_speeds(session)
-    session.is_mounted = False
-    session.mount_spell = None
-
     session.level = int(row.level or 1)
     session.class_id = int(row.class_ or 0)
     session.race = int(row.race or 0)
     session.gender = int(row.gender or 0)
+    spells_handlers._restore_default_movement_speeds(session)
+    session.is_mounted = False
+    session.mount_spell = None
+    _reset_morph_state(session, session.race, session.gender)
 
     session.money = int(row.money or 0)
     session.health = int(row.health or 1)
