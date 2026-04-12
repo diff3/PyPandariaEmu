@@ -104,6 +104,12 @@ class PlayerFactionchangeTitles(Base):
     alliance_id = Column(Integer, primary_key=True, default=0)
     horde_id = Column(Integer, primary_key=True, default=0)
 
+class GameEventGameObject(Base):
+    __tablename__ = "game_event_gameobject"
+
+    guid = Column(Integer, primary_key=True)
+    eventEntry = Column(Integer)
+
 
 class PlayerLevelStats(Base):
     __tablename__ = "player_levelstats"
