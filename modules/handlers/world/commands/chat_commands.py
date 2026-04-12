@@ -313,6 +313,54 @@ def cmd_gps(session, args: list[str]) -> list[tuple[str, bytes]]:
     return _notification_response(feedback)
 
 
+@register_command("spawngo", ".spawngo", allow_args=False)
+def cmd_spawngo(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Load nearby gameobjects from the world database for the current player."""
+    from server.modules.game.guid import GameObjectGuid
+    from server.modules.handlers.world.bootstrap.replay import (
+        _build_gameobject_update_payload,
+        make_update_object_response,
+    )
+
+    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
+    if not isinstance(loaded_gameobjects, set):
+        loaded_gameobjects = set()
+        session.loaded_gameobjects = loaded_gameobjects
+
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    x = float(getattr(session, "x", 0.0) or 0.0)
+    y = float(getattr(session, "y", 0.0) or 0.0)
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
+    entries = DatabaseConnection.get_gameobjects_near(map_id, x, y, radius=120.0, limit=200)
+
+    responses: list[tuple[str, bytes]] = []
+    for entry in entries:
+        world_guid = GameObjectGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), realm_id)
+        if world_guid in loaded_gameobjects:
+            continue
+        loaded_gameobjects.add(world_guid)
+        Logger.info(
+            "[SPAWN_GO] entry=%s pos=(%.2f, %.2f, %.2f)",
+            int(entry.get("entry", 0) or 0),
+            float(entry.get("x", 0.0) or 0.0),
+            float(entry.get("y", 0.0) or 0.0),
+            float(entry.get("z", 0.0) or 0.0),
+        )
+        entry["world_guid"] = world_guid
+        responses.append(
+            make_update_object_response(
+                _build_gameobject_update_payload(map_id=map_id, entry=entry, realm_id=realm_id)
+            )
+        )
+
+    count = len(responses)
+    Logger.info("[SPAWN_GO] count=%s", count)
+
+    message = f"[SpawnGO] loaded {count} gameobjects"
+    responses.extend(_notification_response(message))
+    return responses
+
+
 @register_command("level", ".level [delta]|set <level>")
 def cmd_level(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Adjust or set player level."""
@@ -1020,6 +1068,7 @@ PRIMARY_COMMANDS = {
     "help": Command(handler=cmd_help, usage=".help"),
     "roll": Command(handler=cmd_roll, usage=".roll"),
     "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),
+    "spawngo": Command(handler=cmd_spawngo, usage=".spawngo", allow_args=False),
     "level": Command(handler=cmd_level, usage=".level [delta]|set <level>"),
     "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
     "fly": Command(handler=cmd_fly, usage=".fly <on|off>"),

@@ -16,6 +16,8 @@ def _import_chat_handlers():
             "build_multi_u32_update_object_payload": lambda **fields: b"",
             "build_single_u32_update_object_payload": lambda **fields: b"",
             "send_raw_packet": lambda *args, **kwargs: ("SMSG_MESSAGECHAT", b""),
+            "_build_gameobject_update_payload": lambda **kwargs: b"go-payload",
+            "make_update_object_response": lambda payload, **kwargs: ("SMSG_UPDATE_OBJECT", payload),
         },
         "server.modules.database.DatabaseConnection": {
             "DatabaseConnection": type("DatabaseConnection", (), {}),
@@ -133,6 +135,8 @@ def _import_chat_codec():
     module.build_multi_u32_update_object_payload = lambda **fields: b""
     module.build_single_u32_update_object_payload = lambda **fields: b""
     module.send_raw_packet = lambda *args, **kwargs: ("SMSG_MESSAGECHAT", b"")
+    module._build_gameobject_update_payload = lambda **kwargs: b"go-payload"
+    module.make_update_object_response = lambda payload, **kwargs: ("SMSG_UPDATE_OBJECT", payload)
     sys.modules["server.modules.handlers.world.bootstrap.replay"] = module
     sys.modules.pop("server.modules.handlers.world.chat.codec", None)
     return importlib.import_module("server.modules.handlers.world.chat.codec")
@@ -1753,6 +1757,59 @@ def test_castspell_rejects_unknown_runtime_spell(monkeypatch):
     responses = chat_handlers._handle_chat_command(alice, ".castspell 12345")
 
     assert responses == [("SMSG_MESSAGECHAT", b"system|Spell 12345 has no runtime cast handler")]
+
+
+def test_spawngo_loads_nearby_gameobjects_and_tracks_loaded_guids(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers.DatabaseConnection,
+        "get_gameobjects_near",
+        lambda map_id, x, y, radius=120.0, limit=200: [
+            {
+                "guid": 4,
+                "entry": 175354,
+                "x": 1569.97,
+                "y": -4397.41,
+                "z": 16.05,
+                "orientation": 0.0,
+                "rotation0": 0.0,
+                "rotation1": 0.0,
+                "rotation2": 0.0,
+                "rotation3": 1.0,
+                "display_id": 3015,
+                "flags": 40,
+                "size": 1.0,
+                "type": 15,
+                "state": 1,
+                "animprogress": 255,
+                "faction": 0,
+            }
+        ],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.x = 1569.97
+    alice.y = -4397.41
+    alice.z = 16.05
+
+    responses = chat_handlers.chat_commands.cmd_spawngo(alice, [])
+
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"go-payload"),
+        ("SMSG_MESSAGECHAT", b"system|[SpawnGO] loaded 1 gameobjects"),
+    ]
+    assert len(alice.loaded_gameobjects) == 1
+
+    responses = chat_handlers.chat_commands.cmd_spawngo(alice, [])
+
+    assert responses == [("SMSG_MESSAGECHAT", b"system|[SpawnGO] loaded 0 gameobjects")]
 
 
 def test_build_state_responses_duplicates_display_id_into_native_display(monkeypatch):

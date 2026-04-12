@@ -514,7 +514,7 @@ def _build_gameobject_update_payload(*, map_id: int, entry: dict, realm_id: int)
     return bytes(payload)
 
 
-def _database_gameobject_responses(session) -> list[tuple[str, bytes]]:
+def build_database_gameobject_responses(session, *, loaded_guids: set[int] | None = None) -> list[tuple[str, bytes]]:
     from server.modules.database.DatabaseConnection import DatabaseConnection
 
     map_id = int(getattr(session, "map_id", 0) or 0)
@@ -535,9 +535,27 @@ def _database_gameobject_responses(session) -> list[tuple[str, bytes]]:
         Logger.info("[WorldLoginReplay] no DB gameobjects near map=%s x=%.1f y=%.1f", map_id, x, y)
         return []
 
+    seen = loaded_guids if isinstance(loaded_guids, set) else None
+    filtered_entries: list[dict] = []
+    for entry in entries:
+        world_guid = int(
+            entry.get("world_guid")
+            or GameObjectGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), int(realm_id) or 1)
+        )
+        if seen is not None and world_guid in seen:
+            continue
+        entry["world_guid"] = world_guid
+        filtered_entries.append(entry)
+        if seen is not None:
+            seen.add(world_guid)
+
+    if not filtered_entries:
+        Logger.info("[WorldLoginReplay] DB gameobjects already loaded near map=%s x=%.1f y=%.1f", map_id, x, y)
+        return []
+
     Logger.info(
         "[WorldLoginReplay] loaded %s DB gameobjects near map=%s x=%.1f y=%.1f",
-        len(entries),
+        len(filtered_entries),
         map_id,
         x,
         y,
@@ -546,7 +564,7 @@ def _database_gameobject_responses(session) -> list[tuple[str, bytes]]:
         make_update_object_response(
             _build_gameobject_update_payload(map_id=map_id, entry=entry, realm_id=realm_id)
         )
-        for entry in entries
+        for entry in filtered_entries
     ]
 
 
@@ -620,7 +638,7 @@ def replay_movement_focus_sequence(session) -> list[tuple[str, bytes]]:
             )
         )
 
-    responses.extend(_database_gameobject_responses(session))
+    responses.extend(build_database_gameobject_responses(session))
 
     return responses
 

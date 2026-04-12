@@ -10,6 +10,14 @@ def _import_replay():
     packets_module.build_login_packet = lambda *args, **kwargs: b""
     sys.modules["server.modules.handlers.world.login.packets"] = packets_module
 
+    db_module = types.ModuleType("server.modules.database.DatabaseConnection")
+    db_module.DatabaseConnection = type(
+        "DatabaseConnection",
+        (),
+        {"get_gameobjects_near": staticmethod(lambda *args, **kwargs: [])},
+    )
+    sys.modules["server.modules.database.DatabaseConnection"] = db_module
+
     runtime_module = types.ModuleType("server.session.runtime")
     runtime_module.session = SimpleNamespace()
     sys.modules["server.session.runtime"] = runtime_module
@@ -64,7 +72,7 @@ def test_replay_movement_focus_sequence_appends_db_gameobjects():
     replay._build_replayed_update_object_packet = (
         lambda _session, opcode_name, path, update_index: (opcode_name, path.name.encode())
     )
-    replay._database_gameobject_responses = lambda _session: [("SMSG_UPDATE_OBJECT", b"DBOBJ")]
+    replay.build_database_gameobject_responses = lambda _session: [("SMSG_UPDATE_OBJECT", b"DBOBJ")]
 
     responses = replay.replay_movement_focus_sequence(session)
 
