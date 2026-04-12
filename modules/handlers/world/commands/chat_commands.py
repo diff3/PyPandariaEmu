@@ -240,8 +240,6 @@ def _resolve_morph_display_id(arg: str) -> int:
 
 def _resolve_native_display_id(session) -> int:
     """Resolve the normal player display id for demorph fallback."""
-    from server.modules.handlers.world.login.packets import _resolve_player_display_id
-
     race = int(getattr(session, "race", 0) or 0)
     gender = int(getattr(session, "gender", 0) or 0)
     fallback = int(
@@ -249,6 +247,10 @@ def _resolve_native_display_id(session) -> int:
         or getattr(session, "native_display_id", 0)
         or 15476
     )
+    try:
+        from server.modules.handlers.world.login.packets import _resolve_player_display_id
+    except ImportError:
+        return fallback
     return int(_resolve_player_display_id(race, gender, fallback) or fallback)
 
 
@@ -550,6 +552,63 @@ def cmd_system(session, args: list[str]) -> list[tuple[str, bytes]]:
     Logger.info("[SystemChat] message=%r", message)
     broadcast_system_message(message, scope="world")
     return _notification_response(f"[System] sent: {message}")
+
+
+@register_command("learnspell", ".learnspell <spell_id>", require_args=True)
+def cmd_learnspell(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Learn one runtime-only spell for the current session."""
+    if len(args) != 1:
+        return _notification_response("Usage: .learnspell <spell_id>")
+
+    try:
+        spell_id = int(args[0], 0)
+    except ValueError:
+        return _notification_response("Usage: .learnspell <spell_id>")
+
+    if spell_id <= 0:
+        return _notification_response("Usage: .learnspell <spell_id>")
+
+    spells_handlers.ensure_spell_known(session, spell_id)
+    player_name = (
+        str(getattr(session, "player_name", "") or "").strip()
+        or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
+    )
+    Logger.info("[LEARN_SPELL] player=%s spell=%s", player_name, int(spell_id))
+
+    responses = [spells_handlers.build_known_spells_response(session)]
+    responses.extend(_notification_response(f"Learned spell {int(spell_id)}"))
+    return responses
+
+
+@register_command("castspell", ".castspell <spell_id>", require_args=True)
+def cmd_castspell(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Cast one runtime test spell through the existing spell path."""
+    from server.modules.handlers.world.opcodes.movement import resync_movement
+
+    if len(args) != 1:
+        return _notification_response("Usage: .castspell <spell_id>")
+
+    try:
+        spell_id = int(args[0], 0)
+    except ValueError:
+        return _notification_response("Usage: .castspell <spell_id>")
+
+    if spell_id <= 0:
+        return _notification_response("Usage: .castspell <spell_id>")
+
+    player_name = (
+        str(getattr(session, "player_name", "") or "").strip()
+        or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
+    )
+    Logger.info("[CAST_SPELL] player=%s spell=%s", player_name, int(spell_id))
+
+    if not bool(getattr(spells_handlers, "is_mount_spell", lambda _spell_id: False)(int(spell_id))):
+        return _notification_response(f"Spell {int(spell_id)} has no runtime cast handler")
+
+    responses = list(spells_handlers.handle_mount(session, int(spell_id)))
+    responses.extend(resync_movement(session))
+    responses.extend(_notification_response(f"Casted spell {int(spell_id)}"))
+    return responses
 
 
 @register_command("mount", ".mount", allow_args=False)
@@ -967,6 +1026,8 @@ PRIMARY_COMMANDS = {
     "weather": Command(handler=cmd_weather, usage=".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]"),
     "time": Command(handler=cmd_time, usage=".time <HH:MM|day|night|dawn|dusk|noon|midnight>"),
     "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),
+    "learnspell": Command(handler=cmd_learnspell, usage=".learnspell <spell_id>", require_args=True),
+    "castspell": Command(handler=cmd_castspell, usage=".castspell <spell_id>", require_args=True),
     "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
     "dismount": Command(handler=cmd_dismount, usage=".dismount", allow_args=False),
     "morph": Command(handler=cmd_morph, usage=".morph <displayId|name>", require_args=True),

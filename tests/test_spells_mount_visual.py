@@ -128,3 +128,74 @@ def test_build_mount_visual_responses_clears_mount_display(monkeypatch):
     ]
     assert session.unit_flags == 0x00000020
     assert session.mount_display_id == 0
+
+
+def test_initialize_session_language_state_sets_orcish_for_alliance():
+    spells_handlers = _import_spells_handlers()
+    session = SimpleNamespace(
+        race=1,
+        player_name="Alice",
+        char_guid=3,
+        language=0,
+        known_languages_mask=0,
+    )
+
+    spells_handlers.initialize_session_language_state(session)
+
+    assert session.language == 1
+    assert session.known_languages_mask == 0xFFFFFFFF
+
+
+def test_granted_language_spells_for_alliance_match_horde_default():
+    spells_handlers = _import_spells_handlers()
+
+    granted = spells_handlers.granted_language_spells_for_race(1)
+
+    assert granted == [669]
+
+
+def test_ensure_language_spells_known_normalizes_alliance_to_orcish_only():
+    spells_handlers = _import_spells_handlers()
+    session = SimpleNamespace(
+        race=1,
+        known_spells=[668, 29932, 133, 116],
+    )
+
+    spells_handlers.ensure_language_spells_known(session)
+
+    assert sorted(session.known_spells) == [116, 133, 669]
+
+
+def test_ensure_spell_known_keeps_runtime_language_spell_and_updates_language():
+    spells_handlers = _import_spells_handlers()
+    session = SimpleNamespace(
+        race=2,
+        language=0,
+        known_spells=[133, 116],
+        known_languages_mask=0,
+        extra_language_spells=set(),
+    )
+
+    changed = spells_handlers.ensure_spell_known(session, 668)
+
+    assert changed is True
+    assert sorted(session.known_spells) == [116, 133, 668, 669]
+    assert session.language == 7
+    assert session.known_languages_mask == 0xFFFFFFFF
+    assert session.extra_language_spells == {668}
+
+
+def test_initialize_session_language_state_keeps_horde_on_orcish():
+    spells_handlers = _import_spells_handlers()
+    session = SimpleNamespace(
+        race=2,
+        player_name="Thrall",
+        char_guid=4,
+        language=0,
+        known_languages_mask=0,
+    )
+
+    spells_handlers.initialize_session_language_state(session)
+
+    assert session.language == 1
+    assert session.known_languages_mask == 0xFFFFFFFF

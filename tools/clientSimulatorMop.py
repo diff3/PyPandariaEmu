@@ -42,7 +42,7 @@ from server.modules.interpretation.OpcodeResolver import OpcodeResolver
 from server.modules.interpretation.EncryptedWorldStream import ClientWorldStream
 from server.modules.interpretation.parser import parse_header
 from server.modules.interpretation.utils import build_world_header, build_world_header_plain
-from server.modules.shared.text_emotes import TEXT_EMOTES
+# from server.modules.shared.text_emotes import TEXT_EMOTES
 
 
 # ----------------------------------------------------------------------
@@ -998,9 +998,9 @@ class ClientSimulator:
             return
 
         # -------- /emote --------
-        if text.startswith("/"):
-            self._send_emote_id(ws, crypto, text[1:])
-            return
+        #if text.startswith("/"):
+         #   self._send_emote_id(ws, crypto, text[1:])
+          #  return
 
         # -------- normal SAY --------
         msg = text.encode("utf-8")
@@ -1024,7 +1024,7 @@ class ClientSimulator:
 
 
 
-    def _send_emote_id(self, ws, crypto, emote_name: str):
+    """def _send_emote_id(self, ws, crypto, emote_name: str):
         emote_name = emote_name.lower()
 
         if emote_name not in TEXT_EMOTES:
@@ -1047,7 +1047,7 @@ class ClientSimulator:
         )
 
         ws.sendall(crypto.decrypt_recv(hdr) + payload)
-        Logger.info(f"[SEND] CMSG_SEND_TEXT_EMOTE {emote_name} ({emote_id})")
+        Logger.info(f"[SEND] CMSG_SEND_TEXT_EMOTE {emote_name} ({emote_id})")"""
 
     def _world_idle(self, ws, crypto):
         """

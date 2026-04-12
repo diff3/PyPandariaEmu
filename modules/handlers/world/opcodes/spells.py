@@ -72,6 +72,13 @@ _UNIT_FIELD_FLAGS = 0x60
 _UNIT_FIELD_MOUNTDISPLAYID = 0x6A
 _UNIT_FLAG_MOUNT = 0x08000000
 _MOUNT_SPEED_MULTIPLIER = 2.0
+_LANG_ORCISH = 1
+_LANG_COMMON = 7
+_KNOWN_LANGUAGES_ALL = 0xFFFFFFFF
+_LANGUAGE_ID_BY_SPELL_ID = {
+    668: _LANG_COMMON,
+    669: _LANG_ORCISH,
+}
 
 # TODO:
 # - Keep the current `SMSG_SEND_KNOWN_SPELLS` timing unchanged during ACTIVE_MOVER.
@@ -91,20 +98,29 @@ def _notification_response(message: str) -> list[tuple[str, bytes]]:
 
 
 def ensure_language_spells_known(session) -> None:
-    changed = False
     spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
     race = int(getattr(session, "race", 0) or 0)
-    for spell_id in granted_language_spells_for_race(race):
-        if spell_id not in spells:
-            spells.append(spell_id)
-            changed = True
+    granted_spells = list(granted_language_spells_for_race(race))
+    extra_language_spells = sorted(
+        int(spell_id)
+        for spell_id in (getattr(session, "extra_language_spells", set()) or set())
+        if int(spell_id) in _ALL_LANGUAGE_SPELL_IDS
+    )
+    for spell_id in extra_language_spells:
+        if spell_id not in granted_spells:
+            granted_spells.append(spell_id)
+    kept_spells = [spell_id for spell_id in spells if spell_id not in _ALL_LANGUAGE_SPELL_IDS]
+    normalized_spells = kept_spells + [spell_id for spell_id in granted_spells if spell_id not in kept_spells]
+    changed = normalized_spells != spells
     if changed:
-        session.known_spells = spells
+        session.known_spells = normalized_spells
         Logger.debug(
             "[SPELL] ensured language spells count=%s",
-            len(spells),
+            len(normalized_spells),
         )
-    language_spells = sorted(int(spell_id) for spell_id in spells if int(spell_id) in _ALL_LANGUAGE_SPELL_IDS)
+    else:
+        session.known_spells = normalized_spells
+    language_spells = sorted(int(spell_id) for spell_id in session.known_spells if int(spell_id) in _ALL_LANGUAGE_SPELL_IDS)
     Logger.info(
         "[SPELL][LANG] race=%s known=%s",
         race,
@@ -112,14 +128,43 @@ def ensure_language_spells_known(session) -> None:
     )
 
 
+def ensure_spell_known(session, spell_id: int) -> bool:
+    spell_id = int(spell_id or 0)
+    if spell_id <= 0:
+        return False
+
+    known_spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
+    changed = False
+    if spell_id not in known_spells:
+        known_spells.append(spell_id)
+        session.known_spells = known_spells
+        changed = True
+
+    if spell_id in _ALL_LANGUAGE_SPELL_IDS:
+        extra_language_spells = {
+            int(value)
+            for value in (getattr(session, "extra_language_spells", set()) or set())
+            if int(value) > 0
+        }
+        if spell_id not in extra_language_spells:
+            extra_language_spells.add(spell_id)
+            session.extra_language_spells = extra_language_spells
+            changed = True
+        session.language = int(_LANGUAGE_ID_BY_SPELL_ID.get(spell_id, getattr(session, "language", 0) or 0))
+        session.known_languages_mask = _KNOWN_LANGUAGES_ALL
+        ensure_language_spells_known(session)
+
+    return changed
+
+
 def granted_language_spells_for_race(race: int) -> list[int]:
     granted: list[int] = []
     race = int(race or 0)
+    if race in _ALLIANCE_RACES:
+        return [669]
     base_spell = int(_BASE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
     if base_spell == 0:
-        if race in _ALLIANCE_RACES:
-            base_spell = 668
-        elif race in _HORDE_RACES:
+        if race in _HORDE_RACES:
             base_spell = 669
     if base_spell > 0:
         granted.append(base_spell)
@@ -127,6 +172,43 @@ def granted_language_spells_for_race(race: int) -> list[int]:
     if race_spell > 0 and race_spell not in granted:
         granted.append(race_spell)
     return granted
+
+
+def initialize_session_language_state(session) -> None:
+    race = int(getattr(session, "race", 0) or 0)
+    player_name = (
+        str(getattr(session, "player_name", "") or "").strip()
+        or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
+    )
+    if race in _ALLIANCE_RACES:
+        team = "alliance"
+        session.language = _LANG_ORCISH
+    elif race in _HORDE_RACES:
+        team = "horde"
+        session.language = _LANG_ORCISH
+    else:
+        team = "neutral"
+        session.language = int(getattr(session, "language", 0) or 0)
+
+    granted_spells = granted_language_spells_for_race(race)
+    if granted_spells:
+        session.known_languages_mask = _KNOWN_LANGUAGES_ALL
+
+    Logger.info(
+        "[LANG_INIT] player=%s race=%s team=%s session.language=%s",
+        player_name,
+        race,
+        team,
+        int(getattr(session, "language", 0) or 0),
+    )
+    Logger.info(
+        "[LANG_INIT] granted_language_spells=%s",
+        granted_spells,
+    )
+    Logger.info(
+        "[LANG_INIT] known_languages_field=0x%08X",
+        int(getattr(session, "known_languages_mask", 0) or 0),
+    )
 
 
 def granted_companion_pet_spells() -> list[int]:

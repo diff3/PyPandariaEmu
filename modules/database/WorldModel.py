@@ -21,6 +21,44 @@ class ItemTemplate(Base):
     container_slots = Column("ContainerSlots", TINYINT(unsigned=True), nullable=False, default=0)
 
 
+class WorldGameObject(Base):
+    __tablename__ = "gameobject"
+
+    guid = Column(INTEGER(unsigned=True), primary_key=True, default=0)
+    id = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    map = Column(SMALLINT(unsigned=True), nullable=False, default=0)
+    spawnMask = Column(Integer, nullable=False, default=1)
+    phaseId = Column(Integer, nullable=False, default=0)
+    phaseGroup = Column(Integer, nullable=False, default=0)
+    position_x = Column(Float, nullable=False, default=0.0)
+    position_y = Column(Float, nullable=False, default=0.0)
+    position_z = Column(Float, nullable=False, default=0.0)
+    orientation = Column(Float, nullable=False, default=0.0)
+    rotation0 = Column(Float, nullable=False, default=0.0)
+    rotation1 = Column(Float, nullable=False, default=0.0)
+    rotation2 = Column(Float, nullable=False, default=0.0)
+    rotation3 = Column(Float, nullable=False, default=0.0)
+    spawntimesecs = Column(Integer, nullable=False, default=0)
+    animprogress = Column(TINYINT(unsigned=True), nullable=False, default=0)
+    state = Column(TINYINT(unsigned=True), nullable=False, default=0)
+
+
+class WorldGameObjectTemplate(Base):
+    __tablename__ = "gameobject_template"
+
+    entry = Column(MEDIUMINT(unsigned=True), primary_key=True, default=0)
+    type = Column(TINYINT(unsigned=True), nullable=False, default=0)
+    displayId = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    name = Column(String(100), nullable=False, default="")
+    faction = Column(SMALLINT(unsigned=True), nullable=False, default=0)
+    flags = Column(Integer, nullable=False, default=0)
+    size = Column(Float, nullable=False, default=1.0)
+    data0 = Column(Integer, nullable=False, default=0)
+    data1 = Column(Integer, nullable=False, default=0)
+    data2 = Column(Integer, nullable=False, default=0)
+    data3 = Column(Integer, nullable=False, default=0)
+
+
 class PlayerFactionchangeAchievement(Base):
     __tablename__ = "player_factionchange_achievement"
 

@@ -634,6 +634,7 @@ def handle_player_login(session, ctx: PacketContext):
     session.class_id = int(row.class_ or 0)
     session.race = int(row.race or 0)
     session.gender = int(row.gender or 0)
+    spells_handlers.initialize_session_language_state(session)
     spells_handlers._restore_default_movement_speeds(session)
     session.is_mounted = False
     session.mount_spell = None

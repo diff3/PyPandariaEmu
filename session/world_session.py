@@ -153,6 +153,8 @@ class WorldSession:
     inventory_dirty: bool = False
 
     known_spells: List[int] = field(default_factory=list)
+    language: int = 0
+    known_languages_mask: int = 0
     action_buttons: List[int] = field(default_factory=lambda: [0] * 132)
     is_mounted: bool = False
     mount_spell: Optional[int] = None

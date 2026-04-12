@@ -1,9 +1,10 @@
 import importlib
+import struct
 import sys
 import types
 from types import SimpleNamespace
 
-from DSL.modules.bitsHandler import BitWriter
+from DSL.modules.bitsHandler import BitInterPreter, BitWriter
 from server.modules.handlers.world.state.global_state import GlobalState
 from server.session.world_session import WorldSession
 
@@ -27,6 +28,10 @@ def _import_chat_handlers():
         "server.modules.handlers.world.opcodes.login": {
             "_build_world_login_context": lambda session: SimpleNamespace(motd=""),
             "_reset_login_flow_state": lambda session: None,
+        },
+        "server.modules.handlers.world.login.packets": {
+            "build_login_packet": lambda *args, **kwargs: b"",
+            "_resolve_player_display_id": lambda race, gender, fallback=15475: int(fallback),
         },
         "server.modules.handlers.world.opcodes.entities": {
             "build_query_player_name_response": lambda session, guid: b"",
@@ -56,6 +61,28 @@ def _import_chat_handlers():
             ),
             "handle_mount": lambda session, spell_id: [],
             "dismount": lambda session: [],
+            "is_mount_spell": lambda spell_id: int(spell_id) in {59535, 72286},
+            "ensure_spell_known": lambda session, spell_id: (
+                setattr(
+                    session,
+                    "known_spells",
+                    sorted(
+                        {int(value) for value in (getattr(session, "known_spells", []) or [])}
+                        | {int(spell_id)}
+                    ),
+                ),
+                setattr(
+                    session,
+                    "language",
+                    7 if int(spell_id) == 668 else 1 if int(spell_id) == 669 else getattr(session, "language", 0),
+                ),
+                setattr(
+                    session,
+                    "known_languages_mask",
+                    0xFFFFFFFF if int(spell_id) in {668, 669} else getattr(session, "known_languages_mask", 0),
+                ),
+            ),
+            "build_known_spells_response": lambda session: ("SMSG_SEND_KNOWN_SPELLS", b"known-spells"),
         },
         "server.modules.handlers.world.opcodes.movement": {
             "build_move_set_speed_payload": (
@@ -156,6 +183,155 @@ def _install_movement_stub(monkeypatch, **overrides):
         setattr(module, name, value)
     monkeypatch.setitem(sys.modules, "server.modules.handlers.world.opcodes.movement", module)
     return module
+
+
+def _read_who_xor_byte(payload: bytes, offset: int, raw: list[int], index: int) -> int:
+    if raw[index]:
+        raw[index] ^= payload[offset]
+        return offset + 1
+    return offset
+
+
+def _decode_smsg_who_548(payload: bytes) -> list[dict[str, int | str]]:
+    byte_pos = 0
+    bit_pos = 0
+    count, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 6)
+
+    account_ids: list[list[int]] = []
+    player_guids: list[list[int]] = []
+    guild_guids: list[list[int]] = []
+    guild_name_lengths: list[int] = []
+    player_name_lengths: list[int] = []
+    extra_lengths: list[list[int]] = []
+
+    for _ in range(count):
+        account_id = [0] * 8
+        player_guid = [0] * 8
+        guild_guid = [0] * 8
+
+        account_id[2], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        player_guid[2], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        account_id[7], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        guild_guid[5], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        guild_name_length, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 7)
+        account_id[1], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        account_id[5], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        guild_guid[7], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        player_guid[5], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        _, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        guild_guid[1], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        player_guid[6], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        guild_guid[2], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        player_guid[4], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        guild_guid[0], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        guild_guid[3], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        account_id[6], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        _, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        player_guid[1], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        guild_guid[4], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        account_id[0], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+
+        lengths: list[int] = []
+        for _ in range(5):
+            length, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 7)
+            lengths.append(length)
+
+        player_guid[3], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        guild_guid[6], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        player_guid[0], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        account_id[4], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        account_id[3], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        player_guid[7], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+        player_name_length, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 6)
+
+        account_ids.append(account_id)
+        player_guids.append(player_guid)
+        guild_guids.append(guild_guid)
+        guild_name_lengths.append(guild_name_length)
+        player_name_lengths.append(player_name_length)
+        extra_lengths.append(lengths)
+
+    if bit_pos:
+        byte_pos += 1
+        bit_pos = 0
+
+    offset = byte_pos
+    decoded: list[dict[str, int | str]] = []
+
+    for index in range(count):
+        player_guid = player_guids[index]
+        guild_guid = guild_guids[index]
+        account_id = account_ids[index]
+
+        offset = _read_who_xor_byte(payload, offset, player_guid, 1)
+        realm_id_a = struct.unpack_from("<i", payload, offset)[0]
+        offset += 4
+        offset = _read_who_xor_byte(payload, offset, player_guid, 7)
+        offset = _read_who_xor_byte(payload, offset, player_guid, 4)
+        name = payload[offset : offset + player_name_lengths[index]].decode()
+        offset += player_name_lengths[index]
+        offset = _read_who_xor_byte(payload, offset, guild_guid, 1)
+        offset = _read_who_xor_byte(payload, offset, player_guid, 0)
+        offset = _read_who_xor_byte(payload, offset, guild_guid, 2)
+        offset = _read_who_xor_byte(payload, offset, guild_guid, 0)
+        offset = _read_who_xor_byte(payload, offset, guild_guid, 4)
+        offset = _read_who_xor_byte(payload, offset, player_guid, 3)
+        offset = _read_who_xor_byte(payload, offset, guild_guid, 6)
+        unk1 = struct.unpack_from("<i", payload, offset)[0]
+        offset += 4
+        guild_name = payload[offset : offset + guild_name_lengths[index]].decode()
+        offset += guild_name_lengths[index]
+        offset = _read_who_xor_byte(payload, offset, guild_guid, 3)
+        offset = _read_who_xor_byte(payload, offset, account_id, 4)
+        class_id = payload[offset]
+        offset += 1
+        offset = _read_who_xor_byte(payload, offset, account_id, 7)
+        offset = _read_who_xor_byte(payload, offset, player_guid, 6)
+        offset = _read_who_xor_byte(payload, offset, player_guid, 2)
+
+        extra_strings: list[str] = []
+        for length in extra_lengths[index]:
+            extra_strings.append(payload[offset : offset + length].decode())
+            offset += length
+
+        offset = _read_who_xor_byte(payload, offset, account_id, 2)
+        offset = _read_who_xor_byte(payload, offset, account_id, 3)
+        race = payload[offset]
+        offset += 1
+        offset = _read_who_xor_byte(payload, offset, guild_guid, 7)
+        offset = _read_who_xor_byte(payload, offset, account_id, 1)
+        offset = _read_who_xor_byte(payload, offset, account_id, 5)
+        offset = _read_who_xor_byte(payload, offset, account_id, 6)
+        offset = _read_who_xor_byte(payload, offset, player_guid, 5)
+        offset = _read_who_xor_byte(payload, offset, account_id, 0)
+        gender = payload[offset]
+        offset += 1
+        offset = _read_who_xor_byte(payload, offset, guild_guid, 5)
+        level = payload[offset]
+        offset += 1
+        zone_id = struct.unpack_from("<i", payload, offset)[0]
+        offset += 4
+        realm_id_b = struct.unpack_from("<i", payload, offset)[0]
+        offset += 4
+
+        decoded.append(
+            {
+                "name": name,
+                "guild_name": guild_name,
+                "level": level,
+                "class_id": class_id,
+                "race": race,
+                "gender": gender,
+                "zone_id": zone_id,
+                "realm_id_a": realm_id_a,
+                "realm_id_b": realm_id_b,
+                "unk1": unk1,
+                "extra_strings": extra_strings,
+            }
+        )
+
+    assert offset == len(payload)
+    return decoded
 
 
 def test_yell_broadcasts_to_world_sessions(monkeypatch):
@@ -757,6 +933,156 @@ def test_roll_command_broadcasts_world_system_message(monkeypatch):
     assert sent == [("Alice rolls 42 (1-100)", {"scope": "world"})]
     assert alice.send_response_log == [expected]
     assert bob.send_response_log == [expected]
+
+
+def test_handle_who_lists_all_online_players(monkeypatch):
+    monkeypatch.setattr(chat_handlers, "resolve_zone_from_position", lambda map_id, x, y: 0)
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    bob = _make_session(state, "Bob", 1002)
+    clara = _make_session(state, "Clara", 1003)
+
+    alice.level = 12
+    alice.zone = 1
+    alice.class_id = 8
+    alice.race = 2
+    alice.gender = 1
+
+    bob.level = 34
+    bob.zone = 12
+    bob.class_id = 1
+    bob.race = 1
+    bob.gender = 0
+
+    clara.level = 60
+    clara.zone = 85
+    clara.class_id = 5
+    clara.race = 10
+    clara.gender = 1
+
+    code, responses = chat_handlers.handle_who(alice, None)
+
+    assert code == 0
+    assert len(responses) == 1
+    opcode, payload = responses[0]
+    assert opcode == "SMSG_WHO"
+
+    decoded = _decode_smsg_who_548(payload)
+
+    assert decoded == [
+        {
+            "name": "Alice",
+            "guild_name": "",
+            "level": 12,
+            "class_id": 8,
+            "race": 2,
+            "gender": 1,
+            "zone_id": 1,
+            "realm_id_a": 0,
+            "realm_id_b": 0,
+            "unk1": 0,
+            "extra_strings": ["", "", "", "", ""],
+        },
+        {
+            "name": "Bob",
+            "guild_name": "",
+            "level": 34,
+            "class_id": 1,
+            "race": 1,
+            "gender": 0,
+            "zone_id": 12,
+            "realm_id_a": 0,
+            "realm_id_b": 0,
+            "unk1": 0,
+            "extra_strings": ["", "", "", "", ""],
+        },
+        {
+            "name": "Clara",
+            "guild_name": "",
+            "level": 60,
+            "class_id": 5,
+            "race": 10,
+            "gender": 1,
+            "zone_id": 85,
+            "realm_id_a": 0,
+            "realm_id_b": 0,
+            "unk1": 0,
+            "extra_strings": ["", "", "", "", ""],
+        },
+    ]
+
+
+def test_online_who_players_uses_resolved_zone_over_stale_session_zone(monkeypatch):
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.level = 20
+    alice.class_id = 8
+    alice.race = 2
+    alice.gender = 1
+    alice.map_id = 1
+    alice.x = 123.0
+    alice.y = 456.0
+    alice.zone = 12
+    alice.persist_zone = 12
+
+    monkeypatch.setattr(chat_handlers, "resolve_zone_from_position", lambda map_id, x, y: 14)
+
+    players = chat_handlers._online_who_players(alice)
+
+    assert players == [
+        {
+            "name": "Alice",
+            "guid": 1001,
+            "level": 20,
+            "class_id": 8,
+            "race": 2,
+            "gender": 1,
+            "zone_id": 14,
+            "realm_id": 0,
+        }
+    ]
+
+
+def test_online_who_players_falls_back_to_character_row_for_missing_live_fields(monkeypatch):
+    state = GlobalState()
+    alice = _make_session(state, "", 1001)
+    alice.level = 0
+    alice.class_id = 0
+    alice.race = 0
+    alice.gender = 0
+    alice.zone = 0
+    alice.persist_zone = 0
+    alice.map_id = 1
+    alice.x = 0.0
+    alice.y = 0.0
+    alice._character_row = SimpleNamespace(
+        name="Alice",
+        level=42,
+        class_=5,
+        race=10,
+        gender=1,
+        zone=85,
+        map=1,
+        position_x=1.5,
+        position_y=2.5,
+    )
+
+    monkeypatch.setattr(chat_handlers, "resolve_zone_from_position", lambda map_id, x, y: 0)
+
+    players = chat_handlers._online_who_players(alice)
+
+    assert players == [
+        {
+            "name": "Alice",
+            "guid": 1001,
+            "level": 42,
+            "class_id": 5,
+            "race": 10,
+            "gender": 1,
+            "zone_id": 85,
+            "realm_id": 0,
+        }
+    ]
 
 
 def test_level_without_args_adds_one_level(monkeypatch):
@@ -1363,10 +1689,70 @@ def test_demorph_restores_native_display_when_morph_flag_is_missing(monkeypatch)
     assert alice.native_display_id == 15476
     assert alice.morph_display_id is None
     assert alice.is_morphed is False
+
+
+def test_learnspell_adds_runtime_spell_and_returns_known_spells_sync(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.known_spells = [133, 116]
+    alice.language = 0
+
+    responses = chat_handlers._handle_chat_command(alice, ".learnspell 668")
+
+    assert alice.known_spells == [116, 133, 668]
+    assert alice.language == 7
     assert responses == [
-        ("SMSG_UPDATE_OBJECT", b"display|15476"),
-        ("SMSG_MESSAGECHAT", b"system|[Morph] restored=15476"),
+        ("SMSG_SEND_KNOWN_SPELLS", b"known-spells"),
+        ("SMSG_MESSAGECHAT", b"system|Learned spell 668"),
     ]
+
+
+def test_castspell_mount_uses_mount_handler_and_resyncs(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.spells_handlers,
+        "handle_mount",
+        lambda session, spell_id: captured.update({"spell_id": int(spell_id)}) or [("SMSG_UPDATE_OBJECT", b"mount")],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers._handle_chat_command(alice, ".castspell 59535")
+
+    assert captured == {"spell_id": 59535}
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"mount"),
+        ("SMSG_PLAYER_MOVE", b"move-resync"),
+        ("SMSG_MESSAGECHAT", b"system|Casted spell 59535"),
+    ]
+
+
+def test_castspell_rejects_unknown_runtime_spell(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    responses = chat_handlers._handle_chat_command(alice, ".castspell 12345")
+
+    assert responses == [("SMSG_MESSAGECHAT", b"system|Spell 12345 has no runtime cast handler")]
 
 
 def test_build_state_responses_duplicates_display_id_into_native_display(monkeypatch):

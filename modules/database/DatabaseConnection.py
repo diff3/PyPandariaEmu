@@ -19,6 +19,8 @@ from server.modules.database.CharactersModel import (
 )
 from server.modules.database.WorldModel import (
     ItemTemplate,
+    WorldGameObject,
+    WorldGameObjectTemplate,
     PlayerFactionchangeAchievement,
     PlayerFactionchangeItems,
     PlayerFactionchangeQuests,
@@ -928,6 +930,105 @@ class DatabaseConnection:
         if row is None:
             return None
         return dict(row)
+
+    @staticmethod
+    def get_gameobjects_near(
+        map_id: int,
+        x: float,
+        y: float,
+        *,
+        radius: float = 120.0,
+        limit: int = 200,
+    ) -> list[dict]:
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return []
+
+        radius = max(0.0, float(radius))
+        min_x = float(x) - radius
+        max_x = float(x) + radius
+        min_y = float(y) - radius
+        max_y = float(y) + radius
+
+        try:
+            rows = (
+                session.query(
+                    WorldGameObject.guid,
+                    WorldGameObject.id,
+                    WorldGameObject.map,
+                    WorldGameObject.position_x,
+                    WorldGameObject.position_y,
+                    WorldGameObject.position_z,
+                    WorldGameObject.orientation,
+                    WorldGameObject.rotation0,
+                    WorldGameObject.rotation1,
+                    WorldGameObject.rotation2,
+                    WorldGameObject.rotation3,
+                    WorldGameObject.animprogress,
+                    WorldGameObject.state,
+                    WorldGameObjectTemplate.type,
+                    WorldGameObjectTemplate.displayId,
+                    WorldGameObjectTemplate.name,
+                    WorldGameObjectTemplate.faction,
+                    WorldGameObjectTemplate.flags,
+                    WorldGameObjectTemplate.size,
+                    WorldGameObjectTemplate.data0,
+                    WorldGameObjectTemplate.data1,
+                    WorldGameObjectTemplate.data2,
+                    WorldGameObjectTemplate.data3,
+                )
+                .join(WorldGameObjectTemplate, WorldGameObjectTemplate.entry == WorldGameObject.id)
+                .filter(
+                    WorldGameObject.map == int(map_id),
+                    WorldGameObject.position_x >= min_x,
+                    WorldGameObject.position_x <= max_x,
+                    WorldGameObject.position_y >= min_y,
+                    WorldGameObject.position_y <= max_y,
+                )
+                .limit(int(limit))
+                .all()
+            )
+        except Exception as exc:
+            Logger.warning(f"[DB] gameobject lookup failed map={map_id} x={x:.1f} y={y:.1f}: {exc}")
+            return []
+
+        gameobjects: list[dict] = []
+        radius_sq = radius * radius
+        for row in rows:
+            candidate = {
+                "guid": int(row.guid or 0),
+                "entry": int(row.id or 0),
+                "map_id": int(row.map or 0),
+                "x": float(row.position_x or 0.0),
+                "y": float(row.position_y or 0.0),
+                "z": float(row.position_z or 0.0),
+                "orientation": float(row.orientation or 0.0),
+                "rotation0": float(row.rotation0 or 0.0),
+                "rotation1": float(row.rotation1 or 0.0),
+                "rotation2": float(row.rotation2 or 0.0),
+                "rotation3": float(row.rotation3 or 0.0),
+                "animprogress": int(row.animprogress or 0),
+                "state": int(row.state or 0),
+                "type": int(row.type or 0),
+                "display_id": int(row.displayId or 0),
+                "name": str(row.name or ""),
+                "faction": int(row.faction or 0),
+                "flags": int(row.flags or 0),
+                "size": float(row.size or 1.0),
+                "data0": int(row.data0 or 0),
+                "data1": int(row.data1 or 0),
+                "data2": int(row.data2 or 0),
+                "data3": int(row.data3 or 0),
+            }
+            dx = candidate["x"] - float(x)
+            dy = candidate["y"] - float(y)
+            if (dx * dx) + (dy * dy) > radius_sq:
+                continue
+            gameobjects.append(candidate)
+
+        return gameobjects
 
     @staticmethod
     def get_player_create_info(race: int, class_: int):
