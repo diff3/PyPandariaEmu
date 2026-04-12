@@ -8,11 +8,18 @@ database_module = types.ModuleType("server.modules.database.DatabaseConnection")
 
 
 class _DatabaseConnection:
-    pass
+    @staticmethod
+    def get_gameobjects_near(*args, **kwargs):
+        return []
 
 
 database_module.DatabaseConnection = _DatabaseConnection
 sys.modules.setdefault("server.modules.database.DatabaseConnection", database_module)
+
+replay_module = types.ModuleType("server.modules.handlers.world.bootstrap.replay")
+replay_module.build_single_u32_update_object_payload = lambda **kwargs: b""
+replay_module.build_database_gameobject_responses = lambda session, loaded_guids=None: []
+sys.modules["server.modules.handlers.world.bootstrap.replay"] = replay_module
 
 sys.modules.pop("server.modules.handlers.world.opcodes.movement", None)
 from server.modules.handlers.world.opcodes import movement
@@ -349,3 +356,88 @@ def test_run_speed_change_ack_returns_player_move_refresh(monkeypatch):
     assert status == 0
     assert responses == [("SMSG_PLAYER_MOVE", b"player-move")]
     assert calls == [("sync", session)]
+
+
+def test_stream_nearby_gameobjects_spawns_new_and_despawns_far(monkeypatch):
+    session = _FakeSession()
+    session.realm_id = 1
+    session.loaded_gameobjects = {movement.GameObjectGuid.from_spawn_guid(9, 1)}
+
+    new_world_guid = movement.GameObjectGuid.from_spawn_guid(4, 1)
+
+    monkeypatch.setattr(
+        movement,
+        "build_database_gameobject_responses",
+        lambda target, loaded_guids=None: (
+            loaded_guids.add(new_world_guid) if isinstance(loaded_guids, set) else None
+        ) or [("SMSG_UPDATE_OBJECT", b"spawn-go")],
+    )
+    monkeypatch.setattr(
+        movement.DatabaseConnection,
+        "get_gameobjects_near",
+        lambda map_id, x, y, radius, limit=400: [{"guid": 4}],
+        raising=False,
+    )
+
+    responses = movement._stream_nearby_gameobjects(session)
+
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"spawn-go")
+    assert responses[1][0] == "SMSG_UPDATE_OBJECT"
+    assert session.loaded_gameobjects == {new_world_guid}
+
+
+def test_stream_nearby_gameobjects_allows_map_zero(monkeypatch):
+    session = _FakeSession()
+    session.map_id = 0
+    session.realm_id = 1
+
+    monkeypatch.setattr(
+        movement,
+        "build_database_gameobject_responses",
+        lambda target, loaded_guids=None: [("SMSG_UPDATE_OBJECT", b"spawn-go")],
+    )
+    monkeypatch.setattr(
+        movement.DatabaseConnection,
+        "get_gameobjects_near",
+        lambda map_id, x, y, radius, limit=400: [],
+        raising=False,
+    )
+
+    responses = movement._stream_nearby_gameobjects(session)
+
+    assert responses == [("SMSG_UPDATE_OBJECT", b"spawn-go")]
+
+
+def test_handle_movement_packet_returns_stream_responses(monkeypatch):
+    session = _FakeSession()
+    session.teleport_pending = False
+    session.near_teleport_pending = False
+    session.movement_state = SimpleNamespace(
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=0.5,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        counter=0,
+    )
+
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda target: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args: (10.0, 20.0, 30.0, 1.5))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args: True)
+    monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args: True)
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
+    monkeypatch.setattr(movement, "_maybe_periodic_position_save", lambda target: None)
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, force=False: None)
+    monkeypatch.setattr(movement, "_maybe_stream_gameobjects", lambda target: [("SMSG_UPDATE_OBJECT", b"go-stream")])
+
+    status, responses = movement.handle_movement_packet(
+        session,
+        SimpleNamespace(name="MSG_MOVE_HEARTBEAT", opcode=0, payload=b"", decoded={}),
+    )
+
+    assert status == 0
+    assert responses == [("SMSG_UPDATE_OBJECT", b"go-stream")]

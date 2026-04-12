@@ -78,3 +78,29 @@ def test_replay_movement_focus_sequence_appends_db_gameobjects():
 
     assert responses[0] == ("SMSG_MOVE_SET_ACTIVE_MOVER", b"ACTIVE")
     assert responses[-1] == ("SMSG_UPDATE_OBJECT", b"DBOBJ")
+
+
+def test_build_database_gameobject_responses_allows_map_zero(monkeypatch):
+    replay = _import_replay()
+    session = SimpleNamespace(map_id=0, x=-8803.0, y=633.0, realm_id=1)
+
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_gameobjects_near",
+        staticmethod(lambda map_id, x, y, radius, limit: [{"guid": 4, "entry": 175354}]),
+    )
+    monkeypatch.setattr(
+        replay,
+        "_build_gameobject_update_payload",
+        lambda **kwargs: b"payload",
+    )
+    monkeypatch.setattr(
+        replay,
+        "make_update_object_response",
+        lambda payload: ("SMSG_UPDATE_OBJECT", payload),
+    )
+
+    responses = replay.build_database_gameobject_responses(session)
+
+    assert responses == [("SMSG_UPDATE_OBJECT", b"payload")]

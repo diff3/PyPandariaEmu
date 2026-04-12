@@ -7,7 +7,11 @@ from typing import Any, Optional, Tuple
 
 from DSL.modules.bitsHandler import BitWriter
 from shared.Logger import Logger
-from server.modules.handlers.world.bootstrap.replay import build_single_u32_update_object_payload
+from server.modules.game.guid import GameObjectGuid, GuidHelper
+from server.modules.handlers.world.bootstrap.replay import (
+    build_database_gameobject_responses,
+    build_single_u32_update_object_payload,
+)
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
@@ -409,6 +413,9 @@ _MAX_MOVEMENT_Z_DELTA = 100.0
 _POSITION_SAVE_INTERVAL_SECONDS = 30.0
 _STATIONARY_EPSILON = 0.01
 _SIM_TURN_RATE_RAD_PER_SEC = math.pi
+_GAMEOBJECT_STREAM_LOAD_RADIUS = 120.0
+_GAMEOBJECT_STREAM_UNLOAD_RADIUS = 150.0
+_GAMEOBJECT_STREAM_INTERVAL_SECONDS = 0.5
 
 # TODO:
 # - Move replay_movement_focus_sequence* and related UPDATE_OBJECT replay helpers
@@ -431,6 +438,70 @@ def _broadcast_same_map(session, responses) -> None:
         if int(getattr(target, "map_id", 0) or 0) != map_id:
             continue
         sender(list(responses))
+
+
+def _build_out_of_range_update_object_payload(*, map_id: int, guid: int) -> bytes:
+    payload = bytearray()
+    payload += struct.pack("<HI", int(map_id) & 0xFFFF, 1)
+    payload += struct.pack("<B", 3)
+    payload += struct.pack("<I", 1)
+    payload += GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)
+    return bytes(payload)
+
+
+def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    # Map 0 is valid. Only negative ids mean "no world map".
+    if map_id < 0:
+        return []
+
+    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
+    if not isinstance(loaded_gameobjects, set):
+        loaded_gameobjects = set()
+        session.loaded_gameobjects = loaded_gameobjects
+
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
+    x = float(getattr(session, "x", 0.0) or 0.0)
+    y = float(getattr(session, "y", 0.0) or 0.0)
+
+    responses = list(build_database_gameobject_responses(session, loaded_guids=loaded_gameobjects))
+
+    keep_entries = DatabaseConnection.get_gameobjects_near(
+        map_id,
+        x,
+        y,
+        radius=_GAMEOBJECT_STREAM_UNLOAD_RADIUS,
+        limit=400,
+    )
+    keep_guids = {
+        int(GameObjectGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), realm_id))
+        for entry in keep_entries
+    }
+
+    stale_guids = sorted(int(guid) for guid in loaded_gameobjects if int(guid) not in keep_guids)
+    for guid in stale_guids:
+        Logger.debug("[GO_STREAM] despawn guid=0x%X", int(guid))
+        responses.append(
+            (
+                "SMSG_UPDATE_OBJECT",
+                _build_out_of_range_update_object_payload(map_id=map_id, guid=int(guid)),
+            )
+        )
+        loaded_gameobjects.discard(int(guid))
+
+    return responses
+
+
+def _maybe_stream_gameobjects(session) -> list[tuple[str, bytes]]:
+    now = float(time.monotonic())
+    last_stream_at = float(getattr(session, "last_gameobject_stream_at", 0.0) or 0.0)
+    if now - last_stream_at < _GAMEOBJECT_STREAM_INTERVAL_SECONDS:
+        return []
+    session.last_gameobject_stream_at = now
+    responses = _stream_nearby_gameobjects(session)
+    if responses:
+        Logger.debug("[GO_STREAM] responses=%s", len(responses))
+    return responses
 
 
 def _clear_dance_emote_state_on_move(session) -> None:
@@ -1174,7 +1245,8 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                 float(getattr(session, "orientation", 0.0) or 0.0),
                 int(_movement_state(session).flags),
             )
-            return 0, None
+            stream_responses = _maybe_stream_gameobjects(session)
+            return 0, (stream_responses or None)
         Logger.warning(
             f"[Movement] failed to parse {opcode_name} guid=0x{_player_guid(session):X} "
             f"payload_len={len(ctx.payload)}"
@@ -1264,7 +1336,8 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         f"[MOVE] guid=0x{_player_guid(session):X} "
         f"pos=({session.x:.3f}, {session.y:.3f}, {session.z:.3f}) facing={session.orientation:.3f}"
     )
-    return 0, None
+    stream_responses = _maybe_stream_gameobjects(session)
+    return 0, (stream_responses or None)
 
 
 @register("MSG_MOVE_SET_FACING")
@@ -1301,7 +1374,8 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
         f"facing={session.orientation:.3f}"
     )
     broadcast_player_state_update(session, force=True)
-    return 0, None
+    stream_responses = _maybe_stream_gameobjects(session)
+    return 0, (stream_responses or None)
 
 
 @register("CMSG_MOVE_TELEPORT_ACK")

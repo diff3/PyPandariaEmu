@@ -189,6 +189,8 @@ class WorldSession:
     is_dnd: bool = False
     skyfire_login_stage: int = 0
     visible_guids: set[int] = field(default_factory=set)
+    loaded_gameobjects: set[int] = field(default_factory=set)
+    last_gameobject_stream_at: float = 0.0
     last_position_save_at: float = 0.0
     position_dirty: bool = False
     persist_map_id: int = 0

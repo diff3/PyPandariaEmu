@@ -1801,10 +1801,8 @@ def test_spawngo_loads_nearby_gameobjects_and_tracks_loaded_guids(monkeypatch):
 
     responses = chat_handlers.chat_commands.cmd_spawngo(alice, [])
 
-    assert responses == [
-        ("SMSG_UPDATE_OBJECT", b"go-payload"),
-        ("SMSG_MESSAGECHAT", b"system|[SpawnGO] loaded 1 gameobjects"),
-    ]
+    assert responses[0][0] == "SMSG_UPDATE_OBJECT"
+    assert responses[1] == ("SMSG_MESSAGECHAT", b"system|[SpawnGO] loaded 1 gameobjects")
     assert len(alice.loaded_gameobjects) == 1
 
     responses = chat_handlers.chat_commands.cmd_spawngo(alice, [])

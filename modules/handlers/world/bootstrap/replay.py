@@ -521,7 +521,8 @@ def build_database_gameobject_responses(session, *, loaded_guids: set[int] | Non
     x = float(getattr(session, "x", 0.0) or 0.0)
     y = float(getattr(session, "y", 0.0) or 0.0)
     realm_id = int(getattr(session, "realm_id", 1) or 1)
-    if map_id <= 0:
+    # Map 0 is valid. Only negative ids mean "no world map".
+    if map_id < 0:
         return []
 
     entries = DatabaseConnection.get_gameobjects_near(
