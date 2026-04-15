@@ -5,6 +5,7 @@ import socket
 import signal
 import threading
 import traceback
+import time
 
 from enum import Enum, auto
 from shared.Logger import Logger
@@ -108,20 +109,34 @@ def sigint(sig, frame):
 def _shutdown_active_clients() -> None:
     with _ACTIVE_CLIENTS_LOCK:
         clients = list(_ACTIVE_CLIENTS.values())
+        _ACTIVE_CLIENTS.clear()  # 🔥 viktigt
 
     if not clients:
         return
 
     Logger.info(f"[WorldServer] Closing {len(clients)} active world connection(s)")
+
     for sock, conn_session, addr in clients:
         try:
             handle_disconnect_session(conn_session)
         except Exception as exc:
             Logger.warning(f"[WorldServer] graceful disconnect failed for {addr}: {exc}")
+
+        # 🔥 TA BORT FRÅN GLOBAL STATE
+        try:
+            state = getattr(conn_session, "global_state", None)
+            if state and hasattr(state, "sessions"):
+                state.sessions.discard(conn_session)
+        except Exception as exc:
+            Logger.warning(f"[WorldServer] session cleanup failed for {addr}: {exc}")
+
+        conn_session.active = False
+
         try:
             sock.shutdown(socket.SHUT_RDWR)
         except Exception:
             pass
+
         try:
             sock.close()
         except Exception:
@@ -254,6 +269,47 @@ def normalize_responses(response):
 
 # ---- Client session handler ---------------------------------------------
 
+def _cleanup_dead_sessions():
+    while running:
+        now = time.time()
+
+        with _ACTIVE_CLIENTS_LOCK:
+            clients = list(_ACTIVE_CLIENTS.values())
+
+        for sock, session, addr in clients:
+            guid = int(getattr(session, "char_guid", 0) or 0)
+
+            # --- skip non-player sessions ---
+            if guid <= 0:
+                continue
+
+            last = float(getattr(session, "last_activity", 0) or 0)
+            age = now - last
+
+            # 60 sek timeout
+            if age > 60:
+                Logger.warning(
+                    f"[TIMEOUT] killing dead player guid={guid} age={age:.1f}s addr={addr}"
+                )
+
+                try:
+                    handle_disconnect_session(session)
+                except Exception as exc:
+                    Logger.warning(f"[TIMEOUT] disconnect failed: {exc}")
+
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+        time.sleep(5)
+
+
 class WorldState(Enum):
     NEW = auto()
     HANDSHAKE_SENT = auto()
@@ -268,6 +324,7 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
     conn_session.world_socket = sock
     conn_session.remote_addr = addr
     conn_session._disconnect_handled = False
+    conn_session.last_activity = time.time()
     send_lock = threading.Lock()
 
     with _ACTIVE_CLIENTS_LOCK:
@@ -342,6 +399,15 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                 Logger.info(f"[WorldServer] {addr}: disconnected")
                 break
 
+            IGNORE_ACTIVITY_OPCODES = {
+                "CMSG_WORLD_STATE_UI_TIMER_UPDATE",
+                "CMSG_PING",
+                "CMSG_TIME_SYNC_RESP",
+            }
+
+
+        
+
             # ---- PARSE BY ENCRYPTION STATE ----
             if not encrypted:
                 packets = parse_plain_packets(data, "C")
@@ -392,6 +458,16 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
                 # ---- NORMAL CLIENT PACKET ----
                 name = opcode_resolver.decode_opcode(opcode, "C")
+                
+                ALIVE_OPCODES = {
+                    "CMSG_PING",
+                    "CMSG_TIME_SYNC_RESP",
+                    "CMSG_WORLD_STATE_UI_TIMER_UPDATE",
+                }
+
+                if name in ALIVE_OPCODES:
+                    conn_session.last_activity = time.time()
+
                 if should_log_packet("worldserver", name):
                     Logger.info(f"[WorldServer] C→S {name}")
                 log_raw_packet("worldserver", name, f"[WorldServer] C→S RAW {name}", raw_header + payload)
@@ -454,15 +530,30 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
     finally:
         with _ACTIVE_CLIENTS_LOCK:
             _ACTIVE_CLIENTS.pop(id(conn_session), None)
+
+        # 🔥 TA BORT SESSION FRÅN GLOBAL STATE (DETTA ÄR DIN BUG)
+        try:
+            state = getattr(conn_session, "global_state", None)
+            if state and hasattr(state, "sessions"):
+                state.sessions.discard(conn_session)
+        except Exception as exc:
+            Logger.warning(f"[WorldServer] session cleanup failed: {exc}")
+
+        # markera session som död (bra för safety)
+        conn_session.active = False
+
         try:
             handle_disconnect_session(conn_session)
         except Exception as exc:
             Logger.warning(f"[WorldServer] disconnect handler failed: {exc}")
+
         clear_world_session()
+
         try:
             sock.close()
         except Exception:
             pass
+
         Logger.info(f"[WorldServer] Closed connection from {addr}")
 
 # ---- Server loop --------------------------------------------------------
@@ -500,6 +591,7 @@ def run_world() -> None:
     srv.listen(5)
 
     Logger.info(f"WorldServer listening on {HOST}:{PORT}")
+    threading.Thread(target=_cleanup_dead_sessions, daemon=True).start()
 
     while running:
         try:

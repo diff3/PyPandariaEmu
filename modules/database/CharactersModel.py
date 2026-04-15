@@ -96,8 +96,8 @@ class CharacterSpell(Base):
     spell = Column(MEDIUMINT(unsigned=True), primary_key=True, default=0)
     active = Column(TINYINT(unsigned=True), nullable=False, default=1)
     disabled = Column(TINYINT(unsigned=True), nullable=False, default=0)
-    spec = Column(TINYINT(unsigned=True), nullable=False, default=0)
-    spec_mask = Column("specMask", SMALLINT(unsigned=True), nullable=False, default=0)
+    # spec = Column(TINYINT(unsigned=True), nullable=False, default=0)
+    # spec_mask = Column("specMask", SMALLINT(unsigned=True), nullable=False, default=0)
 
 
 class CharacterInventory(Base):

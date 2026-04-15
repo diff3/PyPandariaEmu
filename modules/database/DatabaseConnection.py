@@ -981,7 +981,6 @@ class DatabaseConnection:
                     WorldGameObjectTemplate.data3,
                 )
                 .join(WorldGameObjectTemplate, WorldGameObjectTemplate.entry == WorldGameObject.id)
-                # ✅ Correct event filter
                 .outerjoin(GameEventGameObject, GameEventGameObject.guid == WorldGameObject.guid)
                 .filter(GameEventGameObject.guid.is_(None))
                 .filter(
@@ -998,13 +997,6 @@ class DatabaseConnection:
             Logger.warning(f"[DB] gameobject lookup failed map={map_id} x={x:.1f} y={y:.1f}: {exc}")
             return []
 
-        # Optional: restrict to safe GO types (reduces junk / duplicates)
-        ALLOWED_TYPES = {
-            0,  # DOOR
-            3,  # CHEST / INTERACTIVE
-            5,  # GENERIC
-        }
-
         gameobjects: list[dict] = []
         radius_sq = radius * radius
 
@@ -1020,27 +1012,12 @@ class DatabaseConnection:
             name = str(row.name or "").lower()
 
             if any(k in name for k in (
-                # "auction house",
-                #"bank",
-                #"inn",
-                #"stable",
-                #"gryphon",
-                #"wind rider",
-                #"broken",
                 "darkmoon",
                 "faire",
-                #"balloon",
-                #"marker",
-                #"trigger",
-                #"invisible",
             )):
                continue
 
-            # Optional type filter
-            # if go_type not in ALLOWED_TYPES:
-         #   if go_type not in {5}:
-          #      continue
-            # MUST have functionality
+            # Remove doublicats signs, and seasonal event objects
             if row.flags == 0 and row.type == 5:
                 continue
 
@@ -1077,106 +1054,6 @@ class DatabaseConnection:
             if (dx * dx) + (dy * dy) > radius_sq:
                 continue
 
-            gameobjects.append(candidate)
-
-        return gameobjects
-
-
-    @staticmethod
-    def get_gameobjects_near_old(
-        map_id: int,
-        x: float,
-        y: float,
-        *,
-        radius: float = 120.0,
-        limit: int = 200,
-    ) -> list[dict]:
-        try:
-            session = DatabaseConnection.world()
-        except Exception as exc:
-            Logger.warning(f"[DB] World DB unavailable: {exc}")
-            return []
-
-        radius = max(0.0, float(radius))
-        min_x = float(x) - radius
-        max_x = float(x) + radius
-        min_y = float(y) - radius
-        max_y = float(y) + radius
-
-        try:
-            rows = (
-                session.query(
-                    WorldGameObject.guid,
-                    WorldGameObject.id,
-                    WorldGameObject.map,
-                    WorldGameObject.position_x,
-                    WorldGameObject.position_y,
-                    WorldGameObject.position_z,
-                    WorldGameObject.orientation,
-                    WorldGameObject.rotation0,
-                    WorldGameObject.rotation1,
-                    WorldGameObject.rotation2,
-                    WorldGameObject.rotation3,
-                    WorldGameObject.animprogress,
-                    WorldGameObject.state,
-                    WorldGameObjectTemplate.type,
-                    WorldGameObjectTemplate.displayId,
-                    WorldGameObjectTemplate.name,
-                    WorldGameObjectTemplate.faction,
-                    WorldGameObjectTemplate.flags,
-                    WorldGameObjectTemplate.size,
-                    WorldGameObjectTemplate.data0,
-                    WorldGameObjectTemplate.data1,
-                    WorldGameObjectTemplate.data2,
-                    WorldGameObjectTemplate.data3,
-                )
-                .join(WorldGameObjectTemplate, WorldGameObjectTemplate.entry == WorldGameObject.id)
-                .filter(
-                    WorldGameObject.map == int(map_id),
-                    WorldGameObject.position_x >= min_x,
-                    WorldGameObject.position_x <= max_x,
-                    WorldGameObject.position_y >= min_y,
-                    WorldGameObject.position_y <= max_y,
-                )
-                .limit(int(limit))
-                .all()
-            )
-        except Exception as exc:
-            Logger.warning(f"[DB] gameobject lookup failed map={map_id} x={x:.1f} y={y:.1f}: {exc}")
-            return []
-
-        gameobjects: list[dict] = []
-        radius_sq = radius * radius
-        for row in rows:
-            candidate = {
-                "guid": int(row.guid or 0),
-                "entry": int(row.id or 0),
-                "map_id": int(row.map or 0),
-                "x": float(row.position_x or 0.0),
-                "y": float(row.position_y or 0.0),
-                "z": float(row.position_z or 0.0),
-                "orientation": float(row.orientation or 0.0),
-                "rotation0": float(row.rotation0 or 0.0),
-                "rotation1": float(row.rotation1 or 0.0),
-                "rotation2": float(row.rotation2 or 0.0),
-                "rotation3": float(row.rotation3 or 0.0),
-                "animprogress": int(row.animprogress or 0),
-                "state": int(row.state or 0),
-                "type": int(row.type or 0),
-                "display_id": int(row.displayId or 0),
-                "name": str(row.name or ""),
-                "faction": int(row.faction or 0),
-                "flags": int(row.flags or 0),
-                "size": float(row.size or 1.0),
-                "data0": int(row.data0 or 0),
-                "data1": int(row.data1 or 0),
-                "data2": int(row.data2 or 0),
-                "data3": int(row.data3 or 0),
-            }
-            dx = candidate["x"] - float(x)
-            dy = candidate["y"] - float(y)
-            if (dx * dx) + (dy * dy) > radius_sq:
-                continue
             gameobjects.append(candidate)
 
         return gameobjects
@@ -1243,6 +1120,29 @@ class DatabaseConnection:
         return 1 << max(class_ - 1, 0)
 
     @staticmethod
+    def update_character_money(guid: int, realm_id: int, money: int) -> None:
+        session = DatabaseConnection.chars()
+
+        try:
+            char = session.query(Characters).filter_by(
+                guid=int(guid),
+                realm=int(realm_id),
+            ).first()
+
+            if not char:
+                return
+
+            char.money = int(money)
+            session.commit()
+
+        except Exception:
+            session.rollback()
+            raise
+
+        finally:
+            session.close()
+
+    @staticmethod
     def get_player_createinfo_actions(race: int, class_: int) -> list[tuple[int, int, int]]:
         if DatabaseConnection._world_cache_loaded:
             return DatabaseConnection._cache_playercreateinfo_actions.get((int(race), int(class_)), [])
@@ -1271,6 +1171,7 @@ class DatabaseConnection:
             except Exception:
                 continue
         return actions
+
     # --------------------------------------------------
     # CHARACTER ACTION BUTTONS
     # --------------------------------------------------
@@ -1808,6 +1709,33 @@ class DatabaseConnection:
             except Exception:
                 continue
         return result
+    
+
+    @staticmethod
+    def get_areatrigger_teleport(trigger_id: int) -> dict | None:
+        session = DatabaseConnection.world()
+
+        try:
+            row = session.execute(text(
+                """
+                SELECT
+                    name,
+                    target_map,
+                    target_position_x,
+                    target_position_y,
+                    target_position_z,
+                    target_orientation
+                FROM areatrigger_teleport
+                WHERE id = :id
+                LIMIT 1
+                """),
+                {"id": int(trigger_id)},
+            ).mappings().first()
+
+            return dict(row) if row else None
+
+        finally:
+            session.close()
 
     # SRP helpers
     @staticmethod
@@ -1826,6 +1754,8 @@ class DatabaseConnection:
     @staticmethod
     def set_gmlevel_old(account_id, gmlevel):
         return AuthConnection.set_gmlevel(account_id, gmlevel)
+    
+
 
 
 DatabaseConnection.auth = staticmethod(DatabaseConnection.auth_old)

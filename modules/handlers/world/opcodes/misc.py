@@ -158,8 +158,44 @@ def handle_set_action_button(session, ctx: PacketContext) -> Tuple[int, Optional
     return 0, None
 
 
+
 @register("CMSG_LOGOUT_REQUEST")
-def handle_logout_request(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+def handle_logout_request(session, ctx):
+    log_cmsg(ctx)
+    Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
+
+    # --- REMOVE FROM WORLD ---
+    state = getattr(session, "global_state", None)
+    if state is not None:
+        sessions = getattr(state, "sessions", None)
+        if sessions is not None:
+            before = len(sessions)
+            sessions.discard(session)
+            Logger.info(f"[LOGOUT] sessions {before} -> {len(sessions)}")
+
+    broadcast_player_remove(session)
+
+    if USE_DB_ACCOUNT_DATA_137:
+        flush_account_data_types_to_db(session, tuple(DB_ACCOUNT_DATA_137_TYPES), seed_defaults=True)
+
+    persist_session_inventory(session)
+    save_current_position_like_command(session, reason="logout", online=0, force=True)
+
+    logout_response = EncoderHandler.encode_packet(
+        "SMSG_LOGOUT_RESPONSE",
+        {
+            "logout_result": 0,
+            "instant_logout": 1,
+        },
+    )
+
+    return 0, [
+        ("SMSG_LOGOUT_RESPONSE", logout_response),
+        ("SMSG_LOGOUT_COMPLETE", b""),
+    ]
+
+
+def handle_logout_request_bk(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
     log_cmsg(ctx)
     Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
     broadcast_player_remove(session)

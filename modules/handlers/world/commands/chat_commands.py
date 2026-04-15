@@ -56,12 +56,25 @@ ALIASES: dict[str, str] = {}
 COMMANDS: dict[str, Command] = {}
 HELPERS: dict[str, Any] = {}
 MORPH_NAME_TO_DISPLAY = {
+    # Boss / heroes
     "sylvanas": 28213,
     "arthas": 22234,
     "jaina": 30863,
     "deathwing": 32809,
     "illidan": 21137,
-    "trall": 4527
+    "thrall": 4527,
+
+    # Undead / spooky
+    "skeleton": 9784,
+    "lich": 15945,
+
+    # Creatures
+    "murloc": 21723, 
+    "elemental": 171,
+    "baby_dragon": 400,
+
+    # Fun / iconic
+    "wisp": 10045,
 }
 UNIT_FIELD_DISPLAYID = 69
 
@@ -658,33 +671,81 @@ def cmd_castspell(session, args: list[str]) -> list[tuple[str, bytes]]:
     responses.extend(_notification_response(f"Casted spell {int(spell_id)}"))
     return responses
 
+def build_spell_go(player, spell_id: int) -> tuple[str, bytes]:
+    payload = bytearray.fromhex(
+        "46 00 00 00 00 00 00 00 00 04 00 02 01 00 80 00 "
+        "05 28 00 C4 00 00 B4 00 00 01 21 00 02 06 81 E5 "
+        "B6 05 06 00 09 00 00 00 E0 93 04 00 02 01 F4 7D "
+        "00 00 02 06"
+    )
+
+    # --- PATCH SPELL ID ---
+    spell_offset = 44
+    payload[spell_offset:spell_offset + 4] = int(spell_id).to_bytes(4, "little")
+
+    # --- PATCH GUID (packed) ---
+    guid = int(player.char_guid)
+
+    mask = 0
+    bytes_out = bytearray()
+
+    for i in range(8):
+        b = (guid >> (i * 8)) & 0xFF
+        if b != 0:
+            mask |= (1 << i)
+            bytes_out.append(b)
+
+    # ⚠️ Här måste du veta exakt offset i packet
+    guid_mask_offset = 0
+    payload[guid_mask_offset] = mask
+
+    # skriv bytes direkt efter mask
+    payload[guid_mask_offset + 1:guid_mask_offset + 1 + len(bytes_out)] = bytes_out
+
+    return ("SMSG_SPELL_GO", bytes(payload))
 
 @register_command("mount", ".mount", allow_args=False)
 def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Apply the debug mount display."""
-    from server.modules.handlers.world.opcodes.movement import resync_movement
+    from server.modules.handlers.world.opcodes.spells import build_raw_update_object
+
+    Logger.error("[MOUNT HARD OVERRIDE FINAL]")
 
     mount_spell_id = int(_helper("chat_mount_spell_id"))
-    Logger.info(
-        "[Mount][Debug] chat .mount received char=%s mounted=%s mount_spell=%s debug_spell=%s",
-        int(getattr(session, "char_guid", 0) or 0),
-        bool(getattr(session, "is_mounted", False)),
-        int(getattr(session, "mount_spell", 0) or 0),
-        mount_spell_id,
-    )
-    Logger.info("[Mount] spell_id=%s", mount_spell_id)
-    responses = list(spells_handlers.handle_mount(session, int(mount_spell_id)))
-    Logger.info(
-        "[Mount] spell_id=%s speed=%.2f",
-        mount_spell_id,
-        float(getattr(session, "run_speed", 0.0) or 0.0),
-    )
-    responses.extend(resync_movement(session))
-    Logger.info("[Mount] aura applied")
-    Logger.info("[Mount] committed")
-    Logger.info("[Mount][Debug] chat .mount returning responses=%s", len(responses))
-    return _append_feedback_response(responses, "[Mount] mount requested")
+    display_id = 31007
 
+    session.unit_flags = 0x08000000
+    session.mount_display_id = display_id
+
+    responses = [
+        # build_spell_go(session, mount_spell_id),
+        build_raw_update_object(session, [
+            (96, session.unit_flags),
+            (106, display_id),
+            (110, 0x00080000),
+        ]),
+    ]
+
+    return responses
+
+#@register_command("mount", ".mount", allow_args=False)
+def cmd_mount_old(session, args: list[str]) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.opcodes.spells import build_raw_update_object
+
+    Logger.error("[MOUNT HARD OVERRIDE FINAL]")
+
+    display_id = 31007
+
+    session.unit_flags = 0x08000000
+    session.mount_display_id = display_id
+
+    fields = [
+        (96, session.unit_flags),
+        (106, display_id),
+        (110, 0x00080000),
+       (55, 1),
+    ]
+
+    return [build_raw_update_object(session, fields)]
 
 @register_command("dismount", ".dismount", allow_args=False)
 def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
@@ -703,14 +764,75 @@ def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
     Logger.info("[Mount][Debug] chat .dismount responses=%s", len(responses))
     return _append_feedback_response(responses, "[Mount] dismount requested")
 
+import re
 
-@register_command("morph", ".morph <displayId|name>", require_args=True)
+@register_command("addmoney", ".addmoney", allow_args=True)
+def cmd_addmoney(session, args: list[str]):
+    from server.modules.handlers.world.opcodes.spells import build_raw_update_object
+    from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
+
+    def msg(text: str):
+        return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(text))]
+
+    if not args or not args[0].strip():
+        return msg("Usage: .addmoney <copper | 10g10s10c>")
+
+    raw = args[0].lower().strip()
+    copper = 0
+
+    # --- plain copper ---
+    if raw.isdigit():
+        copper = int(raw)
+    else:
+        # --- formatted ---
+        pattern = re.compile(r"(?:(\d+)g)?(?:(\d+)s)?(?:(\d+)c)?")
+        match = pattern.fullmatch(raw)
+
+        if not match:
+            return msg("Invalid format. Example: 10g10s10c")
+
+        g, s, c = match.groups()
+        copper += int(g or 0) * 10000
+        copper += int(s or 0) * 100
+        copper += int(c or 0)
+
+        if copper == 0:
+            return msg("Invalid amount. Example: 10g10s10c")
+
+    current = int(getattr(session, "money", 0) or 0)
+    new_amount = max(0, current + copper)
+    session.money = new_amount
+
+    ok = DatabaseConnection.update_character_money(
+        int(session.char_guid),
+        int(session.realm_id),
+        int(new_amount),
+    )
+
+    return [
+        ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(f"+{copper} copper")),
+        build_raw_update_object(session, [(0x117, new_amount)]),
+    ]
+
+
+@register_command("morph", ".morph <displayId|name|list>", require_args=True)
 def cmd_morph(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Morph the player into a target display id."""
+    """Morph the player into a target display id or list available morphs."""
     if len(args) != 1:
-        return _notification_response("Usage: .morph <displayId|name>")
+        return _notification_response("Usage: .morph <displayId|name|list>")
 
-    display_id = _resolve_morph_display_id(args[0])
+    arg = str(args[0]).strip().lower()
+
+    # morph_map = _helper("morph_name_to_display")
+    morph_map = MORPH_NAME_TO_DISPLAY
+
+    # List all morphs
+    if arg == "list":
+        names = sorted(morph_map.keys())
+        names_str = ", ".join(names)
+        return _notification_response(f"[Morph] available: {names_str}")
+
+    display_id = _resolve_morph_display_id(arg)
     if display_id <= 0:
         return _notification_response("Morph target not found")
 
@@ -723,6 +845,7 @@ def cmd_morph(session, args: list[str]) -> list[tuple[str, bytes]]:
     session.display_id = int(display_id)
     session.morph_display_id = int(display_id)
     session.is_morphed = True
+
     Logger.info("[MORPH] display_id=%s", int(display_id))
 
     responses = _helper("build_display_id_responses")(session, int(display_id))
@@ -780,38 +903,55 @@ def cmd_additem(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
-@register_command("addtier", ".addtier <class> <tier>")
+@register_command("addtier", ".addtier <class> [tier]")
 def cmd_addtier(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Add a predefined tier set by reusing additem."""
-    if len(args) != 2:
-        return _notification_response("Usage: .addtier <class> <tier>")
+    """Add a predefined tier set or list available tiers."""
+    if len(args) < 1:
+        return _notification_response("Usage: .addtier <class> [tier]")
 
-    class_name = str(args[0]).strip().lower()
+    class_name = str(args[0]).strip().lower().replace("_", "")
+
+    tier_set_items = _helper("tier_set_items")
+    class_data = tier_set_items.get(class_name)
+    if not class_data:
+        return _notification_response(f"[AddTier] unknown class: {class_name}")
+
+    # Only class → list tiers
+    if len(args) == 1:
+        tiers = sorted(class_data.keys())
+        tiers_str = ", ".join(str(t) for t in tiers)
+        return _notification_response(f"[AddTier] {class_name} tiers: {tiers_str}")
+
+    # Parse tier
     try:
         tier = int(args[1], 0)
     except ValueError:
         return _notification_response("Usage: .addtier <class> <tier>")
 
-    tier_set_items = _helper("tier_set_items")
-    item_entries = tier_set_items.get((class_name, int(tier)))
+    item_entries = class_data.get(tier)
     if not item_entries:
-        return _notification_response(f"[AddTier] unsupported class/tier: {class_name} {tier}")
+        return _notification_response(f"[AddTier] unsupported tier: {class_name} {tier}")
 
     Logger.info(
         "[ADDTIER] class=%s tier=%s items=%s",
         class_name,
-        int(tier),
+        tier,
         len(item_entries),
     )
 
     responses: list[tuple[str, bytes]] = []
+
     for item_entry in item_entries:
         responses.extend(_call_command("additem", session, [str(int(item_entry)), "1"]))
 
     responses.extend(_build_login_inventory_sync(session))
+
     responses.extend(
-        _notification_response(f"[AddTier] {class_name} T{int(tier)} items={len(item_entries)}")
+        _notification_response(
+            f"[AddTier] {class_name} T{tier} items={len(item_entries)}"
+        )
     )
+
     return responses
 
 
@@ -1063,12 +1203,93 @@ def cmd_map(session, args: list[str]) -> list[tuple[str, bytes]]:
     return _notification_response("Usage: map <on|0>")
 
 
+
+def find_online_player_by_name(name: str):
+    if not name:
+        return None
+
+    name = name.strip().lower()
+
+    from server.worldserver import _ACTIVE_CLIENTS, _ACTIVE_CLIENTS_LOCK
+
+    with _ACTIVE_CLIENTS_LOCK:
+        for _, session, _ in _ACTIVE_CLIENTS.values():
+            guid = int(getattr(session, "char_guid", 0) or 0)
+            if guid <= 0:
+                continue
+
+            player_name = str(getattr(session, "player_name", "") or "").strip().lower()
+            account_name = str(getattr(session, "account_name", "") or "").strip().lower()
+
+            if name == player_name or name == account_name:
+                return session
+
+    return None
+
+
+@register_command("goto", ".goto <player>")
+def cmd_goto(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args:
+        return _notification_response("Usage: .goto <player>")
+
+    target_name = " ".join(args).strip()
+    target = find_online_player_by_name(target_name)
+    if target is None:
+        return _notification_response("Player not found")
+
+    from server.modules.handlers.world.opcodes import chat as chat_handlers
+
+    responses = chat_handlers.apply_player_state_change(
+        session,
+        position=(
+            float(getattr(target, "x", 0.0) or 0.0),
+            float(getattr(target, "y", 0.0) or 0.0),
+            float(getattr(target, "z", 0.0) or 0.0),
+            float(getattr(target, "orientation", 0.0) or 0.0),
+        ),
+        map_id=int(getattr(target, "map_id", 0) or 0),
+    )
+
+    return _append_feedback_response(
+        responses,
+        f"[Goto] -> {target_name}"
+    )
+
+@register_command("fetch", ".fetch <player>")
+def cmd_fetch(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args:
+        return _notification_response("Usage: .fetch <player>")
+
+    target_name = " ".join(args).strip()
+    target = find_online_player_by_name(target_name)
+    if target is None:
+        return _notification_response("Player not found")
+
+    from server.modules.handlers.world.opcodes import chat as chat_handlers
+
+    responses = chat_handlers.apply_player_state_change(
+        target,
+        position=(
+            float(getattr(session, "x", 0.0) or 0.0),
+            float(getattr(session, "y", 0.0) or 0.0),
+            float(getattr(session, "z", 0.0) or 0.0),
+            float(getattr(session, "orientation", 0.0) or 0.0),
+        ),
+        map_id=int(getattr(session, "map_id", 0) or 0),
+    )
+
+    # 🔥 CRITICAL: send packets to target, not caller
+    target.send_response(responses)
+
+    return _notification_response(f"[Fetch] {target_name} -> you")
+
+
 # Real commands live here for quick scanning.
 PRIMARY_COMMANDS = {
     "help": Command(handler=cmd_help, usage=".help"),
     "roll": Command(handler=cmd_roll, usage=".roll"),
     "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),
-    "spawngo": Command(handler=cmd_spawngo, usage=".spawngo", allow_args=False),
+    # "spawngo": Command(handler=cmd_spawngo, usage=".spawngo", allow_args=False),
     "level": Command(handler=cmd_level, usage=".level [delta]|set <level>"),
     "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
     "fly": Command(handler=cmd_fly, usage=".fly <on|off>"),
@@ -1079,19 +1300,22 @@ PRIMARY_COMMANDS = {
     "castspell": Command(handler=cmd_castspell, usage=".castspell <spell_id>", require_args=True),
     "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
     "dismount": Command(handler=cmd_dismount, usage=".dismount", allow_args=False),
-    "morph": Command(handler=cmd_morph, usage=".morph <displayId|name>", require_args=True),
+    "morph": Command(handler=cmd_morph, usage=".morph <displayId|namel|list>", require_args=True),
     "demorph": Command(handler=cmd_demorph, usage=".demorph", allow_args=False),
+    "addmoney": Command(handler=cmd_addmoney, usage=".addmoney <copper | 10g10s10c>", require_args=False),
     "additem": Command(handler=cmd_additem, usage=".additem <itemEntry> [count]"),
     "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>"),
-    "invfix": Command(handler=cmd_invfix, usage=".invfix", allow_args=False),
-    "fixplayer": Command(handler=cmd_fixplayer, usage=".fixplayer [teleport]"),
-    "fixspeed": Command(handler=cmd_fixspeed, usage=".fixspeed", allow_args=False),
+    "reload": Command(handler=cmd_invfix, usage=".reload", allow_args=False),
+    # "fixplayer": Command(handler=cmd_fixplayer, usage=".fixplayer [teleport]"),
+    # "fixspeed": Command(handler=cmd_fixspeed, usage=".fixspeed", allow_args=False),
     "save": Command(handler=cmd_save, usage=".save", allow_args=False),
     "telxyz": Command(handler=cmd_telxyz, usage=".telxyz <map> <x> <y> <z> <orientation>"),
     "tel": Command(
         handler=cmd_tel,
         usage=".tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel nearest",
     ),
+    "goto": Command(handler=cmd_goto, usage=".goto <player>", require_args=True),
+    "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", require_args=True),
     "map": Command(handler=cmd_map, usage=".map <on|0>"),
 }
 

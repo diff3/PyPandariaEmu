@@ -6,6 +6,7 @@ import time
 from typing import Any, Optional, Tuple
 
 from DSL.modules.bitsHandler import BitWriter
+# from modules.handlers.world.opcodes.chat import _append_feedback_response
 from shared.Logger import Logger
 from server.modules.game.guid import GameObjectGuid, GuidHelper
 from server.modules.handlers.world.bootstrap.replay import (
@@ -1432,7 +1433,38 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         )
     return 0, responses
 
+@register("CMSG_MOVE_WORLDPORT_ACK")
+def handle_move_worldport_ack(session, _ctx: PacketContext):
+    if not bool(getattr(session, "teleport_pending", False)):
+        Logger.debug("[Teleport] ignoring unexpected WORLDPORT_ACK")
+        return 0, None
 
+    # --- CRITICAL RESET ---
+    session.teleport_pending = False
+    session.near_teleport_pending = False
+
+    _capture_persist_position_from_session(session)
+    _mark_position_dirty(session)
+    _save_session_position(session, reason="worldport", online=1, force=True)
+    broadcast_player_state_update(session, force=True)
+
+    Logger.info(
+        "[Teleport] world transfer ack destination=%s pos=(%.2f %.2f %.2f %.2f)",
+        str(getattr(session, "teleport_destination", "") or ""),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+    )
+
+    return 0, [
+        (
+            "SMSG_MESSAGECHAT",
+            encode_skyfire_messagechat_system_payload(
+                f"[Teleport] worldport ack -> {str(getattr(session, 'teleport_destination', '') or '?')}"
+            ),
+        )
+    ]
 @register("CMSG_MOVE_FORCE_RUN_SPEED_CHANGE_ACK")
 def handle_move_force_run_speed_change_ack(session, _ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     Logger.debug(
@@ -1444,3 +1476,122 @@ def handle_move_force_run_speed_change_ack(session, _ctx: PacketContext) -> Tupl
     if refresh_response is None:
         return 0, None
     return 0, [refresh_response]
+
+
+@staticmethod
+def get_map_name(map_id: int) -> str:
+    row = DatabaseConnection.world_execute_one(
+        "SELECT name FROM map WHERE id = :id",
+        {"id": int(map_id)},
+    )
+    return row.get("name") if row else f"Map {map_id}"
+
+
+
+
+
+def configure(**helpers: Any) -> None:
+    """Store helper callbacks provided by the chat opcode module."""
+    HELPERS.update(helpers)
+
+
+def _helper(name: str) -> Any:
+    """Return a configured helper or fail fast."""
+    if name not in HELPERS:
+        raise RuntimeError(f"chat command helper not configured: {name}")
+    return HELPERS[name]
+
+
+
+HELPERS: dict[str, Any] = {}
+
+def _notification_response(message: str) -> list[tuple[str, bytes]]:
+    """Build a system chat response."""
+    helper = HELPERS.get("notification_response")
+    if callable(helper):
+        return helper(message)
+    return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
+
+def _append_feedback_response(
+    responses: list[tuple[str, bytes]] | None,
+    message: str,
+) -> list[tuple[str, bytes]]:
+    """Append a system chat line after command responses."""
+    helper = HELPERS.get("append_feedback_response")
+    if callable(helper):
+        return helper(responses, message)
+    merged = list(responses or [])
+    merged.extend(_notification_response(message))
+    return merged
+
+@register("CMSG_AREATRIGGER")
+def handle_areatrigger(session, ctx: PacketContext):
+    if len(ctx.payload) < 4:
+        return 0, None
+
+    trigger_id = int.from_bytes(ctx.payload[:4], "little")
+
+    current_map_id = int(getattr(session, "map_id", 0) or 0)
+    px = float(getattr(session, "x", 0.0) or 0.0)
+    py = float(getattr(session, "y", 0.0) or 0.0)
+    pz = float(getattr(session, "z", 0.0) or 0.0)
+
+    Logger.info(
+        "[AREATRIGGER] id=%s map=%s pos=(%.2f %.2f %.2f)",
+        trigger_id, current_map_id, px, py, pz
+    )
+
+    row = DatabaseConnection.get_areatrigger_teleport(trigger_id)
+    if not row:
+        return 0, [
+            (
+                "SMSG_MESSAGECHAT",
+                encode_skyfire_messagechat_system_payload(
+                    f"[AREATRIGGER] id={trigger_id} (no mapping)"
+                ),
+            )
+        ]
+
+    target_map = int(row["target_map"])
+    x = float(row["target_position_x"])
+    y = float(row["target_position_y"])
+    z = float(row["target_position_z"])
+    o = float(row.get("target_orientation", 0.0) or 0.0)
+
+    same_map = (current_map_id == target_map)
+    session.teleport_destination = f"areatrigger:{trigger_id}"
+
+    Logger.debug(
+        "[AREATRIGGER] target map=%s pos=(%.2f %.2f %.2f %.2f)",
+        target_map, x, y, z, o
+    )
+
+    # --- IMPORTANT: set flags BEFORE teleport ---
+    session.near_teleport_pending = same_map
+    session.teleport_pending = not same_map
+
+    # Lazy import (avoid circular import)
+    from server.modules.handlers.world.opcodes import chat as chat_handlers
+
+    responses = chat_handlers.apply_player_state_change(
+        session,
+        position=(x, y, z, o),
+        map_id=target_map,
+    )
+
+    # --- DO NOT reset flags here ---
+
+    if same_map:
+        msg = (
+            f"[Teleport] near start -> {session.teleport_destination} "
+            f"({x:.1f} {y:.1f} {z:.1f})"
+        )
+    else:
+        msg = (
+            f"[Teleport] transfer start -> {session.teleport_destination} "
+            f"map={target_map} ({x:.1f} {y:.1f} {z:.1f})"
+        )
+
+    responses = _append_feedback_response(responses, msg)
+
+    return 0, responses

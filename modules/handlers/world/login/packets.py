@@ -464,58 +464,119 @@ def build_SMSG_WORLD_SERVER_INFO(_ctx=None) -> bytes:
 
     return bytes(payload)
 
-
 def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
-    spells = [int(spell) for spell in (getattr(ctx, "known_spells", []) or [])]
-    spell_set = set(spells)
+    import struct
+
     race = int(getattr(ctx, "race", 0) or 0)
+
     alliance_races = {1, 3, 4, 7, 11, 22, 25}
     horde_races = {2, 5, 6, 8, 9, 10, 26}
-    base_language_spell = {
-        1: 669,       # Human -> Orcish in sandbox
-        2: 669,       # Orc -> Orcish
-        24: 108127,   # Pandaren Neutral
-        25: 669,      # Pandaren Alliance -> Orcish in sandbox
-        26: 669,      # Pandaren Horde -> Orcish
-    }.get(race, 0)
-    if int(base_language_spell or 0) == 0:
-        if race in alliance_races or race in horde_races:
-            base_language_spell = 669
-    if int(base_language_spell or 0) and int(base_language_spell) not in spell_set:
-        spells.append(int(base_language_spell))
-        spell_set.add(int(base_language_spell))
+
+    _LANG_COMMON = 7
+    _LANG_ORCISH = 1
+
+    spell_set: set[int] = set()
+
+    # ----------------------------------------
+    # BASE LANGUAGE (EXACTLY ONE)
+    # ----------------------------------------
+    if race in alliance_races:
+        base_spell = 668  # Common
+        base_lang = _LANG_COMMON
+    elif race in horde_races:
+        base_spell = 669  # Orcish
+        base_lang = _LANG_ORCISH
+    else:
+        base_spell = 0
+        base_lang = 0
+
+    if base_spell:
+        spell_set.add(base_spell)
+
+    # ----------------------------------------
+    # RACIAL LANGUAGE (OPTIONAL)
+    # ----------------------------------------
     race_language_spell = {
-        1: 669,       # Human -> Orcish in sandbox
-        2: 669,       # Orc -> Orcish
-        3: 672,       # Dwarf -> Dwarvish
-        4: 671,       # Night Elf -> Darnassian
-        5: 17737,     # Undead -> Gutterspeak
-        6: 670,       # Tauren -> Taurahe
-        7: 7340,      # Gnome -> Gnomish
-        8: 7341,      # Troll -> Troll
-        10: 813,      # Blood Elf -> Thalassian
-        11: 29932,    # Draenei -> Draenei
-        22: 69269,    # Goblin -> Goblin
-        24: 108127,   # Pandaren Neutral
-        25: 669,      # Pandaren Alliance -> Orcish in sandbox
-        26: 108131,   # Pandaren Horde
+        3: 672,
+        4: 671,
+        5: 17737,
+        6: 670,
+        7: 7340,
+        8: 7341,
+        10: 813,
+        11: 29932,
+        22: 69269,
+        24: 108127,
+        26: 108131,
     }.get(race, 0)
-    if int(race_language_spell or 0) and int(race_language_spell) not in spell_set:
-        spells.append(int(race_language_spell))
+
+    if race_language_spell:
         spell_set.add(int(race_language_spell))
 
+    # ----------------------------------------
+    # MOUNTS
+    # ----------------------------------------
     for spell_id in granted_mount_spells():
-        if int(spell_id) not in spell_set:
-            spells.append(int(spell_id))
-            spell_set.add(int(spell_id))
+        spell_set.add(int(spell_id))
 
+    # ----------------------------------------
+    # BUILD LANGUAGE MASK (CRITICAL FIX)
+    # ----------------------------------------
+    lang_map = {
+        668: _LANG_COMMON,
+        669: _LANG_ORCISH,
+        29932: 35,
+        813: 10,
+    }
+
+    mask = 0
+
+    for s in spell_set:
+        lang = lang_map.get(int(s))
+        if lang is not None:
+            mask |= (1 << lang)
+
+    # FORCE base language (important for Alliance)
+    if base_lang:
+        mask |= (1 << base_lang)
+
+    # ----------------------------------------
+    # APPLY DIRECTLY TO SESSION (TEST MODE)
+    # ----------------------------------------
+    setattr(ctx, "language", base_lang)
+    setattr(ctx, "known_languages_mask", mask)
+
+    # ----------------------------------------
+    # FINAL SPELL LIST
+    # ----------------------------------------
+    spells = sorted(spell_set)
+
+    Logger.info(
+        "[TEST_SPELLS] race=%s spells=%s",
+        race,
+        spells,
+    )
+
+    Logger.info(
+        "[TEST_LANG] base_lang=%s mask=0x%X",
+        base_lang,
+        mask,
+    )
+
+    # ----------------------------------------
+    # BUILD PACKET
+    # ----------------------------------------
     payload = bytearray()
     bits = BitWriter()
-    bits.write_bits(0, 1)
-    bits.write_bits(len(spells) & 0x3FFFFF, 22)
+
+    bits.write_bits(0, 1)  # has cooldowns
+    bits.write_bits(len(spells), 22)
+
     payload.extend(bits.getvalue())
+
     for spell_id in spells:
-        payload.extend(struct.pack("<I", int(spell_id)))
+        payload.extend(struct.pack("<I", spell_id))
+
     return bytes(payload)
 
 
@@ -1512,21 +1573,74 @@ def _resolve_player_faction_template(race: int, fallback: int = 1610) -> int:
     return int(_PLAYER_FACTION_TEMPLATE_IDS.get(int(race) or 0, fallback))
 
 
-def _patch_mount_skill_block_1773613176_0002_fields(payload: bytearray, offsets: dict[str, int]) -> None:
+def _patch_mount_skill_block_1773613176_0002_fields(
+    payload: bytearray,
+    offsets: dict[str, int],
+    ctx: Any,
+) -> None:
     """
-    The exact 0002 player template carries a static 16-slot skill block.
-    We do not serialize full live skill data yet, but mount usability requires
-    Riding to be present client-side. Overwrite the final slot with Riding.
-    """
-    field_base = int(offsets["object_guid_low_u32"])
-    skill_slot = 15
-    skill_ids_offset = field_base + 288 + (skill_slot * 2)
-    skill_values_offset = field_base + 320 + (skill_slot * 2)
-    skill_max_offset = field_base + 352 + (skill_slot * 2)
+    Rebuild the entire 16-slot skill block.
 
-    _patch_u16(payload, skill_ids_offset, int(MOUNT_RIDING_SKILL_ID))
-    _patch_u16(payload, skill_values_offset, int(MOUNT_RIDING_SKILL_VALUE))
-    _patch_u16(payload, skill_max_offset, int(MOUNT_RIDING_SKILL_VALUE))
+    This fixes:
+    - missing language selection
+    - client not sending chat CMSG
+    - inconsistent skill state from template
+
+    Layout (per slot):
+        ids   @ base + 288
+        value @ base + 320
+        max   @ base + 352
+    """
+
+    field_base = int(offsets["object_guid_low_u32"])
+
+    # --- constants ---
+    LANG_COMMON = 98
+    LANG_ORCISH = 109
+
+    race = int(getattr(ctx, "race", 0) or 0)
+
+    # --- clear all slots ---
+    for i in range(16):
+        _patch_u16(payload, field_base + 288 + (i * 2), 0)
+        _patch_u16(payload, field_base + 320 + (i * 2), 0)
+        _patch_u16(payload, field_base + 352 + (i * 2), 0)
+
+    # --- slot 0: primary language ---
+    if race in (1, 3, 4, 7, 11):  # alliance
+        lang = LANG_COMMON
+    else:
+        lang = LANG_ORCISH
+
+    _patch_u16(payload, field_base + 288 + (0 * 2), lang)
+    _patch_u16(payload, field_base + 320 + (0 * 2), 300)
+    _patch_u16(payload, field_base + 352 + (0 * 2), 300)
+
+    # --- slot 1: riding (mount usability) ---
+    _patch_u16(payload, field_base + 288 + (1 * 2), int(MOUNT_RIDING_SKILL_ID))
+    _patch_u16(payload, field_base + 320 + (1 * 2), int(MOUNT_RIDING_SKILL_VALUE))
+    _patch_u16(payload, field_base + 352 + (1 * 2), int(MOUNT_RIDING_SKILL_VALUE))
+
+    # --- optional: racial language (slot 2) ---
+    # Example mapping (expand later if needed)
+    RACIAL_LANG = {
+        1: 113,  # Human -> Common (same, harmless)
+        3: 111,  # Dwarf -> Dwarven
+        4: 113,  # Night Elf -> Darnassian
+        7: 115,  # Gnome -> Gnomish
+        11: 113, # Draenei -> Draenei
+        2: 109,  # Orc -> Orcish
+        5: 110,  # Undead -> Gutterspeak
+        6: 114,  # Tauren -> Taurahe
+        8: 116,  # Troll -> Troll
+        10: 139, # Blood Elf -> Thalassian
+    }
+
+    racial = RACIAL_LANG.get(race)
+    if racial:
+        _patch_u16(payload, field_base + 288 + (2 * 2), racial)
+        _patch_u16(payload, field_base + 320 + (2 * 2), 300)
+        _patch_u16(payload, field_base + 352 + (2 * 2), 300)
 
 
 def _patch_live_update_object_1773613176_0002_fields(ctx: Any, payload: bytearray, *, offset_adjust: int = 0) -> None:
@@ -1594,8 +1708,13 @@ def _patch_live_update_object_1773613176_0002_fields(ctx: Any, payload: bytearra
     _patch_u32(payload, offsets["native_display_id"], display_id)
 
     _patch_u32(payload, offsets["level"], level)
+    
     _patch_u32(payload, offsets["player_bytes"], player_bytes)
     _patch_u32(payload, offsets["player_bytes2"], player_bytes2)
+    # TEMP TEST: assume next slot
+    #known_lang_offset = offsets["player_bytes2"] + 4
+    #_patch_u32(payload, known_lang_offset, getattr(ctx, "known_languages_mask", 1))
+    
 
     # These sparse player fields in the Barncastle 0002 template were still
     # carrying Selene's raw equipment cache values. Patch them from the
@@ -1613,7 +1732,7 @@ def _patch_live_update_object_1773613176_0002_fields(ctx: Any, payload: bytearra
         if raw_index < len(equipment_cache_raw):
             _patch_u32(payload, offsets[offset_key], int(equipment_cache_raw[raw_index]) & 0xFFFFFFFF)
 
-    _patch_mount_skill_block_1773613176_0002_fields(payload, offsets)
+    _patch_mount_skill_block_1773613176_0002_fields(payload, offsets, ctx)
 
 
 def _build_barncastle_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
@@ -1648,7 +1767,6 @@ def _build_barncastle_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
         offset_adjust=_MINIMAL_UPDATE_OBJECT_1773613176_0002_OFFSET_ADJUST,
     )
     return bytes(payload)
-
 
 def _patch_update_object_1773613176_0002_remote_flags(payload: bytearray) -> None:
     """

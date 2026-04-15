@@ -521,8 +521,219 @@ def handle_enum_characters(session, ctx: PacketContext):
     return 0, [("SMSG_ENUM_CHARACTERS_RESULT", payload)]
 
 
+
+
 @register("CMSG_PLAYER_LOGIN")
 def handle_player_login(session, ctx: PacketContext):
+    payload = ctx.payload
+    log_cmsg(ctx)
+    Logger.info("[LOGIN] player entering world")
+
+    login_guid = None
+    if len(payload) == 6:
+        login_guid = int.from_bytes(payload, "little", signed=False)
+    elif len(payload) >= 6:
+        login_guid = int.from_bytes(payload[:6], "little", signed=False)
+
+    session.account_data = {}
+    session.account_data_times = {i: 0 for i in range(8)}
+    session.account_data_mask = 0
+    load_global_account_data(session)
+
+    char_guid = _resolve_login_character_guid(
+        login_guid=login_guid,
+        payload=payload,
+        account_id=session.account_id,
+        realm_id=session.realm_id,
+        account_name=getattr(session, "account_name", None),
+    )
+    if char_guid is None:
+        Logger.error("[WorldHandlers] CMSG_PLAYER_LOGIN could not resolve selected character")
+        return 1, None
+
+    realm_id = session.realm_id
+    selected_world_guid = int(
+        GuidHelper.make(
+            high=HighGuid.PLAYER,
+            realm=int(realm_id or 0),
+            low=int(char_guid or 0),
+        )
+    )
+
+    session.player_guid = selected_world_guid
+    session.world_guid = selected_world_guid
+    session.char_guid = char_guid
+    session.active_mover_guid = selected_world_guid
+
+    load_character_account_data(session)
+    session.account_data_mask = account_data_mask_for_types(PER_CHARACTER_ACCOUNT_DATA_TYPES)
+
+    Logger.info(
+        "[GUID MODE]\n"
+        f"selected_guid = 0x{selected_world_guid:X}\n"
+        f"session_guid = 0x{int(session.world_guid or 0):X}"
+    )
+    Logger.info(f"[GUID MODE ACTIVE] player_guid=0x{int(session.player_guid or 0):X}")
+
+    row = DatabaseConnection.get_character(char_guid, realm_id)
+    if not row:
+        Logger.error(f"[WorldHandlers] Character not found guid={char_guid} realm={realm_id}")
+        return 1, None
+
+    session._character_row = row
+    selected_name = str(getattr(row, "name", "") or f"Player{char_guid}")
+
+    Logger.info(
+        f"[WorldHandlers] PLAYER_LOGIN selected name={selected_name} "
+        f"char_guid={char_guid} realm={realm_id}"
+    )
+
+    session.map_id = int(row.map or 0)
+    session.instance_id = int(row.instance_id or 0)
+
+    loaded_position = position_from_row(row)
+    normalized_loaded_position = normalize_position(correct_z_if_invalid(loaded_position), safe_z=True)
+
+    if normalized_loaded_position is None:
+        Logger.warning(
+            "[POS_SAVE] invalid DB position on login player=%s raw=%s; falling back to origin",
+            int(char_guid),
+            format_position(loaded_position),
+        )
+        normalized_loaded_position = Position(
+            map=int(getattr(row, "map", 0) or 0),
+            x=0.0,
+            y=0.0,
+            z=0.0,
+            orientation=0.0,
+        )
+
+    session.x = float(normalized_loaded_position.x)
+    session.y = float(normalized_loaded_position.y)
+    session.z = float(normalized_loaded_position.z)
+    session.orientation = float(normalized_loaded_position.orientation)
+
+    session.zone = int(
+        resolve_zone_from_position(
+            int(session.map_id),
+            float(session.x),
+            float(session.y),
+        ) or int(row.zone or 0)
+    )
+
+    Logger.info(
+        "[Position] load guid=%s name=%s map=%s zone=%s x=%.3f y=%.3f z=%.3f o=%.3f",
+        int(char_guid),
+        selected_name,
+        int(session.map_id),
+        int(session.zone),
+        float(session.x),
+        float(session.y),
+        float(session.z),
+        float(session.orientation),
+    )
+
+    capture_persist_position_from_session(session)
+    remember_saved_position(session)
+
+    DatabaseConnection.save_character_online_state(
+        int(char_guid),
+        int(realm_id),
+        online=1,
+    )
+
+    session.level = int(row.level or 1)
+    session.class_id = int(row.class_ or 0)
+    session.race = int(row.race or 0)
+    session.gender = int(row.gender or 0)
+
+    # ❌ OLD (removed)
+    # spells_handlers.initialize_session_language_state(session)
+
+    spells_handlers._restore_default_movement_speeds(session)
+
+    session.is_mounted = False
+    session.mount_spell = None
+    _reset_morph_state(session, session.race, session.gender)
+
+    session.money = int(row.money or 0)
+    session.health = int(row.health or 1)
+
+    session.display_power, session.power_primary, session.max_power_primary = _resolve_primary_power_for_row(
+        row,
+        session.class_id,
+    )
+
+    session.faction_template = int(PLAYER_FACTION_TEMPLATE_BY_RACE.get(session.race, 0))
+
+    session.player_bytes = int(row.playerBytes or 0)
+    session.player_bytes2 = int(row.playerBytes2 or 0)
+    session.player_flags = int(row.playerFlags or 0)
+    session.unit_flags = int(getattr(session, "unit_flags", 0) or 0)
+    session.mount_display_id = int(getattr(session, "mount_display_id", 0) or 0)
+
+    session.player_name = selected_name
+
+    session.equipment_cache_raw = [
+        int(value)
+        for value in str(getattr(row, "equipmentCache", "") or "").split()
+        if value.strip()
+    ]
+
+    session.explored_zones_raw = str(getattr(row, "exploredZones", "") or "")
+
+    refresh_session_inventory(session)
+    attach_session_to_world_state(session, map_id=int(session.map_id))
+
+    # --- LOAD SPELLS FIRST ---
+    # spells_handlers.initialize_session_spells(session, int(char_guid))
+
+    # 🔥 FIX: FORCE LANGUAGE AFTER SPELL LOAD
+    # spells_handlers.initialize_session_language_state(session)
+
+    session.action_buttons = DatabaseConnection.get_character_action_buttons(char_guid)
+
+    session.phase_data = {}
+    session.world_states = {}
+    session.single_world_state = {}
+    session.weather = dict(getattr(getattr(session, "region", None), "weather", {}) or {})
+
+    session.server_time = int(time.time())
+    session.game_time = pack_wow_game_time(
+        session.server_time + int(getattr(session, "time_offset", 0) or 0)
+    )
+
+    session.time_speed = float(getattr(session, "time_speed", 0.01666667) or 0.01666667)
+    session.time_sync_seq = 0
+
+    _reset_login_flow_state(
+        session,
+        preserve_loading_screen_done=bool(getattr(session, "loading_screen_done", False)),
+    )
+
+    _resolve_session_ids(session)
+    _set_login_state(session, LoginState.PLAYER_LOGIN)
+
+    Logger.success(
+        f"[WorldHandlers] PLAYER_LOGIN name={session.player_name} "
+        f"char_guid={char_guid} map={session.map_id} zone={session.zone} realm={realm_id}"
+    )
+
+    login_ctx = _build_world_login_context(session)
+
+    responses: list[tuple[str, bytes]] = []
+    responses.extend(build_player_login_packets(login_ctx))
+
+    if getattr(session, "loading_screen_done", False):
+        Logger.info("[WorldHandlers] PLAYER_LOGIN consuming deferred LOADING_SCREEN_NOTIFY show=0")
+        responses.extend(_queue_world_bootstrap_transition(session, login_ctx))
+
+    Logger.debug("[LOGIN] sending init packet sequence")
+    Logger.info("[WorldHandlers] PLAYER_LOGIN queued player login bundle")
+
+    return 0, responses
+
+def handle_player_login_old(session, ctx: PacketContext):
     payload = ctx.payload
     log_cmsg(ctx)
     Logger.info("[LOGIN] player entering world")
@@ -635,6 +846,7 @@ def handle_player_login(session, ctx: PacketContext):
     session.race = int(row.race or 0)
     session.gender = int(row.gender or 0)
     spells_handlers.initialize_session_language_state(session)
+    # spells_handlers.initialize_session_spells(session, int(char_guid))
     spells_handlers._restore_default_movement_speeds(session)
     session.is_mounted = False
     session.mount_spell = None
@@ -662,7 +874,9 @@ def handle_player_login(session, ctx: PacketContext):
     refresh_session_inventory(session)
     attach_session_to_world_state(session, map_id=int(session.map_id))
 
+    #  spells_handlers.initialize_session_language_state(session)
     spells_handlers.initialize_session_spells(session, int(char_guid))
+    #  spells_handlers.initialize_session_language_state(session)
     session.action_buttons = DatabaseConnection.get_character_action_buttons(char_guid)
 
     session.phase_data = {}

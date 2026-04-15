@@ -94,27 +94,84 @@ _UNIT_FIELD_NATIVE_DISPLAYID = 70
 _UNIT_FIELD_FLAGS = 0x60
 _UNIT_FIELD_MOUNTDISPLAYID = 0x6A
 _UNIT_FLAG_MOUNT = 0x08000000
-_TIER_SET_ITEMS: dict[tuple[str, int], tuple[int, ...]] = {
-    # Mage Tier 1 (Arcanist) – stable baseline set
-    ("mage", 1): (
-        16795,  # Head
-        16797,  # Shoulder
-        16798,  # Chest
-        16800,  # Hands
-        16796,  # Legs
-        16799,  # Bindings
-        16801,  # Gloves
-        16802,  # Belt
-    ),
+_TIER_SET_ITEMS: dict[str, dict[int, tuple[int, ...]]] = {
+    "mage": {
+        1: (
+            16795, 16797, 16798, 16800,
+            16796, 16799, 16801, 16802,
+        ),
+    },
 
-    # Shaman Tier 1 (Earthfury) – also stable
-    ("shaman", 1): (
-        16814,  # Head (Earthfury Helmet)
-        16817,  # Shoulder (Earthfury Epaulets)
-        16816,  # Chest (Earthfury Vestments)
-        16812,  # Hands (Earthfury Gauntlets)
-        16813,  # Legs (Earthfury Legguards)
-    ),
+    "rogue": {
+        1: (
+            16821, 16823, 16820, 16826,
+            16822, 16825, 16824, 16827,
+        ),
+    },
+
+    "druid": {
+        1: (
+            16834, 16836, 16833, 16831,
+            16835, 16830, 16829, 16828,
+        ),
+    },
+
+    "shaman": {
+        1: (
+            16842, 16844, 16841, 16839,
+            16843, 16840, 16837, 16838,
+        ),
+    },
+
+    "paladin": {
+        1: (
+            16854, 16856, 16853, 16860,
+            16855, 16857, 16859, 16858,
+        ),
+        2: (
+            16955, 16953, 16958, 16956,
+            16954, 16951, 16957, 16952,
+        ),
+    },
+
+    "warrior": {
+        1: (
+            16866, 16868, 16865, 16863,
+            16867, 16861, 16864, 16862,
+        ),
+    },
+
+    "priest": {
+        1: (
+            16813, 16816, 16815, 16812,
+            16814, 16819, 16811, 16817,
+        ),
+    },
+
+    "warlock": {
+        1: (
+            16808, 16807, 16809, 16805,
+            16810, 16804, 16806, 16803,
+        ),
+    },
+
+    "hunter": {
+        1: (
+            16846, 16848, 16845, 16852,
+            16847, 16850, 16849, 16851,
+        ),
+    },
+
+   "deathknight": {
+        0: (
+            38661, 38663, 38665, 38666,
+            38667, 38668, 38669, 38670,
+        ),
+        1: (
+            38661, 38663, 38665, 38666,
+            38667, 38668, 38669, 38670,
+        ),
+    },
 }
 _TEXT_EMOTE_TO_STAND_STATE = {
     59: _STAND_STATE_KNEEL,
@@ -356,38 +413,50 @@ def _handle_additem(session, entry: int, count: int) -> list[tuple[str, bytes]]:
 
 
 def handle_addtier_command(session, args: list[str]) -> list[tuple[str, bytes]]:
-    if len(args) != 2:
-        return _notification_response("Usage: .addtier <class> <tier>")
+    if len(args) < 1:
+        return _notification_response("Usage: .addtier <class> [tier]")
 
     class_name = str(args[0]).strip().lower()
+
+    class_data = _TIER_SET_ITEMS.get(class_name)
+    if not class_data:
+        return _notification_response(f"[AddTier] unknown class: {class_name}")
+
+    # If only class is provided → list available tiers
+    if len(args) == 1:
+        tiers = sorted(class_data.keys())
+        tiers_str = ", ".join(str(t) for t in tiers)
+        return _notification_response(f"[AddTier] {class_name} tiers: {tiers_str}")
+
+    # Parse tier
     try:
         tier = int(args[1], 0)
     except ValueError:
         return _notification_response("Usage: .addtier <class> <tier>")
 
-    item_entries = _TIER_SET_ITEMS.get((class_name, int(tier)))
+    item_entries = class_data.get(tier)
     if not item_entries:
-        return _notification_response(f"[AddTier] unsupported class/tier: {class_name} {tier}")
+        return _notification_response(f"[AddTier] unsupported tier: {class_name} {tier}")
 
     Logger.info(
         "[ADDTIER] class=%s tier=%s items=%s",
         class_name,
-        int(tier),
+        tier,
         len(item_entries),
     )
 
     responses: list[tuple[str, bytes]] = []
 
-    # Reuse additem logic for each item
+    # Add items
     for item_entry in item_entries:
         responses.extend(_handle_additem(session, int(item_entry), 1))
 
-    # Optional but recommended: force full resync for stability
+    # Inventory resync
     responses.extend(build_login_inventory_sync_responses(session))
 
     responses.extend(
         _notification_response(
-            f"[AddTier] {class_name} T{int(tier)} items={len(item_entries)}"
+            f"[AddTier] {class_name} T{tier} items={len(item_entries)}"
         )
     )
 
@@ -965,8 +1034,176 @@ def _append_xor_guid_bytes(
         if mask_bits.get(index):
             payload.append((raw_guid[index] ^ 1) & 0xFF)
 
+def build_smsg_who(players: list[dict]) -> list[tuple[str, bytes]]:
+    bits = BitWriter()
+    bytes_part = bytearray()
 
-def build_smsg_who(players: list[dict[str, int | str]]) -> list[tuple[str, bytes]]:
+    count = min(len(players or []), 49)
+
+    # ----------------------------------------
+    # BIT PART
+    # ----------------------------------------
+    bits.write_bits(count, 6)
+
+    rows = []
+
+    for p in players[:count]:
+        name = str(p.get("name", "") or "")
+        name_bytes = name.encode("utf-8")
+
+        guild_bytes = b""
+
+        player_guid = _who_guid_bytes(int(p.get("guid", 0)))
+        guild_guid = b"\x00" * 8
+        account_guid = b"\x00" * 8
+
+        # use LIST consistently
+        player_mask = [(player_guid[i] != 0) for i in range(8)]
+        guild_mask = [(guild_guid[i] != 0) for i in range(8)]
+        account_mask = [(account_guid[i] != 0) for i in range(8)]
+
+        # --- SKYFIRE BIT ORDER ---
+        bits.write_bits(account_mask[2], 1)
+        bits.write_bits(player_mask[2], 1)
+        bits.write_bits(account_mask[7], 1)
+        bits.write_bits(guild_mask[5], 1)
+        bits.write_bits(len(guild_bytes), 7)
+        bits.write_bits(account_mask[1], 1)
+        bits.write_bits(account_mask[5], 1)
+        bits.write_bits(guild_mask[7], 1)
+        bits.write_bits(player_mask[5], 1)
+        bits.write_bits(0, 1)
+        bits.write_bits(guild_mask[1], 1)
+        bits.write_bits(player_mask[6], 1)
+        bits.write_bits(guild_mask[2], 1)
+        bits.write_bits(player_mask[4], 1)
+        bits.write_bits(guild_mask[0], 1)
+        bits.write_bits(guild_mask[3], 1)
+        bits.write_bits(account_mask[6], 1)
+        bits.write_bits(0, 1)
+        bits.write_bits(player_mask[1], 1)
+        bits.write_bits(guild_mask[4], 1)
+        bits.write_bits(account_mask[0], 1)
+
+        # declined names (skip)
+        for _ in range(5):
+            bits.write_bits(0, 7)
+
+        bits.write_bits(player_mask[3], 1)
+        bits.write_bits(guild_mask[6], 1)
+        bits.write_bits(player_mask[0], 1)
+        bits.write_bits(account_mask[4], 1)
+        bits.write_bits(account_mask[3], 1)
+        bits.write_bits(player_mask[7], 1)
+        bits.write_bits(len(name_bytes), 6)
+
+        rows.append(
+            (
+                p,
+                name_bytes,
+                guild_bytes,
+                player_guid,
+                guild_guid,
+                account_guid,
+                player_mask,
+                guild_mask,
+                account_mask,
+            )
+        )
+
+    # ----------------------------------------
+    # FLUSH BITS
+    # ----------------------------------------
+    payload = bytearray(bits.getvalue())
+
+    # ----------------------------------------
+    # BYTE PART
+    # ----------------------------------------
+    def write_guid(buf, guid, mask, order):
+        for i in order:
+            if mask[i]:
+                buf.append((guid[i] ^ 1) & 0xFF)
+
+    for (
+        p,
+        name_bytes,
+        guild_bytes,
+        player_guid,
+        guild_guid,
+        account_guid,
+        player_mask,
+        guild_mask,
+        account_mask,
+    ) in rows:
+
+        # --- GUID + DATA ORDER (FIXED ALIGNMENT) ---
+        write_guid(bytes_part, player_guid, player_mask, (1,))
+
+        # realm for player
+        bytes_part.extend(struct.pack("<I", int(p.get("realm_id", 0))))
+
+        write_guid(bytes_part, player_guid, player_mask, (7,))
+
+        # guild realm (MISSING → CRITICAL)
+        bytes_part.extend(struct.pack("<I", int(p.get("realm_id", 0))))
+
+        write_guid(bytes_part, player_guid, player_mask, (4,))
+
+        # NOW name is aligned
+        bytes_part.extend(name_bytes)
+
+        write_guid(bytes_part, guild_guid, guild_mask, (1,))
+        write_guid(bytes_part, player_guid, player_mask, (0,))
+        write_guid(bytes_part, guild_guid, guild_mask, (2, 0, 4))
+        write_guid(bytes_part, player_guid, player_mask, (3,))
+        write_guid(bytes_part, guild_guid, guild_mask, (6,))
+
+        bytes_part.extend(struct.pack("<I", 0))  # account id
+
+        bytes_part.extend(guild_bytes)
+
+        write_guid(bytes_part, guild_guid, guild_mask, (3,))
+        write_guid(bytes_part, account_guid, account_mask, (4,))
+
+        write_guid(bytes_part, account_guid, account_mask, (7,))
+        write_guid(bytes_part, player_guid, player_mask, (6, 2))
+        write_guid(bytes_part, account_guid, account_mask, (2, 3))
+
+        write_guid(bytes_part, guild_guid, guild_mask, (7,))
+        write_guid(bytes_part, account_guid, account_mask, (1, 5, 6))
+        write_guid(bytes_part, player_guid, player_mask, (5,))
+        write_guid(bytes_part, account_guid, account_mask, (0,))
+
+        write_guid(bytes_part, guild_guid, guild_mask, (5,))
+
+        # ----------------------------------------
+        # ✅ CRITICAL: FINAL FIELDS (FIXED)
+        # ----------------------------------------
+        bytes_part.append(int(p.get("class_id", 0)) & 0xFF)
+        bytes_part.append(int(p.get("race", 0)) & 0xFF)
+        bytes_part.append(int(p.get("gender", 0)) & 0xFF)
+        bytes_part.append(int(p.get("level", 1)) & 0xFF)
+        bytes_part.extend(struct.pack("<i", int(p.get("zone_id", 0))))
+
+    payload.extend(bytes_part)
+
+    # ----------------------------------------
+    # DEBUG
+    # ----------------------------------------
+    Logger.info("[WHO] count=%s", count)
+    for p in players[:count]:
+        Logger.info(
+            "[WHO] player=%s lvl=%s class=%s race=%s zone=%s",
+            p.get("name"),
+            p.get("level"),
+            p.get("class_id"),
+            p.get("race"),
+            p.get("zone_id"),
+        )
+
+    return [("SMSG_WHO", bytes(payload))]
+
+def build_smsg_who_old(players: list[dict[str, int | str]]) -> list[tuple[str, bytes]]:
     count = len(players or [])
     bits = BitWriter()
     bits.write_bits(int(count) & 0x3F, 6)
@@ -1334,6 +1571,12 @@ def _handle_chat_message(session, ctx: PacketContext):
     player_name = session.player_name
     sender_guid = _sender_chat_guid(session)
     language = int(chat.get("language") or 0)
+
+    mask = int(getattr(session, "known_languages_mask", 0) or 0)
+
+    if not (mask & (1 << language)):
+        # fallback to session default
+        language = int(getattr(session, "language", 0) or 0)
 
     Logger.debug(f"[CHAT] opcode={ctx.name}")
     Logger.info(f"[CHAT] {player_name}: {message}")

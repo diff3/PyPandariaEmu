@@ -18,6 +18,9 @@ from server.modules.handlers.world.state.global_state import global_state
 from server.modules.handlers.world.state.runtime import broadcast_player_remove
 
 
+
+
+
 def get_auth_challenge() -> Optional[tuple[str, bytes]]:
     fields = {
         "uint16_0": 0,
@@ -86,17 +89,68 @@ def handle_disconnect_session(target_session) -> None:
         return
 
     target_session._disconnect_handled = True
-    broadcast_player_remove(target_session)
-    save_current_position_like_command(target_session, reason="disconnect", online=0, force=True)
+
+    guid = int(getattr(target_session, "char_guid", 0) or 0)
+    state = getattr(target_session, "global_state", None)
+
+    Logger.info(f"[DISCONNECT] guid={guid} start")
+
+    # --- Remove from world (broadcast) ---
+    try:
+        broadcast_player_remove(target_session)
+    except Exception as exc:
+        Logger.warning(f"[DISCONNECT] broadcast_player_remove failed: {exc}")
+
+    # --- Persist position ---
+    try:
+        save_current_position_like_command(
+            target_session,
+            reason="disconnect",
+            online=0,
+            force=True,
+        )
+    except Exception as exc:
+        Logger.warning(f"[DISCONNECT] position save failed: {exc}")
+
+    # --- Remove from region ---
     region = getattr(target_session, "region", None)
     if region is not None:
-        region.players.discard(target_session)
-    state = getattr(target_session, "global_state", None)
+        try:
+            region.players.discard(target_session)
+        except Exception as exc:
+            Logger.warning(f"[DISCONNECT] region cleanup failed: {exc}")
+
+    # --- Remove from global state ---
     if state is not None:
-        state.chat_channels.setdefault("world", set()).discard(target_session)
-        getattr(state, "sessions", set()).discard(target_session)
+        try:
+            # chat channels
+            if hasattr(state, "chat_channels"):
+                state.chat_channels.setdefault("world", set()).discard(target_session)
+
+            # sessions (IMPORTANT FIX)
+            sessions = getattr(state, "sessions", None)
+            if sessions is not None:
+                before = len(sessions)
+                sessions.discard(target_session)
+                after = len(sessions)
+
+                Logger.info(
+                    f"[DISCONNECT] sessions {before} -> {after} (removed={guid})"
+                )
+
+        except Exception as exc:
+            Logger.warning(f"[DISCONNECT] global_state cleanup failed: {exc}")
+
+    # --- Clear references ---
     target_session.region = None
     target_session.send_response = None
     target_session.visible_guids.clear()
     target_session.near_teleport_pending = False
-    login_handlers._reset_login_flow_state(target_session)
+
+    # --- Reset login state ---
+    try:
+        login_handlers._reset_login_flow_state(target_session)
+    except Exception as exc:
+        Logger.warning(f"[DISCONNECT] login reset failed: {exc}")
+
+    Logger.info(f"[DISCONNECT] guid={guid} done")

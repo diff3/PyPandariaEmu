@@ -37,6 +37,8 @@ from server.modules.handlers.world.opcodes import misc as misc_handlers
 from server.modules.handlers.world.opcodes import movement as movement_handlers
 from server.modules.handlers.world.opcodes import spells as spells_handlers
 
+from shared.Logger import Logger
+
 BASE_DIR = Path(__file__).resolve().parents[3]
 
 
@@ -50,6 +52,8 @@ opcode_handlers = {
     for opcode in HANDLERS.keys()
 }
 
+def handle_CMSG_AREATRIGGER(ctx: PacketContext):
+    return movement_handlers.handle_areatrigger(ctx.session or session, ctx)
 
 def handle_CMSG_PING(ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     return misc_handlers.handle_ping(ctx.session or session, ctx)

@@ -21,6 +21,7 @@ from server.modules.handlers.world.mount.mount_service import (
     is_mount_spell,
 )
 
+from server.modules.game import player
 
 _ALLIANCE_RACES = {1, 3, 4, 7, 11, 22, 25}
 _HORDE_RACES = {2, 5, 6, 8, 9, 10, 26}
@@ -101,6 +102,15 @@ def ensure_language_spells_known(session) -> None:
     spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
     race = int(getattr(session, "race", 0) or 0)
     granted_spells = list(granted_language_spells_for_race(race))
+    known_spells = list(getattr(session, "known_spells", []) or [])
+    spell_set = set(int(s) for s in known_spells)
+
+    for spell in granted_spells:
+        if spell not in spell_set:
+            known_spells.append(spell)
+            spell_set.add(spell)
+
+    session.known_spells = known_spells
     extra_language_spells = sorted(
         int(spell_id)
         for spell_id in (getattr(session, "extra_language_spells", set()) or set())
@@ -133,83 +143,114 @@ def ensure_spell_known(session, spell_id: int) -> bool:
     if spell_id <= 0:
         return False
 
-    known_spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
-    changed = False
-    if spell_id not in known_spells:
-        known_spells.append(spell_id)
-        session.known_spells = known_spells
-        changed = True
+    known_spells = list(getattr(session, "known_spells", []) or [])
+    spell_set = set(int(s) for s in known_spells)
 
+    if spell_id in spell_set:
+        return False
+
+    # --- ADD SPELL ---
+    known_spells.append(spell_id)
+    spell_set.add(spell_id)
+    session.known_spells = known_spells
+
+    # --- TRACK LANGUAGE SPELLS (optional bookkeeping) ---
     if spell_id in _ALL_LANGUAGE_SPELL_IDS:
-        extra_language_spells = {
-            int(value)
-            for value in (getattr(session, "extra_language_spells", set()) or set())
-            if int(value) > 0
-        }
-        if spell_id not in extra_language_spells:
-            extra_language_spells.add(spell_id)
-            session.extra_language_spells = extra_language_spells
-            changed = True
-        session.language = int(_LANGUAGE_ID_BY_SPELL_ID.get(spell_id, getattr(session, "language", 0) or 0))
-        session.known_languages_mask = _KNOWN_LANGUAGES_ALL
-        ensure_language_spells_known(session)
+        extra = set(int(v) for v in getattr(session, "extra_language_spells", set()) or set())
+        extra.add(spell_id)
+        session.extra_language_spells = extra
 
-    return changed
+    # --- REBUILD LANGUAGE STATE FROM SPELLS ---
+    mask = 0
+    detected_lang = None
+
+    for s in spell_set:
+        lang = _LANGUAGE_ID_BY_SPELL_ID.get(int(s))
+        if lang is not None:
+            mask |= (1 << lang)
+            if detected_lang is None:
+                detected_lang = lang  # pick first available
+
+    session.known_languages_mask = mask
+
+    if detected_lang is not None:
+        session.language = detected_lang
+
+    return True
 
 
 def granted_language_spells_for_race(race: int) -> list[int]:
-    granted: list[int] = []
     race = int(race or 0)
+
+    # --- BASE ---
     if race in _ALLIANCE_RACES:
-        return [669]
-    base_spell = int(_BASE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
-    if base_spell == 0:
-        if race in _HORDE_RACES:
-            base_spell = 669
+        base_spell = 668
+    elif race in _HORDE_RACES:
+        base_spell = 669
+    else:
+        base_spell = int(_BASE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
+
+    granted = []
+
     if base_spell > 0:
         granted.append(base_spell)
+
+    # --- RACIAL ---
     race_spell = int(_RACE_LANGUAGE_SPELL_BY_RACE.get(race, 0) or 0)
+
     if race_spell > 0 and race_spell not in granted:
         granted.append(race_spell)
-    return granted
 
+    return granted
 
 def initialize_session_language_state(session) -> None:
     race = int(getattr(session, "race", 0) or 0)
+
     player_name = (
         str(getattr(session, "player_name", "") or "").strip()
         or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
     )
-    if race in _ALLIANCE_RACES:
-        team = "alliance"
-        session.language = _LANG_ORCISH
-    elif race in _HORDE_RACES:
-        team = "horde"
-        session.language = _LANG_ORCISH
-    else:
-        team = "neutral"
-        session.language = int(getattr(session, "language", 0) or 0)
 
+    # --- ENSURE CORRECT LANGUAGE SPELLS ---
     granted_spells = granted_language_spells_for_race(race)
-    if granted_spells:
-        session.known_languages_mask = _KNOWN_LANGUAGES_ALL
 
+    known_spells = list(getattr(session, "known_spells", []) or [])
+    spell_set = set(int(s) for s in known_spells)
+
+    # add correct ones
+    for spell in granted_spells:
+        spell_set.add(int(spell))
+
+    session.known_spells = list(spell_set)
+
+    # --- BUILD LANGUAGE STATE FROM SPELLS ---
+    mask = 0
+    detected_lang = None
+
+    for s in spell_set:
+        lang = _LANGUAGE_ID_BY_SPELL_ID.get(int(s))
+        if lang is not None:
+            mask |= (1 << lang)
+            if detected_lang is None:
+                detected_lang = lang
+
+    session.known_languages_mask = mask
+    if race in _ALLIANCE_RACES:
+        session.language = _LANG_COMMON
+    elif race in _HORDE_RACES:
+        session.language = _LANG_ORCISH
+    elif detected_lang is not None:
+        session.language = detected_lang
+
+    # --- DEBUG ---
     Logger.info(
-        "[LANG_INIT] player=%s race=%s team=%s session.language=%s",
+        "[LANG_INIT] player=%s race=%s lang=%s mask=0x%X spells=%s",
         player_name,
         race,
-        team,
-        int(getattr(session, "language", 0) or 0),
+        session.language,
+        session.known_languages_mask,
+        sorted(spell_set),
     )
-    Logger.info(
-        "[LANG_INIT] granted_language_spells=%s",
-        granted_spells,
-    )
-    Logger.info(
-        "[LANG_INIT] known_languages_field=0x%08X",
-        int(getattr(session, "known_languages_mask", 0) or 0),
-    )
-
 
 def granted_companion_pet_spells() -> list[int]:
     return sorted(int(spell_id) for spell_id in _SANDBOX_COMPANION_PET_SPELL_IDS if int(spell_id) > 0)
@@ -257,9 +298,11 @@ def initialize_session_spells(session, char_guid: int) -> None:
     ensure_language_spells_known(session)
     ensure_companion_pet_spells_known(session)
     ensure_mount_spells_known(session)
+    initialize_session_language_state(session)
     persisted_spells = set(granted_language_spells_for_race(int(getattr(session, "race", 0) or 0)))
     persisted_spells.update(granted_battle_pet_support_spells())
     persisted_spells.update(granted_companion_pet_spells())
+
     if int(char_guid) > 0 and persisted_spells:
         inserted = DatabaseConnection.ensure_character_spells(int(char_guid), persisted_spells)
         if inserted:
@@ -506,25 +549,30 @@ def build_player_unit_field_update(
 def _build_run_speed_update_response(player) -> tuple[str, bytes]:
     return ("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(player))
 
+def _resolve_unit_field_value(session, field):
+    if field == _UNIT_FIELD_FLAGS:
+        return int(getattr(session, "unit_flags", 0))
 
+    if field == _UNIT_FIELD_MOUNTDISPLAYID:
+        return int(getattr(session, "mount_display_id", 0))
+
+    # fallback
+    return 0
 def build_mount_visual_responses(session, display_id: int) -> list[tuple[str, bytes]]:
     old_flags = _current_unit_flags(session)
     old_display_id = _current_mount_display_id(session)
+
     unit_flags = int(old_flags)
+
     if int(display_id) > 0:
         unit_flags |= _UNIT_FLAG_MOUNT
-        Logger.info("[MOUNT_FLAGS] mount_bit_set=%s", int(bool(unit_flags & _UNIT_FLAG_MOUNT)))
     else:
         unit_flags &= ~_UNIT_FLAG_MOUNT
-        Logger.info("[MOUNT_FLAGS] mount_bit_cleared=%s", int(bool(unit_flags & _UNIT_FLAG_MOUNT)))
 
+    # --- STORE STATE ---
     session.unit_flags = int(unit_flags)
     session.mount_display_id = int(display_id)
-    Logger.info(
-        "[MOUNT_FLAGS] old=0x%08X new=0x%08X",
-        int(old_flags) & 0xFFFFFFFF,
-        int(unit_flags) & 0xFFFFFFFF,
-    )
+
     Logger.info(
         "[MOUNT_FIX] guid=0x%016X display_old=%s display_new=%s flags=0x%08X",
         int(_player_object_guid(session)) & 0xFFFFFFFFFFFFFFFF,
@@ -532,12 +580,102 @@ def build_mount_visual_responses(session, display_id: int) -> list[tuple[str, by
         int(display_id),
         int(unit_flags) & 0xFFFFFFFF,
     )
-    return build_player_unit_field_update(
+
+    # --- FORCE VALUE INJECTION (critical fix) ---
+    # Some builders don't read mount_display_id automatically
+    setattr(session, "unit_field_mountdisplayid", int(display_id))
+    setattr(session, "unit_field_flags", int(unit_flags))
+
+    # --- DEBUG ---
+    Logger.error(
+        "[MOUNT DEBUG] injecting mount_display_id=%s flags=0x%08X",
+        int(display_id),
+        int(unit_flags),
+    )
+
+    # --- BUILD UPDATE ---
+    responses = build_player_unit_field_update(
         session,
         [_UNIT_FIELD_FLAGS, _UNIT_FIELD_MOUNTDISPLAYID],
         source_label="runtime_session_player_state",
     )
 
+    # --- SAFETY CHECK ---
+    if not responses:
+        Logger.error("[MOUNT ERROR] no UPDATE_OBJECT generated")
+
+    return responses
+
+_UNIT_FIELD_FLAGS = 96
+_UNIT_FIELD_MOUNTDISPLAYID = 106
+_UNIT_FIELD_BYTES_2 = 110  # ⚠️ justera om needed
+
+def build_raw_update_object(player, fields):
+    payload = bytearray()
+
+    # map_id
+    payload += int(getattr(player, "map_id", 1)).to_bytes(2, "little")
+
+    # update_count (LITTLE)
+    payload += (1).to_bytes(4, "little")
+
+    # update_type
+    payload.append(0)
+
+    # GUID packed
+    guid = int(player.char_guid)
+    guid_mask = 0
+    guid_bytes = []
+
+    for i in range(8):
+        b = (guid >> (i * 8)) & 0xFF
+        if b:
+            guid_mask |= (1 << i)
+            guid_bytes.append(b)
+
+    payload.append(guid_mask)
+    payload += bytes(guid_bytes)
+
+    # mask
+    max_field = max(f[0] for f in fields)
+    mask_blocks = (max_field // 32) + 1
+
+    payload.append(mask_blocks)
+
+    mask = [0] * mask_blocks
+    for field, _ in fields:
+        block = field // 32
+        bit = field % 32
+        mask[block] |= (1 << bit)
+
+    for m in mask:
+        payload += m.to_bytes(4, "little")
+
+    # values
+    for _, value in fields:
+        payload += int(value).to_bytes(4, "little")
+
+    return ("SMSG_UPDATE_OBJECT", bytes(payload))
+
+
+def build_mount_aura_update(player, spell_id: int):
+    player.is_mounted = True
+
+    display_id = get_mount_display_id(spell_id)
+    player.mount_display_id = display_id
+
+    player.unit_flags |= _UNIT_FLAG_MOUNT
+    player.player_bytes2 = 0x00000008
+
+    # --- RAW UPDATE_OBJECT ---
+    fields = [
+        (96, player.unit_flags),
+        (106, player.mount_display_id),
+        (110, 8),
+    ]
+
+    Logger.into(f"[FIELDS BEFORE BUILD] {fields}")
+    return [build_raw_update_object(player, fields)]
 
 def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
     responses: list[tuple[str, bytes]] = []
@@ -546,6 +684,7 @@ def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
         responses.extend(build_mount_visual_responses(player, display_id))
     responses.append(_build_run_speed_update_response(player))
     responses.extend(_notification_response(f"Mounted spell={int(spell_id)} speed={float(player.run_speed):.2f}"))
+    responses.append(build_mount_aura_update(player, spell_id))
     return responses
 
 
@@ -583,14 +722,50 @@ def mount_direct(player, display_id: int, run_speed: float | None = None) -> lis
     Logger.info("[Mount][Debug] mount_direct total_responses=%s", len(responses))
     return responses
 
+# from server.modules.handlers.world.login.context import WorldLoginContext
+# from server.modules.handlers.world.login.packets import build_login_packet
+from server.modules.handlers.world.login.packets import build_login_packet
+from server.modules.handlers.world.login.context import WorldLoginContext
 
-def handle_mount(player, spell_id: int) -> list[tuple[str, bytes]]:
+def handle_mount(player, spell_id: int):
+    player.is_mounted = True
+    player.mount_spell = spell_id
+
+    display_id = get_mount_display_id(spell_id)
+    player.mount_display_id = display_id
+    player.unit_flags |= _UNIT_FLAG_MOUNT
+
+    responses = []
+
+    # 🔥 1. SPELL_GO (reuse sniffed structure!)
+    responses.append(build_spell_go(player, spell_id))
+
+    # 🔥 2. UPDATE_OBJECT
+    responses.append(build_raw_update_object(player, [
+        (96, player.unit_flags),
+        (106, display_id),
+    ]))
+
+    # 🔥 3. speed
+    responses.append(_build_run_speed_update_response(player))
+
+    return responses
+
+def handle_mount_old(player, spell_id: int) -> list[tuple[str, bytes]]:
     player.is_mounted = True
     player.mount_spell = int(spell_id)
-    _apply_mount_movement_speeds(player)
-    Logger.debug("[SPELL] cast spell_id=%s", int(spell_id))
-    return send_mount_update(player, int(spell_id))
 
+    # TEMP: hardcoded mount display (from your logs)
+    player.mount_display_id = 31007
+
+    _apply_mount_movement_speeds(player)
+
+    ctx = WorldLoginContext.from_session(player)
+    ctx.mount_display_id = player.mount_display_id
+
+    payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
+
+    return [("SMSG_UPDATE_OBJECT", payload)]
 
 def dismount(player) -> list[tuple[str, bytes]]:
     player.is_mounted = False

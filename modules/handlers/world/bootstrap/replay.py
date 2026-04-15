@@ -379,6 +379,22 @@ def send_raw_packet(
         return make_update_object_response(payload, update_index=update_index)
     return opcode_name, payload
 
+def _patch_language(payload: bytes, session) -> bytes:
+    # Alliance vs Horde
+    if session.race in (1, 3, 4, 7, 11):  # alliance
+        target = (1 << 7)  # Common
+    else:
+        target = (1 << 1)  # Orcish
+
+    target_bytes = target.to_bytes(4, "little")
+
+    # known bad (orcish)
+    orcish_bytes = (1 << 1).to_bytes(4, "little")
+
+    Logger.info(f"[LANG PATCH] race={session.race}")
+
+    # replace fallback
+    return payload.replace(orcish_bytes, target_bytes)
 
 def send_raw_sniff_packet(
     _session,
@@ -390,7 +406,9 @@ def send_raw_sniff_packet(
     path = Path(filepath)
     payload = load_sniff_payload(path)
     Logger.info(f"[RAW REPLAY] {opcode_name} payload={len(payload)} bytes source={path.name}")
+    payload = _patch_language(payload, _session)
     if opcode_name == "SMSG_UPDATE_OBJECT":
+     
         return make_update_object_response(payload, update_index=update_index)
     return opcode_name, payload
 
