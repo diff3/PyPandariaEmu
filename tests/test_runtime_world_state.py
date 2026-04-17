@@ -75,6 +75,51 @@ def test_manual_weather_persists_per_map_for_new_sessions_until_restart(monkeypa
     assert region_manager.get_region(1).weather_manual is True
 
 
+def test_refresh_region_weather_uses_snow_in_snow_zone(monkeypatch):
+    _stub_login_modules()
+
+    test_state = GlobalState()
+    test_state.weather_seed = 12345
+    monkeypatch.setattr(runtime, "global_state", test_state)
+    monkeypatch.setattr(runtime.ConfigLoader, "load_config", staticmethod(lambda: {"worldserver": {"weather_cycle_seconds": 600}}))
+    monkeypatch.setattr(runtime.time, "time", lambda: 0.0)
+    region_manager.regions.clear()
+
+    session = _make_session(name="Alice", guid=1, map_id=0, state=test_state)
+    session.zone = 1
+    runtime.attach_session_to_world_state(session, map_id=0)
+
+    changed = runtime.refresh_region_weather(session)
+
+    assert changed is False
+    assert session.weather == {"weather_type": 8, "density": 0.75, "abrupt": 0}
+
+
+def test_refresh_region_weather_is_per_session_zone_not_per_map(monkeypatch):
+    _stub_login_modules()
+
+    test_state = GlobalState()
+    test_state.weather_seed = 12345
+    monkeypatch.setattr(runtime, "global_state", test_state)
+    monkeypatch.setattr(runtime.ConfigLoader, "load_config", staticmethod(lambda: {"worldserver": {"weather_cycle_seconds": 600}}))
+    monkeypatch.setattr(runtime.time, "time", lambda: 0.0)
+    region_manager.regions.clear()
+
+    snow_session = _make_session(name="Snow", guid=1, map_id=0, state=test_state)
+    snow_session.zone = 1
+    runtime.attach_session_to_world_state(snow_session, map_id=0)
+
+    rain_session = _make_session(name="Rain", guid=2, map_id=0, state=test_state)
+    rain_session.zone = 1637
+    runtime.attach_session_to_world_state(rain_session, map_id=0)
+
+    runtime.refresh_region_weather(snow_session)
+    runtime.refresh_region_weather(rain_session)
+
+    assert snow_session.weather == {"weather_type": 8, "density": 0.75, "abrupt": 0}
+    assert rain_session.weather == {"weather_type": 5, "density": 0.75, "abrupt": 0}
+
+
 def test_visible_peer_gets_value_updates_instead_of_remove_create(monkeypatch):
     _stub_login_modules()
 

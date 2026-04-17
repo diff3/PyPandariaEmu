@@ -326,6 +326,7 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     session.account_data_captures_sent = False
     session.skyfire_login_stage = 0
     session.teleport_pending = False
+    session.worldport_ack_pending = False
     session.teleport_destination = None
     session.near_teleport_pending = False
     session.inventory_activated = False
@@ -458,6 +459,7 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     session.loading_screen_done = True
     session.post_loading_sent = True
     session.teleport_pending = False
+    session.worldport_ack_pending = False
     session.teleport_destination = None
     return responses
 

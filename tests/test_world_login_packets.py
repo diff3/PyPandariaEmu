@@ -99,7 +99,7 @@ def test_pre_update_object_packets_include_action_buttons_again():
     assert "SMSG_UPDATE_ACTION_BUTTONS" in login_flow.PRE_UPDATE_OBJECT_PACKETS
 
 
-def test_known_spells_packet_includes_orcish_for_alliance_race():
+def test_known_spells_packet_includes_common_for_alliance_race():
     ctx = SimpleNamespace(
         known_spells=[133, 116],
         race=1,
@@ -115,8 +115,8 @@ def test_known_spells_packet_includes_orcish_for_alliance_race():
         struct.unpack_from("<I", payload, byte_pos + (index * 4))[0]
         for index in range(int(spell_count))
     ]
-    assert 669 in spells
-    assert 668 not in spells
+    assert 668 in spells
+    assert 669 not in spells
 
 
 def test_known_spells_packet_does_not_force_common_for_horde_race():
@@ -137,6 +137,44 @@ def test_known_spells_packet_does_not_force_common_for_horde_race():
     ]
     assert 669 in spells
     assert 668 not in spells
+
+
+def test_known_spells_packet_uses_journal_test_mount_subset():
+    ctx = SimpleNamespace(
+        known_spells=[133, 116],
+        race=2,
+    )
+
+    payload = login_packets.build_SMSG_SEND_KNOWN_SPELLS(ctx)
+    _, byte_pos, bit_pos = BitInterPreter.read_bits(payload, 0, 0, 1)
+    spell_count, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 22)
+    if bit_pos != 0:
+        byte_pos += 1
+
+    spells = [
+        struct.unpack_from("<I", payload, byte_pos + (index * 4))[0]
+        for index in range(int(spell_count))
+    ]
+
+    assert 458 in spells
+    assert 470 in spells
+    assert 580 in spells
+    assert 6648 in spells
+    assert 68978 in spells
+    assert 68992 in spells
+    assert 32235 in spells
+    assert 34769 in spells
+    assert 61425 in spells
+    assert 72286 in spells
+    assert 89832 in spells
+    assert 33388 in spells
+    assert 33391 in spells
+    assert 34090 in spells
+    assert 34091 in spells
+    assert 54197 in spells
+    assert 115913 in spells
+    assert 87840 not in spells
+    assert 134735 not in spells
 
 
 def test_update_object_0006_matches_pandaria548_value_update_shape():

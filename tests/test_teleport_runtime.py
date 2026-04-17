@@ -11,6 +11,7 @@ class _FakePlayer:
         self.z = 3.0
         self.orientation = 4.0
         self.teleport_pending = False
+        self.worldport_ack_pending = False
         self.teleport_destination = None
 
 
@@ -56,6 +57,7 @@ def test_same_map_teleport_uses_near_flow(monkeypatch):
     assert [opcode for opcode, _ in responses] == ["SMSG_MESSAGECHAT", "SMSG_MOVE_TELEPORT"]
     assert calls == []
     assert player.teleport_pending is False
+    assert player.worldport_ack_pending is False
     assert getattr(player, "near_teleport_pending", False) is True
     assert player.teleport_destination == "Orgrimmar"
     assert player.map_id == 1
@@ -99,3 +101,4 @@ def test_cross_map_teleport_still_uses_transfer_flow(monkeypatch):
 
     assert [opcode for opcode, _ in responses] == ["SMSG_MESSAGECHAT", "SMSG_TRANSFER_PENDING", "SMSG_NEW_WORLD"]
     assert player.teleport_pending is True
+    assert player.worldport_ack_pending is True

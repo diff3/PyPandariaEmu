@@ -1,8 +1,10 @@
 import importlib
 import struct
 import sys
+import time
 import types
 from types import SimpleNamespace
+from pathlib import Path
 
 from DSL.modules.bitsHandler import BitInterPreter, BitWriter
 from server.modules.handlers.world.state.global_state import GlobalState
@@ -17,6 +19,7 @@ def _import_chat_handlers():
             "build_single_u32_update_object_payload": lambda **fields: b"",
             "send_raw_packet": lambda *args, **kwargs: ("SMSG_MESSAGECHAT", b""),
             "_build_gameobject_update_payload": lambda **kwargs: b"go-payload",
+            "build_database_creature_responses": lambda session, loaded_guids=None: [],
             "make_update_object_response": lambda payload, **kwargs: ("SMSG_UPDATE_OBJECT", payload),
         },
         "server.modules.database.DatabaseConnection": {
@@ -63,6 +66,9 @@ def _import_chat_handlers():
             ),
             "handle_mount": lambda session, spell_id: [],
             "dismount": lambda session: [],
+            "apply_fly_aura": lambda session: [("SMSG_AURA_UPDATE", b"fly-aura-on-1"), ("SMSG_AURA_UPDATE", b"fly-aura-on-2")],
+            "remove_fly_aura": lambda session: [("SMSG_AURA_UPDATE", b"fly-aura-off-1"), ("SMSG_AURA_UPDATE", b"fly-aura-off-2")],
+            "build_fly_state_responses": lambda session: [("SMSG_UPDATE_OBJECT", b"fly-state")],
             "is_mount_spell": lambda spell_id: int(spell_id) in {59535, 72286},
             "ensure_spell_known": lambda session, spell_id: (
                 setattr(
@@ -91,6 +97,7 @@ def _import_chat_handlers():
                 lambda session, opcode_name, value: f"{opcode_name}|{float(value):.2f}".encode()
             ),
             "build_move_set_run_speed_payload": lambda session: b"speed-packet",
+            "_build_out_of_range_update_object_payload": lambda *, map_id, guid: b"",
             "resync_movement": lambda session: [("SMSG_PLAYER_MOVE", b"move-resync")],
             "_save_current_position_like_command": lambda *args, **kwargs: True,
         },
@@ -146,6 +153,35 @@ chat_handlers = _import_chat_handlers()
 chat_codec = _import_chat_codec()
 
 
+def _install_worldserver_stub(monkeypatch, *, running=True, started_at=0.0, active_clients=None):
+    class _Lock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    module = types.ModuleType("server.worldserver")
+    module.running = bool(running)
+    module.STARTED_AT = float(started_at)
+    module._ACTIVE_CLIENTS_LOCK = _Lock()
+    module._ACTIVE_CLIENTS = dict(active_clients or {})
+    module._shutdown_calls = []
+    module._restart_calls = []
+
+    def _shutdown_active_clients():
+        module._shutdown_calls.append("shutdown")
+
+    def request_restart():
+        module._restart_calls.append("restart")
+        module.running = False
+
+    module._shutdown_active_clients = _shutdown_active_clients
+    module.request_restart = request_restart
+    monkeypatch.setitem(sys.modules, "server.worldserver", module)
+    return module
+
+
 def _make_session(state: GlobalState, name: str, guid: int):
     session = WorldSession()
     session.global_state = state
@@ -164,7 +200,7 @@ def _install_movement_stub(monkeypatch, **overrides):
     module.build_move_set_speed_payload = (
         lambda session, opcode_name, value: f"{opcode_name}|{float(value):.2f}".encode()
     )
-    module.build_move_set_run_speed_payload = lambda session: b"speed-packet"
+    module.build_move_set_run_speed_payload = lambda session: b"run-speed-packet"
     module.build_move_set_flight_speed_payload = lambda session: b"flight-speed-packet"
     module.build_move_set_can_fly_payload = (
         lambda session, enabled: f"can-fly|{int(bool(enabled))}".encode()
@@ -863,7 +899,7 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
     ]
 
 
-def test_fly_on_sends_enable_packet_flight_speed_and_move(monkeypatch):
+def test_fly_on_sends_aura_state_speed_and_move(monkeypatch):
     _install_movement_stub(monkeypatch)
     monkeypatch.setattr(
         chat_handlers.chat_commands,
@@ -879,6 +915,7 @@ def test_fly_on_sends_enable_packet_flight_speed_and_move(monkeypatch):
     assert alice.can_fly is True
     assert alice.is_flying is True
     assert responses == [
+        ("SMSG_MOVE_SET_RUN_SPEED", b"run-speed-packet"),
         ("SMSG_MOVE_SET_CAN_FLY", b"can-fly|1"),
         ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight-speed-packet"),
         ("SMSG_PLAYER_MOVE", b"move-resync"),
@@ -886,7 +923,7 @@ def test_fly_on_sends_enable_packet_flight_speed_and_move(monkeypatch):
     ]
 
 
-def test_fly_off_sends_disable_packet_and_move(monkeypatch):
+def test_fly_off_sends_aura_remove_state_speed_and_move(monkeypatch):
     _install_movement_stub(monkeypatch)
     monkeypatch.setattr(
         chat_handlers.chat_commands,
@@ -904,7 +941,9 @@ def test_fly_off_sends_disable_packet_and_move(monkeypatch):
     assert alice.can_fly is False
     assert alice.is_flying is False
     assert responses == [
+        ("SMSG_MOVE_SET_RUN_SPEED", b"run-speed-packet"),
         ("SMSG_MOVE_UNSET_CAN_FLY", b"can-fly|0"),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight-speed-packet"),
         ("SMSG_PLAYER_MOVE", b"move-resync"),
         ("SMSG_MESSAGECHAT", b"system|[Fly] off"),
     ]
@@ -1810,6 +1849,187 @@ def test_spawngo_loads_nearby_gameobjects_and_tracks_loaded_guids(monkeypatch):
     assert responses == [("SMSG_MESSAGECHAT", b"system|[SpawnGO] loaded 0 gameobjects")]
 
 
+def test_world_go_status_reports_visibility_and_cache(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.ConfigLoader,
+        "load_config",
+        staticmethod(lambda: {"worldserver": {"preload_gameobjects": True}}),
+    )
+    monkeypatch.setattr(chat_handlers.DatabaseConnection, "_cache_gameobjects_loaded", True, raising=False)
+    monkeypatch.setattr(chat_handlers.DatabaseConnection, "_cache_gameobjects_by_map", {1: [{}, {}], 0: [{}]}, raising=False)
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.gameobjects_visible = True
+    alice.loaded_gameobjects = {11, 12}
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["go", "status"])
+
+    assert responses == [
+        (
+            "SMSG_MESSAGECHAT",
+            b"system|[WorldGO] visible=1 loaded_now=2 cache_loaded=1 preload=1 cached_total=3 maps=2",
+        )
+    ]
+
+
+def test_world_go_hide_clears_loaded_gameobjects(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+
+    movement_module = sys.modules["server.modules.handlers.world.opcodes.movement"]
+    monkeypatch.setattr(
+        movement_module,
+        "_build_out_of_range_update_object_payload",
+        lambda *, map_id, guid: f"oor|map={map_id}|guid={guid}".encode(),
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.gameobjects_visible = True
+    alice.loaded_gameobjects = {21, 22}
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["go", "hide"])
+
+    assert alice.gameobjects_visible is False
+    assert alice.loaded_gameobjects == set()
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"oor|map=1|guid=21"),
+        ("SMSG_UPDATE_OBJECT", b"oor|map=1|guid=22"),
+        ("SMSG_MESSAGECHAT", b"system|[WorldGO] hidden"),
+    ]
+
+
+def test_world_go_show_spawns_nearby_gameobjects(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+
+    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    monkeypatch.setattr(
+        replay_module,
+        "build_database_gameobject_responses",
+        lambda session, loaded_guids=None: [("SMSG_UPDATE_OBJECT", b"go-1"), ("SMSG_UPDATE_OBJECT", b"go-2")],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.gameobjects_visible = False
+    alice.last_gameobject_stream_at = 123.0
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["go", "show"])
+
+    assert alice.gameobjects_visible is True
+    assert alice.last_gameobject_stream_at == 0.0
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"go-1"),
+        ("SMSG_UPDATE_OBJECT", b"go-2"),
+        ("SMSG_MESSAGECHAT", b"system|[WorldGO] shown 2 updates"),
+    ]
+
+
+def test_world_npc_status_reports_visibility_and_cache(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.ConfigLoader,
+        "load_config",
+        staticmethod(lambda: {"worldserver": {"preload_npcs": False}}),
+    )
+    monkeypatch.setattr(chat_handlers.DatabaseConnection, "_cache_creatures_loaded", False, raising=False)
+    monkeypatch.setattr(chat_handlers.DatabaseConnection, "_cache_creatures_by_map", {}, raising=False)
+    monkeypatch.setattr(chat_handlers.DatabaseConnection, "_cache_creature_templates", {}, raising=False)
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.npcs_visible = False
+    alice.loaded_npcs = set()
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["npc", "status"])
+
+    assert responses == [
+        (
+            "SMSG_MESSAGECHAT",
+            b"system|[WorldNPC] visible=0 loaded_now=0 cache_loaded=0 preload=0 cached_total=0 templates=0 maps=0",
+        )
+    ]
+
+
+def test_world_npc_show_enables_visibility(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    monkeypatch.setattr(
+        replay_module,
+        "build_database_creature_responses",
+        lambda session, loaded_guids=None: [("SMSG_UPDATE_OBJECT", b"npc-1"), ("SMSG_UPDATE_OBJECT", b"npc-2")],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.npcs_visible = False
+    alice.last_npc_stream_at = 55.0
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["npc", "show"])
+
+    assert alice.npcs_visible is True
+    assert alice.last_npc_stream_at == 0.0
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"npc-1"),
+        ("SMSG_UPDATE_OBJECT", b"npc-2"),
+        ("SMSG_MESSAGECHAT", b"system|[WorldNPC] shown 2 updates"),
+    ]
+
+
+def test_world_npc_hide_disables_visibility_and_clears_loaded(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    movement_module = sys.modules["server.modules.handlers.world.opcodes.movement"]
+    monkeypatch.setattr(
+        movement_module,
+        "_build_out_of_range_update_object_payload",
+        lambda *, map_id, guid: f"oor|map={map_id}|guid={guid}".encode(),
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.npcs_visible = True
+    alice.loaded_npcs = {101, 102}
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["npc", "hide"])
+
+    assert alice.npcs_visible is False
+    assert alice.loaded_npcs == set()
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"oor|map=1|guid=101"),
+        ("SMSG_UPDATE_OBJECT", b"oor|map=1|guid=102"),
+        ("SMSG_MESSAGECHAT", b"system|[WorldNPC] hidden"),
+    ]
+
+
 def test_build_state_responses_duplicates_display_id_into_native_display(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
@@ -2437,3 +2657,173 @@ def test_new_emote_clears_previous_dance_state(monkeypatch):
     ]
     assert alice.send_response_log == [expected]
     assert bob.send_response_log == [expected]
+
+
+def test_server_info_and_status_use_runtime_state(monkeypatch):
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.login_state = "IN_WORLD"
+    bob = _make_session(state, "Bob", 1002)
+    bob.login_state = "IN_WORLD"
+    chat_handlers.chat_commands._set_runtime_motd(alice, "Runtime MOTD")
+
+    worldserver = _install_worldserver_stub(
+        monkeypatch,
+        running=True,
+        started_at=time.time() - 65.0,
+        active_clients={1: object(), 2: object()},
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode(),
+    )
+
+    info_responses = chat_handlers.chat_commands.cmd_server(alice, ["info"])
+    status_responses = chat_handlers.chat_commands.cmd_server(alice, ["status"])
+
+    info_text = info_responses[0][1].decode()
+    status_text = status_responses[0][1].decode()
+
+    assert "PyPandariaEmu" in info_text
+    assert "clients=2" in info_text
+    assert "online=2" in info_text
+    assert "motd=Runtime MOTD" in info_text
+    assert "running" in status_text
+    assert "clients=2" in status_text
+    assert "in_world=2" in status_text
+    assert worldserver._shutdown_calls == []
+
+
+def test_server_motd_set_updates_runtime_sessions_and_login_context():
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    bob = _make_session(state, "Bob", 1002)
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode(),
+    )
+
+    responses = chat_handlers.chat_commands.cmd_server(alice, ["motd", "set", "Hello", "World"])
+    message = responses[0][1].decode()
+
+    assert message == "MOTD updated"
+    assert alice.motd == "Hello World"
+    assert bob.motd == "Hello World"
+
+    login_context = importlib.import_module("server.modules.handlers.world.login.context")
+    ctx = login_context.WorldLoginContext.from_session(alice)
+    assert ctx.motd == "Hello World"
+    monkeypatch.undo()
+
+
+def test_server_motd_set_persists_to_default_yaml(tmp_path):
+    config_module = importlib.import_module("shared.ConfigLoader")
+    config_path = tmp_path / "default.yaml"
+    config_path.write_text("worldserver:\n  motd: Original\n", encoding="utf-8")
+
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    monkeypatch.setattr(chat_handlers.chat_commands, "_DEFAULT_CONFIG_MOTD_PATH", Path(config_path))
+    monkeypatch.setattr(config_module, "_DEFAULT_CONFIG_PATH", Path(config_path))
+    monkeypatch.setattr(config_module, "_CONFIG_DIR", tmp_path)
+    config_module._config = None
+    config_module._runtime_config = None
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    chat_handlers.chat_commands._set_runtime_motd(alice, "Persisted MOTD")
+
+    saved = config_path.read_text(encoding="utf-8")
+    assert 'motd: Persisted MOTD' in saved
+    monkeypatch.undo()
+
+
+def test_world_login_context_uses_config_motd_when_session_missing(tmp_path):
+    config_module = importlib.import_module("shared.ConfigLoader")
+    config_path = tmp_path / "default.yaml"
+    config_path.write_text("worldserver:\n  motd: Config MOTD\n", encoding="utf-8")
+
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    monkeypatch.setattr(config_module, "_DEFAULT_CONFIG_PATH", Path(config_path))
+    monkeypatch.setattr(config_module, "_CONFIG_DIR", tmp_path)
+    config_module._config = None
+    config_module._runtime_config = None
+
+    login_context = importlib.import_module("server.modules.handlers.world.login.context")
+    session = WorldSession()
+    session.account_data_times = {}
+    session.account_data_mask = 0
+    session.addons = []
+    session.banned_addons = []
+    session.known_spells = []
+    session.action_buttons = []
+    session.weather = {}
+
+    ctx = login_context.WorldLoginContext.from_session(session)
+
+    assert ctx.motd == "Config MOTD"
+    monkeypatch.undo()
+
+
+def test_server_restart_schedules_worldserver_shutdown(monkeypatch):
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+
+    worldserver = _install_worldserver_stub(monkeypatch, running=True, started_at=time.time())
+    broadcasts = []
+    logs = []
+
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "broadcast_system_message",
+        lambda message, scope="world": broadcasts.append((message, scope)),
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode(),
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.Logger,
+        "info",
+        lambda message, *args: logs.append(message % args if args else message),
+    )
+
+    responses = chat_handlers.chat_commands.cmd_server(alice, ["restart"])
+    message = responses[0][1].decode()
+
+    assert message == "Restart scheduled"
+    assert broadcasts == [("[Server] restart requested", "world")]
+    assert worldserver._restart_calls == ["restart"]
+    assert worldserver.running is False
+    assert worldserver._shutdown_calls == []
+
+
+def test_server_msg_broadcasts_world_system_message(monkeypatch):
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    broadcasts = []
+    logs = []
+
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "broadcast_system_message",
+        lambda message, scope="world": broadcasts.append((message, scope)),
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode(),
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.Logger,
+        "info",
+        lambda message, *args: logs.append(message % args if args else message),
+    )
+
+    responses = chat_handlers.chat_commands.cmd_server(alice, ["msg", "Hello", "world"])
+
+    assert responses == [("SMSG_MESSAGECHAT", b"[Server] sent: Hello world")]
+    assert broadcasts == [("Hello world", "world")]

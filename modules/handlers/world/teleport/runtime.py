@@ -44,12 +44,14 @@ def teleport_player(
     )
     player.instance_id = 0
     player.teleport_pending = True
+    player.worldport_ack_pending = True
     player.teleport_destination = str(destination_name or "").strip() or None
     capture_persist_position_from_session(player)
     mark_position_dirty(player)
 
     if same_map:
         player.teleport_pending = False
+        player.worldport_ack_pending = False
         player.near_teleport_pending = True
         Logger.info(
             "[Teleport] queued same-map near teleport map=%s destination=%s",

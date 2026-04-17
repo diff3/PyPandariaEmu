@@ -9,6 +9,7 @@ from typing import Optional
 from DSL.modules.EncoderHandler import EncoderHandler
 from shared.Logger import Logger
 from server.modules.handlers.world.characters.characters import preload_cache as preload_character_cache
+from server.modules.game.inventory import persist_session_inventory
 from server.session.runtime import session
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.opcodes.movement import (
@@ -112,6 +113,12 @@ def handle_disconnect_session(target_session) -> None:
     except Exception as exc:
         Logger.warning(f"[DISCONNECT] position save failed: {exc}")
 
+    # --- Persist inventory/equipment cache ---
+    try:
+        persist_session_inventory(target_session)
+    except Exception as exc:
+        Logger.warning(f"[DISCONNECT] inventory save failed: {exc}")
+
     # --- Remove from region ---
     region = getattr(target_session, "region", None)
     if region is not None:
@@ -146,6 +153,7 @@ def handle_disconnect_session(target_session) -> None:
     target_session.send_response = None
     target_session.visible_guids.clear()
     target_session.near_teleport_pending = False
+    target_session.worldport_ack_pending = False
 
     # --- Reset login state ---
     try:

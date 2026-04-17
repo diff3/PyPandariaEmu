@@ -14,7 +14,11 @@ def _import_replay():
     db_module.DatabaseConnection = type(
         "DatabaseConnection",
         (),
-        {"get_gameobjects_near": staticmethod(lambda *args, **kwargs: [])},
+        {
+            "get_gameobjects_near": staticmethod(lambda *args, **kwargs: []),
+            "get_creatures_near": staticmethod(lambda *args, **kwargs: []),
+            "get_creature_template": staticmethod(lambda *args, **kwargs: {}),
+        },
     )
     sys.modules["server.modules.database.DatabaseConnection"] = db_module
 
@@ -104,3 +108,78 @@ def test_build_database_gameobject_responses_allows_map_zero(monkeypatch):
     responses = replay.build_database_gameobject_responses(session)
 
     assert responses == [("SMSG_UPDATE_OBJECT", b"payload")]
+
+
+def test_build_creature_barncastle_payload_patches_only_map_and_position():
+    replay = _import_replay()
+    entry = {
+        "guid": 68,
+        "entry": 2457,
+        "x": -8903.01,
+        "y": 641.83,
+        "z": 99.62,
+        "orientation": 1.25,
+        "modelid": 1437,
+        "template": {"modelid1": 1437},
+    }
+
+    original = replay._load_npc_barncastle_template()
+    payload = replay._build_creature_barncastle_payload(map_id=0, entry=entry)
+
+    assert len(payload) == 222
+    assert payload[0:2] == b"\x00\x00"
+    assert payload[2:48] == original[2:48]
+    assert payload[56:60] == original[56:60]
+    assert payload[64:83] == original[64:83]
+    assert payload[87:] == original[87:]
+    assert payload[48:52] != original[48:52]
+    assert payload[52:56] != original[52:56]
+    assert payload[60:64] != original[60:64]
+    assert payload[83:87] != original[83:87]
+
+
+def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
+    replay = _import_replay()
+    session = SimpleNamespace(
+        npcs_visible=True,
+        map_id=1,
+        x=100.0,
+        y=200.0,
+        z=30.0,
+        orientation=0.0,
+        realm_id=1,
+    )
+
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creatures_near",
+        staticmethod(
+            lambda map_id, x, y, radius, limit: [
+                {"guid": 68, "entry": 2457, "x": 1000.0, "y": 2000.0, "z": 99.0, "orientation": 1.0}
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creature_template",
+        staticmethod(lambda entry: {"modelid1": 1437}),
+    )
+
+    captured = {}
+
+    def _fake_build(*, map_id, entry):
+        captured["map_id"] = map_id
+        captured["entry"] = dict(entry)
+        return b"npc"
+
+    monkeypatch.setattr(replay, "_build_creature_barncastle_payload", _fake_build)
+    monkeypatch.setattr(replay, "make_update_object_response", lambda payload: ("SMSG_UPDATE_OBJECT", payload))
+
+    responses = replay.build_database_creature_responses(session)
+
+    assert responses == [("SMSG_UPDATE_OBJECT", b"npc")]
+    assert captured["map_id"] == 1
+    assert captured["entry"]["x"] == 106.0
+    assert captured["entry"]["y"] == 200.0
+    assert captured["entry"]["z"] == 30.0

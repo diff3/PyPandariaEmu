@@ -5,9 +5,10 @@ import math
 from pathlib import Path
 import struct
 
+from DSL.modules.bitsHandler import BitWriter
 from shared.Logger import Logger
 from shared.PathUtils import get_captures_root
-from server.modules.game.guid import GameObjectGuid, GuidHelper
+from server.modules.game.guid import CreatureGuid, GameObjectGuid, GuidHelper
 from server.modules.handlers.world.login.packets import build_login_packet
 from server.session.runtime import session as runtime_session
 
@@ -69,6 +70,9 @@ EXACT_UPDATE_OBJECT_BUILDERS = {
 _CAPTURE_DIR = get_captures_root(focus=True) / "debug"
 _GAMEOBJECT_VISIBILITY_RADIUS = 120.0
 _GAMEOBJECT_PACKET_LIMIT = 200
+_CREATURE_VISIBILITY_RADIUS = 120.0
+_CREATURE_PACKET_LIMIT = 200
+_NPC_BARNCASTLE_CAPTURE = _CAPTURE_DIR / "SMSG_UPDATE_OBJECT_1776420870_1545.json"
 
 
 def _login_handlers():
@@ -532,8 +536,224 @@ def _build_gameobject_update_payload(*, map_id: int, entry: dict, realm_id: int)
     return bytes(payload)
 
 
+def _build_creature_create_flags() -> bytes:
+    # Exact 12-byte flag block from a valid sniffed living-creature create.
+    # The previous synthetic bit layout caused the client to misparse the
+    # movement block and ignore the entire NPC create.
+    return bytes.fromhex("200000000029CC0000080000")
+
+
+def _resolve_creature_display_id(entry: dict) -> int:
+    display_id = int(entry.get("modelid", 0) or 0)
+    if display_id > 0:
+        return display_id
+
+    template = entry.get("template")
+    if isinstance(template, dict):
+        for key in ("modelid1", "modelid2", "modelid3", "modelid4"):
+            display_id = int(template.get(key, 0) or 0)
+            if display_id > 0:
+                return display_id
+    return 15476
+
+
+def _build_creature_field_values(entry: dict, *, world_guid: int) -> dict[int, int]:
+    display_id = _resolve_creature_display_id(entry)
+    return {
+        0: int(world_guid) & 0xFFFFFFFF,
+        1: (int(world_guid) >> 32) & 0xFFFFFFFF,
+        4: 9,
+        5: int(entry.get("entry", 0) or 0),
+        6: 0,
+        7: _u32_from_float(1.0),
+        30: 33554688,
+        31: 1,
+        33: 17,
+        39: 17,
+        40: 1000,
+        55: 1,
+        57: 188,
+        61: 768,
+        63: 4194304,
+        64: 2000,
+        65: 2000,
+        67: _u32_from_float(0.05),
+        68: _u32_from_float(0.15),
+        69: int(display_id),
+        70: int(display_id),
+        71: 0,
+        81: _u32_from_float(1.0),
+        82: _u32_from_float(1.0),
+        87: _u32_from_float(2.0),
+        128: 1,
+        154: _u32_from_float(1.0),
+        157: 1,
+    }
+
+
+def _build_creature_update_payload(*, map_id: int, entry: dict, realm_id: int) -> bytes:
+    world_guid = int(
+        entry.get("world_guid")
+        or CreatureGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), int(realm_id) or 1)
+    )
+    raw_guid = GuidHelper.to_le_bytes(world_guid)
+    mask_bytes, field_bytes = _build_fixed_u32_field_block(
+        _build_creature_field_values(entry, world_guid=world_guid),
+        mask_blocks=5,
+    )
+
+    x = float(entry.get("x", 0.0) or 0.0)
+    y = float(entry.get("y", 0.0) or 0.0)
+    z = float(entry.get("z", 0.0) or 0.0)
+    orientation = float(entry.get("orientation", 0.0) or 0.0)
+
+    body = bytearray()
+    body += struct.pack("<B", raw_guid[4])
+    body += struct.pack("<f", 7.0)
+    body += struct.pack("<B", raw_guid[2])
+    body += struct.pack("<B", raw_guid[1])
+    body += struct.pack("<f", 3.1415939331054688)
+    body += struct.pack("<f", 4.7)
+    body += struct.pack("<B", raw_guid[7])
+    body += struct.pack("<f", 3.140000104904175)
+    body += struct.pack("<f", x)
+    body += struct.pack("<f", orientation)
+    body += struct.pack("<f", 2.5)
+    body += struct.pack("<f", y)
+    body += struct.pack("<f", 4.5)
+    body += struct.pack("<B", raw_guid[5])
+    body += struct.pack("<B", raw_guid[6])
+    body += struct.pack("<B", raw_guid[0])
+    body += struct.pack("<f", 4.5)
+    body += struct.pack("<f", 2.5)
+    body += struct.pack("<f", 8.000020027160645)
+    body += struct.pack("<f", 4.722221851348877)
+    body += struct.pack("<f", z)
+    body += struct.pack("<B", len(mask_bytes) // 4)
+    body += bytes(mask_bytes)
+    body += bytes(field_bytes)
+    body += struct.pack("<B", 0)
+
+    payload = bytearray()
+    payload += struct.pack("<HI", int(map_id) & 0xFFFF, 1)
+    payload += _build_create_update_object_entry(
+        guid=world_guid,
+        object_type=3,
+        create_flags=_build_creature_create_flags(),
+        body=bytes(body),
+    )
+    return bytes(payload)
+
+
+def _load_npc_barncastle_template() -> bytes:
+    path = _NPC_BARNCASTLE_CAPTURE
+    if not path.exists():
+        path = Path(__file__).resolve().parents[5] / "data" / "pandaria548" / "captures" / "focus" / "debug" / _NPC_BARNCASTLE_CAPTURE.name
+    return load_sniff_payload(path)
+
+import struct
+
+
+def _find_position_offset(payload: bytes) -> int | None:
+    """
+    Try to locate position block (x,y,z) inside SMSG_UPDATE_OBJECT payload.
+
+    Strategy:
+    - Look for known float pattern: 1.0, 1.0 (80 3F 00 00 80 3F)
+    - Position usually follows shortly after
+    """
+
+    pattern = b"\x00\x00\x80\x3F\x00\x00\x80\x3F"  # 1.0f, 1.0f
+
+    idx = payload.find(pattern)
+    if idx == -1:
+        return None
+
+    # Heuristic: position is usually ~8–32 bytes after this pattern
+    search_start = idx + len(pattern)
+
+    for offset in range(search_start, min(search_start + 64, len(payload) - 12), 4):
+        try:
+            x = struct.unpack_from("<f", payload, offset)[0]
+            y = struct.unpack_from("<f", payload, offset + 4)[0]
+            z = struct.unpack_from("<f", payload, offset + 8)[0]
+
+            # sanity check (WoW world bounds-ish)
+            if -20000 < x < 20000 and -20000 < y < 20000 and -2000 < z < 2000:
+                return offset
+        except Exception:
+            continue
+
+    return None
+
+import random
+import struct
+
+
+def _patch_guid(payload: bytearray):
+    """
+    Replace first packed GUID block with a new random one.
+    This is a hack but works for sandbox.
+    """
+
+    # hitta första F7 (packed guid start i din sniff)
+    idx = payload.find(b"\xF7")
+    if idx == -1:
+        Logger.warning("[NPC] GUID not found")
+        return
+
+    # generera fake guid (8 bytes)
+    guid = random.getrandbits(64)
+
+    struct.pack_into("<Q", payload, idx, guid)
+
+    Logger.info("[NPC] patched GUID at %s -> %s", idx, guid)
+
+def _build_creature_barncastle_payload(*, map_id: int, entry: dict) -> bytes:
+    payload = bytearray(_load_npc_barncastle_template())
+    _patch_guid(payload)
+
+    x = float(entry.get("x", 0.0) or 0.0)
+    y = float(entry.get("y", 0.0) or 0.0)
+    z = float(entry.get("z", 0.0) or 0.0)
+    o = float(entry.get("orientation", 0.0) or 0.0)
+
+    # --- map id (behåll om det funkar i din template) ---
+    try:
+        struct.pack_into("<H", payload, 0, int(map_id) & 0xFFFF)
+    except Exception:
+        pass
+
+    # --- hitta position dynamiskt ---
+    offset = _find_position_offset(payload)
+
+    if offset is None:
+        Logger.warning("[NPC] position offset not found, fallback to 48")
+        offset = 48  # fallback (din gamla)
+
+    # --- skriv coords ---
+    struct.pack_into("<f", payload, offset + 0, x)
+    struct.pack_into("<f", payload, offset + 4, y)
+    struct.pack_into("<f", payload, offset + 8, z)
+
+    # orientation ligger oftast direkt efter
+    try:
+        struct.pack_into("<f", payload, offset + 12, o)
+    except Exception:
+        pass
+
+    Logger.info(
+        "[NPC] patched pos offset=%s -> (%.2f %.2f %.2f)",
+        offset, x, y, z
+    )
+
+    return bytes(payload)
+
 def build_database_gameobject_responses(session, *, loaded_guids: set[int] | None = None) -> list[tuple[str, bytes]]:
     from server.modules.database.DatabaseConnection import DatabaseConnection
+
+    if not bool(getattr(session, "gameobjects_visible", True)):
+        return []
 
     map_id = int(getattr(session, "map_id", 0) or 0)
     x = float(getattr(session, "x", 0.0) or 0.0)
@@ -586,6 +806,175 @@ def build_database_gameobject_responses(session, *, loaded_guids: set[int] | Non
         for entry in filtered_entries
     ]
 
+
+
+
+# START NPC building
+import struct
+import random
+from shared.Logger import Logger
+
+def make_unit_guid(entry: int) -> int:
+    counter = random.getrandbits(32)
+
+    b0_3 = counter
+    b4_6 = entry & 0xFFFFFF
+    b7   = 0xF1
+
+    return (
+        b0_3 |
+        (b4_6 << 32) |
+        (b7 << 56)
+    )
+    
+    
+def pack_guid(guid: int) -> bytes:
+    mask = 0
+    data = bytearray()
+
+    for i in range(8):
+        byte = (guid >> (i * 8)) & 0xFF
+        if byte != 0:
+            mask |= (1 << i)
+            data.append(byte)
+
+    return struct.pack("<B", mask) + data
+
+
+# --- Movement (stabil minimal) ---
+def build_movement_block(x, y, z, o):
+    return struct.pack(
+        "<II I ffff f I ffffff",
+        0,  # flags
+        0,  # flags2
+        0,  # time
+        x, y, z, o,
+        0.0,  # pitch
+        0,    # fall time
+        2.5, 7.0, 4.5, 4.7, 2.5, 3.14
+    )
+
+
+# --- Values (minimalt men korrekt) ---
+def build_values_block(guid: int):
+    buf = bytearray()
+
+    buf += struct.pack("<B", 2)  # mask blocks
+
+    mask1 = 0x00000003  # GUID low + high
+    mask2 = 0x00000004  # TYPE
+
+    buf += struct.pack("<II", mask1, mask2)
+
+    buf += struct.pack("<II",
+        guid & 0xFFFFFFFF,
+        (guid >> 32) & 0xFFFFFFFF
+    )
+
+    TYPEMASK_UNIT = 0x08
+    buf += struct.pack("<I", TYPEMASK_UNIT)
+
+    return bytes(buf)
+
+
+# --- CREATE OBJECT BLOCK ---
+def build_create_block(entry_id, x, y, z, o):
+    guid = make_unit_guid(entry_id)
+
+    buf = bytearray()
+    buf += struct.pack("<B", 3)  # CREATE_OBJECT2
+    buf += pack_guid(guid)
+    buf += struct.pack("<B", 3)  # TYPEID_UNIT
+
+    buf += build_movement_block(x, y, z, o)
+    buf += build_values_block(guid)
+
+    return bytes(buf)
+
+
+# --- UPDATE OBJECT PAYLOAD ---
+def build_npc_update_object_payload(map_id: int, spawns: list[dict]) -> bytes:
+    payload = bytearray()
+
+    payload += struct.pack("<H", map_id)
+    payload += struct.pack("<I", len(spawns))
+
+    for s in spawns:
+        payload += build_create_block(
+            s["entry"],
+            s["x"],
+            s["y"],
+            s["z"],
+            s["orientation"],
+        )
+
+    return bytes(payload)
+
+
+# --- DB → PACKET ---
+def build_database_creature_responses(session, *, loaded_guids: set[int] | None = None):
+    from server.modules.database.DatabaseConnection import DatabaseConnection
+
+    if not getattr(session, "npcs_visible", False):
+        return []
+
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    x = float(getattr(session, "x", 0.0) or 0.0)
+    y = float(getattr(session, "y", 0.0) or 0.0)
+
+    entries = DatabaseConnection.get_creatures_near(
+        map_id,
+        x,
+        y,
+        radius=_CREATURE_VISIBILITY_RADIUS,
+        limit=_CREATURE_PACKET_LIMIT,
+    )
+
+    if not entries:
+        return []
+
+    seen = loaded_guids if isinstance(loaded_guids, set) else None
+    spawns = []
+
+    for entry in entries:
+        entry_id = int(entry.get("entry", 1))
+
+        if seen is not None:
+            if entry_id in seen:
+                continue
+            seen.add(entry_id)
+
+        spawn = {
+            "entry": entry_id,
+            "x": float(entry.get("x", 0.0) or 0.0),
+            "y": float(entry.get("y", 0.0) or 0.0),
+            "z": float(entry.get("z", 0.0) or 0.0),
+            "orientation": float(entry.get("orientation", 0.0) or 0.0),
+        }
+
+        Logger.info(
+            "[SPAWN_NPC] entry=%s pos=(%.2f %.2f %.2f)",
+            spawn["entry"],
+            spawn["x"],
+            spawn["y"],
+            spawn["z"],
+        )
+
+        spawns.append(spawn)
+
+    if not spawns:
+        return []
+
+    payload = build_npc_update_object_payload(map_id, spawns)
+
+    return [
+        make_update_object_response(payload)
+    ]
+
+
+
+
+# end of NPC building
 
 def _build_replayed_update_object_packet(session, opcode_name: str, path: Path, *, update_index: int):
     if path.name in EXACT_UPDATE_OBJECT_BUILDERS:

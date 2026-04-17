@@ -13,7 +13,10 @@ from server.modules.handlers.world.bootstrap.replay import (
     build_multi_u32_update_object_payload,
 )
 from server.modules.handlers.world.dispatcher import register
-from server.modules.handlers.world.opcodes.movement import build_move_set_run_speed_payload
+from server.modules.handlers.world.opcodes.movement import (
+    build_move_set_flight_speed_payload,
+    build_move_set_run_speed_payload,
+)
 from server.modules.handlers.world.mount.mount_service import (
     ALL_MOUNT_SPELLS,
     get_mount_display_id,
@@ -69,9 +72,13 @@ _DEFAULT_FLY_SPEED = 7.0
 _DEFAULT_FLY_BACK_SPEED = 4.5
 _DEFAULT_TURN_SPEED = 3.1415926
 _DEFAULT_PITCH_SPEED = 3.1415926
+_UNIT_FLAG_MOUNT = 0x08000000
+_PLAYER_FIELD_MOUNT_STATE_FLAGS = 61
+_PLAYER_FIELD_DISPLAYID = 69
+_PLAYER_FIELD_NATIVEDISPLAYID = 70
+_PLAYER_FIELD_MOUNTDISPLAYID = 71
 _UNIT_FIELD_FLAGS = 0x60
 _UNIT_FIELD_MOUNTDISPLAYID = 0x6A
-_UNIT_FLAG_MOUNT = 0x08000000
 _MOUNT_SPEED_MULTIPLIER = 2.0
 _LANG_ORCISH = 1
 _LANG_COMMON = 7
@@ -86,6 +93,13 @@ _LANGUAGE_ID_BY_SPELL_ID = {
 #   Revisit whether this should remain a resync or become a more explicit initial spell flow later.
 # - Mount tab behavior still depends on lightweight display/update-object packets rather than a
 #   fully modeled spell/aura pipeline. Keep that behavior unchanged for now.
+_MOUNT_AURA_APPLY_TEMPLATE = bytes.fromhex("80000044400001000000000B5A00F47D0000000100000000007943040602")
+_MOUNT_AURA_REMOVE_TEMPLATE = bytes.fromhex("8000004400000602")
+_FLY_AURA_PRIMARY_APPLY_TEMPLATE = bytes.fromhex("80000044400001000000000B5A00F47D0000000100000000007943040602")
+_FLY_AURA_SECONDARY_APPLY_TEMPLATE = bytes.fromhex("8000004440000000000000035A00BD5101000003000000050602")
+_FLY_AURA_PRIMARY_REMOVE_TEMPLATE = bytes.fromhex("8000004400040602")
+_FLY_AURA_SECONDARY_REMOVE_TEMPLATE = bytes.fromhex("8000004400050602")
+_FLY_AURA_SPELL_ID = 33943
 
 
 def _world_login_context_from_session(session):
@@ -490,6 +504,15 @@ def _current_mount_display_id(session) -> int:
     return int(getattr(session, "mount_display_id", 0) or 0) & 0xFFFFFFFF
 
 
+def _player_mount_state_flags(session, display_id: int) -> int:
+    # Sniffed self mount updates use one compact player field that carries the
+    # mounted bit plus a stable base value of 0x8.
+    base_flags = 0x00000008
+    if int(display_id) > 0:
+        return int(base_flags | _UNIT_FLAG_MOUNT)
+    return int(base_flags)
+
+
 def _runtime_player_unit_field_values(session) -> dict[int, int]:
     return {
         _UNIT_FIELD_FLAGS: _current_unit_flags(session),
@@ -580,35 +603,88 @@ def build_mount_visual_responses(session, display_id: int) -> list[tuple[str, by
         int(display_id),
         int(unit_flags) & 0xFFFFFFFF,
     )
+    display_value = int(getattr(session, "display_id", 0) or 0)
+    native_display_value = int(getattr(session, "native_display_id", display_value) or display_value)
+    mount_state_flags = _player_mount_state_flags(session, int(display_id))
+    guid = _player_object_guid(session)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    if guid <= 0:
+        return []
 
-    # --- FORCE VALUE INJECTION (critical fix) ---
-    # Some builders don't read mount_display_id automatically
-    setattr(session, "unit_field_mountdisplayid", int(display_id))
-    setattr(session, "unit_field_flags", int(unit_flags))
+    return [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=map_id,
+                guid=guid,
+                field_updates=[
+                    (_PLAYER_FIELD_MOUNT_STATE_FLAGS, mount_state_flags),
+                    (_PLAYER_FIELD_DISPLAYID, display_value),
+                    (_PLAYER_FIELD_NATIVEDISPLAYID, native_display_value),
+                    (_PLAYER_FIELD_MOUNTDISPLAYID, int(display_id)),
+                ],
+            ),
+        )
+    ]
 
-    # --- DEBUG ---
-    Logger.error(
-        "[MOUNT DEBUG] injecting mount_display_id=%s flags=0x%08X",
-        int(display_id),
-        int(unit_flags),
-    )
 
-    # --- BUILD UPDATE ---
-    responses = build_player_unit_field_update(
+def apply_mount_aura(session, spell_id: int) -> list[tuple[str, bytes]]:
+    spell_id = int(spell_id or 0)
+    if spell_id <= 0:
+        return []
+
+    slot = int(getattr(session, "active_mount_aura_slot", 0) or 0) & 0xFF
+    session.active_mount_aura_spell_id = spell_id
+    session.active_mount_aura_slot = slot
+
+    payload = bytearray(_MOUNT_AURA_APPLY_TEMPLATE)
+    payload[14:18] = int(spell_id).to_bytes(4, "little", signed=False)
+    payload[28] = slot & 0xFF
+
+    Logger.info("[MOUNT_AURA] apply spell=%s slot=%s", spell_id, slot)
+    return [("SMSG_AURA_UPDATE", bytes(payload))]
+
+
+def remove_mount_aura(session) -> list[tuple[str, bytes]]:
+    slot = int(getattr(session, "active_mount_aura_slot", 0) or 0) & 0xFF
+    session.active_mount_aura_spell_id = None
+
+    payload = bytearray(_MOUNT_AURA_REMOVE_TEMPLATE)
+    payload[5] = slot & 0xFF
+
+    Logger.info("[MOUNT_AURA] remove spell=%s slot=%s", int(getattr(session, "mount_spell", 0) or 0), slot)
+    return [("SMSG_AURA_UPDATE", bytes(payload))]
+
+
+def apply_fly_aura(session, spell_id: int = _FLY_AURA_SPELL_ID) -> list[tuple[str, bytes]]:
+    spell_id = int(spell_id or 0)
+    if spell_id <= 0:
+        return []
+
+    session.active_fly_aura_spell_id = spell_id
+    Logger.info("[FLY_AURA] apply spell=%s", spell_id)
+    return [
+        ("SMSG_AURA_UPDATE", bytes(_FLY_AURA_PRIMARY_APPLY_TEMPLATE)),
+        ("SMSG_AURA_UPDATE", bytes(_FLY_AURA_SECONDARY_APPLY_TEMPLATE)),
+    ]
+
+
+def remove_fly_aura(session) -> list[tuple[str, bytes]]:
+    spell_id = int(getattr(session, "active_fly_aura_spell_id", 0) or 0)
+    session.active_fly_aura_spell_id = None
+    Logger.info("[FLY_AURA] remove spell=%s", spell_id)
+    return [
+        ("SMSG_AURA_UPDATE", bytes(_FLY_AURA_PRIMARY_REMOVE_TEMPLATE)),
+        ("SMSG_AURA_UPDATE", bytes(_FLY_AURA_SECONDARY_REMOVE_TEMPLATE)),
+    ]
+
+
+def build_fly_state_responses(session) -> list[tuple[str, bytes]]:
+    return build_player_unit_field_update(
         session,
-        [_UNIT_FIELD_FLAGS, _UNIT_FIELD_MOUNTDISPLAYID],
-        source_label="runtime_session_player_state",
+        [_UNIT_FIELD_FLAGS],
+        source_label="fly_toggle",
     )
-
-    # --- SAFETY CHECK ---
-    if not responses:
-        Logger.error("[MOUNT ERROR] no UPDATE_OBJECT generated")
-
-    return responses
-
-_UNIT_FIELD_FLAGS = 96
-_UNIT_FIELD_MOUNTDISPLAYID = 106
-_UNIT_FIELD_BYTES_2 = 110  # ⚠️ justera om needed
 
 def build_raw_update_object(player, fields):
     payload = bytearray()
@@ -658,39 +734,23 @@ def build_raw_update_object(player, fields):
     return ("SMSG_UPDATE_OBJECT", bytes(payload))
 
 
-def build_mount_aura_update(player, spell_id: int):
-    player.is_mounted = True
-
-    display_id = get_mount_display_id(spell_id)
-    player.mount_display_id = display_id
-
-    player.unit_flags |= _UNIT_FLAG_MOUNT
-    player.player_bytes2 = 0x00000008
-
-    # --- RAW UPDATE_OBJECT ---
-    fields = [
-        (96, player.unit_flags),
-        (106, player.mount_display_id),
-        (110, 8),
-    ]
-
-    Logger.into(f"[FIELDS BEFORE BUILD] {fields}")
-    return [build_raw_update_object(player, fields)]
-
 def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
     responses: list[tuple[str, bytes]] = []
     display_id = get_mount_display_id(spell_id)
+    responses.extend(apply_mount_aura(player, spell_id))
     if display_id > 0:
         responses.extend(build_mount_visual_responses(player, display_id))
     responses.append(_build_run_speed_update_response(player))
+    responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(player)))
     responses.extend(_notification_response(f"Mounted spell={int(spell_id)} speed={float(player.run_speed):.2f}"))
-    responses.append(build_mount_aura_update(player, spell_id))
     return responses
 
 
 def send_dismount_update(player) -> list[tuple[str, bytes]]:
-    responses: list[tuple[str, bytes]] = list(build_mount_visual_responses(player, 0))
+    responses: list[tuple[str, bytes]] = list(remove_mount_aura(player))
+    responses.extend(build_mount_visual_responses(player, 0))
     responses.append(_build_run_speed_update_response(player))
+    responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(player)))
     responses.extend(_notification_response(f"Dismounted speed={float(player.run_speed):.2f}"))
     return responses
 
@@ -729,27 +789,10 @@ from server.modules.handlers.world.login.context import WorldLoginContext
 
 def handle_mount(player, spell_id: int):
     player.is_mounted = True
-    player.mount_spell = spell_id
-
-    display_id = get_mount_display_id(spell_id)
-    player.mount_display_id = display_id
-    player.unit_flags |= _UNIT_FLAG_MOUNT
-
-    responses = []
-
-    # 🔥 1. SPELL_GO (reuse sniffed structure!)
-    responses.append(build_spell_go(player, spell_id))
-
-    # 🔥 2. UPDATE_OBJECT
-    responses.append(build_raw_update_object(player, [
-        (96, player.unit_flags),
-        (106, display_id),
-    ]))
-
-    # 🔥 3. speed
-    responses.append(_build_run_speed_update_response(player))
-
-    return responses
+    player.mount_spell = int(spell_id)
+    player.active_mount_aura_slot = int(getattr(player, "active_mount_aura_slot", 0) or 0)
+    _apply_mount_movement_speeds(player)
+    return send_mount_update(player, int(spell_id))
 
 def handle_mount_old(player, spell_id: int) -> list[tuple[str, bytes]]:
     player.is_mounted = True
@@ -770,6 +813,8 @@ def handle_mount_old(player, spell_id: int) -> list[tuple[str, bytes]]:
 def dismount(player) -> list[tuple[str, bytes]]:
     player.is_mounted = False
     player.mount_spell = None
+    player.mount_display_id = 0
+    player.unit_flags &= ~_UNIT_FLAG_MOUNT
     _restore_default_movement_speeds(player)
     return send_dismount_update(player)
 

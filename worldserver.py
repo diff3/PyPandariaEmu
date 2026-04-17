@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
+from pathlib import Path
 import socket
 import signal
+import sys
 import threading
 import traceback
 import time
@@ -89,7 +92,9 @@ WORLD_HANDLERS = opcode_handlers
 
 HOST = config["worldserver"]["host"]
 PORT = config["worldserver"]["port"]
+STARTED_AT = time.time()
 running = True
+restart_requested = False
 _ACTIVE_CLIENTS_LOCK = threading.Lock()
 _ACTIVE_CLIENTS: dict[int, tuple[socket.socket, object, tuple[str, int]]] = {}
 
@@ -101,9 +106,19 @@ HANDSHAKE_CLIENT = b"0\x00WORLD OF WARCRAFT CONNECTION - CLIENT TO SERVER\x00"
 
 def sigint(sig, frame):
     """Gracefully stop worldserver on Ctrl+C."""
-    global running
-    Logger.info("Shutting down WorldServer (Ctrl+C)…")
+    global running, restart_requested
+    signal_name = getattr(sig, "name", None) or str(int(sig))
+    restart_requested = False
+    Logger.info("[WorldServer] shutdown requested via %s", signal_name)
     running = False
+
+
+def request_restart() -> None:
+    """Request a clean worldserver restart from the main loop."""
+    global running, restart_requested
+    restart_requested = True
+    running = False
+    Logger.info("[WorldServer] restart requested")
 
 
 def _shutdown_active_clients() -> None:
@@ -559,8 +574,13 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 # ---- Server loop --------------------------------------------------------
 
 def run_world() -> None:
+    global running, restart_requested
+    running = True
+    restart_requested = False
+
     Logger.configure(scope="worldserver", reset=True)
     signal.signal(signal.SIGINT, sigint)
+    signal.signal(signal.SIGTERM, sigint)
 
     Logger.info(f"{project_name()} WorldServer")
     loaded, total = initialize_dsl_runtime(watch=True)
@@ -607,6 +627,11 @@ def run_world() -> None:
     Logger.info("WorldServer stopping…")
     _shutdown_active_clients()
     srv.close()
+
+    if restart_requested:
+        launcher = Path(__file__).resolve().parents[1] / "worldserver.py"
+        Logger.info("[WorldServer] restarting via %s", str(launcher))
+        os.execv(sys.executable, [sys.executable, str(launcher)])
 
 
 

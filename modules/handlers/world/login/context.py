@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 import time
 
+from shared.ConfigLoader import ConfigLoader
+
 
 @dataclass
 class WorldLoginContext:
@@ -138,6 +140,8 @@ class WorldLoginContext:
     # --------------------------------------------------
     @classmethod
     def from_session(cls, session):
+        config_motd = str((ConfigLoader.get_config() or {}).get("worldserver", {}).get("motd", "") or "").strip()
+        resolved_motd = str(getattr(session, "motd", "") or "").strip() or config_motd or cls.motd
         account_data_times = [0] * 8
         for index in range(8):
             account_data_times[index] = int(
@@ -206,4 +210,5 @@ class WorldLoginContext:
             known_spells=session.known_spells,
             action_buttons=session.action_buttons,
             weather=dict(getattr(session, "weather", {}) or {}),
+            motd=resolved_motd,
         )

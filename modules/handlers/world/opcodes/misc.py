@@ -143,17 +143,15 @@ def handle_set_action_button(session, ctx: PacketContext) -> Tuple[int, Optional
         ) if int(action_id) > 0 else 0
         session.action_buttons = buttons
 
-    # Sandbox default-action-bar mode:
-    # keep client-side/session edits in memory only for now.
-    # char_guid = int(getattr(session, "char_guid", 0) or 0)
-    # if char_guid > 0:
-    #     DatabaseConnection.save_character_action_button(
-    #         char_guid,
-    #         int(slot_id),
-    #         int(action_id),
-    #         int(action_type),
-    #         spec=0,
-    #     )
+    char_guid = int(getattr(session, "char_guid", 0) or 0)
+    if char_guid > 0:
+        DatabaseConnection.save_character_action_button(
+            char_guid,
+            int(slot_id),
+            int(action_id),
+            int(action_type),
+            spec=0,
+        )
 
     return 0, None
 
@@ -231,9 +229,18 @@ def handle_time_sync_response(session, ctx: PacketContext):
     session.last_time_sync_seq = seq
     session.time_sync_ok = True
     advance_global_time(1)
-    refresh_region_weather(session)
+    weather_changed = bool(refresh_region_weather(session))
 
     Logger.success(f"[TIME_SYNC] OK seq={seq} client_ticks={client_ticks}")
+
+    responses = []
+    if weather_changed:
+        payload = build_login_packet(
+            "SMSG_WEATHER",
+            type("Ctx", (), dict(getattr(session, "weather", {}) or {}))(),
+        )
+        if payload is not None:
+            responses.append(("SMSG_WEATHER", payload))
 
     if (
         int(getattr(session, "char_guid", 0) or 0) == 2
@@ -244,9 +251,9 @@ def handle_time_sync_response(session, ctx: PacketContext):
         Logger.info("[WorldHandlers] TIME_SYNC_RESPONSE received after post-time-sync block")
         session.skyfire_login_stage = 3
         Logger.info("[WorldHandlers] TIME_SYNC_RESPONSE advanced SkyFire GMIsland stage 3")
-        return 0, None
+        return 0, responses or None
 
-    return 0, None
+    return 0, responses or None
 
 
 @register("CMSG_DISCARDED_TIME_SYNC_ACKS")

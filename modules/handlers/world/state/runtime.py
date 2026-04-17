@@ -9,6 +9,8 @@ import time
 from typing import Iterable
 
 from shared.Logger import Logger
+from shared.ConfigLoader import ConfigLoader
+from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.handlers.world.position.position_service import position_delta, position_from_session
 from server.modules.handlers.world.state.global_state import global_state
 from server.modules.handlers.world.state.region_manager import region_manager
@@ -30,6 +32,21 @@ WEATHER_TYPES: dict[str, int] = {
     "storm": 86,
     "thunder": 86,
 }
+
+_DEFAULT_WEATHER_CYCLE_SECONDS = 600
+_SNOW_ZONE_IDS = frozenset({
+    1,      # Dun Morogh
+    36,     # Alterac Mountains
+    2597,   # Alterac Valley
+    618,    # Winterspring
+    394,    # Grizzly Hills
+    495,    # Howling Fjord
+    3537,   # Borean Tundra
+    65,     # Dragonblight
+    67,     # The Storm Peaks
+    210,    # Icecrown
+    4197,   # Wintergrasp
+})
 
 
 def resolve_weather_type(weather_key: str, density: float) -> int:
@@ -61,6 +78,44 @@ def resolve_weather_type(weather_key: str, density: float) -> int:
     return WEATHER_TYPES.get(key, -1)
 
 
+def _weather_config() -> dict:
+    return dict(ConfigLoader.load_config().get("worldserver", {}) or {})
+
+
+def _weather_cycle_seconds() -> int:
+    configured = int(_weather_config().get("weather_cycle_seconds", _DEFAULT_WEATHER_CYCLE_SECONDS) or 0)
+    return max(60, configured)
+
+
+def _weather_cycle_slot(*, now: float | None = None) -> int:
+    epoch = float(time.time() if now is None else now)
+    return int(epoch // _weather_cycle_seconds())
+
+
+def _resolve_weather_zone_id(target_session) -> int:
+    zone_id = int(
+        getattr(target_session, "zone", 0)
+        or getattr(target_session, "persist_zone", 0)
+        or 0
+    )
+    if zone_id > 0:
+        return zone_id
+
+    map_id = int(getattr(target_session, "map_id", 0) or 0)
+    x = float(getattr(target_session, "x", 0.0) or 0.0)
+    y = float(getattr(target_session, "y", 0.0) or 0.0)
+    resolved = int(resolve_zone_from_position(map_id, x, y) or 0)
+    if resolved > 0:
+        target_session.zone = resolved
+    return resolved
+
+
+def _weather_profile_key(zone_id: int) -> str:
+    if int(zone_id) in _SNOW_ZONE_IDS:
+        return "snow"
+    return "rain"
+
+
 def pack_wow_game_time(epoch_seconds: int) -> int:
     lt = time.localtime(int(epoch_seconds))
     year = max(0, int(lt.tm_year) - 2000)
@@ -79,10 +134,27 @@ def pack_wow_game_time(epoch_seconds: int) -> int:
     )
 
 
-def compute_weather(global_time, map_id, seed):
-    states = ("sunny", "rainy", "snowy")
-    index = hash((int(global_time) // 300, int(map_id), int(seed))) % len(states)
-    return states[int(index)]
+def compute_weather(global_time, map_id, seed, *, zone_id: int = 0, now: float | None = None):
+    slot = _weather_cycle_slot(now=now)
+    offset = (int(map_id) * 31 + int(zone_id) * 17 + int(seed)) % 4
+    phase = int((slot + offset) % 4)
+
+    if _weather_profile_key(int(zone_id)) == "snow":
+        states = (
+            ("clear", 0.0),
+            ("snow", 0.35),
+            ("snow", 0.75),
+            ("clear", 0.0),
+        )
+    else:
+        states = (
+            ("clear", 0.0),
+            ("rain", 0.35),
+            ("rain", 0.75),
+            ("clear", 0.0),
+        )
+
+    return states[phase]
 
 
 def _weather_state_from_key(weather_key: str, density: float = 0.5, abrupt: int = 0) -> dict[str, float | int]:
@@ -94,11 +166,12 @@ def _weather_state_from_key(weather_key: str, density: float = 0.5, abrupt: int 
     }
 
 
-def refresh_region_weather(target_session) -> None:
+def refresh_region_weather(target_session) -> bool:
     state = getattr(target_session, "global_state", None)
     region = getattr(target_session, "region", None)
     if state is None or region is None:
-        return
+        return False
+    previous_weather = dict(getattr(target_session, "weather", {}) or {})
     manual_region_weather = getattr(state, "manual_region_weather", None)
     if isinstance(manual_region_weather, dict):
         manual_weather = manual_region_weather.get(int(getattr(region, "map_id", 0) or 0))
@@ -106,13 +179,20 @@ def refresh_region_weather(target_session) -> None:
             region.weather = dict(manual_weather)
             region.weather_manual = True
             target_session.weather = dict(manual_weather)
-            return
+            return dict(target_session.weather) != previous_weather
     if bool(getattr(region, "weather_manual", False)) and isinstance(getattr(region, "weather", None), dict):
         target_session.weather = dict(region.weather)
-        return
-    weather_key = compute_weather(state.time, region.map_id, state.weather_seed)
-    region.weather = _weather_state_from_key(weather_key, 0.5, 0)
-    target_session.weather = dict(region.weather)
+        return dict(target_session.weather) != previous_weather
+
+    zone_id = _resolve_weather_zone_id(target_session)
+    weather_key, density = compute_weather(
+        state.time,
+        region.map_id,
+        state.weather_seed,
+        zone_id=zone_id,
+    )
+    target_session.weather = _weather_state_from_key(weather_key, density, 0)
+    return dict(target_session.weather) != previous_weather
 
 
 def advance_global_time(delta: int = 1) -> None:

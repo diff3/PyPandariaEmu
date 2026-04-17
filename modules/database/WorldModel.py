@@ -59,6 +59,63 @@ class WorldGameObjectTemplate(Base):
     data3 = Column(Integer, nullable=False, default=0)
 
 
+class WorldCreature(Base):
+    __tablename__ = "creature"
+
+    guid = Column(INTEGER(unsigned=True), primary_key=True, default=0)
+    id = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    map = Column(SMALLINT(unsigned=True), nullable=False, default=0)
+    spawnMask = Column(Integer, nullable=False, default=1)
+    phaseId = Column(Integer, nullable=False, default=0)
+    phaseGroup = Column(Integer, nullable=False, default=0)
+    modelid = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    equipment_id = Column(TINYINT(), nullable=False, default=0)
+    position_x = Column(Float, nullable=False, default=0.0)
+    position_y = Column(Float, nullable=False, default=0.0)
+    position_z = Column(Float, nullable=False, default=0.0)
+    orientation = Column(Float, nullable=False, default=0.0)
+    spawntimesecs = Column(Integer, nullable=False, default=0)
+    spawndist = Column(Float, nullable=False, default=0.0)
+    currentwaypoint = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    curhealth = Column(Integer, nullable=False, default=1)
+    curmana = Column(Integer, nullable=False, default=0)
+    MovementType = Column(TINYINT(unsigned=True), nullable=False, default=0)
+    npcflag = Column(Integer, nullable=False, default=0)
+    unit_flags = Column(Integer, nullable=False, default=0)
+    dynamicflags = Column(Integer, nullable=False, default=0)
+
+
+class WorldCreatureTemplate(Base):
+    __tablename__ = "creature_template"
+
+    entry = Column(MEDIUMINT(unsigned=True), primary_key=True, default=0)
+    KillCredit1 = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    KillCredit2 = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    modelid1 = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    modelid2 = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    modelid3 = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    modelid4 = Column(MEDIUMINT(unsigned=True), nullable=False, default=0)
+    name = Column(String(100), nullable=False, default="")
+    subname = Column(String(100))
+    IconName = Column(String(100))
+    exp = Column(SMALLINT(), nullable=False, default=0)
+    npc_rank = Column(TINYINT(unsigned=True), nullable=False, default=0)
+    type = Column(TINYINT(unsigned=True), nullable=False, default=0)
+    type_flags = Column(Integer, nullable=False, default=0)
+    type_flags2 = Column(Integer, nullable=False, default=0)
+    family = Column(TINYINT(unsigned=True), nullable=False, default=0)
+    movementId = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    Health_mod = Column(Float, nullable=False, default=1.0)
+    Mana_mod = Column(Float, nullable=False, default=1.0)
+    RacialLeader = Column(TINYINT(unsigned=True), nullable=False, default=0)
+    questItem1 = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    questItem2 = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    questItem3 = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    questItem4 = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    questItem5 = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    questItem6 = Column(INTEGER(unsigned=True), nullable=False, default=0)
+
+
 class PlayerFactionchangeAchievement(Base):
     __tablename__ = "player_factionchange_achievement"
 

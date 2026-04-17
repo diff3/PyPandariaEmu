@@ -76,12 +76,17 @@ def test_load_mount_spells_uses_fallback_when_spell_effect_missing():
     assert set(mount_service.FALLBACK_MOUNT_SPELLS).issubset(mount_service.ALL_MOUNT_SPELLS)
 
 
-def test_get_mount_display_id_returns_known_test_mapping():
+def test_get_mount_display_id_returns_specific_mount_displays():
     mount_service.ALL_MOUNT_SPELLS.clear()
-    mount_service.ALL_MOUNT_SPELLS.update({72286, 34769})
+    mount_service.ALL_MOUNT_SPELLS.update({458, 470, 578, 580, 61425, 72286})
 
+    assert mount_service.get_mount_display_id(458) == 2404
+    assert mount_service.get_mount_display_id(470) == 2402
+    assert mount_service.get_mount_display_id(34769) == 19296
+    assert mount_service.get_mount_display_id(578) == 2346
+    assert mount_service.get_mount_display_id(580) == 247
+    assert mount_service.get_mount_display_id(61425) == 27237
     assert mount_service.get_mount_display_id(72286) == 31007
-    assert mount_service.get_mount_display_id(34769) == 31007
     assert mount_service.get_mount_display_id(999999) == 0
 
 
@@ -89,6 +94,14 @@ def test_fallback_mount_cases_are_recognized_and_mapped():
     mount_service.ALL_MOUNT_SPELLS.clear()
     mount_service._load_fallback_mount_spells()
 
-    for spell_id in (59535, 61455, 63644, 87840, 134735):
+    expected_displays = {
+        59535: 27659,
+        61455: 27240,
+        63644: 22471,
+        87840: 41711,
+        134735: 42703,
+    }
+
+    for spell_id, display_id in expected_displays.items():
         assert mount_service.is_mount_spell(spell_id) is True
-        assert mount_service.get_mount_display_id(spell_id) == 31007
+        assert mount_service.get_mount_display_id(spell_id) == display_id

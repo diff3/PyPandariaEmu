@@ -354,17 +354,19 @@ def build_move_set_flight_speed_payload(session) -> bytes:
 
 
 def build_move_set_can_fly_payload(session, enabled: bool) -> bytes:
-    # Keep fly toggles on the same mover/counter path as speed updates.
     guid_value = int(_movement_sync_guid(session) or 0)
     raw_guid = guid_value.to_bytes(8, "little", signed=False)
-    counter = _next_speed_change_counter(session)
     low_guid_xor = (raw_guid[0] ^ 1) & 0xFF
     realm_guid_xor = (raw_guid[4] ^ 1) & 0xFF
 
-    payload = bytearray()
-    payload.extend(struct.pack("<I", counter))
-    payload.extend(bytes((low_guid_xor, realm_guid_xor)))
-    payload.append(1 if enabled else 0)
+    if enabled:
+        payload = bytearray(b"\x14\x13\x00\x00\x00\x00\x00")
+        payload[5] = low_guid_xor
+        payload[6] = realm_guid_xor
+    else:
+        payload = bytearray(b"\x24\x00\x69\x00\x00\x00\x00")
+        payload[1] = realm_guid_xor
+        payload[6] = low_guid_xor
 
     encoded = bytes(payload)
     Logger.debug(
@@ -397,16 +399,20 @@ def build_same_map_teleport_payload(session) -> bytes:
 
 
 def _is_teleporting(session) -> bool:
-    return bool(getattr(session, "near_teleport_pending", False) or getattr(session, "teleport_pending", False))
+    return bool(
+        getattr(session, "near_teleport_pending", False)
+        or getattr(session, "worldport_ack_pending", False)
+        or getattr(session, "teleport_pending", False)
+    )
 
 
 def _consume_pending_teleport_on_movement(session, opcode_name: str) -> None:
-    # Some clients resume with movement before any explicit teleport ack.
+    # Movement must stay usable during teleport, but the explicit ack still
+    # owns the teleport lifecycle. Clearing pending state here breaks repeated
+    # area-trigger teleports because the later ack gets discarded.
     if not _is_teleporting(session):
         return
-    session.teleport_pending = False
-    session.near_teleport_pending = False
-    Logger.debug("[Teleport] cleared pending state on %s", str(opcode_name))
+    Logger.debug("[Teleport] movement resumed on %s while teleport ack is pending", str(opcode_name))
 
 
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
@@ -451,6 +457,9 @@ def _build_out_of_range_update_object_payload(*, map_id: int, guid: int) -> byte
 
 
 def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
+    if not bool(getattr(session, "gameobjects_visible", True)):
+        return []
+
     map_id = int(getattr(session, "map_id", 0) or 0)
     # Map 0 is valid. Only negative ids mean "no world map".
     if map_id < 0:
@@ -1385,7 +1394,9 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         Logger.debug("[Teleport] ignoring unexpected CMSG_MOVE_TELEPORT_ACK")
         return 0, [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Teleport] unexpected near-teleport ack ignored"))]
 
+    destination = str(getattr(session, "teleport_destination", "") or "?")
     session.near_teleport_pending = False
+    session.worldport_ack_pending = False
     fixspeed_pending = bool(getattr(session, "fixspeed_pending", False))
     session.fixspeed_pending = False
     _capture_persist_position_from_session(session)
@@ -1398,7 +1409,7 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         self_resync_responses = build_same_map_teleport_self_resync_responses(session)
     Logger.info(
         "[Teleport] same-map teleport ack destination=%s pos=(%.2f %.2f %.2f %.2f)",
-        str(getattr(session, "teleport_destination", "") or ""),
+        destination,
         float(getattr(session, "x", 0.0) or 0.0),
         float(getattr(session, "y", 0.0) or 0.0),
         float(getattr(session, "z", 0.0) or 0.0),
@@ -1408,7 +1419,7 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         (
             "SMSG_MESSAGECHAT",
             encode_skyfire_messagechat_system_payload(
-                f"[Teleport] same-map ack -> {str(getattr(session, 'teleport_destination', '') or '?')}"
+                f"[Teleport] same-map ack -> {destination}"
             ),
         )
     ]
@@ -1431,17 +1442,20 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
                 encode_skyfire_messagechat_system_payload("[FixSpeed] same-map ack -> speed refresh"),
             ),
         )
+    session.teleport_destination = None
     return 0, responses
 
 @register("CMSG_MOVE_WORLDPORT_ACK")
 def handle_move_worldport_ack(session, _ctx: PacketContext):
-    if not bool(getattr(session, "teleport_pending", False)):
+    if not bool(getattr(session, "worldport_ack_pending", False)):
         Logger.debug("[Teleport] ignoring unexpected WORLDPORT_ACK")
         return 0, None
 
-    # --- CRITICAL RESET ---
-    session.teleport_pending = False
+    destination = str(getattr(session, "teleport_destination", "") or "?")
+    # WORLDPORT_ACK only confirms the transfer packet. The loading screen
+    # completion still owns the final world bootstrap and pending reset.
     session.near_teleport_pending = False
+    session.worldport_ack_pending = False
 
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
@@ -1450,7 +1464,7 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
 
     Logger.info(
         "[Teleport] world transfer ack destination=%s pos=(%.2f %.2f %.2f %.2f)",
-        str(getattr(session, "teleport_destination", "") or ""),
+        destination,
         float(getattr(session, "x", 0.0) or 0.0),
         float(getattr(session, "y", 0.0) or 0.0),
         float(getattr(session, "z", 0.0) or 0.0),
@@ -1461,7 +1475,7 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
         (
             "SMSG_MESSAGECHAT",
             encode_skyfire_messagechat_system_payload(
-                f"[Teleport] worldport ack -> {str(getattr(session, 'teleport_destination', '') or '?')}"
+                f"[Teleport] worldport ack -> {destination}"
             ),
         )
     ]
@@ -1569,6 +1583,7 @@ def handle_areatrigger(session, ctx: PacketContext):
     # --- IMPORTANT: set flags BEFORE teleport ---
     session.near_teleport_pending = same_map
     session.teleport_pending = not same_map
+    session.worldport_ack_pending = not same_map
 
     # Lazy import (avoid circular import)
     from server.modules.handlers.world.opcodes import chat as chat_handlers

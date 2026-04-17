@@ -35,6 +35,7 @@ from server.modules.game.guid import _guid_bytes_and_masks, GuidHelper, HighGuid
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
 from server.modules.handlers.world.mount.mount_service import (
+    MOUNT_SUPPORT_SPELLS,
     MOUNT_RIDING_SKILL_ID,
     MOUNT_RIDING_SKILL_VALUE,
     granted_mount_spells,
@@ -464,6 +465,31 @@ def build_SMSG_WORLD_SERVER_INFO(_ctx=None) -> bytes:
 
     return bytes(payload)
 
+_EXPERIMENTAL_JOURNAL_MOUNT_SPELLS = (
+    458,   # Brown Horse
+    470,   # Black Stallion
+    580,   # Timber Wolf
+    6648,  # Chestnut Mare
+    68978, # White Kodo
+    68992, # Green Kodo
+    72286, # Invincible
+    32235, # Golden Gryphon
+    34769, # Thalassian Warhorse
+    61425, # Traveler's Tundra Mammoth
+    89832, # Drake of the West Wind
+)
+
+
+def _legacy_known_mount_spells() -> list[int]:
+    return sorted(int(spell_id) for spell_id in granted_mount_spells())
+
+
+def _journal_test_mount_spells() -> list[int]:
+    spell_set = {int(spell_id) for spell_id in MOUNT_SUPPORT_SPELLS}
+    spell_set.update(int(spell_id) for spell_id in _EXPERIMENTAL_JOURNAL_MOUNT_SPELLS)
+    return sorted(spell_set)
+
+
 def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
     import struct
 
@@ -516,7 +542,9 @@ def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
     # ----------------------------------------
     # MOUNTS
     # ----------------------------------------
-    for spell_id in granted_mount_spells():
+    legacy_mount_spells = _legacy_known_mount_spells()
+    journal_test_mount_spells = _journal_test_mount_spells()
+    for spell_id in journal_test_mount_spells:
         spell_set.add(int(spell_id))
 
     # ----------------------------------------
@@ -556,6 +584,11 @@ def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
         race,
         spells,
     )
+    Logger.info(
+        "[TEST_MOUNTS] legacy=%s active=%s",
+        legacy_mount_spells,
+        journal_test_mount_spells,
+    )
 
     Logger.info(
         "[TEST_LANG] base_lang=%s mask=0x%X",
@@ -587,45 +620,62 @@ def build_SMSG_SEND_UNLEARN_SPELLS(ctx) -> bytes:
 
 
 def build_SMSG_UPDATE_ACTION_BUTTONS(ctx) -> bytes:
-    Logger.info("[ACTION_BUTTONS MODE] manual")
     button_count = 132
     packet_type = int(getattr(ctx, "action_button_state", 0) or 0) & 0xFF
     source_buttons = list(getattr(ctx, "action_buttons", []) or [])
+    button_bytes: list[bytearray] = []
 
-    button_bytes = [
-        [0] * 8
-        for _ in range(button_count)
-    ]
-
-    for index, packed_value in enumerate(source_buttons[:button_count]):
+    for index in range(button_count):
         try:
-            packed_value = int(packed_value) & 0xFFFFFFFF
-            action_id = packed_value & 0x00FFFFFF
-            action_type = (packed_value >> 24) & 0xFF
-            raw = struct.pack("<II", action_id, action_type << 24)
-            button_bytes[index] = list(raw)
+            packed_value = int(source_buttons[index]) & 0xFFFFFFFF
         except Exception:
-            button_bytes[index] = [0] * 8
+            packed_value = 0
 
+        action_id = int(packed_value & 0x00FFFFFF)
+        action_type_word = int(packed_value & 0xFF000000)
+        button_bytes.append(bytearray(struct.pack("<II", action_id, action_type_word)))
+
+    payload = bytearray()
     bits = BitWriter()
-    for byte_index in (4, 5, 3, 1, 6, 7, 0, 2):
-        for raw in button_bytes:
-            bits.write_bits(1 if raw[byte_index] else 0, 1)
 
-    payload = bytearray(bits.getvalue())
+    for index in range(button_count):
+        bits.write_bits(1 if button_bytes[index][4] else 0, 1)
+    for index in range(button_count):
+        bits.write_bits(1 if button_bytes[index][5] else 0, 1)
+    for index in range(button_count):
+        bits.write_bits(1 if button_bytes[index][3] else 0, 1)
+    for index in range(button_count):
+        bits.write_bits(1 if button_bytes[index][1] else 0, 1)
+    for index in range(button_count):
+        bits.write_bits(1 if button_bytes[index][6] else 0, 1)
+    for index in range(button_count):
+        bits.write_bits(1 if button_bytes[index][7] else 0, 1)
+    for index in range(button_count):
+        bits.write_bits(1 if button_bytes[index][0] else 0, 1)
+    for index in range(button_count):
+        bits.write_bits(1 if button_bytes[index][2] else 0, 1)
+
+    payload.extend(bits.getvalue())
 
     for byte_index in (0, 1, 4, 6, 7, 2, 5, 3):
-        for raw in button_bytes:
-            payload.append(raw[byte_index] ^ 0x01)
+        for index in range(button_count):
+            value = button_bytes[index][byte_index]
+            payload.append(value ^ 0x01)
 
-    payload.append(packet_type & 0xFF)
-    expected_len = 132 + (button_count * 8) + 1
-    if len(payload) != expected_len:
-        raise AssertionError(
-            f"SMSG_UPDATE_ACTION_BUTTONS malformed length: {len(payload)} != {expected_len}"
-        )
+    payload.append(packet_type)
+
     return bytes(payload)
 
+
+def build_SMSG_ACTION_BUTTONS(session) -> bytes:
+    buttons = getattr(session, "action_buttons", [0] * 132)
+
+    payload = bytearray()
+
+    for value in buttons:
+        payload += int(value).to_bytes(4, "little")
+
+    return bytes(payload)
 
 def build_SMSG_INITIALIZE_FACTIONS(ctx) -> bytes:
     factions = list(getattr(ctx, "factions", []) or [])

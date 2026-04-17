@@ -25,6 +25,10 @@ MOUNT_SUPPORT_SPELLS: tuple[int, ...] = (
     115913,  # Wisdom of the Four Winds
 )
 FALLBACK_MOUNT_SPELLS: tuple[int, ...] = (
+    458,    # Brown Horse
+    470,    # Black Stallion
+    580,    # Timber Wolf
+    6648,   # Chestnut Mare
     59535,  # Black Polar Bear
     59542,  # Black War Mammoth
     61437,  # Grand Ice Mammoth
@@ -59,34 +63,42 @@ FALLBACK_MOUNT_SPELLS: tuple[int, ...] = (
     578,    # Summon Felsteed
 )
 MOUNT_DISPLAY_BY_SPELL: dict[int, int] = {
-    59535: 31007,
-    59542: 31007,
-    61437: 31007,
-    61455: 31007,
-    63644: 31007,
-    63645: 31007,
-    68398: 31007,
-    68975: 31007,
-    68976: 31007,
-    68978: 31007,
-    68992: 31007,
-    68996: 31007,
-    76271: 31007,
-    76282: 31007,
-    76292: 31007,
-    76294: 31007,
-    79741: 31007,
-    79742: 31007,
-    82246: 31007,
-    87840: 31007,
-    89832: 31007,
-    89964: 31007,
-    94293: 31007,
-    96220: 31007,
-    111621: 31007,
-    113873: 31007,
-    134735: 31007,
-    72286: 31007,  # Invincible
+    458: 2404,       # Brown Horse
+    470: 2402,       # Black Stallion
+    578: 2346,       # Felsteed
+    580: 247,        # Timber Wolf
+    6648: 2405,      # Chestnut Mare
+    32235: 17697,    # Golden Gryphon
+    34769: 19296,    # Thalassian Warhorse
+    59535: 27659,    # Black Polar Bear Mount
+    59542: 27247,    # Black War Mammoth
+    61425: 27237,    # Traveler's Tundra Mammoth
+    61437: 27239,    # Grand Ice Mammoth
+    61455: 27240,    # Grand Black War Mammoth
+    63644: 22471,    # Argent Hippogryph
+    63645: 28605,    # White Skeletal Warhorse
+    68398: 30989,    # Big Love Rocket
+    68975: 31721,    # Wooly White Rhino
+    68976: 31992,    # X-53 Touring Rocket
+    68978: 12241,    # White Kodo
+    68992: 12245,    # Green Kodo
+    68996: 11641,    # Brown Kodo
+    76271: 31992,    # X-53 Touring Rocket
+    76282: 31992,    # X-53 Touring Rocket
+    76292: 31992,    # X-53 Touring Rocket
+    76294: 31992,    # X-53 Touring Rocket
+    79741: 38668,    # Vicious War Steed
+    79742: 38607,    # Vicious War Wolf
+    82246: 38668,    # Vicious War Steed
+    87840: 41711,    # Azure Water Strider
+    89832: 35754,    # Drake of the West Wind
+    89964: 38607,    # Vicious War Wolf
+    94293: 38668,    # Vicious War Steed
+    96220: 28607,    # Swift Red Hawkstrider
+    111621: 41089,   # White Riding Yak
+    113873: 41903,   # Pandaren Kite
+    134735: 42703,   # Grand Expedition Yak
+    72286: 31007,    # Invincible
 }
 DEFAULT_TEST_MOUNT_DISPLAY_ID = 31007
 

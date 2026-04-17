@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import random
 import time
 from typing import Any, Callable, Optional
 
+import yaml
+from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.game.inventory import (
@@ -191,9 +194,11 @@ def _gps_strings(session) -> tuple[str, str]:
     y = float(getattr(session, "y", 0.0) or 0.0)
     z = float(getattr(session, "z", 0.0) or 0.0)
     orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+
     feedback = f"[GPS] map={map_id} x={x:.2f} y={y:.2f} z={z:.2f} o={orientation:.2f}"
-    telxyz = f".telxyz {map_id} {x:.2f} {y:.2f} {z:.2f} {orientation:.2f}"
-    return feedback, telxyz
+    tel_coord = f".tel coord {map_id} {x:.2f} {y:.2f} {z:.2f} {orientation:.2f}"
+
+    return feedback, tel_coord
 
 
 def _resolve_max_level(session) -> int:
@@ -374,6 +379,174 @@ def cmd_spawngo(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
+def _gameobject_cache_status() -> dict[str, int | bool]:
+    config = ConfigLoader.load_config()
+    preload_enabled = bool(config.get("worldserver", {}).get("preload_gameobjects", True))
+    cache_by_map = getattr(DatabaseConnection, "_cache_gameobjects_by_map", {}) or {}
+    cache_loaded = bool(getattr(DatabaseConnection, "_cache_gameobjects_loaded", False))
+    total = sum(len(entries) for entries in cache_by_map.values())
+    return {
+        "preload_enabled": preload_enabled,
+        "cache_loaded": cache_loaded,
+        "maps": int(len(cache_by_map)),
+        "total": int(total),
+    }
+
+
+def _hide_loaded_gameobjects(session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.opcodes.movement import _build_out_of_range_update_object_payload
+
+    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
+    if not isinstance(loaded_gameobjects, set):
+        loaded_gameobjects = set()
+        session.loaded_gameobjects = loaded_gameobjects
+
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    responses = [
+        (
+            "SMSG_UPDATE_OBJECT",
+            _build_out_of_range_update_object_payload(map_id=map_id, guid=int(guid)),
+        )
+        for guid in sorted(int(guid) for guid in loaded_gameobjects)
+    ]
+    loaded_gameobjects.clear()
+    return responses
+
+
+def _show_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.bootstrap.replay import build_database_gameobject_responses
+
+    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
+    if not isinstance(loaded_gameobjects, set):
+        loaded_gameobjects = set()
+        session.loaded_gameobjects = loaded_gameobjects
+
+    return list(build_database_gameobject_responses(session, loaded_guids=loaded_gameobjects))
+
+
+def _hide_loaded_npcs(session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.opcodes.movement import _build_out_of_range_update_object_payload
+
+    loaded_npcs = getattr(session, "loaded_npcs", None)
+    if not isinstance(loaded_npcs, set):
+        loaded_npcs = set()
+        session.loaded_npcs = loaded_npcs
+
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    responses = [
+        (
+            "SMSG_UPDATE_OBJECT",
+            _build_out_of_range_update_object_payload(map_id=map_id, guid=int(guid)),
+        )
+        for guid in sorted(int(guid) for guid in loaded_npcs)
+    ]
+    loaded_npcs.clear()
+    return responses
+
+
+def _show_nearby_npcs(session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.bootstrap.replay import build_database_creature_responses
+
+    loaded_npcs = getattr(session, "loaded_npcs", None)
+    if not isinstance(loaded_npcs, set):
+        loaded_npcs = set()
+        session.loaded_npcs = loaded_npcs
+
+    return list(build_database_creature_responses(session, loaded_guids=loaded_npcs))
+
+
+def _npc_cache_status() -> dict[str, int | bool]:
+    config = ConfigLoader.load_config()
+    preload_enabled = bool(config.get("worldserver", {}).get("preload_npcs", False))
+    cache_by_map = getattr(DatabaseConnection, "_cache_creatures_by_map", {}) or {}
+    cache_loaded = bool(getattr(DatabaseConnection, "_cache_creatures_loaded", False))
+    template_count = len(getattr(DatabaseConnection, "_cache_creature_templates", {}) or {})
+    total = sum(len(entries) for entries in cache_by_map.values())
+    return {
+        "preload_enabled": preload_enabled,
+        "cache_loaded": cache_loaded,
+        "maps": int(len(cache_by_map)),
+        "total": int(total),
+        "templates": int(template_count),
+    }
+
+
+def world_go_status(session, _args):
+    status = _gameobject_cache_status()
+    visible = bool(getattr(session, "gameobjects_visible", True))
+    loaded_now = len(getattr(session, "loaded_gameobjects", set()) or ())
+    return _notification_response(
+        f"[WorldGO] visible={int(visible)} loaded_now={int(loaded_now)} "
+        f"cache_loaded={int(status['cache_loaded'])} preload={int(status['preload_enabled'])} "
+        f"cached_total={int(status['total'])} maps={int(status['maps'])}"
+    )
+
+
+def world_go_hide(session, _args):
+    session.gameobjects_visible = False
+    responses = _hide_loaded_gameobjects(session)
+    responses.extend(_notification_response("[WorldGO] hidden"))
+    return responses
+
+
+def world_go_show(session, _args):
+    session.gameobjects_visible = True
+    session.last_gameobject_stream_at = 0.0
+    responses = _show_nearby_gameobjects(session)
+    responses.extend(_notification_response(f"[WorldGO] shown {len(responses)} updates"))
+    return responses
+
+
+def world_npc_status(session, _args):
+    status = _npc_cache_status()
+    visible = bool(getattr(session, "npcs_visible", False))
+    loaded_now = len(getattr(session, "loaded_npcs", set()) or ())
+    return _notification_response(
+        f"[WorldNPC] visible={int(visible)} loaded_now={int(loaded_now)} "
+        f"cache_loaded={int(status['cache_loaded'])} preload={int(status['preload_enabled'])} "
+        f"cached_total={int(status['total'])} templates={int(status['templates'])} maps={int(status['maps'])}"
+    )
+
+
+def world_npc_hide(session, _args):
+    session.npcs_visible = False
+    responses = _hide_loaded_npcs(session)
+    responses.extend(_notification_response("[WorldNPC] hidden"))
+    return responses
+
+
+def world_npc_show(session, _args):
+    session.npcs_visible = True
+    session.last_npc_stream_at = 0.0
+    responses = _show_nearby_npcs(session)
+    responses.extend(_notification_response(f"[WorldNPC] shown {len(responses)} updates"))
+    return responses
+
+
+@register_command("world", ".world <go|npc> <hide|show|status>")
+def cmd_world(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if len(args) < 2:
+        return _notification_response("Usage: .world <go|npc> <hide|show|status>")
+
+    kind = args[0].lower()
+    sub = args[1].lower()
+    if kind == "go":
+        if sub == "hide":
+            return world_go_hide(session, args[2:])
+        if sub == "show":
+            return world_go_show(session, args[2:])
+        if sub == "status":
+            return world_go_status(session, args[2:])
+    if kind == "npc":
+        if sub == "hide":
+            return world_npc_hide(session, args[2:])
+        if sub == "show":
+            return world_npc_show(session, args[2:])
+        if sub == "status":
+            return world_npc_status(session, args[2:])
+    return _notification_response("Usage: .world <go|npc> <hide|show|status>")
+
+
 @register_command("level", ".level [delta]|set <level>")
 def cmd_level(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Adjust or set player level."""
@@ -463,6 +636,7 @@ def cmd_fly(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Toggle self flying in the sandbox."""
     from server.modules.handlers.world.opcodes.movement import (
         build_move_set_can_fly_payload,
+        build_move_set_run_speed_payload,
         build_move_set_flight_speed_payload,
         resync_movement,
     )
@@ -483,16 +657,15 @@ def cmd_fly(session, args: list[str]) -> list[tuple[str, bytes]]:
         int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or getattr(session, "world_guid", 0) or 0),
     )
 
-    responses: list[tuple[str, bytes]] = [
+    responses: list[tuple[str, bytes]] = []
+    responses.append(("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(session)))
+    responses.append(
         (
             "SMSG_MOVE_SET_CAN_FLY" if fly_enabled else "SMSG_MOVE_UNSET_CAN_FLY",
             build_move_set_can_fly_payload(session, fly_enabled),
         )
-    ]
-    if fly_enabled:
-        responses.append(
-            ("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session))
-        )
+    )
+    responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session)))
     movement_responses = list(resync_movement(session))
     if movement_responses:
         responses.extend(movement_responses)
@@ -704,28 +877,33 @@ def build_spell_go(player, spell_id: int) -> tuple[str, bytes]:
 
     return ("SMSG_SPELL_GO", bytes(payload))
 
+
+def build_spell_start(player, spell_id: int) -> tuple[str, bytes]:
+    payload = bytearray.fromhex(
+        "00 00 00 40 00 00 00 00 00 00 00 00 40 00 01 00 "
+        "EA 00 5C 00 00 00 0B 38 DC 05 00 00 E0 93 04 00 "
+        "00 02 08 00 00 06 01 06 02 02 F4 7D 00 00"
+    )
+
+    spell_offset = 42
+    payload[spell_offset:spell_offset + 4] = int(spell_id).to_bytes(4, "little")
+    return ("SMSG_SPELL_START", bytes(payload))
+
 @register_command("mount", ".mount", allow_args=False)
 def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.opcodes.spells import build_raw_update_object
-
-    Logger.error("[MOUNT HARD OVERRIDE FINAL]")
+    from server.modules.handlers.world.opcodes.movement import resync_movement
 
     mount_spell_id = int(_helper("chat_mount_spell_id"))
-    display_id = 31007
-
-    session.unit_flags = 0x08000000
-    session.mount_display_id = display_id
-
-    responses = [
-        # build_spell_go(session, mount_spell_id),
-        build_raw_update_object(session, [
-            (96, session.unit_flags),
-            (106, display_id),
-            (110, 0x00080000),
-        ]),
-    ]
-
-    return responses
+    Logger.info("[Mount] spell_id=%s", mount_spell_id)
+    responses = list(spells_handlers.handle_mount(session, mount_spell_id))
+    Logger.info(
+        "[Mount] speed=%.2f mounted=%s",
+        float(getattr(session, "run_speed", 0.0) or 0.0),
+        bool(getattr(session, "is_mounted", False)),
+    )
+    responses.extend(resync_movement(session))
+    Logger.info("[Mount] committed")
+    return _append_feedback_response(responses, "[Mount] mount requested")
 
 #@register_command("mount", ".mount", allow_args=False)
 def cmd_mount_old(session, args: list[str]) -> list[tuple[str, bytes]]:
@@ -1029,25 +1207,16 @@ def cmd_save(session, args: list[str]) -> list[tuple[str, bytes]]:
     return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
 
 
-@register_command("telxyz", ".telxyz <map> <x> <y> <z> <orientation>")
-def cmd_telxyz(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Teleport to explicit coordinates."""
+def _telxyz(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Teleport to explicit coordinates (internal helper)."""
     player_name = (
         str(getattr(session, "player_name", "") or "").strip()
         or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
     )
+
     if len(args) != 5:
         Logger.info("[Teleport] Invalid .telxyz syntax command=%r", args)
-        payload_out = encode_messagechat_payload(
-            chat_type=CHAT_MSG_SAY,
-            language=0,
-            sender_guid=int(getattr(session, "player_guid", 0) or getattr(session, "world_guid", 0) or 0),
-            sender_name=player_name,
-            target_guid=0,
-            target_name="",
-            message="Usage: .telxyz <map> <x> <y> <z> <orientation>",
-        )
-        return [("SMSG_MESSAGECHAT", payload_out)]
+        return _notification_response("Usage: .tel coord <map> <x> <y> <z> <orientation>")
 
     try:
         map_id = int(args[0])
@@ -1057,7 +1226,7 @@ def cmd_telxyz(session, args: list[str]) -> list[tuple[str, bytes]]:
         orientation = float(args[4])
     except (TypeError, ValueError):
         Logger.info("[Teleport] Invalid .telxyz args command=%r", args)
-        return []
+        return _notification_response("Usage: .tel coord <map> <x> <y> <z> <orientation>")
 
     Logger.info(
         "[Teleport] %s -> manual (%s %.2f %.2f %.2f %.2f)",
@@ -1068,33 +1237,41 @@ def cmd_telxyz(session, args: list[str]) -> list[tuple[str, bytes]]:
         z,
         orientation,
     )
+
     current_map_id = int(getattr(session, "map_id", 0) or 0)
     session.teleport_destination = f"manual:{map_id}:{x:.2f}:{y:.2f}:{z:.2f}:{orientation:.2f}"
+
     responses = _helper("apply_player_state_change")(
         session,
         position=(x, y, z, orientation),
         map_id=map_id,
     )
+
     if current_map_id == int(map_id):
         return _append_feedback_response(
             responses,
             f"[Teleport] near start -> {session.teleport_destination} ({x:.1f} {y:.1f} {z:.1f})",
         )
+
     return _append_feedback_response(
         responses,
         f"[Teleport] transfer start -> {session.teleport_destination} map={int(map_id)} ({x:.1f} {y:.1f} {z:.1f})",
     )
 
 
-@register_command("tel", ".tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel nearest")
+@register_command(
+    "tel",
+    ".tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel coord <map> <x> <y> <z> <orientation>"
+)
 def cmd_tel(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Handle named teleport commands."""
     if not args:
         return _notification_response(
-            "Usage: .tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel nearest"
+            "Usage: .tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel coord <map> <x> <y> <z> <orientation>"
         )
 
     action = str(args[0]).strip().lower()
+
     if action == "search":
         query = " ".join(args[1:]) if len(args) >= 2 else ""
         matches = search_teleports(query)
@@ -1134,16 +1311,12 @@ def cmd_tel(session, args: list[str]) -> list[tuple[str, bytes]]:
             return _notification_response("Teleport not found")
         return _notification_response("Teleport removed")
 
-    if action == "nearest":
-        nearest = nearest_teleport(
-            int(getattr(session, "map_id", 0) or 0),
-            float(getattr(session, "x", 0.0) or 0.0),
-            float(getattr(session, "y", 0.0) or 0.0),
-        )
-        if nearest is None:
-            return _notification_response("Nearest: none")
-        return _notification_response(f"Nearest: {nearest['name']}")
+    if action == "coord":
+        if len(args) != 6:
+            return _notification_response("Usage: .tel coord <map> <x> <y> <z> <orientation>")
+        return _telxyz(session, args[1:])
 
+    # Default: .tel <name>
     destination_name = " ".join(args).strip()
     destination = find_teleport(destination_name)
     if destination is None:
@@ -1278,47 +1451,237 @@ def cmd_fetch(session, args: list[str]) -> list[tuple[str, bytes]]:
         map_id=int(getattr(session, "map_id", 0) or 0),
     )
 
-    # 🔥 CRITICAL: send packets to target, not caller
     target.send_response(responses)
 
     return _notification_response(f"[Fetch] {target_name} -> you")
 
+_DEFAULT_MOTD = "Welcome to PyPandaria!"
+_MOTD = _DEFAULT_MOTD
+_DEFAULT_CONFIG_MOTD_PATH = Path(__file__).resolve().parents[5] / "config" / "default.yaml"
+
+
+def _load_motd_from_config() -> str:
+    """Read MOTD from merged config."""
+    cfg = ConfigLoader.get_config() or {}
+    motd = str((cfg.get("worldserver", {}) or {}).get("motd", "") or "").strip()
+    return motd or _DEFAULT_MOTD
+
+
+def _persist_motd_to_default_config(message: str) -> str:
+    """Persist MOTD to default.yaml so it survives restart."""
+    normalized = str(message or "").strip() or _DEFAULT_MOTD
+    path = Path(_DEFAULT_CONFIG_MOTD_PATH)
+    current = {}
+
+    if path.is_file():
+        with path.open("r", encoding="utf-8") as handle:
+            current = yaml.safe_load(handle) or {}
+
+    world_cfg = current.setdefault("worldserver", {})
+    if not isinstance(world_cfg, dict):
+        world_cfg = {}
+        current["worldserver"] = world_cfg
+    world_cfg["motd"] = normalized
+
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(current, handle, sort_keys=False, allow_unicode=True)
+
+    ConfigLoader.reload_config()
+    return normalized
+
+def get_motd() -> str:
+    """Return current MOTD."""
+    from server.session.world_session import WorldSession
+
+    motd = str(getattr(WorldSession, "motd", "") or "").strip()
+    if motd:
+        return motd
+    motd = str(_MOTD or "").strip()
+    if motd:
+        return motd
+    return _load_motd_from_config()
+
+
+def _set_runtime_motd(session, message: str) -> str:
+    """Update the runtime MOTD for current and future sessions."""
+    global _MOTD
+
+    from server.session.world_session import WorldSession
+
+    normalized = _persist_motd_to_default_config(message)
+
+    _MOTD = normalized
+    WorldSession.motd = normalized
+
+    state = getattr(session, "global_state", None)
+    for target in list(getattr(state, "sessions", set()) or ()):
+        target.motd = normalized
+    session.motd = normalized
+    return normalized
+
+
+def _format_duration(seconds: int) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _server_runtime_snapshot(session) -> dict[str, Any]:
+    from server import worldserver
+
+    with worldserver._ACTIVE_CLIENTS_LOCK:
+        client_count = len(worldserver._ACTIVE_CLIENTS)
+
+    sessions = list(getattr(getattr(session, "global_state", None), "sessions", set()) or ())
+    online_count = sum(1 for target in sessions if int(getattr(target, "char_guid", 0) or 0) > 0)
+    in_world_count = sum(1 for target in sessions if str(getattr(target, "login_state", "")) == "IN_WORLD")
+    uptime_seconds = int(time.time() - float(getattr(worldserver, "STARTED_AT", time.time()) or time.time()))
+
+    return {
+        "running": bool(getattr(worldserver, "running", False)),
+        "clients": int(client_count),
+        "sessions": int(len(sessions)),
+        "online": int(online_count),
+        "in_world": int(in_world_count),
+        "uptime": _format_duration(uptime_seconds),
+        "motd": get_motd(),
+    }
+
+
+def set_motd(message: str) -> None:
+    """Set MOTD (stub)."""
+    global _MOTD
+    _MOTD = message.strip()
+
+def server_info(session, args):
+    snapshot = _server_runtime_snapshot(session)
+    return _notification_response(
+        "Server info: PyPandariaEmu | "
+        f"uptime={snapshot['uptime']} | "
+        f"clients={snapshot['clients']} | "
+        f"online={snapshot['online']} | "
+        f"motd={snapshot['motd']}"
+    )
+
+def server_status(session, args):
+    snapshot = _server_runtime_snapshot(session)
+    status = "running" if snapshot["running"] else "stopped"
+    return _notification_response(
+        f"Server status: {status} | clients={snapshot['clients']} | "
+        f"sessions={snapshot['sessions']} | in_world={snapshot['in_world']}"
+    )
+
+def server_restart(session, args):
+    from server import worldserver
+
+    Logger.info("[SERVER] restart requested by %s", str(getattr(session, "player_name", "") or "unknown"))
+    broadcast_system_message("[Server] restart requested", scope="world")
+    worldserver.request_restart()
+    return _notification_response("Restart scheduled")
+
+def server_motd(session, args):
+    if not args:
+        return _notification_response(f"MOTD: {get_motd()}")
+
+    if args[0] == "set":
+        if len(args) < 2:
+            return _notification_response("Usage: .server motd set <message>")
+        msg = " ".join(args[1:])
+        _set_runtime_motd(session, msg)
+        return _notification_response("MOTD updated")
+
+    return _notification_response("Usage: .server motd [set <message>]")
+
+
+def server_msg(session, args):
+    """Broadcast a server system message."""
+    message = " ".join(args).strip()
+    if not message:
+        return _notification_response("Usage: .server msg <message>")
+    Logger.info("[ServerMsg] message=%r", message)
+    broadcast_system_message(message, scope="world")
+    return _notification_response(f"[Server] sent: {message}")
+
+@register_command(
+    "server",
+    ".server <info|status|restart|motd [set <message>]|msg <message>>"
+)
+def cmd_server(session, args):
+    if not args:
+        return _notification_response(
+            "Usage: .server <info|status|restart|motd [set <message>]|msg <message>>"
+        )
+
+    subcommands = {
+        "info": (server_info, False),
+        "status": (server_status, False),
+        "restart": (server_restart, False),
+        "motd": (server_motd, None),  # special case (handles its own args)
+        "msg": (server_msg, True),
+    }
+
+    sub = args[0].lower()
+    if sub not in subcommands:
+        return _notification_response(f"Unknown subcommand: {sub}")
+
+    handler, needs_args = subcommands[sub]
+    sub_args = args[1:]
+
+    # Only enforce arg rules if explicitly True/False
+    if needs_args is True and not sub_args:
+        return _notification_response(f"Missing arguments for '{sub}'")
+
+    if needs_args is False and sub_args:
+        return _notification_response(f"'{sub}' takes no arguments")
+
+    return handler(session, sub_args)
+
+
 
 # Real commands live here for quick scanning.
 PRIMARY_COMMANDS = {
-    "help": Command(handler=cmd_help, usage=".help"),
-    "roll": Command(handler=cmd_roll, usage=".roll"),
-    "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),
-    # "spawngo": Command(handler=cmd_spawngo, usage=".spawngo", allow_args=False),
-    "level": Command(handler=cmd_level, usage=".level [delta]|set <level>"),
-    "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
-    "fly": Command(handler=cmd_fly, usage=".fly <on|off>"),
-    "weather": Command(handler=cmd_weather, usage=".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]"),
-    "time": Command(handler=cmd_time, usage=".time <HH:MM|day|night|dawn|dusk|noon|midnight>"),
-    "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),
-    "learnspell": Command(handler=cmd_learnspell, usage=".learnspell <spell_id>", require_args=True),
-    "castspell": Command(handler=cmd_castspell, usage=".castspell <spell_id>", require_args=True),
-    "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
-    "dismount": Command(handler=cmd_dismount, usage=".dismount", allow_args=False),
-    "morph": Command(handler=cmd_morph, usage=".morph <displayId|namel|list>", require_args=True),
-    "demorph": Command(handler=cmd_demorph, usage=".demorph", allow_args=False),
-    "addmoney": Command(handler=cmd_addmoney, usage=".addmoney <copper | 10g10s10c>", require_args=False),
     "additem": Command(handler=cmd_additem, usage=".additem <itemEntry> [count]"),
+    "addmoney": Command(handler=cmd_addmoney, usage=".addmoney <copper | 10g10s10c>", require_args=False),
     "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>"),
-    "reload": Command(handler=cmd_invfix, usage=".reload", allow_args=False),
+    "castspell": Command(handler=cmd_castspell, usage=".castspell <spell_id>", require_args=True),
+    "demorph": Command(handler=cmd_demorph, usage=".demorph", allow_args=False),
+    "dismount": Command(handler=cmd_dismount, usage=".dismount", allow_args=False),
+    "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", require_args=True),
+    "fly": Command(handler=cmd_fly, usage=".fly <on|off>"),
     # "fixplayer": Command(handler=cmd_fixplayer, usage=".fixplayer [teleport]"),
     # "fixspeed": Command(handler=cmd_fixspeed, usage=".fixspeed", allow_args=False),
+    "goto": Command(handler=cmd_goto, usage=".goto <player>", require_args=True),
+    "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),
+    "help": Command(handler=cmd_help, usage=".help"),
+    "learnspell": Command(handler=cmd_learnspell, usage=".learnspell <spell_id>", require_args=True),
+    "level": Command(handler=cmd_level, usage=".level [delta]|set <level>"),
+    "map": Command(handler=cmd_map, usage=".map <on|0>"),
+    "morph": Command(handler=cmd_morph, usage=".morph <displayId|namel|list>", require_args=True),
+    "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
+    "reload": Command(handler=cmd_invfix, usage=".reload", allow_args=False),
+    "roll": Command(handler=cmd_roll, usage=".roll"),
     "save": Command(handler=cmd_save, usage=".save", allow_args=False),
-    "telxyz": Command(handler=cmd_telxyz, usage=".telxyz <map> <x> <y> <z> <orientation>"),
+    "server": Command(
+        handler=cmd_server,
+        usage=".server  <info|status|restart|motd [set <message>]|msg <message>>",
+    ),
+    # "spawngo": Command(handler=cmd_spawngo, usage=".spawngo", allow_args=False),
+    "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
+    "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),
+    "world": Command(handler=cmd_world, usage=".world <go|npc> <hide|show|status>"),
+    # "telxyz": Command(handler=cmd_telxyz, usage=".telxyz <map> <x> <y> <z> <orientation>"),
     "tel": Command(
         handler=cmd_tel,
-        usage=".tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel nearest",
+        usage=".tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel coord <map> <x> <y> <z> <orientation>",
     ),
-    "goto": Command(handler=cmd_goto, usage=".goto <player>", require_args=True),
-    "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", require_args=True),
-    "map": Command(handler=cmd_map, usage=".map <on|0>"),
+    "time": Command(handler=cmd_time, usage=".time <HH:MM|day|night|dawn|dusk|noon|midnight>"),
+    "weather": Command(handler=cmd_weather, usage=".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]"),
 }
-
 
 # Aliases resolve to names in PRIMARY_COMMANDS.
 ALIASES = {}

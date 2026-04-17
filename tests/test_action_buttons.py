@@ -134,7 +134,13 @@ def test_handle_set_action_button_updates_session_and_saves(monkeypatch):
     assert code == 0
     assert responses is None
     assert session.action_buttons[7] == 116
-    assert saved == {}
+    assert saved == {
+        "guid": 42,
+        "button": 7,
+        "action": 116,
+        "type_": 0,
+        "spec": 0,
+    }
 
 
 def test_handle_set_action_button_clears_slot(monkeypatch):
@@ -162,4 +168,10 @@ def test_handle_set_action_button_clears_slot(monkeypatch):
     assert code == 0
     assert responses is None
     assert session.action_buttons[3] == 0
-    assert saved == {}
+    assert saved == {
+        "guid": 99,
+        "button": 3,
+        "action": 0,
+        "type_": 0,
+        "spec": 0,
+    }

@@ -48,7 +48,7 @@ class WorldSession:
     account_data_mask: int = 0
     server_time: int = 0
     game_time: int = 0
-    motd = "Hello World"
+    motd: str = ""
     addons: List[Dict[str, Any]] = field(default_factory=list)
     addon_trailing_value: int = 0
     banned_addons: List[Dict[str, Any]] = field(default_factory=list)
@@ -158,6 +158,10 @@ class WorldSession:
     action_buttons: List[int] = field(default_factory=lambda: [0] * 132)
     is_mounted: bool = False
     mount_spell: Optional[int] = None
+    active_mount_aura_spell_id: Optional[int] = None
+    active_mount_aura_slot: int = 0
+    active_fly_aura_spell_id: Optional[int] = None
+    active_fly_aura_slot: int = 1
 
     # --------------------------------------------------
     # World state
@@ -180,6 +184,7 @@ class WorldSession:
     send_response: Any = None
     pending_account_data_requests: List[int] = field(default_factory=list)
     teleport_pending: bool = False
+    worldport_ack_pending: bool = False
     teleport_destination: Optional[str] = None
     near_teleport_pending: bool = False
     chat_joined: bool = False
@@ -189,8 +194,12 @@ class WorldSession:
     is_dnd: bool = False
     skyfire_login_stage: int = 0
     visible_guids: set[int] = field(default_factory=set)
+    gameobjects_visible: bool = True
     loaded_gameobjects: set[int] = field(default_factory=set)
+    npcs_visible: bool = False
+    loaded_npcs: set[int] = field(default_factory=set)
     last_gameobject_stream_at: float = 0.0
+    last_npc_stream_at: float = 0.0
     last_position_save_at: float = 0.0
     position_dirty: bool = False
     persist_map_id: int = 0

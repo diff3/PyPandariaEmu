@@ -809,6 +809,7 @@ def apply_player_state_change(
         movement_handlers._mark_position_dirty(session)
         if same_map:
             session.teleport_pending = False
+            session.worldport_ack_pending = False
             session.near_teleport_pending = True
             return apply_state_and_resync(
                 session,
@@ -816,6 +817,7 @@ def apply_player_state_change(
             )
 
         session.teleport_pending = True
+        session.worldport_ack_pending = True
         session.near_teleport_pending = False
         return [
             (

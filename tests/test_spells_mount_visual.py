@@ -33,6 +33,7 @@ def _import_spells_handlers():
         },
         "server.modules.handlers.world.opcodes.movement": {
             "build_move_set_run_speed_payload": lambda session: b"",
+            "build_move_set_flight_speed_payload": lambda session: b"",
         },
         "server.modules.handlers.world.mount.mount_service": {
             "ALL_MOUNT_SPELLS": set(),
@@ -82,8 +83,10 @@ def test_build_mount_visual_responses_uses_char_guid_and_only_mount_field(monkey
             "map_id": 530,
             "guid": 3,
             "field_updates": [
-                (0x60, 0x08000020),
-                (106, 2404),
+                (61, 0x08000008),
+                (69, 0),
+                (70, 0),
+                (71, 2404),
             ],
         }
     ]
@@ -121,13 +124,105 @@ def test_build_mount_visual_responses_clears_mount_display(monkeypatch):
             "map_id": 1,
             "guid": 3,
             "field_updates": [
-                (0x60, 0x00000020),
-                (106, 0),
+                (61, 0x00000008),
+                (69, 0),
+                (70, 0),
+                (71, 0),
             ],
         }
     ]
     assert session.unit_flags == 0x00000020
     assert session.mount_display_id == 0
+
+
+def test_apply_and_remove_mount_aura_track_runtime_state():
+    spells_handlers = _import_spells_handlers()
+    session = SimpleNamespace(
+        active_mount_aura_spell_id=None,
+        active_mount_aura_slot=0,
+        mount_spell=59535,
+    )
+
+    apply_responses = spells_handlers.apply_mount_aura(session, 59535)
+    remove_responses = spells_handlers.remove_mount_aura(session)
+
+    assert apply_responses[0][0] == "SMSG_AURA_UPDATE"
+    assert apply_responses[0][1][14:18] == (59535).to_bytes(4, "little")
+    assert session.active_mount_aura_spell_id is None
+    assert remove_responses == [("SMSG_AURA_UPDATE", bytes.fromhex("8000004400000602"))]
+
+
+def test_apply_and_remove_fly_aura_track_runtime_state():
+    spells_handlers = _import_spells_handlers()
+    session = SimpleNamespace(
+        active_fly_aura_spell_id=None,
+        active_fly_aura_slot=1,
+    )
+
+    apply_responses = spells_handlers.apply_fly_aura(session)
+    remove_responses = spells_handlers.remove_fly_aura(session)
+
+    assert [opcode for opcode, _payload in apply_responses] == [
+        "SMSG_AURA_UPDATE",
+        "SMSG_AURA_UPDATE",
+    ]
+    assert apply_responses[0][1] == bytes.fromhex("80000044400001000000000B5A00F47D0000000100000000007943040602")
+    assert apply_responses[1][1] == bytes.fromhex("8000004440000000000000035A00BD5101000003000000050602")
+    assert session.active_fly_aura_spell_id is None
+    assert remove_responses == [
+        ("SMSG_AURA_UPDATE", bytes.fromhex("8000004400040602")),
+        ("SMSG_AURA_UPDATE", bytes.fromhex("8000004400050602")),
+    ]
+
+
+def test_handle_mount_and_dismount_use_aura_visual_and_speed(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda spell_id: 2404)
+    monkeypatch.setattr(spells_handlers, "build_move_set_run_speed_payload", lambda session: b"run")
+    monkeypatch.setattr(spells_handlers, "build_move_set_flight_speed_payload", lambda session: b"flight")
+    monkeypatch.setattr(
+        spells_handlers,
+        "build_multi_u32_update_object_payload",
+        lambda **fields: b"mount-update",
+    )
+
+    session = SimpleNamespace(
+        map_id=1,
+        char_guid=3,
+        world_guid=0x0003000100000003,
+        unit_flags=0x00000020,
+        mount_display_id=0,
+        mount_spell=None,
+        is_mounted=False,
+        run_speed=7.0,
+        fly_speed=7.0,
+        display_id=15475,
+        native_display_id=15475,
+        active_mount_aura_spell_id=None,
+        active_mount_aura_slot=0,
+    )
+
+    mount_responses = spells_handlers.handle_mount(session, 59535)
+    assert [opcode for opcode, _payload in mount_responses[:4]] == [
+        "SMSG_AURA_UPDATE",
+        "SMSG_UPDATE_OBJECT",
+        "SMSG_MOVE_SET_RUN_SPEED",
+        "SMSG_MOVE_SET_FLIGHT_SPEED",
+    ]
+    assert session.is_mounted is True
+    assert session.mount_spell == 59535
+    assert session.active_mount_aura_spell_id == 59535
+
+    dismount_responses = spells_handlers.dismount(session)
+    assert [opcode for opcode, _payload in dismount_responses[:4]] == [
+        "SMSG_AURA_UPDATE",
+        "SMSG_UPDATE_OBJECT",
+        "SMSG_MOVE_SET_RUN_SPEED",
+        "SMSG_MOVE_SET_FLIGHT_SPEED",
+    ]
+    assert session.is_mounted is False
+    assert session.mount_spell is None
+    assert session.active_mount_aura_spell_id is None
 
 
 def test_initialize_session_language_state_sets_orcish_for_alliance():

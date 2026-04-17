@@ -19,6 +19,8 @@ from server.modules.database.CharactersModel import (
 )
 from server.modules.database.WorldModel import (
     ItemTemplate,
+    WorldCreature,
+    WorldCreatureTemplate,
     WorldGameObject,
     WorldGameObjectTemplate,
     GameEventGameObject,
@@ -60,6 +62,11 @@ class DatabaseConnection:
     _cache_xp_for_level = {}
     _item_template_cache = {}
     _item_template_details_cache = {}
+    _cache_creature_templates = {}
+    _cache_creatures_by_map = {}
+    _cache_creatures_loaded = False
+    _cache_gameobjects_by_map = {}
+    _cache_gameobjects_loaded = False
     _account_data_tables_ready = False
     _addon_tables_ready = False
     _db_signature = None
@@ -112,6 +119,11 @@ class DatabaseConnection:
         DatabaseConnection._cache_xp_for_level = {}
         DatabaseConnection._item_template_cache = {}
         DatabaseConnection._item_template_details_cache = {}
+        DatabaseConnection._cache_creature_templates = {}
+        DatabaseConnection._cache_creatures_by_map = {}
+        DatabaseConnection._cache_creatures_loaded = False
+        DatabaseConnection._cache_gameobjects_by_map = {}
+        DatabaseConnection._cache_gameobjects_loaded = False
         DatabaseConnection._account_data_tables_ready = False
         DatabaseConnection._addon_tables_ready = False
 
@@ -246,6 +258,105 @@ class DatabaseConnection:
             Logger.warning(f"[DB] player_xp_for_level preload failed: {exc}")
             DatabaseConnection._cache_xp_for_level = {}
 
+        preload_npcs = bool(
+            ConfigLoader.load_config().get("worldserver", {}).get("preload_npcs", False)
+        )
+        if preload_npcs:
+            try:
+                rows = session.query(WorldCreatureTemplate).all()
+                DatabaseConnection._cache_creature_templates = {
+                    int(row.entry): DatabaseConnection._build_creature_template_entry(row)
+                    for row in rows
+                    if int(getattr(row, "entry", 0) or 0) > 0
+                }
+                Logger.info("[DB] preloaded %s creature templates", len(DatabaseConnection._cache_creature_templates))
+            except Exception as exc:
+                Logger.warning(f"[DB] creature_template preload failed: {exc}")
+                DatabaseConnection._cache_creature_templates = {}
+
+            try:
+                rows = session.query(WorldCreature).all()
+                by_map: dict[int, list[dict]] = {}
+                for row in rows:
+                    candidate = DatabaseConnection._build_creature_candidate(row)
+                    if candidate is None:
+                        continue
+                    by_map.setdefault(int(candidate["map_id"]), []).append(candidate)
+                DatabaseConnection._cache_creatures_by_map = by_map
+                DatabaseConnection._cache_creatures_loaded = True
+                Logger.info(
+                    "[DB] preloaded %s creature spawns across %s maps",
+                    sum(len(entries) for entries in by_map.values()),
+                    len(by_map),
+                )
+            except Exception as exc:
+                Logger.warning(f"[DB] creature preload failed: {exc}")
+                DatabaseConnection._cache_creatures_by_map = {}
+                DatabaseConnection._cache_creatures_loaded = False
+        else:
+            DatabaseConnection._cache_creature_templates = {}
+            DatabaseConnection._cache_creatures_by_map = {}
+            DatabaseConnection._cache_creatures_loaded = False
+            Logger.info("[DB] creature preload disabled by config")
+
+        preload_gameobjects = bool(
+            ConfigLoader.load_config().get("worldserver", {}).get("preload_gameobjects", True)
+        )
+        if preload_gameobjects:
+            try:
+                rows = (
+                    session.query(
+                        WorldGameObject.guid,
+                        WorldGameObject.id,
+                        WorldGameObject.map,
+                        WorldGameObject.position_x,
+                        WorldGameObject.position_y,
+                        WorldGameObject.position_z,
+                        WorldGameObject.orientation,
+                        WorldGameObject.rotation0,
+                        WorldGameObject.rotation1,
+                        WorldGameObject.rotation2,
+                        WorldGameObject.rotation3,
+                        WorldGameObject.animprogress,
+                        WorldGameObject.state,
+                        WorldGameObjectTemplate.type,
+                        WorldGameObjectTemplate.displayId,
+                        WorldGameObjectTemplate.name,
+                        WorldGameObjectTemplate.faction,
+                        WorldGameObjectTemplate.flags,
+                        WorldGameObjectTemplate.size,
+                        WorldGameObjectTemplate.data0,
+                        WorldGameObjectTemplate.data1,
+                        WorldGameObjectTemplate.data2,
+                        WorldGameObjectTemplate.data3,
+                    )
+                    .join(WorldGameObjectTemplate, WorldGameObjectTemplate.entry == WorldGameObject.id)
+                    .outerjoin(GameEventGameObject, GameEventGameObject.guid == WorldGameObject.guid)
+                    .filter(GameEventGameObject.guid.is_(None))
+                    .all()
+                )
+                by_map: dict[int, list[dict]] = {}
+                for row in rows:
+                    candidate = DatabaseConnection._build_gameobject_candidate(row)
+                    if candidate is None:
+                        continue
+                    by_map.setdefault(int(candidate["map_id"]), []).append(candidate)
+                DatabaseConnection._cache_gameobjects_by_map = by_map
+                DatabaseConnection._cache_gameobjects_loaded = True
+                Logger.info(
+                    "[DB] preloaded %s gameobjects across %s maps",
+                    sum(len(entries) for entries in by_map.values()),
+                    len(by_map),
+                )
+            except Exception as exc:
+                Logger.warning(f"[DB] gameobject preload failed: {exc}")
+                DatabaseConnection._cache_gameobjects_by_map = {}
+                DatabaseConnection._cache_gameobjects_loaded = False
+        else:
+            DatabaseConnection._cache_gameobjects_by_map = {}
+            DatabaseConnection._cache_gameobjects_loaded = False
+            Logger.info("[DB] gameobject preload disabled by config")
+
         if item_entries:
             DatabaseConnection.get_item_template_map(list(item_entries))
 
@@ -265,6 +376,11 @@ class DatabaseConnection:
         DatabaseConnection._cache_xp_for_level = {}
         DatabaseConnection._item_template_cache = {}
         DatabaseConnection._item_template_details_cache = {}
+        DatabaseConnection._cache_creature_templates = {}
+        DatabaseConnection._cache_creatures_by_map = {}
+        DatabaseConnection._cache_creatures_loaded = False
+        DatabaseConnection._cache_gameobjects_by_map = {}
+        DatabaseConnection._cache_gameobjects_loaded = False
         DatabaseConnection.preload_world_cache()
 
     # AUTH DB SESSION
@@ -882,6 +998,9 @@ class DatabaseConnection:
     def get_creature_template(entry: int) -> dict | None:
         if int(entry or 0) <= 0:
             return None
+        if DatabaseConnection._world_cache_loaded and DatabaseConnection._cache_creatures_loaded:
+            cached = DatabaseConnection._cache_creature_templates.get(int(entry))
+            return dict(cached) if cached is not None else None
         try:
             session = DatabaseConnection.world()
         except Exception as exc:
@@ -933,6 +1052,88 @@ class DatabaseConnection:
         return dict(row)
 
     @staticmethod
+    def get_creatures_near(
+        map_id: int,
+        x: float,
+        y: float,
+        *,
+        radius: float = 120.0,
+        limit: int = 200,
+    ) -> list[dict]:
+        radius = max(0.0, float(radius))
+        min_x = float(x) - radius
+        max_x = float(x) + radius
+        min_y = float(y) - radius
+        max_y = float(y) + radius
+        radius_sq = radius * radius
+
+        if DatabaseConnection._world_cache_loaded and DatabaseConnection._cache_creatures_loaded:
+            entries = list(DatabaseConnection._cache_creatures_by_map.get(int(map_id), ()) or ())
+            if not entries:
+                return []
+
+            matches: list[dict] = []
+            for entry in entries:
+                entry_x = float(entry.get("x", 0.0) or 0.0)
+                entry_y = float(entry.get("y", 0.0) or 0.0)
+
+                if entry_x < min_x or entry_x > max_x or entry_y < min_y or entry_y > max_y:
+                    continue
+
+                dx = entry_x - float(x)
+                dy = entry_y - float(y)
+                if (dx * dx) + (dy * dy) > radius_sq:
+                    continue
+
+                matches.append(dict(entry))
+                if len(matches) >= int(limit):
+                    break
+
+            return matches
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return []
+
+        try:
+            rows = (
+                session.query(WorldCreature)
+                .filter(
+                    WorldCreature.map == int(map_id),
+                    WorldCreature.position_x >= min_x,
+                    WorldCreature.position_x <= max_x,
+                    WorldCreature.position_y >= min_y,
+                    WorldCreature.position_y <= max_y,
+                )
+                .limit(int(limit))
+                .all()
+            )
+        except Exception as exc:
+            Logger.warning(f"[DB] creature lookup failed map={map_id} x={x:.1f} y={y:.1f}: {exc}")
+            return []
+
+        creatures: list[dict] = []
+        for row in rows:
+            candidate = DatabaseConnection._build_creature_candidate(row)
+            if candidate is None:
+                continue
+
+            entry_x = float(candidate.get("x", 0.0) or 0.0)
+            entry_y = float(candidate.get("y", 0.0) or 0.0)
+            dx = entry_x - float(x)
+            dy = entry_y - float(y)
+            if (dx * dx) + (dy * dy) > radius_sq:
+                continue
+
+            creatures.append(candidate)
+            if len(creatures) >= int(limit):
+                break
+
+        return creatures
+
+    @staticmethod
     def get_gameobjects_near(
         map_id: int,
         x: float,
@@ -941,17 +1142,42 @@ class DatabaseConnection:
         radius: float = 120.0,
         limit: int = 200,
     ) -> list[dict]:
-        try:
-            session = DatabaseConnection.world()
-        except Exception as exc:
-            Logger.warning(f"[DB] World DB unavailable: {exc}")
-            return []
-
         radius = max(0.0, float(radius))
         min_x = float(x) - radius
         max_x = float(x) + radius
         min_y = float(y) - radius
         max_y = float(y) + radius
+        radius_sq = radius * radius
+
+        if DatabaseConnection._world_cache_loaded and DatabaseConnection._cache_gameobjects_loaded:
+            entries = list(DatabaseConnection._cache_gameobjects_by_map.get(int(map_id), ()) or ())
+            if not entries:
+                return []
+
+            matches: list[dict] = []
+            for entry in entries:
+                entry_x = float(entry.get("x", 0.0) or 0.0)
+                entry_y = float(entry.get("y", 0.0) or 0.0)
+
+                if entry_x < min_x or entry_x > max_x or entry_y < min_y or entry_y > max_y:
+                    continue
+
+                dx = entry_x - float(x)
+                dy = entry_y - float(y)
+                if (dx * dx) + (dy * dy) > radius_sq:
+                    continue
+
+                matches.append(dict(entry))
+                if len(matches) >= int(limit):
+                    break
+
+            return matches
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return []
 
         try:
             rows = (
@@ -998,55 +1224,11 @@ class DatabaseConnection:
             return []
 
         gameobjects: list[dict] = []
-        radius_sq = radius * radius
 
         for row in rows:
-            display_id = int(row.displayId or 0)
-
-            # Skip client-side / invalid objects
-            if display_id == 0:
+            candidate = DatabaseConnection._build_gameobject_candidate(row)
+            if candidate is None:
                 continue
-
-            go_type = int(row.type or 0)
-
-            name = str(row.name or "").lower()
-
-            if any(k in name for k in (
-                "darkmoon",
-                "faire",
-            )):
-               continue
-
-            # Remove doublicats signs, and seasonal event objects
-            if row.flags == 0 and row.type == 5:
-                continue
-
-            candidate = {
-                "guid": int(row.guid or 0),
-                "entry": int(row.id or 0),
-                "map_id": int(row.map or 0),
-                "x": float(row.position_x or 0.0),
-                "y": float(row.position_y or 0.0),
-                "z": float(row.position_z or 0.0),
-                "orientation": float(row.orientation or 0.0),
-                # Prefer quaternion if available
-                "rotation0": float(row.rotation0 or 0.0),
-                "rotation1": float(row.rotation1 or 0.0),
-                "rotation2": float(row.rotation2 or 0.0),
-                "rotation3": float(row.rotation3 or 0.0),
-                "animprogress": int(row.animprogress or 0),
-                "state": int(row.state or 0),
-                "type": go_type,
-                "display_id": display_id,
-                "name": str(row.name or ""),
-                "faction": int(row.faction or 0),
-                "flags": int(row.flags or 0),
-                "size": float(row.size or 1.0),
-                "data0": int(row.data0 or 0),
-                "data1": int(row.data1 or 0),
-                "data2": int(row.data2 or 0),
-                "data3": int(row.data3 or 0),
-            }
 
             dx = candidate["x"] - float(x)
             dy = candidate["y"] - float(y)
@@ -1057,6 +1239,106 @@ class DatabaseConnection:
             gameobjects.append(candidate)
 
         return gameobjects
+
+    @staticmethod
+    def _build_gameobject_candidate(row) -> dict | None:
+        display_id = int(getattr(row, "displayId", 0) or 0)
+        if display_id == 0:
+            return None
+
+        name = str(getattr(row, "name", "") or "").lower()
+        if any(token in name for token in ("darkmoon", "faire")):
+            return None
+
+        go_type = int(getattr(row, "type", 0) or 0)
+        flags = int(getattr(row, "flags", 0) or 0)
+        if flags == 0 and go_type == 5:
+            return None
+
+        return {
+            "guid": int(getattr(row, "guid", 0) or 0),
+            "entry": int(getattr(row, "id", 0) or 0),
+            "map_id": int(getattr(row, "map", 0) or 0),
+            "x": float(getattr(row, "position_x", 0.0) or 0.0),
+            "y": float(getattr(row, "position_y", 0.0) or 0.0),
+            "z": float(getattr(row, "position_z", 0.0) or 0.0),
+            "orientation": float(getattr(row, "orientation", 0.0) or 0.0),
+            "rotation0": float(getattr(row, "rotation0", 0.0) or 0.0),
+            "rotation1": float(getattr(row, "rotation1", 0.0) or 0.0),
+            "rotation2": float(getattr(row, "rotation2", 0.0) or 0.0),
+            "rotation3": float(getattr(row, "rotation3", 0.0) or 0.0),
+            "animprogress": int(getattr(row, "animprogress", 0) or 0),
+            "state": int(getattr(row, "state", 0) or 0),
+            "type": go_type,
+            "display_id": display_id,
+            "name": str(getattr(row, "name", "") or ""),
+            "faction": int(getattr(row, "faction", 0) or 0),
+            "flags": flags,
+            "size": float(getattr(row, "size", 1.0) or 1.0),
+            "data0": int(getattr(row, "data0", 0) or 0),
+            "data1": int(getattr(row, "data1", 0) or 0),
+            "data2": int(getattr(row, "data2", 0) or 0),
+            "data3": int(getattr(row, "data3", 0) or 0),
+        }
+
+    @staticmethod
+    def _build_creature_template_entry(row) -> dict:
+        return {
+            "entry": int(getattr(row, "entry", 0) or 0),
+            "KillCredit1": int(getattr(row, "KillCredit1", 0) or 0),
+            "KillCredit2": int(getattr(row, "KillCredit2", 0) or 0),
+            "modelid1": int(getattr(row, "modelid1", 0) or 0),
+            "modelid2": int(getattr(row, "modelid2", 0) or 0),
+            "modelid3": int(getattr(row, "modelid3", 0) or 0),
+            "modelid4": int(getattr(row, "modelid4", 0) or 0),
+            "name": str(getattr(row, "name", "") or ""),
+            "subname": str(getattr(row, "subname", "") or ""),
+            "IconName": str(getattr(row, "IconName", "") or ""),
+            "exp": int(getattr(row, "exp", 0) or 0),
+            "npc_rank": int(getattr(row, "npc_rank", 0) or 0),
+            "type": int(getattr(row, "type", 0) or 0),
+            "type_flags": int(getattr(row, "type_flags", 0) or 0),
+            "type_flags2": int(getattr(row, "type_flags2", 0) or 0),
+            "family": int(getattr(row, "family", 0) or 0),
+            "movementId": int(getattr(row, "movementId", 0) or 0),
+            "Health_mod": float(getattr(row, "Health_mod", 0.0) or 0.0),
+            "Mana_mod": float(getattr(row, "Mana_mod", 0.0) or 0.0),
+            "RacialLeader": int(getattr(row, "RacialLeader", 0) or 0),
+            "questItem1": int(getattr(row, "questItem1", 0) or 0),
+            "questItem2": int(getattr(row, "questItem2", 0) or 0),
+            "questItem3": int(getattr(row, "questItem3", 0) or 0),
+            "questItem4": int(getattr(row, "questItem4", 0) or 0),
+            "questItem5": int(getattr(row, "questItem5", 0) or 0),
+            "questItem6": int(getattr(row, "questItem6", 0) or 0),
+        }
+
+    @staticmethod
+    def _build_creature_candidate(row) -> dict | None:
+        entry = int(getattr(row, "id", 0) or 0)
+        guid = int(getattr(row, "guid", 0) or 0)
+        if entry <= 0 or guid <= 0:
+            return None
+
+        return {
+            "guid": guid,
+            "entry": entry,
+            "map_id": int(getattr(row, "map", 0) or 0),
+            "modelid": int(getattr(row, "modelid", 0) or 0),
+            "equipment_id": int(getattr(row, "equipment_id", 0) or 0),
+            "x": float(getattr(row, "position_x", 0.0) or 0.0),
+            "y": float(getattr(row, "position_y", 0.0) or 0.0),
+            "z": float(getattr(row, "position_z", 0.0) or 0.0),
+            "orientation": float(getattr(row, "orientation", 0.0) or 0.0),
+            "spawntimesecs": int(getattr(row, "spawntimesecs", 0) or 0),
+            "spawndist": float(getattr(row, "spawndist", 0.0) or 0.0),
+            "currentwaypoint": int(getattr(row, "currentwaypoint", 0) or 0),
+            "curhealth": int(getattr(row, "curhealth", 0) or 0),
+            "curmana": int(getattr(row, "curmana", 0) or 0),
+            "movement_type": int(getattr(row, "MovementType", 0) or 0),
+            "npcflag": int(getattr(row, "npcflag", 0) or 0),
+            "unit_flags": int(getattr(row, "unit_flags", 0) or 0),
+            "dynamicflags": int(getattr(row, "dynamicflags", 0) or 0),
+        }
 
     @staticmethod
     def get_player_create_info(race: int, class_: int):
@@ -1178,15 +1460,10 @@ class DatabaseConnection:
     @staticmethod
     def get_character_action_buttons(char_guid: int) -> list[int]:
         """
-        Return default action buttons for character race/class.
-        Sandbox mode currently ignores saved character_action rows and
-        always derives the bar from playercreateinfo_action.
+        Return action buttons merged from createinfo defaults and saved rows.
         """
         session = DatabaseConnection.chars()
 
-        # --------------------------------------------------
-        # Sandbox default → use createinfo actions
-        # --------------------------------------------------
         char = (
             session.query(Characters.race, Characters.class_)
             .filter(Characters.guid == char_guid)
@@ -1213,7 +1490,31 @@ class DatabaseConnection:
         for button, action, type_ in actions:
             try:
                 if 0 <= button < 132:
-                    buttons[button] = (int(action) & 0x00FFFFFF) | (int(type_) << 24)
+                    buttons[int(button)] = (int(action) & 0x00FFFFFF) | ((int(type_) & 0xFF) << 24)
+            except Exception:
+                continue
+
+        try:
+            saved_rows = (
+                session.query(CharacterAction.button, CharacterAction.action, CharacterAction.type_)
+                .filter(
+                    CharacterAction.guid == int(char_guid),
+                    CharacterAction.spec == 0,
+                )
+                .all()
+            )
+        except Exception as exc:
+            Logger.warning(f"[DB] character_action lookup failed guid={char_guid}: {exc}")
+            saved_rows = []
+
+        for button, action, type_ in saved_rows:
+            try:
+                button_index = int(button)
+                if not (0 <= button_index < 132):
+                    continue
+                buttons[button_index] = (
+                    (int(action) & 0x00FFFFFF) | ((int(type_) & 0xFF) << 24)
+                ) if int(action) > 0 else 0
             except Exception:
                 continue
 
