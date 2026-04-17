@@ -4,27 +4,51 @@
 from __future__ import annotations
 
 import struct
+from typing import Any, Mapping
 
-from server.modules.game.guid import GameObjectGuid, GuidHelper
+from DSL.modules.EncoderHandler import EncoderHandler
+from server.modules.game.guid import GameObjectGuid
 
 _GAMEOBJECT_CREATE_FLAGS = bytes.fromhex("000000030040")
+_GAMEOBJECT_UPDATE_COUNT = 1
+_GAMEOBJECT_UPDATE_TYPE = 1
+_GAMEOBJECT_OBJECT_TYPE = 5
+_GAMEOBJECT_MASK_BLOCKS = 1
+_GAMEOBJECT_DYNAMIC_MASK_BLOCKS = 0
+_GAMEOBJECT_MOVEMENT_BLOCK_UINT32 = 0
+_GAMEOBJECT_ROTATION_PACKED = 0
+
+_OBJECT_FIELD_GUID_LOW = 0
+_OBJECT_FIELD_GUID_HIGH = 1
+_OBJECT_FIELD_TYPE = 4
+_OBJECT_FIELD_ENTRY = 5
+_OBJECT_FIELD_SCALE = 7
+_GAMEOBJECT_FIELD_DISPLAY_ID = 10
+_GAMEOBJECT_FIELD_FLAGS = 11
+_GAMEOBJECT_FIELD_ROTATION_START = 12
+_GAMEOBJECT_FIELD_FACTION = 16
+_GAMEOBJECT_FIELD_BYTES_1 = 18
+_GAMEOBJECT_FIELD_BYTES_2 = 19
+_GAMEOBJECT_ROTATION_COMPONENT_KEYS = ("rotation0", "rotation1", "rotation2", "rotation3")
+
+
+def _entry_int(entry: Mapping[str, Any], key: str, default: int = 0) -> int:
+    """Return an integer field from a GameObject entry."""
+    return int(entry.get(key, default) or default)
+
+
+def _entry_float(entry: Mapping[str, Any], key: str, default: float = 0.0) -> float:
+    """Return a float field from a GameObject entry."""
+    return float(entry.get(key, default) or default)
 
 
 def _u32_from_float(value: float) -> int:
+    """Pack a float into a little-endian uint32 value."""
     return struct.unpack("<I", struct.pack("<f", float(value)))[0]
 
 
-def _build_create_update_object_entry(*, guid: int, object_type: int, create_flags: bytes, body: bytes) -> bytes:
-    payload = bytearray()
-    payload += struct.pack("<B", 1)
-    payload += GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)
-    payload += struct.pack("<B", int(object_type) & 0xFF)
-    payload += bytes(create_flags)
-    payload += bytes(body)
-    return bytes(payload)
-
-
 def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1) -> tuple[bytes, bytes]:
+    """Build a fixed-size update mask and packed uint32 field payload."""
     if not fields:
         return (b"\x00" * (int(mask_blocks) * 4), b"")
 
@@ -39,69 +63,79 @@ def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1
     return bytes(mask), bytes(field_bytes)
 
 
-def _build_gameobject_field_values(entry: dict, *, world_guid: int) -> dict[int, int]:
-    state = int(entry.get("state", 0) or 0) & 0xFF
-    object_bytes_1 = state | ((int(entry.get("type", 0) or 0) & 0xFF) << 8)
+def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
+    """Resolve the full 64-bit world guid for a GameObject spawn."""
+    return int(
+        entry.get("world_guid")
+        or GameObjectGuid.from_spawn_guid(_entry_int(entry, "guid"), int(realm_id) or 1)
+    )
+
+
+def _build_gameobject_field_values(entry: Mapping[str, Any], *, world_guid: int) -> dict[int, int]:
+    """Build update-field values for a single GameObject create packet."""
+    state = _entry_int(entry, "state") & 0xFF
+    gameobject_type = _entry_int(entry, "type") & 0xFF
+    object_bytes_1 = state | (gameobject_type << 8)
     field_values: dict[int, int] = {
-        0: int(world_guid) & 0xFFFFFFFF,
-        1: (int(world_guid) >> 32) & 0xFFFFFFFF,
-        4: 33,
-        5: int(entry.get("entry", 0) or 0),
-        7: _u32_from_float(float(entry.get("size", 1.0) or 1.0)),
-        10: int(entry.get("display_id", 0) or 0),
-        11: int(entry.get("flags", 0) or 0),
-        18: object_bytes_1,
-        19: (int(entry.get("animprogress", 0) or 0) & 0xFF) << 24,
+        _OBJECT_FIELD_GUID_LOW: int(world_guid) & 0xFFFFFFFF,
+        _OBJECT_FIELD_GUID_HIGH: (int(world_guid) >> 32) & 0xFFFFFFFF,
+        _OBJECT_FIELD_TYPE: 33,
+        _OBJECT_FIELD_ENTRY: _entry_int(entry, "entry"),
+        _OBJECT_FIELD_SCALE: _u32_from_float(_entry_float(entry, "size", 1.0)),
+        _GAMEOBJECT_FIELD_DISPLAY_ID: _entry_int(entry, "display_id"),
+        _GAMEOBJECT_FIELD_FLAGS: _entry_int(entry, "flags"),
+        _GAMEOBJECT_FIELD_BYTES_1: object_bytes_1,
+        _GAMEOBJECT_FIELD_BYTES_2: (_entry_int(entry, "animprogress") & 0xFF) << 24,
     }
-    if int(entry.get("faction", 0) or 0) != 0:
-        field_values[16] = int(entry.get("faction", 0) or 0)
-    for offset, key in enumerate(("rotation0", "rotation1", "rotation2", "rotation3")):
-        value = float(entry.get(key, 0.0) or 0.0)
+    faction = _entry_int(entry, "faction")
+    if faction != 0:
+        field_values[_GAMEOBJECT_FIELD_FACTION] = faction
+    for offset, key in enumerate(_GAMEOBJECT_ROTATION_COMPONENT_KEYS):
+        value = _entry_float(entry, key)
         if value != 0.0:
-            field_values[12 + offset] = _u32_from_float(value)
-    if 15 not in field_values:
-        field_values[15] = _u32_from_float(1.0)
+            field_values[_GAMEOBJECT_FIELD_ROTATION_START + offset] = _u32_from_float(value)
+    if _GAMEOBJECT_FIELD_ROTATION_START + 3 not in field_values:
+        field_values[_GAMEOBJECT_FIELD_ROTATION_START + 3] = _u32_from_float(1.0)
     return field_values
 
 
-def _build_gameobject_update_payload(*, map_id: int, entry: dict, realm_id: int) -> bytes:
-    world_guid = int(
-        entry.get("world_guid")
-        or GameObjectGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), int(realm_id) or 1)
-    )
+def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], realm_id: int) -> bytes:
+    """Encode a GameObject CREATE_OBJECT payload through the DSL definition."""
+    world_guid = _resolve_world_guid(entry, realm_id)
     mask_bytes, field_bytes = _build_fixed_u32_field_block(
         _build_gameobject_field_values(entry, world_guid=world_guid),
-        mask_blocks=1,
+        mask_blocks=_GAMEOBJECT_MASK_BLOCKS,
     )
 
-    stationary_y = float(entry.get("y", 0.0) or 0.0)
-    stationary_z = float(entry.get("z", 0.0) or 0.0)
-    stationary_orientation = float(entry.get("orientation", 0.0) or 0.0)
-    stationary_x = float(entry.get("x", 0.0) or 0.0)
-    gameobject_rotation_packed = 0
-    movement_block_uint32 = 0
+    stationary_y = _entry_float(entry, "y")
+    stationary_z = _entry_float(entry, "z")
+    stationary_orientation = _entry_float(entry, "orientation")
+    stationary_x = _entry_float(entry, "x")
 
-    body = bytearray()
-    body += struct.pack(
-        "<ffff",
-        stationary_y,
-        stationary_z,
-        stationary_orientation,
-        stationary_x,
+    return EncoderHandler.encode_packet(
+        "GAMEOBJECT_CREATE",
+        {
+            "map_id": int(map_id) & 0xFFFF,
+            "update_count": _GAMEOBJECT_UPDATE_COUNT,
+            "update_type": _GAMEOBJECT_UPDATE_TYPE,
+            "guid": {"guid": world_guid},
+            "object_type": _GAMEOBJECT_OBJECT_TYPE,
+            "create_flag_0": _GAMEOBJECT_CREATE_FLAGS[0],
+            "create_flag_1": _GAMEOBJECT_CREATE_FLAGS[1],
+            "create_flag_2": _GAMEOBJECT_CREATE_FLAGS[2],
+            "create_flag_3": _GAMEOBJECT_CREATE_FLAGS[3],
+            "create_flag_4": _GAMEOBJECT_CREATE_FLAGS[4],
+            "create_flag_5": _GAMEOBJECT_CREATE_FLAGS[5],
+            "stationary_y": stationary_y,
+            "stationary_z": stationary_z,
+            "stationary_orientation": stationary_orientation,
+            "stationary_x": stationary_x,
+            # The current create flags expect these two fields explicitly.
+            "movement_block_uint32": _GAMEOBJECT_MOVEMENT_BLOCK_UINT32,
+            "gameobject_rotation_packed": _GAMEOBJECT_ROTATION_PACKED,
+            "mask_blocks": len(mask_bytes) // 4,
+            "mask": mask_bytes,
+            "fields": field_bytes,
+            "dynamic_mask_blocks": _GAMEOBJECT_DYNAMIC_MASK_BLOCKS,
+        },
     )
-    body += struct.pack("<I", movement_block_uint32)
-    body += struct.pack("<Q", gameobject_rotation_packed)
-    body += struct.pack("<B", len(mask_bytes) // 4)
-    body += bytes(mask_bytes)
-    body += bytes(field_bytes)
-    body += struct.pack("<B", 0)
-
-    payload = bytearray()
-    payload += struct.pack("<HI", int(map_id) & 0xFFFF, 1)
-    payload += _build_create_update_object_entry(
-        guid=world_guid,
-        object_type=5,
-        create_flags=_GAMEOBJECT_CREATE_FLAGS,
-        body=bytes(body),
-    )
-    return bytes(payload)

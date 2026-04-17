@@ -1,0 +1,401 @@
+from __future__ import annotations
+
+import importlib
+import importlib.util
+from pathlib import Path
+import pytest
+import struct
+import sys
+from types import SimpleNamespace
+import types
+
+
+REFERENCE_CREATE_CAPTURE_NAME = "SMSG_UPDATE_OBJECT_1776451639_0458.json"
+REFERENCE_CREATE_CAPTURE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "data"
+    / "skyfire548"
+    / "captures"
+    / "focus"
+    / "debug"
+    / REFERENCE_CREATE_CAPTURE_NAME
+)
+CURRENT_CREATE_BUILDER_IS_SERVER_BUILT = False
+
+
+def _import_replay_with_stubs():
+    """Import replay with lightweight stubs so load_sniff_payload stays reusable."""
+    packets_module = types.ModuleType("server.modules.handlers.world.login.packets")
+    packets_module.build_login_packet = lambda *args, **kwargs: b""
+    sys.modules["server.modules.handlers.world.login.packets"] = packets_module
+
+    db_module = types.ModuleType("server.modules.database.DatabaseConnection")
+    db_module.DatabaseConnection = type(
+        "DatabaseConnection",
+        (),
+        {
+            "get_gameobjects_near": staticmethod(lambda *args, **kwargs: []),
+            "get_creatures_near": staticmethod(lambda *args, **kwargs: []),
+            "get_creature_template": staticmethod(lambda *args, **kwargs: {}),
+        },
+    )
+    sys.modules["server.modules.database.DatabaseConnection"] = db_module
+
+    runtime_module = types.ModuleType("server.session.runtime")
+    runtime_module.session = SimpleNamespace()
+    sys.modules["server.session.runtime"] = runtime_module
+
+    sys.modules.pop("server.modules.handlers.world.bootstrap.replay", None)
+    return importlib.import_module("server.modules.handlers.world.bootstrap.replay")
+
+
+def _import_login_packets_with_stubs():
+    """Load packets.py directly with DB-related stubs for isolated tests."""
+    db_module = types.ModuleType("server.modules.database.DatabaseConnection")
+    db_module.DatabaseConnection = type(
+        "DatabaseConnection",
+        (),
+        {
+            "get_gameobjects_near": staticmethod(lambda *args, **kwargs: []),
+            "get_creatures_near": staticmethod(lambda *args, **kwargs: []),
+            "get_creature_template": staticmethod(lambda *args, **kwargs: {}),
+        },
+    )
+    sys.modules["server.modules.database.DatabaseConnection"] = db_module
+
+    module_name = "_test_login_packets_create_diff"
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "modules"
+        / "handlers"
+        / "world"
+        / "login"
+        / "packets.py"
+    )
+    sys.modules.pop(module_name, None)
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load packets.py spec for create diff test")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_reference_payload() -> bytes:
+    """Load the reference player CREATE_OBJECT payload from the SkyFire capture."""
+    replay = _import_replay_with_stubs()
+    return replay.load_sniff_payload(REFERENCE_CREATE_CAPTURE_PATH)
+
+
+def build_server_payload() -> bytes:
+    """Build the current player CREATE_OBJECT payload under test."""
+    login_packets = _import_login_packets_with_stubs()
+    ctx = SimpleNamespace(
+        map_id=1,
+        char_guid=14,
+        exact_0002_low_guid=14,
+        race=4,
+        gender=1,
+    )
+    return login_packets.build_SMSG_UPDATE_OBJECT_1773613176_0002(ctx)
+
+
+def diff_bytes(a: bytes, b: bytes) -> list[tuple[int, int | None, int | None]]:
+    """Return byte-level differences between two payloads."""
+    differences: list[tuple[int, int | None, int | None]] = []
+    max_len = max(len(a), len(b))
+
+    for index in range(max_len):
+        left = a[index] if index < len(a) else None
+        right = b[index] if index < len(b) else None
+        if left != right:
+            differences.append((index, left, right))
+
+    return differences
+
+
+def diff_bytes_exact(a: bytes, b: bytes) -> list[tuple[int, int | None, int | None]]:
+    """Return exact byte differences between two payloads."""
+    return diff_bytes(a, b)
+
+
+def _decode_packed_guid(mask: int, data: bytes) -> int:
+    """Decode a WoW packed GUID from mask plus payload bytes."""
+    raw = [0] * 8
+    offset = 0
+    for bit_index in range(8):
+        if not (mask & (1 << bit_index)):
+            continue
+        raw[bit_index] = data[offset]
+        offset += 1
+    return int.from_bytes(bytes(raw), "little", signed=False)
+
+
+def parse_create_header(payload: bytes) -> dict[str, int]:
+    """Parse the stable CREATE_OBJECT header fields from the first update entry."""
+    if len(payload) < 10:
+        raise ValueError("payload is too short to contain a player CREATE_OBJECT")
+
+    map_id = struct.unpack_from("<H", payload, 0)[0]
+    update_count = struct.unpack_from("<I", payload, 2)[0]
+    update_type = payload[6]
+    guid_mask = payload[7]
+    guid_size = int(guid_mask).bit_count()
+    guid_data_start = 8
+    guid_data_end = guid_data_start + guid_size
+    guid = _decode_packed_guid(guid_mask, payload[guid_data_start:guid_data_end])
+    object_type = payload[guid_data_end]
+    body_offset = guid_data_end + 1
+
+    return {
+        "map_id": int(map_id),
+        "update_count": int(update_count),
+        "update_type": int(update_type),
+        "guid_mask": int(guid_mask),
+        "guid_size": int(guid_size),
+        "guid": int(guid),
+        "object_type": int(object_type),
+        "body_offset": int(body_offset),
+    }
+
+
+def locate_update_field_region(payload: bytes) -> dict[str, int]:
+    """Locate the field mask and field bytes inside the CREATE_OBJECT body."""
+    header = parse_create_header(payload)
+    body_offset = header["body_offset"]
+    candidates: list[dict[str, int]] = []
+
+    for mask_offset in range(body_offset, len(payload)):
+        mask_blocks = payload[mask_offset]
+        if mask_blocks <= 0:
+            continue
+
+        mask_size = int(mask_blocks) * 4
+        remaining = len(payload) - (mask_offset + 1)
+        if remaining < mask_size + 1:
+            continue
+
+        field_bytes_size = remaining - mask_size - 1
+        if field_bytes_size < 0 or field_bytes_size % 4 != 0:
+            continue
+
+        mask_start = mask_offset + 1
+        mask_end = mask_start + mask_size
+        field_start = mask_end
+        field_end = field_start + field_bytes_size
+        mask_bytes = payload[mask_start:mask_end]
+        enabled_bits = sum(byte.bit_count() for byte in mask_bytes)
+        field_count = field_bytes_size // 4
+
+        if enabled_bits != field_count:
+            continue
+
+        candidates.append(
+            {
+                "mask_offset": mask_offset,
+                "mask_blocks": int(mask_blocks),
+                "mask_start": mask_start,
+                "mask_end": mask_end,
+                "field_start": field_start,
+                "field_end": field_end,
+                "field_count": field_count,
+                "trailing_zero_offset": field_end,
+            }
+        )
+
+    if not candidates:
+        raise ValueError("could not locate CREATE_OBJECT field region")
+
+    candidates.sort(key=lambda item: (-item["field_count"], item["mask_offset"]))
+    return candidates[0]
+
+
+def locate_movement_region(payload: bytes) -> dict[str, int]:
+    """Return the byte range between the create body start and field mask."""
+    header = parse_create_header(payload)
+    field_region = locate_update_field_region(payload)
+    return {
+        "start": header["body_offset"],
+        "end": field_region["mask_offset"],
+        "size": field_region["mask_offset"] - header["body_offset"],
+    }
+
+
+def diff_create_object_regions(a: bytes, b: bytes) -> dict[str, list[tuple[int, int | None, int | None]]]:
+    """Return byte-level diffs split into CREATE_OBJECT regions."""
+    a_region = locate_update_field_region(a)
+    b_region = locate_update_field_region(b)
+
+    a_mask_start = a_region["mask_offset"]
+    a_mask_end = a_region["mask_end"]
+    a_fields_start = a_region["field_start"]
+    a_fields_end = a_region["field_end"]
+    a_tail_start = a_region["trailing_zero_offset"]
+
+    regions = {
+        "header": (0, 10),
+        "movement": (10, 76),
+        "mask": (a_mask_start, a_mask_end),
+        "fields": (a_fields_start, a_fields_end),
+        "tail": (a_tail_start, len(a)),
+    }
+
+    result: dict[str, list[tuple[int, int | None, int | None]]] = {}
+    for name, (start, end) in regions.items():
+        region_diffs: list[tuple[int, int | None, int | None]] = []
+        for index in range(start, end):
+            left = a[index] if index < len(a) else None
+            right = b[index] if index < len(b) else None
+            if left != right:
+                region_diffs.append((index, left, right))
+        result[name] = region_diffs
+
+    result["candidate_mask_meta"] = [
+        (b_region["mask_offset"], b_region["mask_blocks"], b_region["field_count"])
+    ]
+    return result
+
+
+def dump_movement_floats(payload: bytes) -> list[tuple[int, float]]:
+    """Dump the movement region as 32-bit floats for debugging."""
+    floats: list[tuple[int, float]] = []
+    for offset in range(10, 76, 4):
+        try:
+            value = struct.unpack_from("<f", payload, offset)[0]
+        except struct.error:
+            continue
+        floats.append((offset, float(value)))
+    return floats
+
+
+def parse_update_fields(payload: bytes) -> dict[int, int]:
+    """Parse uint32 update fields from the CREATE_OBJECT field block."""
+    region = locate_update_field_region(payload)
+    mask_bytes = payload[region["mask_start"] : region["mask_end"]]
+    field_bytes = payload[region["field_start"] : region["field_end"]]
+    field_values: dict[int, int] = {}
+    field_offset = 0
+
+    for word_index in range(region["mask_blocks"]):
+        word_value = struct.unpack_from("<I", mask_bytes, word_index * 4)[0]
+        for bit_index in range(32):
+            if not (word_value & (1 << bit_index)):
+                continue
+            field_index = word_index * 32 + bit_index
+            field_values[field_index] = struct.unpack_from("<I", field_bytes, field_offset)[0]
+            field_offset += 4
+
+    return field_values
+
+
+def diff_fields(a: dict[int, int], b: dict[int, int]) -> dict[int, tuple[int | None, int | None]]:
+    """Return field-level differences keyed by field index."""
+    differences: dict[int, tuple[int | None, int | None]] = {}
+    for field_index in sorted(set(a) | set(b)):
+        left = a.get(field_index)
+        right = b.get(field_index)
+        if left != right:
+            differences[field_index] = (left, right)
+    return differences
+
+
+def export_missing_fields(reference_fields: dict[int, int], candidate_fields: dict[int, int]) -> None:
+    """Print copy-paste friendly assignments for future create-builder work."""
+    for field_index, (reference_value, _candidate_value) in diff_fields(
+        reference_fields,
+        candidate_fields,
+    ).items():
+        if reference_value is None:
+            continue
+        print(f"fields[{field_index}] = {reference_value}")
+
+
+def test_reference_player_create_layout_is_stable() -> None:
+    """Lock the verified SkyFire player CREATE_OBJECT layout."""
+    payload = load_reference_payload()
+    header = parse_create_header(payload)
+    movement_region = locate_movement_region(payload)
+    field_region = locate_update_field_region(payload)
+
+    assert header == {
+        "map_id": 1,
+        "update_count": 1,
+        "update_type": 2,
+        "guid_mask": 0x01,
+        "guid_size": 1,
+        "guid": 0x000000000000000E,
+        "object_type": 4,
+        "body_offset": 10,
+    }
+    assert movement_region == {"start": 10, "end": 76, "size": 66}
+    assert field_region["mask_offset"] == 76
+    assert field_region["mask_blocks"] == 63
+    assert field_region["field_start"] == 77 + 252
+    assert field_region["field_end"] == 77 + 252 + 448
+    assert field_region["field_count"] == 112
+    assert payload[field_region["trailing_zero_offset"]] == 0
+
+
+def test_reference_player_create_fields_are_self_consistent() -> None:
+    """Ensure field parsing is stable before any future server-side create work."""
+    payload = load_reference_payload()
+    fields = parse_update_fields(payload)
+    byte_diffs = diff_bytes(payload, payload)
+    field_diffs = diff_fields(fields, fields)
+
+    print(f"reference_create_capture={REFERENCE_CREATE_CAPTURE_NAME}")
+    print(f"reference_len={len(payload)} field_count={len(fields)}")
+    print(f"byte_diff_count={len(byte_diffs)} first_10={byte_diffs[:10]}")
+    print(f"field_diff_count={len(field_diffs)} first_10={list(field_diffs.items())[:10]}")
+    export_missing_fields(fields, fields)
+
+    assert fields[0] == 14
+    assert fields[4] == 25
+    assert fields[7] == struct.unpack("<I", struct.pack("<f", 1.0))[0]
+    assert fields[33] == 102
+    assert fields[39] == 102
+    assert fields[55] == 1
+    assert fields[69] == 56
+    assert fields[70] == 56
+    assert fields[71] == 0
+    assert fields[166] == 393479
+    assert fields[167] == 16777220
+    assert fields[168] == 1
+    assert fields[1943] == 90
+    assert field_diffs == {}
+    assert byte_diffs == []
+
+
+def test_create_object_debug_diff() -> None:
+    """Print a structured region diff between reference and current create payload."""
+    reference_payload = load_reference_payload()
+    server_payload = build_server_payload()
+    region_diffs = diff_create_object_regions(reference_payload, server_payload)
+
+    for name, differences in region_diffs.items():
+        print(f"[DIFF] {name}: {len(differences)} differences")
+        if differences:
+            print(differences[:10])
+
+
+def test_movement_debug() -> None:
+    """Print movement floats for the reference player CREATE_OBJECT capture."""
+    reference_payload = load_reference_payload()
+    floats = dump_movement_floats(reference_payload)
+
+    for offset, value in floats:
+        print(offset, value)
+
+
+def test_create_object_byte_match() -> None:
+    """Assert exact byte match once a server-built CREATE_OBJECT path exists."""
+    if not CURRENT_CREATE_BUILDER_IS_SERVER_BUILT:
+        pytest.skip("server-built player CREATE_OBJECT path is not implemented yet")
+
+    reference_payload = load_reference_payload()
+    server_payload = build_server_payload()
+    differences = diff_bytes_exact(reference_payload, server_payload)
+
+    assert not differences, f"Byte mismatch: {differences[:20]}"

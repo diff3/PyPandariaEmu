@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 import struct
 
@@ -13,8 +12,20 @@ from server.modules.handlers.world.bootstrap.gameobjects import (
     _build_gameobject_field_values,
     _build_gameobject_update_payload,
 )
+from server.modules.handlers.world.bootstrap.playerobjects import (
+    USE_SERVER_BUILT_MINIMAL_PLAYER,
+    build_multi_u32_update_object_payload,
+    build_server_built_minimal_player_value_update,
+    build_single_u32_update_object_payload,
+    debug_log_player_movement_flags,
+    debug_log_replayed_update_object_guid,
+    debug_verify_update_object_guid,
+    extract_first_update_object_guid_info,
+    find_player_living_movement_block,
+    make_update_object_response,
+    unpack_guid,
+)
 from server.modules.handlers.world.login.packets import build_login_packet
-from server.session.runtime import session as runtime_session
 
 LOGIN_UPDATE_SEQUENCE = (
     "SMSG_UPDATE_OBJECT_1773586161_0001.json",
@@ -87,271 +98,6 @@ def _login_handlers():
 
 def _build_world_login_context(session):
     return _login_handlers()._build_world_login_context(session)
-
-
-def unpack_guid(mask: int, data: bytes) -> int:
-    guid_bytes = [0] * 8
-    offset = 0
-
-    for bit in range(8):
-        if mask & (1 << bit):
-            if offset >= len(data):
-                raise ValueError("packed guid data shorter than mask indicates")
-            guid_bytes[bit] = data[offset]
-            offset += 1
-
-    return int.from_bytes(bytes(guid_bytes), "little", signed=False)
-
-
-def extract_first_update_object_guid_info(payload: bytes) -> tuple[int, int, bytes] | None:
-    if len(payload) < 8:
-        return None
-
-    update_count = struct.unpack_from("<I", payload, 2)[0]
-    if update_count <= 0:
-        return None
-
-    offset = 6
-    update_type = payload[offset]
-    offset += 1
-
-    if update_type == 3:
-        if offset + 4 > len(payload):
-            return None
-        out_of_range_count = struct.unpack_from("<I", payload, offset)[0]
-        offset += 4
-        if out_of_range_count <= 0:
-            return None
-
-    if offset >= len(payload):
-        return None
-
-    mask = payload[offset]
-    offset += 1
-    packed_len = int(mask).bit_count()
-    if offset + packed_len > len(payload):
-        return None
-
-    packed_guid_bytes = payload[offset : offset + packed_len]
-    return unpack_guid(mask, packed_guid_bytes), int(mask), packed_guid_bytes
-
-
-def _current_session():
-    return runtime_session
-
-
-def debug_log_replayed_update_object_guid(payload: bytes, update_index: int | None = None) -> None:
-    session = _current_session()
-    session_player_guid = int(
-        getattr(session, "world_guid", 0)
-        or getattr(session, "player_guid", 0)
-        or 0
-    )
-    if session_player_guid <= 0:
-        return
-
-    try:
-        guid_info = extract_first_update_object_guid_info(payload)
-    except Exception as exc:
-        Logger.warning(f"[GUID DEBUG] failed to decode packed guid: {exc}")
-        return
-
-    if guid_info is None:
-        Logger.warning("[GUID DEBUG] no packed guid found in SMSG_UPDATE_OBJECT")
-        return
-
-    packet_guid, guid_mask, packed_guid_bytes = guid_info
-    packed_guid_bytes_display = "[" + " ".join(f"{byte:02X}" for byte in packed_guid_bytes) + "]"
-    Logger.info(
-        "[GUID DEBUG]\n"
-        f"update_index = {update_index if update_index is not None else -1}\n"
-        f"mask = 0x{guid_mask:02X}\n"
-        f"raw_sniffed_guid_bytes = {packed_guid_bytes_display}\n"
-        f"reconstructed = 0x{packet_guid:016X}\n"
-        f"session_player_guid = 0x{session_player_guid:016X}"
-    )
-    if packet_guid != session_player_guid:
-        Logger.debug("[GUID MISMATCH] UPDATE_OBJECT GUID does not match session player GUID.")
-
-
-def debug_verify_update_object_guid(payload: bytes) -> None:
-    session = _current_session()
-    expected = int(
-        getattr(session, "world_guid", 0)
-        or getattr(session, "player_guid", 0)
-        or 0
-    )
-    if expected <= 0:
-        return
-
-    try:
-        guid_info = extract_first_update_object_guid_info(payload)
-    except Exception as exc:
-        Logger.warning(f"[GUID CHECK] failed to decode packed guid: {exc}")
-        return
-
-    if guid_info is None:
-        Logger.warning("[GUID CHECK] no packed guid found in SMSG_UPDATE_OBJECT")
-        return
-    received, _guid_mask, _packed_guid_bytes = guid_info
-
-    Logger.info(
-        "[GUID CHECK]\n"
-        f"expected: 0x{expected:X}\n"
-        f"received: 0x{received:X}"
-    )
-    if received != expected:
-        Logger.debug("WARNING: Player UPDATE_OBJECT GUID mismatch")
-
-
-def find_player_living_movement_block(payload: bytes) -> dict[str, float] | None:
-    block_size = 13 * 4
-    if len(payload) < block_size:
-        return None
-
-    for offset in range(0, len(payload) - block_size + 1):
-        try:
-            (
-                fly_speed,
-                turn_speed,
-                swim_speed,
-                pitch_speed,
-                x,
-                orientation,
-                walk_speed,
-                y,
-                fly_back_speed,
-                run_back_speed,
-                run_speed,
-                swim_back_speed,
-                z,
-            ) = struct.unpack_from("<13f", payload, offset)
-        except struct.error:
-            continue
-
-        values = (
-            fly_speed,
-            turn_speed,
-            swim_speed,
-            pitch_speed,
-            x,
-            orientation,
-            walk_speed,
-            y,
-            fly_back_speed,
-            run_back_speed,
-            run_speed,
-            swim_back_speed,
-            z,
-        )
-        if not all(math.isfinite(value) for value in values):
-            continue
-        if not (6.5 <= run_speed <= 7.5):
-            continue
-        if not (3.0 <= turn_speed <= 3.3):
-            continue
-        if not (3.0 <= pitch_speed <= 3.3):
-            continue
-        if not (2.0 <= walk_speed <= 3.0):
-            continue
-        if not (4.0 <= run_back_speed <= 5.0):
-            continue
-        if not (4.0 <= fly_back_speed <= 5.0):
-            continue
-        if not (-math.pi * 4 <= orientation <= math.pi * 4):
-            continue
-        if abs(x) > 100000 or abs(y) > 100000 or abs(z) > 100000:
-            continue
-
-        return {
-            "offset": float(offset),
-            "fly_speed": float(fly_speed),
-            "turn_speed": float(turn_speed),
-            "swim_speed": float(swim_speed),
-            "pitch_speed": float(pitch_speed),
-            "x": float(x),
-            "orientation": float(orientation),
-            "walk_speed": float(walk_speed),
-            "y": float(y),
-            "fly_back_speed": float(fly_back_speed),
-            "run_back_speed": float(run_back_speed),
-            "run_speed": float(run_speed),
-            "swim_back_speed": float(swim_back_speed),
-            "z": float(z),
-        }
-
-    return None
-
-
-def debug_log_player_movement_flags(payload: bytes, *, update_index: int | None = None) -> None:
-    if update_index != 1:
-        return
-
-    movement = find_player_living_movement_block(payload)
-    if movement is None:
-        Logger.debug("[PLAYER MOVEMENT FLAGS] no living player movement block found in UPDATE_OBJECT")
-        return
-
-    Logger.info(
-        f"[PLAYER MOVEMENT FLAGS] run={movement['run_speed']:.6f} "
-        f"turn={movement['turn_speed']:.6f} pitch={movement['pitch_speed']:.6f}"
-    )
-    Logger.info(
-        f"[PLAYER MOVEMENT CREATE] is_living=1 orientation={movement['orientation']:.6f} "
-        f"walk={movement['walk_speed']:.6f} swim={movement['swim_speed']:.6f} "
-        f"offset={int(movement['offset'])}"
-    )
-
-
-def build_single_u32_update_object_payload(*, map_id: int, guid: int, field_index: int, value: int) -> bytes:
-    return build_multi_u32_update_object_payload(
-        map_id=map_id,
-        guid=guid,
-        field_updates=[(int(field_index), int(value))],
-    )
-
-
-def build_multi_u32_update_object_payload(*, map_id: int, guid: int, field_updates: list[tuple[int, int]]) -> bytes:
-    normalized_updates = [(int(field_index), int(value)) for field_index, value in (field_updates or [])]
-    if not normalized_updates:
-        return bytes(struct.pack("<HI", int(map_id) & 0xFFFF, 0))
-
-    highest_field_index = max(field_index for field_index, _value in normalized_updates)
-    mask_words = (highest_field_index // 32) + 1
-    mask = bytearray(mask_words * 4)
-    values_by_field = {field_index: value for field_index, value in normalized_updates}
-    field_bytes = bytearray()
-
-    for field_index in sorted(values_by_field):
-        mask_word = int(field_index) // 32
-        mask_bit = int(field_index) % 32
-        current_word = struct.unpack_from("<I", mask, mask_word * 4)[0]
-        struct.pack_into("<I", mask, mask_word * 4, current_word | (1 << mask_bit))
-
-    for field_index in range(mask_words * 32):
-        mask_word = field_index // 32
-        mask_bit = field_index % 32
-        word_value = struct.unpack_from("<I", mask, mask_word * 4)[0]
-        if not (word_value & (1 << mask_bit)):
-            continue
-        field_bytes += struct.pack("<I", int(values_by_field.get(field_index, 0)) & 0xFFFFFFFF)
-
-    payload = bytearray()
-    payload += struct.pack("<HI", int(map_id) & 0xFFFF, 1)
-    payload += struct.pack("<B", 0)
-    payload += GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)
-    payload += struct.pack("<B", mask_words)
-    payload += bytes(mask)
-    payload += bytes(field_bytes)
-    payload += struct.pack("<B", 0)
-    return bytes(payload)
-
-
-def make_update_object_response(payload: bytes, *, update_index: int | None = None) -> tuple[str, bytes]:
-    debug_log_replayed_update_object_guid(payload, update_index=update_index)
-    debug_verify_update_object_guid(payload)
-    debug_log_player_movement_flags(payload, update_index=update_index)
-    return "SMSG_UPDATE_OBJECT", payload
 
 
 def load_sniff_payload(filepath: str | Path) -> bytes:
@@ -926,8 +672,31 @@ def _build_replayed_update_object_packet(session, opcode_name: str, path: Path, 
         raise RuntimeError(
             f"Missing exact UPDATE_OBJECT builder for {path.name} while "
             "USE_RAW_UPDATE_OBJECT_FALLBACK is disabled"
-        )
+    )
     return send_raw_sniff_packet(session, opcode_name, path, update_index=update_index)
+
+
+def _build_hybrid_player_value_update_responses(
+    session,
+    path: Path,
+) -> list[tuple[str, bytes]]:
+    """Append a minimal server-built player value update after replayed 0002."""
+    if path.name != "SMSG_UPDATE_OBJECT_1773613176_0002.json":
+        return []
+
+    if not USE_SERVER_BUILT_MINIMAL_PLAYER:
+        Logger.info("[PLAYER HYBRID] replay-only (fallback)")
+        return []
+
+    payload = build_server_built_minimal_player_value_update(_build_world_login_context(session))
+    if payload is None:
+        # fallback to replay/exact path
+        Logger.info("[PLAYER HYBRID] replay-only (fallback)")
+        return []
+
+    # server-built experimental path
+    Logger.info("[PLAYER HYBRID] replay CREATE + server VALUE update")
+    return [make_update_object_response(payload)]
 
 
 def replay_movement_focus_sequence(session) -> list[tuple[str, bytes]]:
@@ -980,14 +749,14 @@ def replay_movement_focus_sequence(session) -> list[tuple[str, bytes]]:
 
     for index, (opcode_name, path) in enumerate(update_entries, start=1):
         Logger.info(f"[WorldLoginReplay] packet {index}/{total} opcode={opcode_name}")
-        responses.append(
-            _build_replayed_update_object_packet(
-                session,
-                opcode_name,
-                path,
-                update_index=index,
-            )
+        response = _build_replayed_update_object_packet(
+            session,
+            opcode_name,
+            path,
+            update_index=index,
         )
+        responses.append(response)
+        responses.extend(_build_hybrid_player_value_update_responses(session, path))
 
     responses.extend(build_database_gameobject_responses(session))
 

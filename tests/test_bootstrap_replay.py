@@ -72,6 +72,7 @@ def test_replay_movement_focus_sequence_appends_db_gameobjects():
     replay = _import_replay()
     session = SimpleNamespace(map_id=1, zone=1637, x=1570.0, y=-4397.0, realm_id=1)
 
+    replay.USE_SERVER_BUILT_MINIMAL_PLAYER = False
     replay._build_dynamic_active_mover_packet = lambda _session: ("SMSG_MOVE_SET_ACTIVE_MOVER", b"ACTIVE")
     replay._build_replayed_update_object_packet = (
         lambda _session, opcode_name, path, update_index: (opcode_name, path.name.encode())
@@ -82,6 +83,91 @@ def test_replay_movement_focus_sequence_appends_db_gameobjects():
 
     assert responses[0] == ("SMSG_MOVE_SET_ACTIVE_MOVER", b"ACTIVE")
     assert responses[-1] == ("SMSG_UPDATE_OBJECT", b"DBOBJ")
+
+
+def test_replay_movement_focus_sequence_appends_hybrid_player_value_update(monkeypatch):
+    replay = _import_replay()
+    session = SimpleNamespace(map_id=1, zone=1637, x=1570.0, y=-4397.0, realm_id=1)
+
+    monkeypatch.setattr(replay, "USE_SERVER_BUILT_MINIMAL_PLAYER", True)
+    monkeypatch.setattr(
+        replay,
+        "_build_world_login_context",
+        lambda _session: SimpleNamespace(map_id=1, world_guid=0x300010000000D),
+    )
+    monkeypatch.setattr(
+        replay,
+        "build_server_built_minimal_player_value_update",
+        lambda _ctx: b"VALUE",
+    )
+    monkeypatch.setattr(
+        replay,
+        "_build_dynamic_active_mover_packet",
+        lambda _session: ("SMSG_MOVE_SET_ACTIVE_MOVER", b"ACTIVE"),
+    )
+    monkeypatch.setattr(
+        replay,
+        "_build_replayed_update_object_packet",
+        lambda _session, opcode_name, path, update_index: (opcode_name, path.name.encode()),
+    )
+    monkeypatch.setattr(
+        replay,
+        "build_database_gameobject_responses",
+        lambda _session: [("SMSG_UPDATE_OBJECT", b"DBOBJ")],
+    )
+    monkeypatch.setattr(
+        replay,
+        "make_update_object_response",
+        lambda payload, update_index=None: ("SMSG_UPDATE_OBJECT", payload),
+    )
+
+    responses = replay.replay_movement_focus_sequence(session)
+
+    replay_index = responses.index(
+        ("SMSG_UPDATE_OBJECT", b"SMSG_UPDATE_OBJECT_1773613176_0002.json")
+    )
+    assert responses[replay_index + 1] == ("SMSG_UPDATE_OBJECT", b"VALUE")
+
+
+def test_replay_movement_focus_sequence_skips_hybrid_player_value_update_on_none(monkeypatch):
+    replay = _import_replay()
+    session = SimpleNamespace(map_id=1, zone=1637, x=1570.0, y=-4397.0, realm_id=1)
+
+    monkeypatch.setattr(replay, "USE_SERVER_BUILT_MINIMAL_PLAYER", True)
+    monkeypatch.setattr(
+        replay,
+        "_build_world_login_context",
+        lambda _session: SimpleNamespace(map_id=1, world_guid=0x300010000000D),
+    )
+    monkeypatch.setattr(
+        replay,
+        "build_server_built_minimal_player_value_update",
+        lambda _ctx: None,
+    )
+    monkeypatch.setattr(
+        replay,
+        "_build_dynamic_active_mover_packet",
+        lambda _session: ("SMSG_MOVE_SET_ACTIVE_MOVER", b"ACTIVE"),
+    )
+    monkeypatch.setattr(
+        replay,
+        "_build_replayed_update_object_packet",
+        lambda _session, opcode_name, path, update_index: (opcode_name, path.name.encode()),
+    )
+    monkeypatch.setattr(
+        replay,
+        "build_database_gameobject_responses",
+        lambda _session: [],
+    )
+    monkeypatch.setattr(
+        replay,
+        "make_update_object_response",
+        lambda payload, update_index=None: ("SMSG_UPDATE_OBJECT", payload),
+    )
+
+    responses = replay.replay_movement_focus_sequence(session)
+
+    assert ("SMSG_UPDATE_OBJECT", b"VALUE") not in responses
 
 
 def test_build_database_gameobject_responses_allows_map_zero(monkeypatch):
