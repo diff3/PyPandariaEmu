@@ -638,35 +638,35 @@ def test_player_create_direct_field_match_reference() -> None:
 
 
 def test_build_player_field_values_sets_alliance_primary_language_skill() -> None:
-    """Alliance races should expose Common in the primary language create slot."""
+    """Alliance should mirror the old working barncastle language/riding block."""
     ctx = SimpleNamespace(race=4, char_guid=14, world_guid=14)
     fields = build_player_field_values(ctx)
 
-    assert (fields[1159] >> 16) & 0xFFFF == 762
-    assert (fields[1287] >> 16) & 0xFFFF == 300
-    assert (fields[1415] >> 16) & 0xFFFF == 300
-    assert fields[1154] & 0xFFFF == 98
-    assert (fields[1154] >> 16) & 0xFFFF == 113
-    assert fields[1282] & 0xFFFF == 300
-    assert (fields[1282] >> 16) & 0xFFFF == 300
-    assert fields[1410] & 0xFFFF == 300
-    assert (fields[1410] >> 16) & 0xFFFF == 300
+    assert fields[1153] == 49938530
+    assert fields[1154] == 113
+    assert fields[1281] == 24576300
+    assert fields[1282] == 300
+    assert fields[1409] == 24576300
+    assert fields[1410] == 300
+    assert fields[1155] == 0
+    assert fields[1283] == 0
+    assert fields[1411] == 0
 
 
 def test_build_player_field_values_sets_horde_primary_language_skill() -> None:
-    """Horde races should expose Orcish in the primary language create slot."""
+    """Horde should mirror the old working barncastle language/riding block."""
     ctx = SimpleNamespace(race=2, char_guid=14, world_guid=14)
     fields = build_player_field_values(ctx)
 
-    assert (fields[1159] >> 16) & 0xFFFF == 762
-    assert (fields[1287] >> 16) & 0xFFFF == 300
-    assert (fields[1415] >> 16) & 0xFFFF == 300
-    assert fields[1154] & 0xFFFF == 109
-    assert (fields[1154] >> 16) & 0xFFFF == 109
-    assert fields[1282] & 0xFFFF == 300
-    assert (fields[1282] >> 16) & 0xFFFF == 300
-    assert fields[1410] & 0xFFFF == 300
-    assert (fields[1410] >> 16) & 0xFFFF == 300
+    assert fields[1153] == 49938541
+    assert fields[1154] == 109
+    assert fields[1281] == 24576300
+    assert fields[1282] == 300
+    assert fields[1409] == 24576300
+    assert fields[1410] == 300
+    assert fields[1155] == 0
+    assert fields[1283] == 0
+    assert fields[1411] == 0
 
 
 def test_identify_language_related_fields_from_alliance_horde_create_diff() -> None:
@@ -750,24 +750,181 @@ def test_identify_language_related_fields_from_alliance_horde_create_diff() -> N
     print("fields that differ:", differences)
     print({index: (alliance_values[index], horde_values[index]) for index in differences})
 
-    assert alliance_candidates == {1154: alliance_values[1154]}
-    assert horde_candidates == {1154: horde_values[1154]}
-    assert (alliance_values[1159] >> 16) & 0xFFFF == 762
-    assert (horde_values[1159] >> 16) & 0xFFFF == 762
-    assert (alliance_values[1287] >> 16) & 0xFFFF == 300
-    assert (horde_values[1287] >> 16) & 0xFFFF == 300
-    assert (alliance_values[1415] >> 16) & 0xFFFF == 300
-    assert (horde_values[1415] >> 16) & 0xFFFF == 300
+    assert alliance_candidates == {1153: alliance_values[1153]}
+    assert horde_candidates == {1153: horde_values[1153], 1154: horde_values[1154]}
+    assert 1153 in differences
     assert 1154 in differences
-    assert alliance_values[1154] & 0xFFFF == 98
-    assert horde_values[1154] & 0xFFFF == 109
-    assert (alliance_values[1154] >> 16) & 0xFFFF == 113
-    assert (horde_values[1154] >> 16) & 0xFFFF == 109
-    assert alliance_values[1282] & 0xFFFF == 300
-    assert horde_values[1282] & 0xFFFF == 300
-    assert (alliance_values[1282] >> 16) & 0xFFFF == 300
-    assert (horde_values[1282] >> 16) & 0xFFFF == 300
-    assert alliance_values[1410] & 0xFFFF == 300
-    assert horde_values[1410] & 0xFFFF == 300
-    assert (alliance_values[1410] >> 16) & 0xFFFF == 300
-    assert (horde_values[1410] >> 16) & 0xFFFF == 300
+    assert alliance_values[1153] == 49938530
+    assert horde_values[1153] == 49938541
+    assert alliance_values[1154] == 113
+    assert horde_values[1154] == 109
+    assert alliance_values[1281] == 24576300
+    assert horde_values[1281] == 24576300
+    assert alliance_values[1282] == 300
+    assert horde_values[1282] == 300
+    assert alliance_values[1409] == 24576300
+    assert horde_values[1409] == 24576300
+    assert alliance_values[1410] == 300
+    assert horde_values[1410] == 300
+
+
+def test_player_create_patches_language_mask_for_team() -> None:
+    """The new create path should mirror the old replay language-mask patch."""
+    alliance_payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+        ctx=SimpleNamespace(
+            map_id=1,
+            char_guid=14,
+            player_guid=14,
+            world_guid=14,
+            exact_0002_low_guid=14,
+            race=4,
+            gender=1,
+            faction="alliance",
+            x=16212.216796875,
+            y=16253.169921875,
+            z=14.770503044128418,
+            orientation=1.6979784965515137,
+            health=102,
+            max_health=102,
+            power_primary=40,
+            max_power=40,
+            level=1,
+            faction_template=4,
+            display_id=56,
+            player_bytes=393479,
+            player_bytes2=16777220,
+            player_bytes3=1,
+            max_level=90,
+        ),
+    )
+    horde_payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+        ctx=SimpleNamespace(
+            map_id=1,
+            char_guid=14,
+            player_guid=14,
+            world_guid=14,
+            exact_0002_low_guid=14,
+            race=2,
+            gender=1,
+            faction="horde",
+            x=16212.216796875,
+            y=16253.169921875,
+            z=14.770503044128418,
+            orientation=1.6979784965515137,
+            health=102,
+            max_health=102,
+            power_primary=40,
+            max_power=40,
+            level=1,
+            faction_template=2,
+            display_id=52,
+            player_bytes=393218,
+            player_bytes2=16777220,
+            player_bytes3=1,
+            max_level=90,
+        ),
+    )
+
+    common_mask = (1 << 7).to_bytes(4, "little")
+    orcish_mask = (1 << 1).to_bytes(4, "little")
+
+    assert common_mask in alliance_payload
+    assert orcish_mask not in alliance_payload
+    assert orcish_mask in horde_payload
+
+
+def test_horde_player_create_keeps_level_field_in_final_payload() -> None:
+    """Horde create should include field 55 and keep the runtime level value."""
+    payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+        ctx=SimpleNamespace(
+            map_id=1,
+            char_guid=14,
+            player_guid=14,
+            world_guid=14,
+            exact_0002_low_guid=14,
+            race=2,
+            gender=1,
+            faction="horde",
+            x=16212.216796875,
+            y=16253.169921875,
+            z=14.770503044128418,
+            orientation=1.6979784965515137,
+            health=102,
+            max_health=102,
+            power_primary=40,
+            max_power=40,
+            level=100,
+            faction_template=2,
+            display_id=52,
+            player_bytes=393218,
+            player_bytes2=16777220,
+            player_bytes3=1,
+            max_level=100,
+        ),
+    )
+    region = locate_update_field_region(payload)
+    field_indices = extract_field_indices(
+        payload[region["mask_start"] : region["mask_end"]],
+        region["mask_blocks"],
+    )
+    field_values = parse_field_values(
+        payload[region["field_start"] : region["field_end"]],
+        field_indices,
+    )
+
+    assert 55 in field_indices
+    assert field_values[55] == 100
+
+
+def test_horde_player_create_packs_unit_field_bytes_0_from_ctx() -> None:
+    """Horde create should serialize UNIT_FIELD_BYTES_0 from runtime faction data."""
+    payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+        ctx=SimpleNamespace(
+            map_id=1,
+            char_guid=13,
+            player_guid=13,
+            world_guid=13,
+            exact_0002_low_guid=13,
+            race=10,
+            class_id=4,
+            gender=1,
+            display_power=3,
+            faction="horde",
+            x=16212.216796875,
+            y=16253.169921875,
+            z=14.770503044128418,
+            orientation=1.6979784965515137,
+            health=102,
+            max_health=102,
+            power_primary=40,
+            max_power=40,
+            level=90,
+            faction_template=1610,
+            display_id=52,
+            player_bytes=393218,
+            player_bytes2=16777220,
+            player_bytes3=1,
+            max_level=90,
+        ),
+    )
+    region = locate_update_field_region(payload)
+    field_indices = extract_field_indices(
+        payload[region["mask_start"] : region["mask_end"]],
+        region["mask_blocks"],
+    )
+    field_values = parse_field_values(
+        payload[region["field_start"] : region["field_end"]],
+        field_indices,
+    )
+    expected = 10 | (4 << 8) | (1 << 16) | (3 << 24)
+
+    assert 30 in field_indices
+    assert field_values[30] == expected

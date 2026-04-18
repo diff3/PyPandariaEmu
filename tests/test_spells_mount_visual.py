@@ -237,8 +237,9 @@ def test_initialize_session_language_state_sets_orcish_for_alliance():
 
     spells_handlers.initialize_session_language_state(session)
 
-    assert session.language == 1
-    assert session.known_languages_mask == 0xFFFFFFFF
+    assert session.language == 7
+    assert session.current_language == 7
+    assert session.known_languages_mask == (1 << 7)
 
 
 def test_granted_language_spells_for_alliance_match_horde_default():
@@ -293,7 +294,8 @@ def test_initialize_session_language_state_keeps_horde_on_orcish():
     spells_handlers.initialize_session_language_state(session)
 
     assert session.language == 1
-    assert session.known_languages_mask == 0xFFFFFFFF
+    assert session.current_language == 1
+    assert session.known_languages_mask == (1 << 1)
 
 
 def test_raw_known_spells_payload_loads():

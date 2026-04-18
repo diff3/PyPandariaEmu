@@ -184,7 +184,7 @@ from shared.Logger import Logger
 from server.modules.game.guid import GuidHelper
 from server.session.runtime import session as runtime_session
 
-USE_SERVER_BUILT_MINIMAL_PLAYER = True
+USE_SERVER_BUILT_MINIMAL_PLAYER = False
 USE_SERVER_BUILT_PLAYER_CREATE = True
 USE_SERVER_BUILT_PLAYER_CREATE_DIRECT = True
 
@@ -232,12 +232,11 @@ _PLAYER_FIELD_MAX_LEVEL = 1943
 _LANG_SKILL_ID_FIELD = 1154
 _LANG_SKILL_VALUE_FIELD = 1282
 _LANG_SKILL_MAX_FIELD = 1410
-_SKILL_SLOT_ID_FIELDS = tuple(range(1153, 1160))
-_SKILL_SLOT_VALUE_FIELDS = tuple(range(1281, 1288))
-_SKILL_SLOT_MAX_FIELDS = tuple(range(1409, 1416))
-_SKILL_SLOT_COUNT = min(len(_SKILL_SLOT_VALUE_FIELDS), len(_SKILL_SLOT_MAX_FIELDS)) * 2
 _SKILL_RIDING = 762
-_SKILL_RIDING_VALUE = 300
+_SKILL_LANGUAGE_RANK = 300
+_SKILL_RIDING_RANK = 375
+_LANGUAGE_MASK_COMMON = (1 << 7).to_bytes(4, "little")
+_LANGUAGE_MASK_ORCISH = (1 << 1).to_bytes(4, "little")
 
 _VERIFIED_PLAYER_REFERENCE_FIELDS = {
     6: 0,
@@ -455,6 +454,15 @@ def _u32_from_two_u16(low: int, high: int) -> int:
     return ((int(high) & 0xFFFF) << 16) | (int(low) & 0xFFFF)
 
 
+def _pack_u8x4(a: int, b: int, c: int, d: int) -> int:
+    return (
+        (int(a) & 0xFF)
+        | ((int(b) & 0xFF) << 8)
+        | ((int(c) & 0xFF) << 16)
+        | ((int(d) & 0xFF) << 24)
+    )
+
+
 def _resolve_player_team(ctx) -> str | None:
     """Resolve Alliance/Horde from explicit faction data before falling back to race."""
     explicit_faction = getattr(ctx, "faction", None)
@@ -479,76 +487,53 @@ def _resolve_player_team(ctx) -> str | None:
     return None
 
 
-def _set_language_skill_slot(
+def _patch_language_mask_bytes(payload: bytes, ctx) -> bytes:
+    """Mirror the old replay language-mask patch inside the new player create path."""
+    team = _resolve_player_team(ctx)
+    if team == "alliance":
+        target_bytes = _LANGUAGE_MASK_COMMON
+    elif team == "horde":
+        target_bytes = _LANGUAGE_MASK_ORCISH
+    else:
+        return bytes(payload)
+
+    return bytes(payload).replace(_LANGUAGE_MASK_ORCISH, target_bytes)
+
+
+def _apply_legacy_language_riding_skill_block(
     field_values: dict[int, int],
     *,
     primary_language: int,
     racial_language: int,
-    rank: int = 300,
-    max_rank: int = 300,
 ) -> None:
-    """Write the packed language skill slot triplet used by the current create layout."""
-    field_values[_LANG_SKILL_ID_FIELD] = _u32_from_two_u16(primary_language, racial_language)
-    field_values[_LANG_SKILL_VALUE_FIELD] = _u32_from_two_u16(rank, rank)
-    field_values[_LANG_SKILL_MAX_FIELD] = _u32_from_two_u16(max_rank, max_rank)
+    """Mirror the old working barncastle language/riding skill block exactly."""
+    field_values[1153] = _u32_from_two_u16(primary_language, _SKILL_RIDING)
+    field_values[1154] = _u32_from_two_u16(racial_language, 0)
+    field_values[1155] = 0
+    field_values[1156] = 0
+    field_values[1157] = 0
+    field_values[1158] = 0
+    field_values[1159] = 0
 
+    field_values[1281] = _u32_from_two_u16(_SKILL_LANGUAGE_RANK, _SKILL_RIDING_RANK)
+    field_values[1282] = _u32_from_two_u16(_SKILL_LANGUAGE_RANK, 0)
+    field_values[1283] = 0
+    field_values[1284] = 0
+    field_values[1285] = 0
+    field_values[1286] = 0
+    field_values[1287] = 0
 
-def _read_packed_skill_slot(field_values: dict[int, int], field_ids: tuple[int, ...], slot_index: int) -> int:
-    """Read one packed u16 skill slot from a field range."""
-    field_index = slot_index // 2
-    half_index = slot_index % 2
-    if field_index >= len(field_ids):
-        return 0
-    packed_value = int(field_values.get(field_ids[field_index], 0) or 0)
-    if half_index == 0:
-        return packed_value & 0xFFFF
-    return (packed_value >> 16) & 0xFFFF
-
-
-def _write_packed_skill_slot(
-    field_values: dict[int, int],
-    field_ids: tuple[int, ...],
-    slot_index: int,
-    slot_value: int,
-) -> None:
-    """Write one packed u16 skill slot into a field range."""
-    field_index = slot_index // 2
-    half_index = slot_index % 2
-    if field_index >= len(field_ids):
-        return
-
-    field_id = field_ids[field_index]
-    packed_value = int(field_values.get(field_id, 0) or 0)
-    if half_index == 0:
-        packed_value = (packed_value & 0xFFFF0000) | (int(slot_value) & 0xFFFF)
-    else:
-        packed_value = (packed_value & 0x0000FFFF) | ((int(slot_value) & 0xFFFF) << 16)
-    field_values[field_id] = packed_value
-
-
-def _find_first_free_skill_slot(field_values: dict[int, int]) -> int | None:
-    """Find the first packed skill slot whose skill id is zero."""
-    for slot_index in range(_SKILL_SLOT_COUNT):
-        skill_id = _read_packed_skill_slot(field_values, _SKILL_SLOT_ID_FIELDS, slot_index)
-        if skill_id == 0:
-            return slot_index
-    return None
-
-
-def _ensure_extra_riding_skill_slot(field_values: dict[int, int]) -> None:
-    """Add one explicit riding skill slot so mount usability does not depend on spells."""
-    slot_index = _find_first_free_skill_slot(field_values)
-    if slot_index is None:
-        Logger.warning("[PLAYER RIDING] no free skill slot available for riding")
-        return
-
-    _write_packed_skill_slot(field_values, _SKILL_SLOT_ID_FIELDS, slot_index, _SKILL_RIDING)
-    _write_packed_skill_slot(field_values, _SKILL_SLOT_VALUE_FIELDS, slot_index, _SKILL_RIDING_VALUE)
-    _write_packed_skill_slot(field_values, _SKILL_SLOT_MAX_FIELDS, slot_index, _SKILL_RIDING_VALUE)
+    field_values[1409] = _u32_from_two_u16(_SKILL_LANGUAGE_RANK, _SKILL_RIDING_RANK)
+    field_values[1410] = _u32_from_two_u16(_SKILL_LANGUAGE_RANK, 0)
+    field_values[1411] = 0
+    field_values[1412] = 0
+    field_values[1413] = 0
+    field_values[1414] = 0
+    field_values[1415] = 0
 
 
 def _patch_language_skill_fields(field_values: dict[int, int], ctx) -> None:
-    """Patch the primary language as a packed skill slot triplet."""
+    """Patch the old working language/riding skill block."""
     team = _resolve_player_team(ctx)
     if team == "alliance":
         primary_language = _LANGUAGE_SKILL_COMMON
@@ -559,12 +544,11 @@ def _patch_language_skill_fields(field_values: dict[int, int], ctx) -> None:
 
     race = int(getattr(ctx, "race", 0) or 0)
     racial_language = int(_RACIAL_LANGUAGE_SKILL_BY_RACE.get(race, primary_language) or primary_language)
-    _set_language_skill_slot(
+    _apply_legacy_language_riding_skill_block(
         field_values,
         primary_language=primary_language,
         racial_language=racial_language,
     )
-    _ensure_extra_riding_skill_slot(field_values)
 
 
 def locate_update_field_region(payload: bytes) -> dict[str, int]:
@@ -659,6 +643,37 @@ def patch_create_fields(
     return bytes(output)
 
 
+def _read_u32_field_value(field_indices: list[int], field_bytes: bytes, field_index: int) -> int:
+    """Read one uint32 field value from packed CREATE_OBJECT field bytes."""
+    offset = 0
+    for current_index in field_indices:
+        if current_index == field_index:
+            return struct.unpack_from("<I", field_bytes, offset)[0]
+        offset += 4
+    raise ValueError(f"missing field {field_index}")
+
+
+def _verify_player_level_field_in_payload(payload: bytes, expected_level: int) -> None:
+    """Ensure CREATE_OBJECT includes the level field and that it matches ctx.level."""
+    mask_start, mask_end, mask_blocks = locate_mask_region(payload)
+    field_start, field_end = locate_field_region(payload)
+    field_indices = extract_field_indices(payload[mask_start:mask_end], mask_blocks)
+
+    if _UNIT_FIELD_LEVEL not in field_indices:
+        raise ValueError(f"player create mask missing field {_UNIT_FIELD_LEVEL}")
+
+    actual_level = _read_u32_field_value(
+        field_indices,
+        payload[field_start:field_end],
+        _UNIT_FIELD_LEVEL,
+    )
+    Logger.info(f"[LEVEL FIELD] idx=55 value={actual_level}")
+    if int(actual_level) != int(expected_level):
+        raise ValueError(
+            f"player create level mismatch: expected {int(expected_level)} got {int(actual_level)}"
+        )
+
+
 def patch_player_guid(payload: bytearray, ctx) -> None:
     """Patch the packed low GUID byte in the sniffed player CREATE_OBJECT template."""
     guid_mask = payload[_PLAYER_CREATE_GUID_MASK_OFFSET]
@@ -687,6 +702,10 @@ def build_movement_block_from_template(template_block: bytes, ctx) -> bytes:
 def build_player_field_values(ctx) -> dict[int, int]:
     """Build the current server-side player field mapping for value updates."""
     guid = _resolve_player_guid(ctx)
+    race = int(getattr(ctx, "race", 0) or 0)
+    class_id = int(getattr(ctx, "player_class", 0) or getattr(ctx, "class_id", 0) or 0)
+    gender = int(getattr(ctx, "gender", 0) or 0)
+    power_type = int(getattr(ctx, "power_type", 0) or getattr(ctx, "display_power", 0) or 0)
     health = int(getattr(ctx, "health", 103) or 103)
     max_health = int(getattr(ctx, "max_health", health) or health)
     power_primary = int(getattr(ctx, "power_primary", 100) or 100)
@@ -707,6 +726,7 @@ def build_player_field_values(ctx) -> dict[int, int]:
             _OBJECT_FIELD_GUID_LOW: int(guid) & 0xFFFFFFFF,
             _OBJECT_FIELD_TYPE: _PLAYER_OBJECT_TYPE,
             _OBJECT_FIELD_SCALE_X: _u32_from_float(_PLAYER_SCALE_X),
+            30: _pack_u8x4(race, class_id, gender, power_type),
             _UNIT_FIELD_HEALTH: health,
             _UNIT_FIELD_POWER_PRIMARY: power_primary,
             _UNIT_FIELD_MAX_HEALTH: max_health,
@@ -727,6 +747,12 @@ def build_player_field_values(ctx) -> dict[int, int]:
         }
     )
     _patch_language_skill_fields(field_values, ctx)
+    Logger.info(
+        f"[FIELD30] race={race} class={class_id} "
+        f"gender={gender} power={power_type} "
+        f"packed={field_values[30]}"
+    )
+    Logger.info(f"[LEVEL FIELD] idx=55 value={field_values[_UNIT_FIELD_LEVEL]}")
     return field_values
 
 
@@ -754,6 +780,10 @@ def build_full_player_create(ctx) -> bytes | None:
         field_start, field_end = locate_field_region(template_payload)
         mask_bytes = template_payload[mask_start:mask_end]
         field_indices = extract_field_indices(mask_bytes, mask_blocks)
+        if 30 not in field_indices:
+            raise ValueError("player create mask missing field 30")
+        if _UNIT_FIELD_LEVEL not in field_indices:
+            raise ValueError(f"player create mask missing field {_UNIT_FIELD_LEVEL}")
         srv_values = build_player_field_values(ctx)
         field_bytes = patch_create_fields(template_payload[field_start:field_end], field_indices, srv_values)
 
@@ -762,7 +792,12 @@ def build_full_player_create(ctx) -> bytes | None:
         payload += mask_bytes
         payload += field_bytes
         payload += struct.pack("<B", 0)
-        return bytes(payload)
+        built_payload = _patch_language_mask_bytes(bytes(payload), ctx)
+        _verify_player_level_field_in_payload(
+            built_payload,
+            int(getattr(ctx, "level", 1) or 1),
+        )
+        return built_payload
     except Exception as exc:
         Logger.warning(f"[PLAYER CREATE] direct build failed: {exc}")
         return None
@@ -784,11 +819,20 @@ def build_server_built_player_create_from_template(ctx) -> bytes | None:
         field_start, field_end = locate_field_region(payload)
         mask_start, mask_end, mask_blocks = locate_mask_region(payload)
         field_indices = extract_field_indices(payload[mask_start:mask_end], mask_blocks)
+        if 30 not in field_indices:
+            raise ValueError("player create mask missing field 30")
+        if _UNIT_FIELD_LEVEL not in field_indices:
+            raise ValueError(f"player create mask missing field {_UNIT_FIELD_LEVEL}")
         srv_values = build_player_field_values(ctx)
         patched_fields = patch_create_fields(payload[field_start:field_end], field_indices, srv_values)
         payload[field_start:field_end] = patched_fields
 
-        return bytes(payload)
+        built_payload = _patch_language_mask_bytes(bytes(payload), ctx)
+        _verify_player_level_field_in_payload(
+            built_payload,
+            int(getattr(ctx, "level", 1) or 1),
+        )
+        return built_payload
     except Exception as exc:
         Logger.warning(f"[PLAYER CREATE] server-built failed: {exc}")
         return None

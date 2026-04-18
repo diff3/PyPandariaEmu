@@ -531,6 +531,33 @@ def test_dot_inside_normal_text_still_broadcasts_as_chat(monkeypatch):
     assert bob.send_response_log == [[("SMSG_MESSAGECHAT", b"1|Alice|hej. detta ar vanlig text")]]
 
 
+def test_chat_uses_current_language_for_outgoing_messages(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers,
+        "encode_messagechat_payload",
+        lambda **fields: f"{fields['language']}|{fields['sender_name']}|{fields['message']}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    bob = _make_session(state, "Bob", 1002)
+    alice.language = 7
+    alice.current_language = 1
+    alice.known_languages_mask = (1 << 1) | (1 << 7)
+    ctx = SimpleNamespace(
+        name="CMSG_MESSAGECHAT_SAY",
+        payload=b"",
+        decoded={"msg": "zug zug", "language": 7},
+    )
+
+    code, responses = chat_handlers.handle_messagechat_say(alice, ctx)
+
+    assert code == 0
+    assert responses is None
+    assert alice.send_response_log == [[("SMSG_MESSAGECHAT", b"1|Alice|zug zug")]]
+    assert bob.send_response_log == [[("SMSG_MESSAGECHAT", b"1|Alice|zug zug")]]
+
+
 def test_afk_toggle_sets_player_flags(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,

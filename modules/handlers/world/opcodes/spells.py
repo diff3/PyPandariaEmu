@@ -102,7 +102,7 @@ _FLY_AURA_SECONDARY_APPLY_TEMPLATE = bytes.fromhex("8000004440000000000000035A00
 _FLY_AURA_PRIMARY_REMOVE_TEMPLATE = bytes.fromhex("8000004400040602")
 _FLY_AURA_SECONDARY_REMOVE_TEMPLATE = bytes.fromhex("8000004400050602")
 _FLY_AURA_SPELL_ID = 33943
-USE_RAW_SNIFFED_KNOWN_SPELLS = False
+USE_RAW_SNIFFED_KNOWN_SPELLS = True
 _RAW_KNOWN_SPELLS_SNIFF_PATH = (
     Path(__file__).resolve().parents[5]
     / "data"
@@ -209,6 +209,7 @@ def ensure_spell_known(session, spell_id: int) -> bool:
 
     if detected_lang is not None:
         session.language = detected_lang
+        session.current_language = detected_lang
 
     return True
 
@@ -275,6 +276,7 @@ def initialize_session_language_state(session) -> None:
         session.language = _LANG_ORCISH
     elif detected_lang is not None:
         session.language = detected_lang
+    session.current_language = int(getattr(session, "language", 0) or 0)
 
     # --- DEBUG ---
     Logger.info(
@@ -285,6 +287,7 @@ def initialize_session_language_state(session) -> None:
         session.known_languages_mask,
         sorted(spell_set),
     )
+    Logger.info(f"[LANG ACTIVE] {int(getattr(session, 'current_language', 0) or 0)}")
 
 def granted_companion_pet_spells() -> list[int]:
     return sorted(int(spell_id) for spell_id in _SANDBOX_COMPANION_PET_SPELL_IDS if int(spell_id) > 0)

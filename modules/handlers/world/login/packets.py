@@ -51,6 +51,8 @@ DEBUG_UPDATE_OBJECT_0002 = str(os.getenv("PP_DEBUG_UPDATE_OBJECT_0002", "")).str
     "yes",
     "on",
 }
+SPELL_LANGUAGE_COMMON = 668
+SPELL_LANGUAGE_ORCISH = 669
 
 
 def _load_raw_from_path(path: Path) -> Optional[bytes]:
@@ -511,10 +513,10 @@ def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
     # BASE LANGUAGE (EXACTLY ONE)
     # ----------------------------------------
     if race in alliance_races:
-        base_spell = 668  # Common
+        base_spell = SPELL_LANGUAGE_COMMON
         base_lang = _LANG_COMMON
     elif race in horde_races:
-        base_spell = 669  # Orcish
+        base_spell = SPELL_LANGUAGE_ORCISH
         base_lang = _LANG_ORCISH
     else:
         base_spell = 0
@@ -555,8 +557,8 @@ def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
     # BUILD LANGUAGE MASK (CRITICAL FIX)
     # ----------------------------------------
     lang_map = {
-        668: _LANG_COMMON,
-        669: _LANG_ORCISH,
+        SPELL_LANGUAGE_COMMON: _LANG_COMMON,
+        SPELL_LANGUAGE_ORCISH: _LANG_ORCISH,
         29932: 35,
         813: 10,
     }

@@ -115,8 +115,8 @@ def test_known_spells_packet_includes_common_for_alliance_race():
         struct.unpack_from("<I", payload, byte_pos + (index * 4))[0]
         for index in range(int(spell_count))
     ]
-    assert 668 in spells
-    assert 669 not in spells
+    assert login_packets.SPELL_LANGUAGE_COMMON in spells
+    assert login_packets.SPELL_LANGUAGE_ORCISH not in spells
 
 
 def test_known_spells_packet_does_not_force_common_for_horde_race():
@@ -135,8 +135,8 @@ def test_known_spells_packet_does_not_force_common_for_horde_race():
         struct.unpack_from("<I", payload, byte_pos + (index * 4))[0]
         for index in range(int(spell_count))
     ]
-    assert 669 in spells
-    assert 668 not in spells
+    assert login_packets.SPELL_LANGUAGE_ORCISH in spells
+    assert login_packets.SPELL_LANGUAGE_COMMON not in spells
 
 
 def test_known_spells_packet_uses_journal_test_mount_subset():

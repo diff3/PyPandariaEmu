@@ -1573,12 +1573,20 @@ def _handle_chat_message(session, ctx: PacketContext):
     player_name = session.player_name
     sender_guid = _sender_chat_guid(session)
     language = int(chat.get("language") or 0)
+    active_language = int(
+        getattr(session, "current_language", 0)
+        or getattr(session, "language", 0)
+        or 0
+    )
 
     mask = int(getattr(session, "known_languages_mask", 0) or 0)
 
-    if not (mask & (1 << language)):
-        # fallback to session default
-        language = int(getattr(session, "language", 0) or 0)
+    if language <= 0 or not (mask & (1 << language)):
+        language = active_language
+
+    # force outgoing chat to the session's active/default language
+    if active_language > 0:
+        language = active_language
 
     Logger.debug(f"[CHAT] opcode={ctx.name}")
     Logger.info(f"[CHAT] {player_name}: {message}")

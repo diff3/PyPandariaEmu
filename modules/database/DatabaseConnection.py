@@ -1654,8 +1654,6 @@ class DatabaseConnection:
                     spell=int(spell_id),
                     active=1,
                     disabled=0,
-                    spec=0,
-                    spec_mask=0,
                 )
                 for spell_id in spells
             ]
@@ -1749,8 +1747,6 @@ class DatabaseConnection:
                     spell=int(spell_id),
                     active=1,
                     disabled=0,
-                    spec=0,
-                    spec_mask=0,
                 )
                 for spell_id in missing
             )
