@@ -11,9 +11,11 @@ import types
 
 from shared.Logger import Logger
 from server.modules.handlers.world.bootstrap.playerobjects import (
+    build_full_player_create,
     build_movement_block,
     build_update_mask,
     build_player_field_values,
+    build_server_built_player_create_from_template,
 )
 
 
@@ -1122,3 +1124,40 @@ def test_server_built_movement_block_matches_reference_bytes() -> None:
     built_block = build_movement_block(ctx)
 
     assert built_block == reference_block
+
+
+def test_full_player_create_matches_template_path_bytes() -> None:
+    """Full code-built CREATE_OBJECT should stay byte-identical to template assembly."""
+    ctx = SimpleNamespace(
+        map_id=1,
+        char_guid=14,
+        player_guid=14,
+        world_guid=14,
+        exact_0002_low_guid=14,
+        race=4,
+        class_id=11,
+        gender=1,
+        faction="alliance",
+        x=16212.216796875,
+        y=16253.169921875,
+        z=14.770503044128418,
+        orientation=1.6979784965515137,
+        health=102,
+        max_health=102,
+        power_primary=40,
+        max_power=40,
+        level=1,
+        faction_template=4,
+        display_id=56,
+        player_bytes=393479,
+        player_bytes2=16777220,
+        player_bytes3=1,
+        max_level=90,
+    )
+
+    direct_payload = build_full_player_create(ctx)
+    template_payload = build_server_built_player_create_from_template(ctx)
+
+    assert direct_payload is not None
+    assert template_payload is not None
+    assert direct_payload == template_payload

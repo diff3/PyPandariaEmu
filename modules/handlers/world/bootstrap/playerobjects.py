@@ -187,6 +187,7 @@ from server.session.runtime import session as runtime_session
 USE_SERVER_BUILT_MINIMAL_PLAYER = False
 USE_SERVER_BUILT_PLAYER_CREATE = True
 USE_SERVER_BUILT_PLAYER_CREATE_DIRECT = True
+USE_SERVER_BUILT_PLAYER_CREATE_DEBUG_FALLBACK = False
 
 _PLAYER_CREATE_TEMPLATE_PATH = (
     Path(__file__).resolve().parents[5]
@@ -914,25 +915,22 @@ def build_server_built_player_create_from_template(ctx) -> bytes | None:
 
 
 def build_server_built_player_create(ctx) -> bytes | None:
-    """Build player CREATE_OBJECT with direct-header mode and template fallback."""
-    template_payload = build_server_built_player_create_from_template(ctx)
-    if template_payload is None:
-        return None
-
-    if not USE_SERVER_BUILT_PLAYER_CREATE_DIRECT:
-        Logger.info("[PLAYER CREATE] template path")
-        return template_payload
-
+    """Build player CREATE_OBJECT from code-only assembly, with optional debug fallback."""
     direct_payload = build_full_player_create(ctx)
     if direct_payload is None:
+        if not USE_SERVER_BUILT_PLAYER_CREATE_DEBUG_FALLBACK:
+            return None
         Logger.info("[PLAYER CREATE] direct fallback to template")
-        return template_payload
+        return build_server_built_player_create_from_template(ctx)
 
-    differences = _diff_bytes(direct_payload, template_payload)
-    Logger.info(f"[PLAYER CREATE] direct diff={len(differences)}")
-    if differences:
-        Logger.info("[PLAYER CREATE] direct fallback to template")
-        return template_payload
+    if USE_SERVER_BUILT_PLAYER_CREATE_DEBUG_FALLBACK:
+        template_payload = build_server_built_player_create_from_template(ctx)
+        if template_payload is not None:
+            differences = _diff_bytes(direct_payload, template_payload)
+            Logger.info(f"[PLAYER CREATE] direct diff={len(differences)}")
+            if differences:
+                Logger.info("[PLAYER CREATE] direct fallback to template")
+                return template_payload
 
     Logger.info("[PLAYER CREATE] direct path")
     return direct_payload
