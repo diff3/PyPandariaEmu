@@ -209,6 +209,11 @@ _PLAYER_CREATE_MOVEMENT_Z_OFFSET = 62
 _PLAYER_CREATE_OBJECT_TYPE = 4
 _PLAYER_CREATE_UPDATE_COUNT = 1
 _PLAYER_CREATE_UPDATE_TYPE = 2
+_PLAYER_CREATE_CONST_MOVEMENT_BLOCK = bytes.fromhex(
+    "200000004009080000080000490000e040e00f494000009040c3f54840"
+    "de507d465c57d93f00002040aef47d46000090400f000020400000e040"
+    "711c9740fb536c41"
+)
 
 _OBJECT_FIELD_GUID_LOW = 0
 _OBJECT_FIELD_TYPE = 4
@@ -730,13 +735,17 @@ def _diff_bytes(a: bytes, b: bytes) -> list[tuple[int, int, int]]:
     return [(index, a[index], b[index]) for index in range(min(len(a), len(b))) if a[index] != b[index]]
 
 
-def build_movement_block_from_template(template_block: bytes, ctx) -> bytes:
-    """Build the player CREATE_OBJECT movement block from a stable template."""
-    output = bytearray(template_block)
-    struct.pack_into("<f", output, _PLAYER_CREATE_MOVEMENT_X_OFFSET, float(getattr(ctx, "x", 0.0) or 0.0))
-    struct.pack_into("<f", output, _PLAYER_CREATE_MOVEMENT_Y_OFFSET, float(getattr(ctx, "y", 0.0) or 0.0))
-    struct.pack_into("<f", output, _PLAYER_CREATE_MOVEMENT_Z_OFFSET, float(getattr(ctx, "z", 0.0) or 0.0))
-    struct.pack_into("<f", output, _PLAYER_CREATE_MOVEMENT_O_OFFSET, float(getattr(ctx, "orientation", 0.0) or 0.0))
+def _write_float_le(buffer: bytearray, offset: int, value: float) -> None:
+    struct.pack_into("<f", buffer, int(offset), float(value))
+
+
+def build_movement_block(ctx) -> bytes:
+    """Build the player CREATE_OBJECT movement block from code-only constants."""
+    output = bytearray(_PLAYER_CREATE_CONST_MOVEMENT_BLOCK)
+    _write_float_le(output, _PLAYER_CREATE_MOVEMENT_X_OFFSET, float(getattr(ctx, "x", 0.0) or 0.0))
+    _write_float_le(output, _PLAYER_CREATE_MOVEMENT_Y_OFFSET, float(getattr(ctx, "y", 0.0) or 0.0))
+    _write_float_le(output, _PLAYER_CREATE_MOVEMENT_Z_OFFSET, float(getattr(ctx, "z", 0.0) or 0.0))
+    _write_float_le(output, _PLAYER_CREATE_MOVEMENT_O_OFFSET, float(getattr(ctx, "orientation", 0.0) or 0.0))
     return bytes(output)
 
 
@@ -826,9 +835,7 @@ def build_create_object_payload(ctx) -> bytes:
 def build_full_player_create(ctx) -> bytes | None:
     """Build a full player CREATE_OBJECT using a built header plus known body blocks."""
     try:
-        template_payload = _load_player_create_template_payload()
-        movement_template = template_payload[_PLAYER_CREATE_MOVEMENT_BLOCK_START:_PLAYER_CREATE_MOVEMENT_BLOCK_END]
-        movement_block = build_movement_block_from_template(movement_template, ctx)
+        movement_block = build_movement_block(ctx)
         if len(movement_block) != (_PLAYER_CREATE_MOVEMENT_BLOCK_END - _PLAYER_CREATE_MOVEMENT_BLOCK_START):
             return None
 
@@ -869,10 +876,10 @@ def build_server_built_player_create_from_template(ctx) -> bytes | None:
 
         patch_player_guid(payload, ctx)
         template_block = bytes(payload[_PLAYER_CREATE_MOVEMENT_BLOCK_START:_PLAYER_CREATE_MOVEMENT_BLOCK_END])
-        movement_block = build_movement_block_from_template(template_block, ctx)
+        movement_block = build_movement_block(ctx)
         if len(movement_block) != (_PLAYER_CREATE_MOVEMENT_BLOCK_END - _PLAYER_CREATE_MOVEMENT_BLOCK_START):
             return None
-        Logger.info(f"[MOVEMENT DIFF] {len(_diff_bytes(template_block, movement_block))}")
+        Logger.info(f"[MOVEMENT DIFF COUNT] {len(_diff_bytes(template_block, movement_block))}")
         payload[_PLAYER_CREATE_MOVEMENT_BLOCK_START:_PLAYER_CREATE_MOVEMENT_BLOCK_END] = movement_block
 
         srv_values = build_player_field_values(ctx)

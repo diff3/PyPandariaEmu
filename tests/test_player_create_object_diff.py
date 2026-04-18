@@ -11,6 +11,7 @@ import types
 
 from shared.Logger import Logger
 from server.modules.handlers.world.bootstrap.playerobjects import (
+    build_movement_block,
     build_update_mask,
     build_player_field_values,
 )
@@ -1105,3 +1106,19 @@ def test_server_built_create_mask_roundtrip_matches_field_values() -> None:
     assert set(field_indices) == set(field_values)
     assert len(parsed_fields) == len(field_values)
     assert set(parsed_fields) == set(field_values)
+
+
+def test_server_built_movement_block_matches_reference_bytes() -> None:
+    """Build the movement block from code-only constants and require byte identity."""
+    reference_payload = load_reference_payload()
+    reference_block = reference_payload[10:76]
+    ctx = SimpleNamespace(
+        x=16212.216796875,
+        y=16253.169921875,
+        z=14.770503044128418,
+        orientation=1.6979784965515137,
+    )
+
+    built_block = build_movement_block(ctx)
+
+    assert built_block == reference_block
