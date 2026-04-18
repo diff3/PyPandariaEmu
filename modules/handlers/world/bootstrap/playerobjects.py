@@ -394,6 +394,7 @@ _RACIAL_LANGUAGE_SKILL_BY_RACE = {
     10: 139,
     11: 113,
 }
+_BIAS_SENSITIVE_PLAYER_FIELDS = (57, 166, 167, 168, 1943)
 
 
 def _u32_from_float(value: float) -> int:
@@ -451,7 +452,7 @@ def _resolve_player_faction_template(ctx) -> int:
 
 
 def _u32_from_two_u16(low: int, high: int) -> int:
-    return ((int(high) & 0xFFFF) << 16) | (int(low) & 0xFFFF)
+    return _pack_u16x2(low, high)
 
 
 def _pack_u8x4(a: int, b: int, c: int, d: int) -> int:
@@ -460,6 +461,20 @@ def _pack_u8x4(a: int, b: int, c: int, d: int) -> int:
         | ((int(b) & 0xFF) << 8)
         | ((int(c) & 0xFF) << 16)
         | ((int(d) & 0xFF) << 24)
+    )
+
+
+def _pack_u16x2(a: int, b: int) -> int:
+    return (int(a) & 0xFFFF) | ((int(b) & 0xFFFF) << 16)
+
+
+def _unpack_u8x4(value: int) -> tuple[int, int, int, int]:
+    raw = int(value or 0)
+    return (
+        raw & 0xFF,
+        (raw >> 8) & 0xFF,
+        (raw >> 16) & 0xFF,
+        (raw >> 24) & 0xFF,
     )
 
 
@@ -705,7 +720,6 @@ def build_player_field_values(ctx) -> dict[int, int]:
     race = int(getattr(ctx, "race", 0) or 0)
     class_id = int(getattr(ctx, "player_class", 0) or getattr(ctx, "class_id", 0) or 0)
     gender = int(getattr(ctx, "gender", 0) or 0)
-    power_type = int(getattr(ctx, "power_type", 0) or getattr(ctx, "display_power", 0) or 0)
     health = int(getattr(ctx, "health", 103) or 103)
     max_health = int(getattr(ctx, "max_health", health) or health)
     power_primary = int(getattr(ctx, "power_primary", 100) or 100)
@@ -713,11 +727,21 @@ def build_player_field_values(ctx) -> dict[int, int]:
     level = int(getattr(ctx, "level", 1) or 1)
     faction = _resolve_player_faction_template(ctx)
     display_id = _resolve_player_display_id(ctx)
-    player_bytes = int(getattr(ctx, "player_bytes", 198401) or 198401)
-    player_bytes_2 = int(getattr(ctx, "player_bytes2", 16777224) or 16777224)
-    player_bytes_3 = int(
+    default_player_bytes = int(getattr(ctx, "player_bytes", 198401) or 198401)
+    default_player_bytes_2 = int(getattr(ctx, "player_bytes2", 16777224) or 16777224)
+    default_player_bytes_3 = int(
         getattr(ctx, "player_bytes3", _PLAYER_BYTES_3_DEFAULT) or _PLAYER_BYTES_3_DEFAULT
     )
+    default_skin, default_face, default_hair_style, default_hair_color = _unpack_u8x4(default_player_bytes)
+    default_facial_hair, _, _, _ = _unpack_u8x4(default_player_bytes_2)
+    skin = int(getattr(ctx, "skin", default_skin) or default_skin)
+    face = int(getattr(ctx, "face", default_face) or default_face)
+    hair_style = int(getattr(ctx, "hair_style", default_hair_style) or default_hair_style)
+    hair_color = int(getattr(ctx, "hair_color", default_hair_color) or default_hair_color)
+    facial_hair = int(getattr(ctx, "facial_hair", default_facial_hair) or default_facial_hair)
+    player_bytes = _pack_u8x4(skin, face, hair_style, hair_color)
+    player_bytes_2 = _pack_u8x4(facial_hair, 0, 0, gender)
+    player_bytes_3 = _pack_u8x4(gender, 0, 0, 0)
     max_level = int(getattr(ctx, "max_level", _PLAYER_MAX_LEVEL_DEFAULT) or _PLAYER_MAX_LEVEL_DEFAULT)
 
     field_values = dict(_VERIFIED_PLAYER_REFERENCE_FIELDS)
@@ -726,13 +750,13 @@ def build_player_field_values(ctx) -> dict[int, int]:
             _OBJECT_FIELD_GUID_LOW: int(guid) & 0xFFFFFFFF,
             _OBJECT_FIELD_TYPE: _PLAYER_OBJECT_TYPE,
             _OBJECT_FIELD_SCALE_X: _u32_from_float(_PLAYER_SCALE_X),
-            30: _pack_u8x4(race, class_id, gender, power_type),
+            30: _pack_u8x4(race, class_id, 0, gender),
             _UNIT_FIELD_HEALTH: health,
             _UNIT_FIELD_POWER_PRIMARY: power_primary,
             _UNIT_FIELD_MAX_HEALTH: max_health,
             40: max_power,
             _UNIT_FIELD_LEVEL: level,
-            _UNIT_FIELD_FACTION_TEMPLATE: faction,
+            _UNIT_FIELD_FACTION_TEMPLATE: int(getattr(ctx, "faction_template", faction) or faction),
             _UNIT_FIELD_FLAGS: _PLAYER_FLAGS,
             _UNIT_FIELD_FLAGS_2: _PLAYER_FLAGS_2,
             _UNIT_FIELD_BOUNDING_RADIUS: _u32_from_float(_PLAYER_BOUNDING_RADIUS),
@@ -747,10 +771,16 @@ def build_player_field_values(ctx) -> dict[int, int]:
         }
     )
     _patch_language_skill_fields(field_values, ctx)
+    for field_index in _BIAS_SENSITIVE_PLAYER_FIELDS:
+        assert field_index in field_values
     Logger.info(
         f"[FIELD30] race={race} class={class_id} "
-        f"gender={gender} power={power_type} "
+        f"gender={gender} zero_byte=0 "
         f"packed={field_values[30]}"
+    )
+    Logger.info(f"[FIELD57] faction_template={field_values[57]}")
+    Logger.info(
+        f"[PLAYER_BYTES] 166={field_values[166]} 167={field_values[167]} 168={field_values[168]}"
     )
     Logger.info(f"[LEVEL FIELD] idx=55 value={field_values[_UNIT_FIELD_LEVEL]}")
     return field_values
@@ -784,6 +814,9 @@ def build_full_player_create(ctx) -> bytes | None:
             raise ValueError("player create mask missing field 30")
         if _UNIT_FIELD_LEVEL not in field_indices:
             raise ValueError(f"player create mask missing field {_UNIT_FIELD_LEVEL}")
+        for field_index in _BIAS_SENSITIVE_PLAYER_FIELDS:
+            if field_index not in field_indices:
+                raise ValueError(f"player create mask missing field {field_index}")
         srv_values = build_player_field_values(ctx)
         field_bytes = patch_create_fields(template_payload[field_start:field_end], field_indices, srv_values)
 
@@ -823,6 +856,9 @@ def build_server_built_player_create_from_template(ctx) -> bytes | None:
             raise ValueError("player create mask missing field 30")
         if _UNIT_FIELD_LEVEL not in field_indices:
             raise ValueError(f"player create mask missing field {_UNIT_FIELD_LEVEL}")
+        for field_index in _BIAS_SENSITIVE_PLAYER_FIELDS:
+            if field_index not in field_indices:
+                raise ValueError(f"player create mask missing field {field_index}")
         srv_values = build_player_field_values(ctx)
         patched_fields = patch_create_fields(payload[field_start:field_end], field_indices, srv_values)
         payload[field_start:field_end] = patched_fields

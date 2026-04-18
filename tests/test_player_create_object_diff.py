@@ -9,6 +9,7 @@ import sys
 from types import SimpleNamespace
 import types
 
+from shared.Logger import Logger
 from server.modules.handlers.world.bootstrap.playerobjects import (
     build_player_field_values,
 )
@@ -896,7 +897,6 @@ def test_horde_player_create_packs_unit_field_bytes_0_from_ctx() -> None:
             race=10,
             class_id=4,
             gender=1,
-            display_power=3,
             faction="horde",
             x=16212.216796875,
             y=16253.169921875,
@@ -924,7 +924,139 @@ def test_horde_player_create_packs_unit_field_bytes_0_from_ctx() -> None:
         payload[region["field_start"] : region["field_end"]],
         field_indices,
     )
-    expected = 10 | (4 << 8) | (1 << 16) | (3 << 24)
+    expected = 10 | (4 << 8) | (1 << 24)
 
     assert 30 in field_indices
     assert field_values[30] == expected
+
+
+def test_horde_replay_and_server_create_match_remaining_sensitive_fields() -> None:
+    """Lock replay vs server parity for the currently known Horde-sensitive fields."""
+    ctx = SimpleNamespace(
+        map_id=1,
+        char_guid=13,
+        player_guid=13,
+        world_guid=13,
+        exact_0002_low_guid=13,
+        race=10,
+        class_id=4,
+        gender=1,
+        faction="horde",
+        x=16212.216796875,
+        y=16253.169921875,
+        z=14.770503044128418,
+        orientation=1.6979784965515137,
+        health=102,
+        max_health=102,
+        power_primary=40,
+        max_power=40,
+        level=90,
+        faction_template=1610,
+        display_id=52,
+        player_bytes=393218,
+        player_bytes2=16777220,
+        player_bytes3=1,
+        max_level=90,
+    )
+    replay_payload = build_create_payload(use_server_built_player_create=False, ctx=ctx)
+    server_payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+        ctx=ctx,
+    )
+
+    replay_region = locate_update_field_region(replay_payload)
+    replay_indices = extract_field_indices(
+        replay_payload[replay_region["mask_start"] : replay_region["mask_end"]],
+        replay_region["mask_blocks"],
+    )
+    replay_values = parse_field_values(
+        replay_payload[replay_region["field_start"] : replay_region["field_end"]],
+        replay_indices,
+    )
+
+    server_region = locate_update_field_region(server_payload)
+    server_indices = extract_field_indices(
+        server_payload[server_region["mask_start"] : server_region["mask_end"]],
+        server_region["mask_blocks"],
+    )
+    server_values = parse_field_values(
+        server_payload[server_region["field_start"] : server_region["field_end"]],
+        server_indices,
+    )
+
+    target_fields = [30, 57, 166, 167, 168, 1154, 1282, 1410, 1943]
+    differences = {
+        field_index: (replay_values.get(field_index), server_values.get(field_index))
+        for field_index in target_fields
+        if replay_values.get(field_index) != server_values.get(field_index)
+    }
+
+    assert differences == {}
+
+
+def test_horde_replay_and_server_create_match_bias_sensitive_fields() -> None:
+    """Replay and server-built Horde create should match for the remaining bias-sensitive fields."""
+    ctx = SimpleNamespace(
+        map_id=1,
+        char_guid=13,
+        player_guid=13,
+        world_guid=13,
+        exact_0002_low_guid=13,
+        race=10,
+        class_id=4,
+        gender=1,
+        faction="horde",
+        x=16212.216796875,
+        y=16253.169921875,
+        z=14.770503044128418,
+        orientation=1.6979784965515137,
+        health=102,
+        max_health=102,
+        power_primary=40,
+        max_power=40,
+        level=90,
+        faction_template=1610,
+        display_id=52,
+        player_bytes=393218,
+        player_bytes2=16777220,
+        player_bytes3=1,
+        max_level=90,
+    )
+    replay_payload = build_create_payload(use_server_built_player_create=False, ctx=ctx)
+    server_payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+        ctx=ctx,
+    )
+
+    replay_region = locate_update_field_region(replay_payload)
+    replay_indices = extract_field_indices(
+        replay_payload[replay_region["mask_start"] : replay_region["mask_end"]],
+        replay_region["mask_blocks"],
+    )
+    replay_values = parse_field_values(
+        replay_payload[replay_region["field_start"] : replay_region["field_end"]],
+        replay_indices,
+    )
+
+    server_region = locate_update_field_region(server_payload)
+    server_indices = extract_field_indices(
+        server_payload[server_region["mask_start"] : server_region["mask_end"]],
+        server_region["mask_blocks"],
+    )
+    server_values = parse_field_values(
+        server_payload[server_region["field_start"] : server_region["field_end"]],
+        server_indices,
+    )
+
+    target_fields = [57, 166, 167, 168, 1943]
+    differences = {}
+    for field_index in target_fields:
+        replay_value = replay_values.get(field_index)
+        server_value = server_values.get(field_index)
+        if replay_value != server_value:
+            Logger.info(f"[BIAS DIFF] {field_index}: replay={replay_value} server={server_value}")
+            differences[field_index] = (replay_value, server_value)
+
+    assert differences == {}

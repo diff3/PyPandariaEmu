@@ -94,3 +94,75 @@ def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> 
     ]
     assert session.loading_screen_done is True
     assert session.post_loading_sent is True
+
+
+def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
+    """Queue a post-teleport spell sync so language/mount state survives world transfers."""
+    session = SimpleNamespace(
+        loading_screen_done=False,
+        post_loading_sent=False,
+        teleport_pending=True,
+        worldport_ack_pending=True,
+        teleport_destination="test",
+    )
+    ctx = SimpleNamespace()
+    state_changes: list[LoginState] = []
+
+    monkeypatch.setattr(
+        login_handlers,
+        "_set_login_state",
+        lambda _session, state: state_changes.append(state),
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_login_packet",
+        lambda opcode_name, _ctx: {
+            "SMSG_LOGIN_VERIFY_WORLD": b"verify",
+            "SMSG_LOGIN_SET_TIME_SPEED": b"time",
+            "SMSG_BIND_POINT_UPDATE": b"bind",
+            "SMSG_TIME_SYNC_REQUEST": b"sync",
+            "SMSG_PHASE_SHIFT_CHANGE": b"phase",
+            "SMSG_INIT_WORLD_STATES": b"states",
+            "SMSG_WEATHER": b"weather",
+            "SMSG_QUERY_TIME_RESPONSE": b"query-time",
+        }.get(opcode_name),
+    )
+    monkeypatch.setattr(
+        login_handlers.bootstrap_replay,
+        "replay_movement_focus_sequence",
+        lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
+    )
+    monkeypatch.setattr(
+        login_handlers.spells_handlers,
+        "build_active_mover_spell_sync_responses",
+        lambda _session: [("SMSG_SEND_KNOWN_SPELLS", b"known-spells")],
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_login_inventory_sync_responses",
+        lambda _session: [],
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "trigger_inventory_activation",
+        lambda _session: [],
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_explored_zones_update_response",
+        lambda _session: None,
+    )
+
+    responses = login_handlers._queue_teleport_world_transition(session, ctx)
+
+    assert state_changes == [LoginState.WORLD_BOOTSTRAP]
+    assert ("SMSG_UPDATE_OBJECT", b"create") in responses
+    assert ("SMSG_SEND_KNOWN_SPELLS", b"known-spells") in responses
+    assert responses.index(("SMSG_SEND_KNOWN_SPELLS", b"known-spells")) > responses.index(
+        ("SMSG_UPDATE_OBJECT", b"create")
+    )
+    assert session.loading_screen_done is True
+    assert session.post_loading_sent is True
+    assert session.teleport_pending is False
+    assert session.worldport_ack_pending is False
+    assert session.teleport_destination is None

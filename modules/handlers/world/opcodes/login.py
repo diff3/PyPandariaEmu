@@ -436,6 +436,14 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     Logger.info("[Teleport] replaying sniffed movement focus sequence")
     responses.extend(bootstrap_replay.replay_movement_focus_sequence(session))
 
+    post_teleport_spell_packets = spells_handlers.build_active_mover_spell_sync_responses(session)
+    if post_teleport_spell_packets:
+        Logger.info(
+            "[Teleport] sending %s post-teleport spell sync packets",
+            len(post_teleport_spell_packets),
+        )
+        responses.extend(post_teleport_spell_packets)
+
     inventory_packets = build_login_inventory_sync_responses(session)
     if inventory_packets:
         Logger.info(f"[Teleport] sending {len(inventory_packets)} inventory sync packets")
