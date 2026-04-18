@@ -263,3 +263,35 @@ def test_remote_player_create_keeps_equipment_cache_when_morphed(monkeypatch):
 
     assert response == ("SMSG_UPDATE_OBJECT", b"0002-remote")
     assert captured == [("SMSG_UPDATE_OBJECT_1773613176_0002", [111, 0, 222, 0])]
+
+
+def test_send_player_create_appends_remote_visible_item_updates(monkeypatch):
+    observer = _make_session(name="Observer", guid=1, map_id=1, state=GlobalState())
+    source = _make_session(name="Source", guid=7, map_id=1, state=GlobalState())
+    observer.login_state = "IN_WORLD"
+    source.login_state = "IN_WORLD"
+
+    monkeypatch.setattr(
+        runtime,
+        "_build_player_create_responses",
+        lambda session: [("SMSG_UPDATE_OBJECT", b"0002-remote")] if session is source else [],
+    )
+
+    inventory_sync_module = types.ModuleType("server.modules.handlers.world.inventory_sync")
+    captured_sessions = []
+    inventory_sync_module.build_self_visible_item_update_responses = lambda session: (
+        captured_sessions.append(session)
+        or [("SMSG_UPDATE_OBJECT", b"visible-items-1"), ("SMSG_UPDATE_OBJECT", b"visible-items-2")]
+    )
+    sys.modules["server.modules.handlers.world.inventory_sync"] = inventory_sync_module
+
+    sent = runtime._send_player_create(observer, source)
+
+    assert sent is True
+    assert captured_sessions == [source]
+    assert observer.send_response_log == [[
+        ("SMSG_UPDATE_OBJECT", b"0002-remote"),
+        ("SMSG_UPDATE_OBJECT", b"visible-items-1"),
+        ("SMSG_UPDATE_OBJECT", b"visible-items-2"),
+    ]]
+    assert source.char_guid in observer.visible_guids

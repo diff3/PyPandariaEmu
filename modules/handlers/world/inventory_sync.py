@@ -536,19 +536,44 @@ def _visible_item_cache_raw(session) -> list[int]:
     return values
 
 
+def _visible_item_update_pairs(session) -> list[tuple[int, int]]:
+    """Return visible-item entry/enchant pairs in stable equipment-slot order."""
+    state = getattr(session, "inventory_state", None)
+    if state is not None and hasattr(state, "get"):
+        pairs: list[tuple[int, int]] = []
+        for slot in range(_PLAYER_VISIBLE_ITEM_SLOT_COUNT):
+            item = state.get(0, slot)
+            entry_id = int(getattr(item, "entry", 0) or 0) if item is not None else 0
+            enchant = 0
+            pairs.append((entry_id, enchant))
+        return pairs
+
+    # Fallback for legacy callers without an inventory_state. This preserves
+    # the old behavior shape, but the primary runtime path should always use
+    # inventory_state so remote visible items carry correct entry ids.
+    cached = _visible_item_cache_raw(session)
+    pairs = []
+    for slot in range(_PLAYER_VISIBLE_ITEM_SLOT_COUNT):
+        cached_index = slot * 2
+        entry_id = int(cached[cached_index]) if cached_index < len(cached) else 0
+        pairs.append((entry_id, 0))
+    return pairs
+
+
 def build_self_visible_item_update_responses(session) -> list[tuple[str, bytes]]:
     player_guid = int(getattr(session, "char_guid", 0) or 0)
     map_id = int(getattr(session, "map_id", 0) or 0)
     if player_guid <= 0:
         return []
 
-    equipment_cache_raw = _visible_item_cache_raw(session)
+    visible_pairs = _visible_item_update_pairs(session)
     field_updates: list[tuple[int, int]] = []
     for slot in range(_PLAYER_VISIBLE_ITEM_SLOT_COUNT):
         field_index = _PLAYER_FIELD_VISIBLE_ITEMS + (slot * 2)
-        display_id = int(equipment_cache_raw[slot * 2]) if (slot * 2) < len(equipment_cache_raw) else 0
-        field_updates.append((field_index, display_id))
-        field_updates.append((field_index + 1, 0))
+        entry_id, enchant = visible_pairs[slot] if slot < len(visible_pairs) else (0, 0)
+        Logger.debug(f"[VISIBLE MAP] slot={slot} field={field_index} entry={entry_id}")
+        field_updates.append((field_index, int(entry_id)))
+        field_updates.append((field_index + 1, int(enchant)))
 
     return [
         (

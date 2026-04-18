@@ -834,6 +834,19 @@ def build_full_player_create(ctx) -> bytes | None:
             built_payload,
             int(getattr(ctx, "level", 1) or 1),
         )
+        Logger.info(
+            f"[CREATE BUILD] guid={getattr(ctx, 'guid', None)} "
+            f"type=4 "
+            f"mask_words={mask_words} "
+            f"fields={len(srv_values)} "
+            f"field_bytes={len(field_bytes)} "
+            f"size={len(built_payload)}"
+        )
+
+        Logger.info(
+            f"[CREATE FIELDS] guid={getattr(ctx, 'guid', None)} "
+            f"indices={sorted(srv_values.keys())}"
+        )
         return built_payload
     except Exception as exc:
         Logger.warning(f"[PLAYER CREATE] direct build failed: {exc}")

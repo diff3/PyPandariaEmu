@@ -497,6 +497,7 @@ def _build_player_create_update_response(source_session) -> tuple[str, bytes] | 
     ctx.exact_0002_remote_player = True
     ctx.exact_0002_map_id = int(getattr(source_session, "map_id", 0) or 0)
     ctx.exact_0002_low_guid = int(getattr(source_session, "char_guid", 0) or 0)
+    Logger.info("[CREATE PATH] remote=replay")
     payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
     if payload is None:
         return None
@@ -516,6 +517,7 @@ def build_self_player_appearance_responses(source_session) -> list[tuple[str, by
     ctx.exact_0002_mode = "barncastle"
     ctx.exact_0002_map_id = int(getattr(source_session, "map_id", 0) or 0)
     ctx.exact_0002_low_guid = int(getattr(source_session, "char_guid", 0) or 0)
+    Logger.info("[CREATE PATH] self=server-built")
     payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
     if payload is not None:
         responses.append(("SMSG_UPDATE_OBJECT", payload))
@@ -621,6 +623,8 @@ def _build_player_create_responses(source_session) -> list[tuple[str, bytes]]:
 
 
 def _send_player_create(observer_session, source_session) -> bool:
+    from server.modules.handlers.world.inventory_sync import build_self_visible_item_update_responses
+
     source_guid = _session_guid(source_session)
     if source_guid <= 0:
         return False
@@ -630,8 +634,47 @@ def _send_player_create(observer_session, source_session) -> bool:
         return False
 
     responses = _build_player_create_responses(source_session)
+    if responses:
+        responses.extend(build_self_visible_item_update_responses(source_session))
     if not responses:
         return False
+
+    # --- LOG START ---
+    observer_guid = int(getattr(observer_session, "char_guid", 0) or 0)
+    source_guid = int(getattr(source_session, "char_guid", 0) or 0)
+    tag = "SELF" if observer_guid == source_guid else "OTHER"
+
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+
+        try:
+            from server.modules.handlers.world.bootstrap.playerobjects import (
+                extract_first_update_object_guid_info,
+                locate_mask_region,
+                extract_field_indices,
+            )
+
+            guid_info = extract_first_update_object_guid_info(payload)
+            create_guid = guid_info[0] if guid_info else 0
+
+            mask_start, mask_end, mask_blocks = locate_mask_region(payload)
+            mask_bytes = payload[mask_start:mask_end]
+            field_indices = extract_field_indices(mask_bytes, mask_blocks)
+
+            Logger.info(
+                f"[CREATE SEND {tag}] "
+                f"observer={observer_guid} "
+                f"source={source_guid} "
+                f"create_guid={create_guid} "
+                f"mask_words={mask_blocks} "
+                f"fields={len(field_indices)} "
+                f"size={len(payload)}"
+            )
+
+        except Exception as exc:
+            Logger.warning(f"[CREATE LOG ERROR] {exc}")
+    # --- LOG END ---
 
     dispatch_responses_to_sessions([observer_session], responses)
     visible_guids.add(source_guid)

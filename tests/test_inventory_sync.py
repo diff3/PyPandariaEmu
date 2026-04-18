@@ -120,9 +120,18 @@ class _InventoryState:
 
 def test_self_visible_item_update_writes_all_equipment_slots():
     session = _FakeSession()
+    state = _InventoryState()
+    session.inventory_state = state
     for slot in range(19):
-        session.equipment_cache_raw[slot * 2] = 1000 + slot
-        session.equipment_cache_raw[slot * 2 + 1] = 77
+        state.put(
+            _Item(
+                item_guid=10000 + slot,
+                bag=0,
+                slot=slot,
+                count=1,
+                template=_Template(entry=1000 + slot, display_id=2000 + slot, inventory_type=slot + 1),
+            )
+        )
 
     responses = inventory_sync.build_self_visible_item_update_responses(session)
 
@@ -153,8 +162,17 @@ def test_self_visible_item_update_clears_slots_without_equipment():
 def test_self_visible_item_update_keeps_slots_when_morphed():
     session = _FakeSession()
     session.is_morphed = True
-    session.equipment_cache_raw[0] = 1234
-    session.equipment_cache_raw[1] = 77
+    state = _InventoryState()
+    state.put(
+        _Item(
+            item_guid=1000,
+            bag=0,
+            slot=0,
+            count=1,
+            template=_Template(entry=1234, display_id=9999, inventory_type=1),
+        )
+    )
+    session.inventory_state = state
 
     responses = inventory_sync.build_self_visible_item_update_responses(session)
     payload = responses[0][1]
@@ -162,6 +180,29 @@ def test_self_visible_item_update_keeps_slots_when_morphed():
     update = decoded["updates"][0]
 
     assert update["fields"]["u32"][:2] == [1234, 0]
+
+
+def test_self_visible_item_update_uses_equipment_slots_not_raw_cache_order():
+    session = _FakeSession()
+    session.equipment_cache_raw[0] = 7777  # legacy fallback value that should be ignored
+    state = _InventoryState()
+    state.put(
+        _Item(
+            item_guid=2001,
+            bag=0,
+            slot=1,
+            count=1,
+            template=_Template(entry=4321, display_id=8765, inventory_type=2),
+        )
+    )
+    session.inventory_state = state
+
+    responses = inventory_sync.build_self_visible_item_update_responses(session)
+    payload = responses[0][1]
+    decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)
+    update = decoded["updates"][0]
+
+    assert update["fields"]["u32"][0:4] == [0, 0, 4321, 0]
 
 
 def test_item_snapshot_uses_bag_guid_as_contained_in_for_bag_contents():

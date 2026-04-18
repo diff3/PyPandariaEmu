@@ -1501,15 +1501,12 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0003(_ctx=None) -> bytes:
 
 def build_SMSG_UPDATE_OBJECT_1773613176_0002(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
-    if USE_SERVER_BUILT_PLAYER_CREATE and not hasattr(ctx, "exact_0002_payload"):
+    is_remote_player = bool(getattr(ctx, "exact_0002_remote_player", False))
+    if USE_SERVER_BUILT_PLAYER_CREATE and not hasattr(ctx, "exact_0002_payload") and not is_remote_player:
         built = build_server_built_player_create(ctx)
         if built is None:
             raise RuntimeError("[PLAYER CREATE] server-built create returned no payload")
 
-        if bool(getattr(ctx, "exact_0002_remote_player", False)):
-            patched = bytearray(built)
-            _patch_update_object_1773613176_0002_remote_flags(patched)
-            built = bytes(patched)
         map_id = struct.unpack_from("<H", built, 0)[0]
         Logger.info("[PLAYER CREATE] server-built only")
         Logger.info(
@@ -1540,7 +1537,7 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0002(_ctx=None) -> bytes:
         built = _build_live_update_object_1773613176_0002_payload(ctx)
         map_id = struct.unpack_from("<H", built, 0)[0]
         active_mode = "full-capture"
-    if bool(getattr(ctx, "exact_0002_remote_player", False)):
+    if is_remote_player:
         patched = bytearray(built)
         _patch_update_object_1773613176_0002_remote_flags(patched)
         built = bytes(patched)

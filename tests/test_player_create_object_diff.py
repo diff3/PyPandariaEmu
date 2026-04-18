@@ -141,6 +141,46 @@ def build_create_payload(
     return login_packets.build_SMSG_UPDATE_OBJECT_1773613176_0002(ctx)
 
 
+def test_self_player_create_uses_server_built_path_when_enabled(monkeypatch) -> None:
+    login_packets = _import_login_packets_with_stubs()
+    login_packets.USE_SERVER_BUILT_PLAYER_CREATE = True
+    monkeypatch.setattr(login_packets, "build_server_built_player_create", lambda ctx: b"server-built")
+    monkeypatch.setattr(
+        login_packets,
+        "_build_barncastle_update_object_1773613176_0002_payload",
+        lambda ctx: b"replay-built",
+    )
+
+    ctx = SimpleNamespace(map_id=1, char_guid=14)
+
+    assert login_packets.build_SMSG_UPDATE_OBJECT_1773613176_0002(ctx) == b"server-built"
+
+
+def test_remote_player_create_uses_replay_path_when_server_built_enabled(monkeypatch) -> None:
+    login_packets = _import_login_packets_with_stubs()
+    login_packets.USE_SERVER_BUILT_PLAYER_CREATE = True
+    monkeypatch.setattr(login_packets, "build_server_built_player_create", lambda ctx: b"server-built")
+    monkeypatch.setattr(
+        login_packets,
+        "_build_barncastle_update_object_1773613176_0002_payload",
+        lambda ctx: b"replay-built-payload",
+    )
+    monkeypatch.setattr(
+        login_packets,
+        "_patch_update_object_1773613176_0002_remote_flags",
+        lambda payload: None,
+    )
+
+    ctx = SimpleNamespace(
+        map_id=1,
+        char_guid=14,
+        exact_0002_mode="barncastle",
+        exact_0002_remote_player=True,
+    )
+
+    assert login_packets.build_SMSG_UPDATE_OBJECT_1773613176_0002(ctx) == b"replay-built-payload"
+
+
 def diff_bytes(a: bytes, b: bytes) -> list[tuple[int, int | None, int | None]]:
     """Return byte-level differences between two payloads."""
     differences: list[tuple[int, int | None, int | None]] = []
