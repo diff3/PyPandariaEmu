@@ -175,7 +175,9 @@ Working assumption for the next phase:
   server-built payload.
 """
 
+import json
 import math
+from pathlib import Path
 import struct
 
 from shared.Logger import Logger
@@ -183,6 +185,30 @@ from server.modules.game.guid import GuidHelper
 from server.session.runtime import session as runtime_session
 
 USE_SERVER_BUILT_MINIMAL_PLAYER = True
+USE_SERVER_BUILT_PLAYER_CREATE = True
+USE_SERVER_BUILT_PLAYER_CREATE_DIRECT = True
+
+_PLAYER_CREATE_TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[5]
+    / "data"
+    / "skyfire548"
+    / "captures"
+    / "focus"
+    / "debug"
+    / "SMSG_UPDATE_OBJECT_1776451639_0458.json"
+)
+
+_PLAYER_CREATE_GUID_MASK_OFFSET = 7
+_PLAYER_CREATE_GUID_VALUE_OFFSET = 8
+_PLAYER_CREATE_MOVEMENT_BLOCK_START = 10
+_PLAYER_CREATE_MOVEMENT_BLOCK_END = 76
+_PLAYER_CREATE_MOVEMENT_X_OFFSET = 29
+_PLAYER_CREATE_MOVEMENT_O_OFFSET = 33
+_PLAYER_CREATE_MOVEMENT_Y_OFFSET = 41
+_PLAYER_CREATE_MOVEMENT_Z_OFFSET = 62
+_PLAYER_CREATE_OBJECT_TYPE = 4
+_PLAYER_CREATE_UPDATE_COUNT = 1
+_PLAYER_CREATE_UPDATE_TYPE = 2
 
 _OBJECT_FIELD_GUID_LOW = 0
 _OBJECT_FIELD_TYPE = 4
@@ -203,6 +229,12 @@ _PLAYER_BYTES = 166
 _PLAYER_BYTES_2 = 167
 _PLAYER_BYTES_3 = 168
 _PLAYER_FIELD_MAX_LEVEL = 1943
+_PLAYER_SKILL_SLOT_IDS_0_1_FIELD = 1415
+_PLAYER_SKILL_SLOT_ID_2_FIELD = 1610
+_PLAYER_SKILL_SLOT_VALUES_0_1_FIELD = 1619
+_PLAYER_SKILL_SLOT_VALUE_2_FIELD = 1620
+_PLAYER_SKILL_SLOT_MAX_0_1_FIELD = 1830
+_PLAYER_SKILL_SLOT_MAX_2_FIELD = 1831
 
 _VERIFIED_PLAYER_REFERENCE_FIELDS = {
     6: 0,
@@ -338,9 +370,35 @@ _PLAYER_FACTION_TEMPLATE_IDS = {
     11: 1629,
 }
 
+_ALLIANCE_RACES = {1, 3, 4, 7, 11, 22, 25}
+_HORDE_RACES = {2, 5, 6, 8, 9, 10, 26}
+_LANGUAGE_SKILL_COMMON = 98
+_LANGUAGE_SKILL_ORCISH = 109
+_RACIAL_LANGUAGE_SKILL_BY_RACE = {
+    1: 113,
+    2: 109,
+    3: 111,
+    4: 113,
+    5: 110,
+    6: 114,
+    7: 115,
+    8: 116,
+    10: 139,
+    11: 113,
+}
+
 
 def _u32_from_float(value: float) -> int:
     return struct.unpack("<I", struct.pack("<f", float(value)))[0]
+
+
+def _load_player_create_template_payload() -> bytes:
+    """Load the sniffed player CREATE_OBJECT template payload."""
+    data = json.loads(_PLAYER_CREATE_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    payload_hex = data.get("hex_compact") or data.get("hex_spaced")
+    if not payload_hex:
+        raise ValueError(f"missing payload hex in {_PLAYER_CREATE_TEMPLATE_PATH.name}")
+    return bytes.fromhex(str(payload_hex).replace(" ", ""))
 
 
 def _resolve_player_guid(ctx) -> int:
@@ -350,6 +408,16 @@ def _resolve_player_guid(ctx) -> int:
         or getattr(ctx, "char_guid", 0)
         or 0
     )
+
+
+def _resolve_player_low_guid(ctx) -> int:
+    return int(
+        getattr(ctx, "exact_0002_low_guid", 0)
+        or getattr(ctx, "char_guid", 0)
+        or getattr(ctx, "player_guid", 0)
+        or getattr(ctx, "world_guid", 0)
+        or 0
+    ) & 0xFF
 
 
 def _resolve_player_display_id(ctx) -> int:
@@ -374,25 +442,168 @@ def _resolve_player_faction_template(ctx) -> int:
     return int(_PLAYER_FACTION_TEMPLATE_IDS.get(race, 1610))
 
 
-def build_server_built_minimal_player_value_update(ctx) -> bytes | None:
-    """Build a minimal server-built player UPDATE_OBJECT value-update packet."""
-    guid = _resolve_player_guid(ctx)
-    if guid <= 0:
-        Logger.warning("[PLAYER UPDATE_OBJECT] server-built experimental path skipped: missing guid")
-        return None
+def _u32_from_two_u16(low: int, high: int) -> int:
+    return ((int(high) & 0xFFFF) << 16) | (int(low) & 0xFFFF)
 
-    map_id = int(getattr(ctx, "map_id", 0) or 0)
-    display_id = _resolve_player_display_id(ctx)
+
+def _patch_language_skill_fields(field_values: dict[int, int], ctx) -> None:
+    """Patch the primary language skill slots with the simpler working create-state."""
+    race = int(getattr(ctx, "race", 0) or 0)
+    if race in _ALLIANCE_RACES:
+        primary_language = _LANGUAGE_SKILL_COMMON
+    elif race in _HORDE_RACES:
+        primary_language = _LANGUAGE_SKILL_ORCISH
+    else:
+        return
+
+    field_values[1154] = _u32_from_two_u16(
+        primary_language,
+        (int(field_values.get(1154, 0) or 0) >> 16) & 0xFFFF,
+    )
+    field_values[1282] = _u32_from_two_u16(
+        300,
+        (int(field_values.get(1282, 0) or 0) >> 16) & 0xFFFF,
+    )
+    field_values[1410] = _u32_from_two_u16(
+        300,
+        (int(field_values.get(1410, 0) or 0) >> 16) & 0xFFFF,
+    )
+
+
+def locate_update_field_region(payload: bytes) -> dict[str, int]:
+    """Locate the field mask and field bytes inside a CREATE_OBJECT payload."""
+    if len(payload) < 10:
+        raise ValueError("payload is too short to contain player CREATE_OBJECT data")
+
+    body_offset = 10
+    candidates: list[dict[str, int]] = []
+
+    for mask_offset in range(body_offset, len(payload)):
+        mask_blocks = payload[mask_offset]
+        if mask_blocks <= 0:
+            continue
+
+        mask_size = int(mask_blocks) * 4
+        remaining = len(payload) - (mask_offset + 1)
+        if remaining < mask_size + 1:
+            continue
+
+        field_bytes_size = remaining - mask_size - 1
+        if field_bytes_size < 0 or field_bytes_size % 4 != 0:
+            continue
+
+        mask_start = mask_offset + 1
+        mask_end = mask_start + mask_size
+        field_start = mask_end
+        field_end = field_start + field_bytes_size
+        mask_bytes = payload[mask_start:mask_end]
+        enabled_bits = sum(byte.bit_count() for byte in mask_bytes)
+        field_count = field_bytes_size // 4
+
+        if enabled_bits != field_count:
+            continue
+
+        candidates.append(
+            {
+                "mask_offset": mask_offset,
+                "mask_blocks": int(mask_blocks),
+                "mask_start": mask_start,
+                "mask_end": mask_end,
+                "field_start": field_start,
+                "field_end": field_end,
+                "field_count": field_count,
+            }
+        )
+
+    if not candidates:
+        raise ValueError("could not locate CREATE_OBJECT field region")
+
+    candidates.sort(key=lambda item: (-item["field_count"], item["mask_offset"]))
+    return candidates[0]
+
+
+def locate_field_region(payload: bytes) -> tuple[int, int]:
+    """Return the start and end offsets for the CREATE_OBJECT field bytes."""
+    region = locate_update_field_region(payload)
+    return region["field_start"], region["field_end"]
+
+
+def locate_mask_region(payload: bytes) -> tuple[int, int, int]:
+    """Return the start, end, and block count for the CREATE_OBJECT field mask."""
+    region = locate_update_field_region(payload)
+    return region["mask_start"], region["mask_end"], region["mask_blocks"]
+
+
+def extract_field_indices(mask_bytes: bytes, mask_blocks: int) -> list[int]:
+    """Expand mask bytes into a flat list of enabled field indices."""
+    indices: list[int] = []
+    for word_index in range(mask_blocks):
+        word = struct.unpack_from("<I", mask_bytes, word_index * 4)[0]
+        for bit_index in range(32):
+            if word & (1 << bit_index):
+                indices.append(word_index * 32 + bit_index)
+    return indices
+
+
+def patch_create_fields(
+    ref_field_bytes: bytes,
+    field_indices: list[int],
+    srv_values: dict[int, int],
+) -> bytes:
+    """Patch CREATE_OBJECT field bytes using server-built values where available."""
+    output = bytearray(ref_field_bytes)
+    offset = 0
+
+    for field_index in field_indices:
+        if field_index in srv_values:
+            struct.pack_into("<I", output, offset, srv_values[field_index])
+        offset += 4
+
+    return bytes(output)
+
+
+def patch_player_guid(payload: bytearray, ctx) -> None:
+    """Patch the packed low GUID byte in the sniffed player CREATE_OBJECT template."""
+    guid_mask = payload[_PLAYER_CREATE_GUID_MASK_OFFSET]
+    if guid_mask != 0x01:
+        raise ValueError(f"unsupported player create guid mask: 0x{guid_mask:02X}")
+
+    payload[_PLAYER_CREATE_GUID_VALUE_OFFSET] = _resolve_player_low_guid(ctx)
+    struct.pack_into("<H", payload, 0, int(getattr(ctx, "map_id", 0) or 0) & 0xFFFF)
+
+
+def _diff_bytes(a: bytes, b: bytes) -> list[tuple[int, int, int]]:
+    """Return byte differences for equally sized byte sequences."""
+    return [(index, a[index], b[index]) for index in range(min(len(a), len(b))) if a[index] != b[index]]
+
+
+def build_movement_block_from_template(template_block: bytes, ctx) -> bytes:
+    """Build the player CREATE_OBJECT movement block from a stable template."""
+    output = bytearray(template_block)
+    struct.pack_into("<f", output, _PLAYER_CREATE_MOVEMENT_X_OFFSET, float(getattr(ctx, "x", 0.0) or 0.0))
+    struct.pack_into("<f", output, _PLAYER_CREATE_MOVEMENT_Y_OFFSET, float(getattr(ctx, "y", 0.0) or 0.0))
+    struct.pack_into("<f", output, _PLAYER_CREATE_MOVEMENT_Z_OFFSET, float(getattr(ctx, "z", 0.0) or 0.0))
+    struct.pack_into("<f", output, _PLAYER_CREATE_MOVEMENT_O_OFFSET, float(getattr(ctx, "orientation", 0.0) or 0.0))
+    return bytes(output)
+
+
+def build_player_field_values(ctx) -> dict[int, int]:
+    """Build the current server-side player field mapping for value updates."""
+    guid = _resolve_player_guid(ctx)
     health = int(getattr(ctx, "health", 103) or 103)
     max_health = int(getattr(ctx, "max_health", health) or health)
     power_primary = int(getattr(ctx, "power_primary", 100) or 100)
+    max_power = int(getattr(ctx, "max_power", 40) or 40)
     level = int(getattr(ctx, "level", 1) or 1)
+    faction = _resolve_player_faction_template(ctx)
+    display_id = _resolve_player_display_id(ctx)
     player_bytes = int(getattr(ctx, "player_bytes", 198401) or 198401)
     player_bytes_2 = int(getattr(ctx, "player_bytes2", 16777224) or 16777224)
-    player_bytes_3 = int(getattr(ctx, "player_bytes3", _PLAYER_BYTES_3_DEFAULT) or _PLAYER_BYTES_3_DEFAULT)
+    player_bytes_3 = int(
+        getattr(ctx, "player_bytes3", _PLAYER_BYTES_3_DEFAULT) or _PLAYER_BYTES_3_DEFAULT
+    )
     max_level = int(getattr(ctx, "max_level", _PLAYER_MAX_LEVEL_DEFAULT) or _PLAYER_MAX_LEVEL_DEFAULT)
 
-    # server-built experimental path
     field_values = dict(_VERIFIED_PLAYER_REFERENCE_FIELDS)
     field_values.update(
         {
@@ -402,8 +613,9 @@ def build_server_built_minimal_player_value_update(ctx) -> bytes | None:
             _UNIT_FIELD_HEALTH: health,
             _UNIT_FIELD_POWER_PRIMARY: power_primary,
             _UNIT_FIELD_MAX_HEALTH: max_health,
+            40: max_power,
             _UNIT_FIELD_LEVEL: level,
-            _UNIT_FIELD_FACTION_TEMPLATE: _resolve_player_faction_template(ctx),
+            _UNIT_FIELD_FACTION_TEMPLATE: faction,
             _UNIT_FIELD_FLAGS: _PLAYER_FLAGS,
             _UNIT_FIELD_FLAGS_2: _PLAYER_FLAGS_2,
             _UNIT_FIELD_BOUNDING_RADIUS: _u32_from_float(_PLAYER_BOUNDING_RADIUS),
@@ -417,6 +629,110 @@ def build_server_built_minimal_player_value_update(ctx) -> bytes | None:
             _PLAYER_FIELD_MAX_LEVEL: max_level,
         }
     )
+    _patch_language_skill_fields(field_values, ctx)
+    return field_values
+
+
+def build_create_object_payload(ctx) -> bytes:
+    """Build the top-level CREATE_OBJECT payload header without a template."""
+    payload = bytearray()
+    payload += struct.pack("<H", int(getattr(ctx, "map_id", 0) or 0) & 0xFFFF)
+    payload += struct.pack("<I", _PLAYER_CREATE_UPDATE_COUNT)
+    payload += struct.pack("<B", _PLAYER_CREATE_UPDATE_TYPE)
+    payload += GuidHelper.pack(_resolve_player_low_guid(ctx))
+    payload += struct.pack("<B", _PLAYER_CREATE_OBJECT_TYPE)
+    return bytes(payload)
+
+
+def build_full_player_create(ctx) -> bytes | None:
+    """Build a full player CREATE_OBJECT using a built header plus known body blocks."""
+    try:
+        template_payload = _load_player_create_template_payload()
+        movement_template = template_payload[_PLAYER_CREATE_MOVEMENT_BLOCK_START:_PLAYER_CREATE_MOVEMENT_BLOCK_END]
+        movement_block = build_movement_block_from_template(movement_template, ctx)
+        if len(movement_block) != (_PLAYER_CREATE_MOVEMENT_BLOCK_END - _PLAYER_CREATE_MOVEMENT_BLOCK_START):
+            return None
+
+        mask_start, mask_end, mask_blocks = locate_mask_region(template_payload)
+        field_start, field_end = locate_field_region(template_payload)
+        mask_bytes = template_payload[mask_start:mask_end]
+        field_indices = extract_field_indices(mask_bytes, mask_blocks)
+        srv_values = build_player_field_values(ctx)
+        field_bytes = patch_create_fields(template_payload[field_start:field_end], field_indices, srv_values)
+
+        payload = bytearray(build_create_object_payload(ctx))
+        payload += movement_block
+        payload += mask_bytes
+        payload += field_bytes
+        payload += struct.pack("<B", 0)
+        return bytes(payload)
+    except Exception as exc:
+        Logger.warning(f"[PLAYER CREATE] direct build failed: {exc}")
+        return None
+
+
+def build_server_built_player_create_from_template(ctx) -> bytes | None:
+    """Build a player CREATE_OBJECT from a sniff template plus targeted patching."""
+    try:
+        payload = bytearray(_load_player_create_template_payload())
+
+        patch_player_guid(payload, ctx)
+        template_block = bytes(payload[_PLAYER_CREATE_MOVEMENT_BLOCK_START:_PLAYER_CREATE_MOVEMENT_BLOCK_END])
+        movement_block = build_movement_block_from_template(template_block, ctx)
+        if len(movement_block) != (_PLAYER_CREATE_MOVEMENT_BLOCK_END - _PLAYER_CREATE_MOVEMENT_BLOCK_START):
+            return None
+        Logger.info(f"[MOVEMENT DIFF] {len(_diff_bytes(template_block, movement_block))}")
+        payload[_PLAYER_CREATE_MOVEMENT_BLOCK_START:_PLAYER_CREATE_MOVEMENT_BLOCK_END] = movement_block
+
+        field_start, field_end = locate_field_region(payload)
+        mask_start, mask_end, mask_blocks = locate_mask_region(payload)
+        field_indices = extract_field_indices(payload[mask_start:mask_end], mask_blocks)
+        srv_values = build_player_field_values(ctx)
+        patched_fields = patch_create_fields(payload[field_start:field_end], field_indices, srv_values)
+        payload[field_start:field_end] = patched_fields
+
+        return bytes(payload)
+    except Exception as exc:
+        Logger.warning(f"[PLAYER CREATE] server-built failed: {exc}")
+        return None
+
+
+def build_server_built_player_create(ctx) -> bytes | None:
+    """Build player CREATE_OBJECT with direct-header mode and template fallback."""
+    template_payload = build_server_built_player_create_from_template(ctx)
+    if template_payload is None:
+        return None
+
+    if not USE_SERVER_BUILT_PLAYER_CREATE_DIRECT:
+        Logger.info("[PLAYER CREATE] template path")
+        return template_payload
+
+    direct_payload = build_full_player_create(ctx)
+    if direct_payload is None:
+        Logger.info("[PLAYER CREATE] direct fallback to template")
+        return template_payload
+
+    differences = _diff_bytes(direct_payload, template_payload)
+    Logger.info(f"[PLAYER CREATE] direct diff={len(differences)}")
+    if differences:
+        Logger.info("[PLAYER CREATE] direct fallback to template")
+        return template_payload
+
+    Logger.info("[PLAYER CREATE] direct path")
+    return direct_payload
+
+
+def build_server_built_minimal_player_value_update(ctx) -> bytes | None:
+    """Build a minimal server-built player UPDATE_OBJECT value-update packet."""
+    guid = _resolve_player_guid(ctx)
+    if guid <= 0:
+        Logger.warning("[PLAYER UPDATE_OBJECT] server-built experimental path skipped: missing guid")
+        return None
+
+    map_id = int(getattr(ctx, "map_id", 0) or 0)
+
+    # server-built experimental path
+    field_values = build_player_field_values(ctx)
 
     Logger.info(
         "[PLAYER UPDATE_OBJECT] server-built experimental path active map_id=%s guid=0x%X",

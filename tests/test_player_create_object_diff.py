@@ -9,6 +9,10 @@ import sys
 from types import SimpleNamespace
 import types
 
+from server.modules.handlers.world.bootstrap.playerobjects import (
+    build_player_field_values,
+)
+
 
 REFERENCE_CREATE_CAPTURE_NAME = "SMSG_UPDATE_OBJECT_1776451639_0458.json"
 REFERENCE_CREATE_CAPTURE_PATH = (
@@ -91,13 +95,42 @@ def load_reference_payload() -> bytes:
 
 def build_server_payload() -> bytes:
     """Build the current player CREATE_OBJECT payload under test."""
+    return build_create_payload(use_server_built_player_create=False)
+
+
+def build_create_payload(
+    *,
+    use_server_built_player_create: bool,
+    use_server_built_player_create_direct: bool = False,
+    ctx: SimpleNamespace | None = None,
+) -> bytes:
+    """Build player CREATE_OBJECT with an explicit create-path flag."""
     login_packets = _import_login_packets_with_stubs()
-    ctx = SimpleNamespace(
+    login_packets.USE_SERVER_BUILT_PLAYER_CREATE = use_server_built_player_create
+    login_packets.USE_SERVER_BUILT_PLAYER_CREATE_DIRECT = use_server_built_player_create_direct
+    ctx = ctx or SimpleNamespace(
         map_id=1,
         char_guid=14,
+        player_guid=14,
+        world_guid=14,
         exact_0002_low_guid=14,
         race=4,
         gender=1,
+        x=16212.216796875,
+        y=16253.169921875,
+        z=14.770503044128418,
+        orientation=1.6979784965515137,
+        health=102,
+        max_health=102,
+        power_primary=40,
+        max_power=40,
+        level=1,
+        faction_template=4,
+        display_id=56,
+        player_bytes=393479,
+        player_bytes2=16777220,
+        player_bytes3=1,
+        max_level=90,
     )
     return login_packets.build_SMSG_UPDATE_OBJECT_1773613176_0002(ctx)
 
@@ -221,6 +254,59 @@ def locate_movement_region(payload: bytes) -> dict[str, int]:
         "end": field_region["mask_offset"],
         "size": field_region["mask_offset"] - header["body_offset"],
     }
+
+
+def locate_field_region(payload: bytes) -> tuple[int, int]:
+    """Return the start and end offsets for the CREATE_OBJECT field bytes."""
+    region = locate_update_field_region(payload)
+    return region["field_start"], region["field_end"]
+
+
+def extract_field_indices(mask_bytes: bytes, mask_blocks: int) -> list[int]:
+    """Expand the field mask into a flat list of enabled field indices."""
+    indices: list[int] = []
+    for word_index in range(mask_blocks):
+        word = struct.unpack_from("<I", mask_bytes, word_index * 4)[0]
+        for bit_index in range(32):
+            if word & (1 << bit_index):
+                indices.append(word_index * 32 + bit_index)
+    return indices
+
+
+def parse_field_values(field_bytes: bytes, field_indices: list[int]) -> dict[int, int]:
+    """Decode packed uint32 field bytes into a field-indexed mapping."""
+    values: dict[int, int] = {}
+    offset = 0
+    for field_index in field_indices:
+        values[field_index] = struct.unpack_from("<I", field_bytes, offset)[0]
+        offset += 4
+    return values
+
+
+def diff_field_values(ref_values: dict[int, int], srv_values: dict[int, int]) -> list[int]:
+    """Return field indices whose decoded uint32 values differ."""
+    differences: list[int] = []
+    for field_index in ref_values:
+        if ref_values[field_index] != srv_values.get(field_index):
+            differences.append(field_index)
+    return differences
+
+
+def patch_create_fields(
+    ref_field_bytes: bytes,
+    field_indices: list[int],
+    srv_values: dict[int, int],
+) -> bytes:
+    """Patch reference field bytes with server-built values for matching indices."""
+    output = bytearray(ref_field_bytes)
+    offset = 0
+
+    for field_index in field_indices:
+        if field_index in srv_values:
+            struct.pack_into("<I", output, offset, srv_values[field_index])
+        offset += 4
+
+    return bytes(output)
 
 
 def diff_create_object_regions(a: bytes, b: bytes) -> dict[str, list[tuple[int, int | None, int | None]]]:
@@ -399,3 +485,152 @@ def test_create_object_byte_match() -> None:
     differences = diff_bytes_exact(reference_payload, server_payload)
 
     assert not differences, f"Byte mismatch: {differences[:20]}"
+
+
+def test_field_diff_baseline() -> None:
+    """Measure the current field-region diff without header, movement, or mask."""
+    reference_payload = load_reference_payload()
+    server_payload = build_server_payload()
+
+    region = locate_update_field_region(reference_payload)
+    reference_fields = reference_payload[region["field_start"] : region["field_end"]]
+    server_fields = server_payload[region["field_start"] : region["field_end"]]
+
+    differences = diff_bytes(reference_fields, server_fields)
+
+    print("field diff:", len(differences))
+
+    assert len(differences) > 0
+
+
+def test_extract_field_indices() -> None:
+    """Expand the CREATE_OBJECT field mask into explicit field indices."""
+    reference_payload = load_reference_payload()
+    region = locate_update_field_region(reference_payload)
+    mask_bytes = reference_payload[region["mask_start"] : region["mask_end"]]
+    indices = extract_field_indices(mask_bytes, region["mask_blocks"])
+
+    print(len(indices))
+
+    assert len(indices) == region["field_count"]
+
+
+def test_field_value_diff() -> None:
+    """Convert the field byte diff into explicit field-index differences."""
+    reference_payload = load_reference_payload()
+    server_payload = build_server_payload()
+
+    field_start, field_end = locate_field_region(reference_payload)
+    region = locate_update_field_region(reference_payload)
+    mask_bytes = reference_payload[region["mask_start"] : region["mask_end"]]
+    indices = extract_field_indices(mask_bytes, region["mask_blocks"])
+
+    reference_values = parse_field_values(reference_payload[field_start:field_end], indices)
+    server_values = parse_field_values(server_payload[field_start:field_end], indices)
+    differences = diff_field_values(reference_values, server_values)
+
+    print("field value diffs:", len(differences))
+    print("first 20:", differences[:20])
+
+    assert len(differences) > 0
+
+
+def test_patch_create_fields_with_server_values() -> None:
+    """Patch the reference CREATE_OBJECT field block with server-built field values."""
+    reference_payload = load_reference_payload()
+    region = locate_update_field_region(reference_payload)
+    mask_bytes = reference_payload[region["mask_start"] : region["mask_end"]]
+    field_indices = extract_field_indices(mask_bytes, region["mask_blocks"])
+    reference_field_bytes = reference_payload[region["field_start"] : region["field_end"]]
+    reference_values = parse_field_values(reference_field_bytes, field_indices)
+
+    ctx = SimpleNamespace(
+        map_id=1,
+        char_guid=14,
+        world_guid=14,
+        player_guid=14,
+        race=4,
+        gender=1,
+        health=102,
+        max_health=102,
+        power_primary=40,
+        max_power=40,
+        level=1,
+        faction_template=4,
+        display_id=56,
+        player_bytes=393479,
+        player_bytes2=16777220,
+        player_bytes3=1,
+        max_level=90,
+    )
+    server_values = build_player_field_values(ctx)
+    patched_field_bytes = patch_create_fields(reference_field_bytes, field_indices, server_values)
+    patched_payload = bytearray(reference_payload)
+    patched_payload[region["field_start"] : region["field_end"]] = patched_field_bytes
+
+    baseline_server_payload = build_server_payload()
+    baseline_differences = diff_bytes(reference_payload, baseline_server_payload)
+    patched_differences = diff_bytes(reference_payload, bytes(patched_payload))
+    patched_values = parse_field_values(patched_field_bytes, field_indices)
+    field_differences = diff_field_values(reference_values, patched_values)
+
+    print("create diff before:", len(baseline_differences))
+    print("create diff:", len(patched_differences))
+    print("field value diffs after patch:", len(field_differences))
+
+    assert len(field_differences) < 102
+    assert len(patched_differences) < len(baseline_differences)
+
+
+def test_player_create_flag_off() -> None:
+    """Keep replay CREATE_OBJECT behavior unchanged while the flag is disabled."""
+    replay_payload = build_create_payload(use_server_built_player_create=False)
+    payload = build_create_payload(use_server_built_player_create=False)
+
+    assert payload == replay_payload
+
+
+def test_player_create_flag_on() -> None:
+    """Ensure the template-based CREATE_OBJECT path produces a payload when enabled."""
+    payload = build_create_payload(use_server_built_player_create=True)
+
+    assert payload is not None
+
+
+def test_player_create_field_match_reference() -> None:
+    """The template-based CREATE_OBJECT path should match the reference payload."""
+    payload = build_create_payload(use_server_built_player_create=True)
+    reference_payload = load_reference_payload()
+
+    assert diff_bytes(payload, reference_payload) == []
+
+
+def test_player_create_direct_field_match_reference() -> None:
+    """The direct-header CREATE_OBJECT path should match the reference payload."""
+    payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+    )
+    reference_payload = load_reference_payload()
+
+    assert diff_bytes(payload, reference_payload) == []
+
+
+def test_build_player_field_values_sets_alliance_primary_language_skill() -> None:
+    """Alliance races should expose Common in the primary language create slot."""
+    ctx = SimpleNamespace(race=4, char_guid=14, world_guid=14)
+    fields = build_player_field_values(ctx)
+
+    assert fields[1154] & 0xFFFF == 98
+    assert fields[1282] & 0xFFFF == 300
+    assert fields[1410] & 0xFFFF == 300
+
+
+def test_build_player_field_values_sets_horde_primary_language_skill() -> None:
+    """Horde races should expose Orcish in the primary language create slot."""
+    ctx = SimpleNamespace(race=2, char_guid=14, world_guid=14)
+    fields = build_player_field_values(ctx)
+
+    assert fields[1154] & 0xFFFF == 109
+    assert fields[1282] & 0xFFFF == 300
+    assert fields[1410] & 0xFFFF == 300

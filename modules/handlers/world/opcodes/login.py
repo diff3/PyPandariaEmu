@@ -649,9 +649,6 @@ def handle_player_login(session, ctx: PacketContext):
     session.race = int(row.race or 0)
     session.gender = int(row.gender or 0)
 
-    # ❌ OLD (removed)
-    # spells_handlers.initialize_session_language_state(session)
-
     spells_handlers._restore_default_movement_speeds(session)
 
     session.is_mounted = False
@@ -687,11 +684,7 @@ def handle_player_login(session, ctx: PacketContext):
     refresh_session_inventory(session)
     attach_session_to_world_state(session, map_id=int(session.map_id))
 
-    # --- LOAD SPELLS FIRST ---
-    # spells_handlers.initialize_session_spells(session, int(char_guid))
-
-    # 🔥 FIX: FORCE LANGUAGE AFTER SPELL LOAD
-    # spells_handlers.initialize_session_language_state(session)
+    spells_handlers.initialize_session_spells(session, int(char_guid))
 
     session.action_buttons = DatabaseConnection.get_character_action_buttons(char_guid)
 
