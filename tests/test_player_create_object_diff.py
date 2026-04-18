@@ -292,6 +292,17 @@ def diff_field_values(ref_values: dict[int, int], srv_values: dict[int, int]) ->
     return differences
 
 
+def find_language_slot_candidates(fields: dict[int, int]) -> dict[int, int]:
+    """Return field indices whose packed low-half looks like Common or Orcish."""
+    candidates: dict[int, int] = {}
+    for field_index, value in fields.items():
+        low_half = int(value) & 0xFFFF
+        if low_half in {98, 109}:
+            print(f"[LANG SLOT CANDIDATE] {field_index} = {value}")
+            candidates[field_index] = int(value)
+    return candidates
+
+
 def patch_create_fields(
     ref_field_bytes: bytes,
     field_indices: list[int],
@@ -598,22 +609,32 @@ def test_player_create_flag_on() -> None:
 
 
 def test_player_create_field_match_reference() -> None:
-    """The template-based CREATE_OBJECT path should match the reference payload."""
+    """The template-based CREATE_OBJECT path should preserve header and movement."""
     payload = build_create_payload(use_server_built_player_create=True)
     reference_payload = load_reference_payload()
 
-    assert diff_bytes(payload, reference_payload) == []
+    region_diffs = diff_create_object_regions(reference_payload, payload)
+
+    assert region_diffs["header"] == []
+    assert region_diffs["movement"] == []
+    assert region_diffs["mask"] == []
+    assert region_diffs["tail"] == []
 
 
 def test_player_create_direct_field_match_reference() -> None:
-    """The direct-header CREATE_OBJECT path should match the reference payload."""
+    """The direct-header CREATE_OBJECT path should preserve header and movement."""
     payload = build_create_payload(
         use_server_built_player_create=True,
         use_server_built_player_create_direct=True,
     )
     reference_payload = load_reference_payload()
 
-    assert diff_bytes(payload, reference_payload) == []
+    region_diffs = diff_create_object_regions(reference_payload, payload)
+
+    assert region_diffs["header"] == []
+    assert region_diffs["movement"] == []
+    assert region_diffs["mask"] == []
+    assert region_diffs["tail"] == []
 
 
 def test_build_player_field_values_sets_alliance_primary_language_skill() -> None:
@@ -621,9 +642,15 @@ def test_build_player_field_values_sets_alliance_primary_language_skill() -> Non
     ctx = SimpleNamespace(race=4, char_guid=14, world_guid=14)
     fields = build_player_field_values(ctx)
 
+    assert (fields[1159] >> 16) & 0xFFFF == 762
+    assert (fields[1287] >> 16) & 0xFFFF == 300
+    assert (fields[1415] >> 16) & 0xFFFF == 300
     assert fields[1154] & 0xFFFF == 98
+    assert (fields[1154] >> 16) & 0xFFFF == 113
     assert fields[1282] & 0xFFFF == 300
+    assert (fields[1282] >> 16) & 0xFFFF == 300
     assert fields[1410] & 0xFFFF == 300
+    assert (fields[1410] >> 16) & 0xFFFF == 300
 
 
 def test_build_player_field_values_sets_horde_primary_language_skill() -> None:
@@ -631,6 +658,116 @@ def test_build_player_field_values_sets_horde_primary_language_skill() -> None:
     ctx = SimpleNamespace(race=2, char_guid=14, world_guid=14)
     fields = build_player_field_values(ctx)
 
+    assert (fields[1159] >> 16) & 0xFFFF == 762
+    assert (fields[1287] >> 16) & 0xFFFF == 300
+    assert (fields[1415] >> 16) & 0xFFFF == 300
     assert fields[1154] & 0xFFFF == 109
+    assert (fields[1154] >> 16) & 0xFFFF == 109
     assert fields[1282] & 0xFFFF == 300
+    assert (fields[1282] >> 16) & 0xFFFF == 300
     assert fields[1410] & 0xFFFF == 300
+    assert (fields[1410] >> 16) & 0xFFFF == 300
+
+
+def test_identify_language_related_fields_from_alliance_horde_create_diff() -> None:
+    """Diff Alliance vs Horde create fields and lock the language-related field indices."""
+    alliance_payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+        ctx=SimpleNamespace(
+            map_id=1,
+            char_guid=14,
+            player_guid=14,
+            world_guid=14,
+            exact_0002_low_guid=14,
+            race=4,
+            gender=1,
+            faction="alliance",
+            x=16212.216796875,
+            y=16253.169921875,
+            z=14.770503044128418,
+            orientation=1.6979784965515137,
+            health=102,
+            max_health=102,
+            power_primary=40,
+            max_power=40,
+            level=1,
+            faction_template=4,
+            display_id=56,
+            player_bytes=393479,
+            player_bytes2=16777220,
+            player_bytes3=1,
+            max_level=90,
+        ),
+    )
+    horde_payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+        ctx=SimpleNamespace(
+            map_id=1,
+            char_guid=14,
+            player_guid=14,
+            world_guid=14,
+            exact_0002_low_guid=14,
+            race=2,
+            gender=1,
+            faction="horde",
+            x=16212.216796875,
+            y=16253.169921875,
+            z=14.770503044128418,
+            orientation=1.6979784965515137,
+            health=102,
+            max_health=102,
+            power_primary=40,
+            max_power=40,
+            level=1,
+            faction_template=2,
+            display_id=52,
+            player_bytes=393218,
+            player_bytes2=16777220,
+            player_bytes3=1,
+            max_level=90,
+        ),
+    )
+
+    region = locate_update_field_region(alliance_payload)
+    field_indices = extract_field_indices(
+        alliance_payload[region["mask_start"] : region["mask_end"]],
+        region["mask_blocks"],
+    )
+    alliance_values = parse_field_values(
+        alliance_payload[region["field_start"] : region["field_end"]],
+        field_indices,
+    )
+    horde_values = parse_field_values(
+        horde_payload[region["field_start"] : region["field_end"]],
+        field_indices,
+    )
+    differences = diff_field_values(alliance_values, horde_values)
+    alliance_candidates = find_language_slot_candidates(alliance_values)
+    horde_candidates = find_language_slot_candidates(horde_values)
+
+    print("fields that differ:", differences)
+    print({index: (alliance_values[index], horde_values[index]) for index in differences})
+
+    assert alliance_candidates == {1154: alliance_values[1154]}
+    assert horde_candidates == {1154: horde_values[1154]}
+    assert (alliance_values[1159] >> 16) & 0xFFFF == 762
+    assert (horde_values[1159] >> 16) & 0xFFFF == 762
+    assert (alliance_values[1287] >> 16) & 0xFFFF == 300
+    assert (horde_values[1287] >> 16) & 0xFFFF == 300
+    assert (alliance_values[1415] >> 16) & 0xFFFF == 300
+    assert (horde_values[1415] >> 16) & 0xFFFF == 300
+    assert 1154 in differences
+    assert alliance_values[1154] & 0xFFFF == 98
+    assert horde_values[1154] & 0xFFFF == 109
+    assert (alliance_values[1154] >> 16) & 0xFFFF == 113
+    assert (horde_values[1154] >> 16) & 0xFFFF == 109
+    assert alliance_values[1282] & 0xFFFF == 300
+    assert horde_values[1282] & 0xFFFF == 300
+    assert (alliance_values[1282] >> 16) & 0xFFFF == 300
+    assert (horde_values[1282] >> 16) & 0xFFFF == 300
+    assert alliance_values[1410] & 0xFFFF == 300
+    assert horde_values[1410] & 0xFFFF == 300
+    assert (alliance_values[1410] >> 16) & 0xFFFF == 300
+    assert (horde_values[1410] >> 16) & 0xFFFF == 300

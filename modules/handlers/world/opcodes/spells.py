@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import struct
 from typing import Any, Optional
 
@@ -100,10 +102,28 @@ _FLY_AURA_SECONDARY_APPLY_TEMPLATE = bytes.fromhex("8000004440000000000000035A00
 _FLY_AURA_PRIMARY_REMOVE_TEMPLATE = bytes.fromhex("8000004400040602")
 _FLY_AURA_SECONDARY_REMOVE_TEMPLATE = bytes.fromhex("8000004400050602")
 _FLY_AURA_SPELL_ID = 33943
+USE_RAW_SNIFFED_KNOWN_SPELLS = False
+_RAW_KNOWN_SPELLS_SNIFF_PATH = (
+    Path(__file__).resolve().parents[5]
+    / "data"
+    / "skyfire548"
+    / "captures"
+    / "debug"
+    / "SMSG_SEND_KNOWN_SPELLS.json"
+)
 
 
 def _world_login_context_from_session(session):
     return WorldLoginContext.from_session(session)
+
+
+def load_raw_known_spells_payload() -> bytes:
+    """Load one exact sniffed SMSG_SEND_KNOWN_SPELLS payload without patching."""
+    data = json.loads(_RAW_KNOWN_SPELLS_SNIFF_PATH.read_text(encoding="utf-8"))
+    payload_hex = data.get("hex_compact") or data.get("hex_spaced")
+    if not payload_hex:
+        raise ValueError(f"missing payload hex in {_RAW_KNOWN_SPELLS_SNIFF_PATH.name}")
+    return bytes.fromhex(str(payload_hex).replace(" ", ""))
 
 
 def _notification_response(message: str) -> list[tuple[str, bytes]]:
@@ -331,11 +351,24 @@ def build_known_spells_response(session) -> tuple[str, bytes]:
     return "SMSG_SEND_KNOWN_SPELLS", payload
 
 
+def build_raw_known_spells_response() -> tuple[str, bytes]:
+    """Return a byte-for-byte sniffed known-spells packet for A/B timing tests."""
+    payload = load_raw_known_spells_payload()
+    return "SMSG_SEND_KNOWN_SPELLS", payload
+
+
 def build_active_mover_spell_sync_responses(session) -> list[tuple[str, bytes]]:
     ensure_language_spells_known(session)
     ensure_companion_pet_spells_known(session)
     ensure_mount_spells_known(session)
-    return [build_known_spells_response(session)]
+    if USE_RAW_SNIFFED_KNOWN_SPELLS:
+        response = build_raw_known_spells_response()
+        Logger.info("[KNOWN_SPELLS TEST] raw sniffed path payload_len=%s", len(response[1]))
+        return [response]
+
+    response = build_known_spells_response(session)
+    Logger.info("[KNOWN_SPELLS TEST] server-built path payload_len=%s", len(response[1]))
+    return [response]
 
 
 def _restore_default_movement_speeds(player) -> None:

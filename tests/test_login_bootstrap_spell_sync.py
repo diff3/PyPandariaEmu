@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import sys
+from types import SimpleNamespace
+import types
+
+database_module = types.ModuleType("server.modules.database.DatabaseConnection")
+database_module.DatabaseConnection = type("DatabaseConnection", (), {})
+sys.modules.setdefault("server.modules.database.DatabaseConnection", database_module)
+
+inventory_module = types.ModuleType("server.modules.game.inventory")
+inventory_module.refresh_session_inventory = lambda session: None
+inventory_module.persist_session_inventory = lambda session, **kwargs: None
+sys.modules.setdefault("server.modules.game.inventory", inventory_module)
+
+characters_module = types.ModuleType("server.modules.handlers.world.characters.characters")
+characters_module.handle_CMSG_CHAR_CREATE = lambda *args, **kwargs: (0, None)
+characters_module.handle_CMSG_CHAR_DELETE = lambda *args, **kwargs: (0, None)
+characters_module.handle_CMSG_REORDER_CHARACTERS = lambda *args, **kwargs: (0, None)
+sys.modules.setdefault("server.modules.handlers.world.characters.characters", characters_module)
+
+from server.modules.handlers.world.opcodes import login as login_handlers
+from server.session.world_session import LoginState
+
+
+def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
+    """Queue a post-create spell sync so known spells land after player create."""
+    session = SimpleNamespace(
+        post_loading_sent=False,
+        player_object_sent=False,
+        loading_screen_done=False,
+        login_state=LoginState.PLAYER_LOGIN,
+    )
+    ctx = SimpleNamespace()
+    state_changes: list[LoginState] = []
+
+    monkeypatch.setattr(
+        login_handlers,
+        "_set_login_state",
+        lambda _session, state: state_changes.append(state),
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_pre_update_object_packets",
+        lambda _ctx: [("PRE", b"pre")],
+    )
+    monkeypatch.setattr(
+        login_handlers.bootstrap_replay,
+        "replay_movement_focus_sequence",
+        lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
+    )
+    monkeypatch.setattr(
+        login_handlers.spells_handlers,
+        "build_active_mover_spell_sync_responses",
+        lambda _session: [("SMSG_SEND_KNOWN_SPELLS", b"known-spells")],
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_login_inventory_sync_responses",
+        lambda _session: [],
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "trigger_inventory_activation",
+        lambda _session: [],
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_explored_zones_update_response",
+        lambda _session: None,
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_post_update_object_packets",
+        lambda _ctx: [],
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_world_bootstrap_packets",
+        lambda _ctx: [
+            ("SMSG_MOVE_SET_ACTIVE_MOVER", b"active-mover"),
+            ("BOOT", b"boot"),
+        ],
+    )
+
+    responses = login_handlers._queue_world_bootstrap_transition(session, ctx)
+
+    assert state_changes == [LoginState.WORLD_BOOTSTRAP]
+    assert responses == [
+        ("PRE", b"pre"),
+        ("SMSG_UPDATE_OBJECT", b"create"),
+        ("SMSG_SEND_KNOWN_SPELLS", b"known-spells"),
+        ("BOOT", b"boot"),
+    ]
+    assert session.loading_screen_done is True
+    assert session.post_loading_sent is True

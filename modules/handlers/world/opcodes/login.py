@@ -384,6 +384,13 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
             session.account_data_times_sent = True
         responses.append((opcode_name, payload))
     responses.extend(update_packets)
+    post_create_spell_packets = spells_handlers.build_active_mover_spell_sync_responses(session)
+    if post_create_spell_packets:
+        Logger.info(
+            "[WorldLogin] sending %s post-create spell sync packets",
+            len(post_create_spell_packets),
+        )
+        responses.extend(post_create_spell_packets)
     inventory_packets = build_login_inventory_sync_responses(session)
     if inventory_packets:
         Logger.info(f"[WorldLogin] sending {len(inventory_packets)} inventory sync packets")

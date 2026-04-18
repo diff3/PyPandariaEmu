@@ -294,3 +294,50 @@ def test_initialize_session_language_state_keeps_horde_on_orcish():
 
     assert session.language == 1
     assert session.known_languages_mask == 0xFFFFFFFF
+
+
+def test_raw_known_spells_payload_loads():
+    spells_handlers = _import_spells_handlers()
+
+    payload = spells_handlers.load_raw_known_spells_payload()
+
+    assert isinstance(payload, bytes)
+    assert payload
+
+
+def test_known_spells_flag_off_uses_server_builder(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    session = SimpleNamespace(known_spells=[], race=1)
+
+    monkeypatch.setattr(spells_handlers, "USE_RAW_SNIFFED_KNOWN_SPELLS", False)
+    monkeypatch.setattr(spells_handlers, "ensure_language_spells_known", lambda _session: None)
+    monkeypatch.setattr(spells_handlers, "ensure_companion_pet_spells_known", lambda _session: None)
+    monkeypatch.setattr(spells_handlers, "ensure_mount_spells_known", lambda _session: None)
+    monkeypatch.setattr(
+        spells_handlers,
+        "build_known_spells_response",
+        lambda _session: ("SMSG_SEND_KNOWN_SPELLS", b"server-built"),
+    )
+
+    responses = spells_handlers.build_active_mover_spell_sync_responses(session)
+
+    assert responses == [("SMSG_SEND_KNOWN_SPELLS", b"server-built")]
+
+
+def test_known_spells_flag_on_uses_raw_sniff(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    session = SimpleNamespace(known_spells=[], race=2)
+
+    monkeypatch.setattr(spells_handlers, "USE_RAW_SNIFFED_KNOWN_SPELLS", True)
+    monkeypatch.setattr(spells_handlers, "ensure_language_spells_known", lambda _session: None)
+    monkeypatch.setattr(spells_handlers, "ensure_companion_pet_spells_known", lambda _session: None)
+    monkeypatch.setattr(spells_handlers, "ensure_mount_spells_known", lambda _session: None)
+    monkeypatch.setattr(
+        spells_handlers,
+        "load_raw_known_spells_payload",
+        lambda: b"raw-known-spells",
+    )
+
+    responses = spells_handlers.build_active_mover_spell_sync_responses(session)
+
+    assert responses == [("SMSG_SEND_KNOWN_SPELLS", b"raw-known-spells")]

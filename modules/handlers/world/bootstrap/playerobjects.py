@@ -229,12 +229,15 @@ _PLAYER_BYTES = 166
 _PLAYER_BYTES_2 = 167
 _PLAYER_BYTES_3 = 168
 _PLAYER_FIELD_MAX_LEVEL = 1943
-_PLAYER_SKILL_SLOT_IDS_0_1_FIELD = 1415
-_PLAYER_SKILL_SLOT_ID_2_FIELD = 1610
-_PLAYER_SKILL_SLOT_VALUES_0_1_FIELD = 1619
-_PLAYER_SKILL_SLOT_VALUE_2_FIELD = 1620
-_PLAYER_SKILL_SLOT_MAX_0_1_FIELD = 1830
-_PLAYER_SKILL_SLOT_MAX_2_FIELD = 1831
+_LANG_SKILL_ID_FIELD = 1154
+_LANG_SKILL_VALUE_FIELD = 1282
+_LANG_SKILL_MAX_FIELD = 1410
+_SKILL_SLOT_ID_FIELDS = tuple(range(1153, 1160))
+_SKILL_SLOT_VALUE_FIELDS = tuple(range(1281, 1288))
+_SKILL_SLOT_MAX_FIELDS = tuple(range(1409, 1416))
+_SKILL_SLOT_COUNT = min(len(_SKILL_SLOT_VALUE_FIELDS), len(_SKILL_SLOT_MAX_FIELDS)) * 2
+_SKILL_RIDING = 762
+_SKILL_RIDING_VALUE = 300
 
 _VERIFIED_PLAYER_REFERENCE_FIELDS = {
     6: 0,
@@ -372,6 +375,12 @@ _PLAYER_FACTION_TEMPLATE_IDS = {
 
 _ALLIANCE_RACES = {1, 3, 4, 7, 11, 22, 25}
 _HORDE_RACES = {2, 5, 6, 8, 9, 10, 26}
+_ALLIANCE_FACTION_TEMPLATES = frozenset(
+    int(_PLAYER_FACTION_TEMPLATE_IDS[race]) for race in _ALLIANCE_RACES if race in _PLAYER_FACTION_TEMPLATE_IDS
+)
+_HORDE_FACTION_TEMPLATES = frozenset(
+    int(_PLAYER_FACTION_TEMPLATE_IDS[race]) for race in _HORDE_RACES if race in _PLAYER_FACTION_TEMPLATE_IDS
+)
 _LANGUAGE_SKILL_COMMON = 98
 _LANGUAGE_SKILL_ORCISH = 109
 _RACIAL_LANGUAGE_SKILL_BY_RACE = {
@@ -446,28 +455,116 @@ def _u32_from_two_u16(low: int, high: int) -> int:
     return ((int(high) & 0xFFFF) << 16) | (int(low) & 0xFFFF)
 
 
-def _patch_language_skill_fields(field_values: dict[int, int], ctx) -> None:
-    """Patch the primary language skill slots with the simpler working create-state."""
+def _resolve_player_team(ctx) -> str | None:
+    """Resolve Alliance/Horde from explicit faction data before falling back to race."""
+    explicit_faction = getattr(ctx, "faction", None)
+    if isinstance(explicit_faction, str):
+        normalized = explicit_faction.strip().lower()
+        if normalized in {"alliance", "ally"}:
+            return "alliance"
+        if normalized in {"horde"}:
+            return "horde"
+
+    faction_template = int(getattr(ctx, "faction_template", 0) or 0)
+    if faction_template in _ALLIANCE_FACTION_TEMPLATES:
+        return "alliance"
+    if faction_template in _HORDE_FACTION_TEMPLATES:
+        return "horde"
+
     race = int(getattr(ctx, "race", 0) or 0)
     if race in _ALLIANCE_RACES:
+        return "alliance"
+    if race in _HORDE_RACES:
+        return "horde"
+    return None
+
+
+def _set_language_skill_slot(
+    field_values: dict[int, int],
+    *,
+    primary_language: int,
+    racial_language: int,
+    rank: int = 300,
+    max_rank: int = 300,
+) -> None:
+    """Write the packed language skill slot triplet used by the current create layout."""
+    field_values[_LANG_SKILL_ID_FIELD] = _u32_from_two_u16(primary_language, racial_language)
+    field_values[_LANG_SKILL_VALUE_FIELD] = _u32_from_two_u16(rank, rank)
+    field_values[_LANG_SKILL_MAX_FIELD] = _u32_from_two_u16(max_rank, max_rank)
+
+
+def _read_packed_skill_slot(field_values: dict[int, int], field_ids: tuple[int, ...], slot_index: int) -> int:
+    """Read one packed u16 skill slot from a field range."""
+    field_index = slot_index // 2
+    half_index = slot_index % 2
+    if field_index >= len(field_ids):
+        return 0
+    packed_value = int(field_values.get(field_ids[field_index], 0) or 0)
+    if half_index == 0:
+        return packed_value & 0xFFFF
+    return (packed_value >> 16) & 0xFFFF
+
+
+def _write_packed_skill_slot(
+    field_values: dict[int, int],
+    field_ids: tuple[int, ...],
+    slot_index: int,
+    slot_value: int,
+) -> None:
+    """Write one packed u16 skill slot into a field range."""
+    field_index = slot_index // 2
+    half_index = slot_index % 2
+    if field_index >= len(field_ids):
+        return
+
+    field_id = field_ids[field_index]
+    packed_value = int(field_values.get(field_id, 0) or 0)
+    if half_index == 0:
+        packed_value = (packed_value & 0xFFFF0000) | (int(slot_value) & 0xFFFF)
+    else:
+        packed_value = (packed_value & 0x0000FFFF) | ((int(slot_value) & 0xFFFF) << 16)
+    field_values[field_id] = packed_value
+
+
+def _find_first_free_skill_slot(field_values: dict[int, int]) -> int | None:
+    """Find the first packed skill slot whose skill id is zero."""
+    for slot_index in range(_SKILL_SLOT_COUNT):
+        skill_id = _read_packed_skill_slot(field_values, _SKILL_SLOT_ID_FIELDS, slot_index)
+        if skill_id == 0:
+            return slot_index
+    return None
+
+
+def _ensure_extra_riding_skill_slot(field_values: dict[int, int]) -> None:
+    """Add one explicit riding skill slot so mount usability does not depend on spells."""
+    slot_index = _find_first_free_skill_slot(field_values)
+    if slot_index is None:
+        Logger.warning("[PLAYER RIDING] no free skill slot available for riding")
+        return
+
+    _write_packed_skill_slot(field_values, _SKILL_SLOT_ID_FIELDS, slot_index, _SKILL_RIDING)
+    _write_packed_skill_slot(field_values, _SKILL_SLOT_VALUE_FIELDS, slot_index, _SKILL_RIDING_VALUE)
+    _write_packed_skill_slot(field_values, _SKILL_SLOT_MAX_FIELDS, slot_index, _SKILL_RIDING_VALUE)
+
+
+def _patch_language_skill_fields(field_values: dict[int, int], ctx) -> None:
+    """Patch the primary language as a packed skill slot triplet."""
+    team = _resolve_player_team(ctx)
+    if team == "alliance":
         primary_language = _LANGUAGE_SKILL_COMMON
-    elif race in _HORDE_RACES:
+    elif team == "horde":
         primary_language = _LANGUAGE_SKILL_ORCISH
     else:
         return
 
-    field_values[1154] = _u32_from_two_u16(
-        primary_language,
-        (int(field_values.get(1154, 0) or 0) >> 16) & 0xFFFF,
+    race = int(getattr(ctx, "race", 0) or 0)
+    racial_language = int(_RACIAL_LANGUAGE_SKILL_BY_RACE.get(race, primary_language) or primary_language)
+    _set_language_skill_slot(
+        field_values,
+        primary_language=primary_language,
+        racial_language=racial_language,
     )
-    field_values[1282] = _u32_from_two_u16(
-        300,
-        (int(field_values.get(1282, 0) or 0) >> 16) & 0xFFFF,
-    )
-    field_values[1410] = _u32_from_two_u16(
-        300,
-        (int(field_values.get(1410, 0) or 0) >> 16) & 0xFFFF,
-    )
+    _ensure_extra_riding_skill_slot(field_values)
 
 
 def locate_update_field_region(payload: bytes) -> dict[str, int]:
