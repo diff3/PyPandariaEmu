@@ -71,6 +71,8 @@ from server.modules.handlers.world.state.runtime import (
     sync_player_visibility,
 )
 
+USE_REPLAY_BOOTSTRAP = True
+
 
 def _resolve_session_ids(session) -> Tuple[Optional[int], Optional[int]]:
     """Ensure session.account_id and session.realm_id are populated if possible."""
@@ -352,6 +354,15 @@ def _is_pre_player_login_state(state: Optional[LoginState]) -> bool:
     return state in {None, LoginState.AUTHED, LoginState.CHAR_SCREEN}
 
 
+def run_replay_bootstrap(session) -> list[tuple[str, bytes]]:
+    if USE_REPLAY_BOOTSTRAP:
+        Logger.info("[BOOTSTRAP] replay path")
+        return bootstrap_replay.replay_movement_focus_sequence(session)
+
+    Logger.info("[BOOTSTRAP] server path (future)")
+    return []
+
+
 def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[tuple[str, bytes]]:
     # TODO: Keep current packet ordering intact until world bootstrap is isolated from legacy replay helpers.
     if getattr(session, "post_loading_sent", False):
@@ -365,7 +376,7 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
     pre_update_packets = build_pre_update_object_packets(ctx)
     update_packets: list[tuple[str, bytes]] = []
     if not getattr(session, "player_object_sent", False):
-        update_packets = bootstrap_replay.replay_movement_focus_sequence(session)
+        update_packets = run_replay_bootstrap(session)
     post_update_packets = build_post_update_object_packets(ctx)
     bootstrap_packets = [
         (opcode_name, payload)
@@ -433,8 +444,7 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         Logger.info(f"[Teleport] sending {opcode_name}")
         responses.append((opcode_name, payload))
 
-    Logger.info("[Teleport] replaying sniffed movement focus sequence")
-    responses.extend(bootstrap_replay.replay_movement_focus_sequence(session))
+    responses.extend(run_replay_bootstrap(session))
 
     post_teleport_spell_packets = spells_handlers.build_active_mover_spell_sync_responses(session)
     if post_teleport_spell_packets:

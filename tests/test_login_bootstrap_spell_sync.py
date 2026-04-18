@@ -23,6 +23,32 @@ from server.modules.handlers.world.opcodes import login as login_handlers
 from server.session.world_session import LoginState
 
 
+def test_run_replay_bootstrap_flag_on_uses_replay(monkeypatch) -> None:
+    session = SimpleNamespace()
+
+    monkeypatch.setattr(login_handlers, "USE_REPLAY_BOOTSTRAP", True)
+    monkeypatch.setattr(
+        login_handlers.bootstrap_replay,
+        "replay_movement_focus_sequence",
+        lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
+    )
+
+    assert login_handlers.run_replay_bootstrap(session) == [("SMSG_UPDATE_OBJECT", b"create")]
+
+
+def test_run_replay_bootstrap_flag_off_uses_future_server_path(monkeypatch) -> None:
+    session = SimpleNamespace()
+
+    monkeypatch.setattr(login_handlers, "USE_REPLAY_BOOTSTRAP", False)
+    monkeypatch.setattr(
+        login_handlers.bootstrap_replay,
+        "replay_movement_focus_sequence",
+        lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
+    )
+
+    assert login_handlers.run_replay_bootstrap(session) == []
+
+
 def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
     """Queue a post-create spell sync so known spells land after player create."""
     session = SimpleNamespace(
@@ -45,8 +71,8 @@ def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> 
         lambda _ctx: [("PRE", b"pre")],
     )
     monkeypatch.setattr(
-        login_handlers.bootstrap_replay,
-        "replay_movement_focus_sequence",
+        login_handlers,
+        "run_replay_bootstrap",
         lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
     )
     monkeypatch.setattr(
@@ -128,8 +154,8 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
         }.get(opcode_name),
     )
     monkeypatch.setattr(
-        login_handlers.bootstrap_replay,
-        "replay_movement_focus_sequence",
+        login_handlers,
+        "run_replay_bootstrap",
         lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
     )
     monkeypatch.setattr(
