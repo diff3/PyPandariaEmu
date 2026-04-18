@@ -658,6 +658,32 @@ def patch_create_fields(
     return bytes(output)
 
 
+def build_update_mask(field_values: dict[int, int]) -> tuple[bytes, int]:
+    """Build CREATE_OBJECT update-mask bytes directly from field indices."""
+    if not field_values:
+        raise ValueError("field_values must not be empty")
+
+    max_index = max(int(field_index) for field_index in field_values)
+    mask_words = (max_index // 32) + 1
+    mask_words_list = [0] * mask_words
+
+    for field_index in field_values:
+        word_index = int(field_index) // 32
+        bit_index = int(field_index) % 32
+        mask_words_list[word_index] |= 1 << bit_index
+
+    mask_bytes = b"".join(struct.pack("<I", int(word_value) & 0xFFFFFFFF) for word_value in mask_words_list)
+    return mask_bytes, mask_words
+
+
+def _serialize_field_values(field_values: dict[int, int]) -> bytes:
+    """Serialize CREATE_OBJECT fields in ascending field-index order."""
+    payload = bytearray()
+    for field_index in sorted(field_values):
+        payload += struct.pack("<I", int(field_values[field_index]) & 0xFFFFFFFF)
+    return bytes(payload)
+
+
 def _read_u32_field_value(field_indices: list[int], field_bytes: bytes, field_index: int) -> int:
     """Read one uint32 field value from packed CREATE_OBJECT field bytes."""
     offset = 0
@@ -806,22 +832,22 @@ def build_full_player_create(ctx) -> bytes | None:
         if len(movement_block) != (_PLAYER_CREATE_MOVEMENT_BLOCK_END - _PLAYER_CREATE_MOVEMENT_BLOCK_START):
             return None
 
-        mask_start, mask_end, mask_blocks = locate_mask_region(template_payload)
-        field_start, field_end = locate_field_region(template_payload)
-        mask_bytes = template_payload[mask_start:mask_end]
-        field_indices = extract_field_indices(mask_bytes, mask_blocks)
-        if 30 not in field_indices:
-            raise ValueError("player create mask missing field 30")
-        if _UNIT_FIELD_LEVEL not in field_indices:
-            raise ValueError(f"player create mask missing field {_UNIT_FIELD_LEVEL}")
-        for field_index in _BIAS_SENSITIVE_PLAYER_FIELDS:
-            if field_index not in field_indices:
-                raise ValueError(f"player create mask missing field {field_index}")
         srv_values = build_player_field_values(ctx)
-        field_bytes = patch_create_fields(template_payload[field_start:field_end], field_indices, srv_values)
+        if 30 not in srv_values:
+            raise ValueError("player create fields missing field 30")
+        if _UNIT_FIELD_LEVEL not in srv_values:
+            raise ValueError(f"player create fields missing field {_UNIT_FIELD_LEVEL}")
+        for field_index in _BIAS_SENSITIVE_PLAYER_FIELDS:
+            if field_index not in srv_values:
+                raise ValueError(f"player create fields missing field {field_index}")
+
+        mask_bytes, mask_words = build_update_mask(srv_values)
+        field_bytes = _serialize_field_values(srv_values)
+        Logger.info(f"[MASK BUILD] words={mask_words} fields={len(srv_values)}")
 
         payload = bytearray(build_create_object_payload(ctx))
         payload += movement_block
+        payload += struct.pack("<B", int(mask_words) & 0xFF)
         payload += mask_bytes
         payload += field_bytes
         payload += struct.pack("<B", 0)
@@ -849,21 +875,27 @@ def build_server_built_player_create_from_template(ctx) -> bytes | None:
         Logger.info(f"[MOVEMENT DIFF] {len(_diff_bytes(template_block, movement_block))}")
         payload[_PLAYER_CREATE_MOVEMENT_BLOCK_START:_PLAYER_CREATE_MOVEMENT_BLOCK_END] = movement_block
 
-        field_start, field_end = locate_field_region(payload)
-        mask_start, mask_end, mask_blocks = locate_mask_region(payload)
-        field_indices = extract_field_indices(payload[mask_start:mask_end], mask_blocks)
-        if 30 not in field_indices:
-            raise ValueError("player create mask missing field 30")
-        if _UNIT_FIELD_LEVEL not in field_indices:
-            raise ValueError(f"player create mask missing field {_UNIT_FIELD_LEVEL}")
-        for field_index in _BIAS_SENSITIVE_PLAYER_FIELDS:
-            if field_index not in field_indices:
-                raise ValueError(f"player create mask missing field {field_index}")
         srv_values = build_player_field_values(ctx)
-        patched_fields = patch_create_fields(payload[field_start:field_end], field_indices, srv_values)
-        payload[field_start:field_end] = patched_fields
+        if 30 not in srv_values:
+            raise ValueError("player create fields missing field 30")
+        if _UNIT_FIELD_LEVEL not in srv_values:
+            raise ValueError(f"player create fields missing field {_UNIT_FIELD_LEVEL}")
+        for field_index in _BIAS_SENSITIVE_PLAYER_FIELDS:
+            if field_index not in srv_values:
+                raise ValueError(f"player create fields missing field {field_index}")
 
-        built_payload = _patch_language_mask_bytes(bytes(payload), ctx)
+        mask_bytes, mask_words = build_update_mask(srv_values)
+        field_bytes = _serialize_field_values(srv_values)
+        Logger.info(f"[MASK BUILD] words={mask_words} fields={len(srv_values)}")
+
+        rebuilt_payload = bytearray()
+        rebuilt_payload += payload[:_PLAYER_CREATE_MOVEMENT_BLOCK_END]
+        rebuilt_payload += struct.pack("<B", int(mask_words) & 0xFF)
+        rebuilt_payload += mask_bytes
+        rebuilt_payload += field_bytes
+        rebuilt_payload += struct.pack("<B", 0)
+
+        built_payload = _patch_language_mask_bytes(bytes(rebuilt_payload), ctx)
         _verify_player_level_field_in_payload(
             built_payload,
             int(getattr(ctx, "level", 1) or 1),

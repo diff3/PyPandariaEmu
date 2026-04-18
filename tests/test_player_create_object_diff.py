@@ -11,6 +11,7 @@ import types
 
 from shared.Logger import Logger
 from server.modules.handlers.world.bootstrap.playerobjects import (
+    build_update_mask,
     build_player_field_values,
 )
 
@@ -1060,3 +1061,47 @@ def test_horde_replay_and_server_create_match_bias_sensitive_fields() -> None:
             differences[field_index] = (replay_value, server_value)
 
     assert differences == {}
+
+
+def test_server_built_create_mask_roundtrip_matches_field_values() -> None:
+    """Ensure the CREATE_OBJECT mask is fully derived from field_values."""
+    ctx = SimpleNamespace(
+        map_id=1,
+        char_guid=13,
+        player_guid=13,
+        world_guid=13,
+        exact_0002_low_guid=13,
+        race=10,
+        class_id=4,
+        gender=1,
+        faction="horde",
+        x=16212.216796875,
+        y=16253.169921875,
+        z=14.770503044128418,
+        orientation=1.6979784965515137,
+        health=102,
+        max_health=102,
+        power_primary=40,
+        max_power=40,
+        level=90,
+        faction_template=1610,
+        display_id=52,
+        player_bytes=393218,
+        player_bytes2=16777220,
+        player_bytes3=1,
+        max_level=90,
+    )
+    field_values = build_player_field_values(ctx)
+    mask_bytes, mask_words = build_update_mask(field_values)
+    field_indices = extract_field_indices(mask_bytes, mask_words)
+    payload = build_create_payload(
+        use_server_built_player_create=True,
+        use_server_built_player_create_direct=True,
+        ctx=ctx,
+    )
+    parsed_fields = parse_update_fields(payload)
+
+    assert sum(byte.bit_count() for byte in mask_bytes) == len(field_values)
+    assert set(field_indices) == set(field_values)
+    assert len(parsed_fields) == len(field_values)
+    assert set(parsed_fields) == set(field_values)
