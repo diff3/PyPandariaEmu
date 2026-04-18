@@ -1503,19 +1503,19 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0002(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
     if USE_SERVER_BUILT_PLAYER_CREATE and not hasattr(ctx, "exact_0002_payload"):
         built = build_server_built_player_create(ctx)
-        if built is not None:
-            if bool(getattr(ctx, "exact_0002_remote_player", False)):
-                patched = bytearray(built)
-                _patch_update_object_1773613176_0002_remote_flags(patched)
-                built = bytes(patched)
-            map_id = struct.unpack_from("<H", built, 0)[0]
-            Logger.info("[PLAYER CREATE] server-built template path")
-            Logger.info(
-                f"[UPDATE_OBJECT BUILD] 0002 mode=server-template map_id={map_id} packet_size={len(built)}"
-            )
-            return built
+        if built is None:
+            raise RuntimeError("[PLAYER CREATE] server-built create returned no payload")
 
-        Logger.info("[PLAYER CREATE] fallback to replay")
+        if bool(getattr(ctx, "exact_0002_remote_player", False)):
+            patched = bytearray(built)
+            _patch_update_object_1773613176_0002_remote_flags(patched)
+            built = bytes(patched)
+        map_id = struct.unpack_from("<H", built, 0)[0]
+        Logger.info("[PLAYER CREATE] server-built only")
+        Logger.info(
+            f"[UPDATE_OBJECT BUILD] 0002 mode=server-built map_id={map_id} packet_size={len(built)}"
+        )
+        return built
 
     mode = str(
         getattr(

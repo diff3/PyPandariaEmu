@@ -175,9 +175,7 @@ Working assumption for the next phase:
   server-built payload.
 """
 
-import json
 import math
-from pathlib import Path
 import struct
 
 from shared.Logger import Logger
@@ -187,17 +185,6 @@ from server.session.runtime import session as runtime_session
 USE_SERVER_BUILT_MINIMAL_PLAYER = False
 USE_SERVER_BUILT_PLAYER_CREATE = True
 USE_SERVER_BUILT_PLAYER_CREATE_DIRECT = True
-USE_SERVER_BUILT_PLAYER_CREATE_DEBUG_FALLBACK = False
-
-_PLAYER_CREATE_TEMPLATE_PATH = (
-    Path(__file__).resolve().parents[5]
-    / "data"
-    / "skyfire548"
-    / "captures"
-    / "focus"
-    / "debug"
-    / "SMSG_UPDATE_OBJECT_1776451639_0458.json"
-)
 
 _PLAYER_CREATE_GUID_MASK_OFFSET = 7
 _PLAYER_CREATE_GUID_VALUE_OFFSET = 8
@@ -405,15 +392,6 @@ _BIAS_SENSITIVE_PLAYER_FIELDS = (57, 166, 167, 168, 1943)
 
 def _u32_from_float(value: float) -> int:
     return struct.unpack("<I", struct.pack("<f", float(value)))[0]
-
-
-def _load_player_create_template_payload() -> bytes:
-    """Load the sniffed player CREATE_OBJECT template payload."""
-    data = json.loads(_PLAYER_CREATE_TEMPLATE_PATH.read_text(encoding="utf-8"))
-    payload_hex = data.get("hex_compact") or data.get("hex_spaced")
-    if not payload_hex:
-        raise ValueError(f"missing payload hex in {_PLAYER_CREATE_TEMPLATE_PATH.name}")
-    return bytes.fromhex(str(payload_hex).replace(" ", ""))
 
 
 def _resolve_player_guid(ctx) -> int:
@@ -721,16 +699,6 @@ def _verify_player_level_field_in_payload(payload: bytes, expected_level: int) -
         )
 
 
-def patch_player_guid(payload: bytearray, ctx) -> None:
-    """Patch the packed low GUID byte in the sniffed player CREATE_OBJECT template."""
-    guid_mask = payload[_PLAYER_CREATE_GUID_MASK_OFFSET]
-    if guid_mask != 0x01:
-        raise ValueError(f"unsupported player create guid mask: 0x{guid_mask:02X}")
-
-    payload[_PLAYER_CREATE_GUID_VALUE_OFFSET] = _resolve_player_low_guid(ctx)
-    struct.pack_into("<H", payload, 0, int(getattr(ctx, "map_id", 0) or 0) & 0xFFFF)
-
-
 def _diff_bytes(a: bytes, b: bytes) -> list[tuple[int, int, int]]:
     """Return byte differences for equally sized byte sequences."""
     return [(index, a[index], b[index]) for index in range(min(len(a), len(b))) if a[index] != b[index]]
@@ -860,6 +828,8 @@ def build_full_player_create(ctx) -> bytes | None:
         payload += field_bytes
         payload += struct.pack("<B", 0)
         built_payload = _patch_language_mask_bytes(bytes(payload), ctx)
+        assert isinstance(built_payload, (bytes, bytearray))
+        assert len(built_payload) > 0
         _verify_player_level_field_in_payload(
             built_payload,
             int(getattr(ctx, "level", 1) or 1),
@@ -870,70 +840,10 @@ def build_full_player_create(ctx) -> bytes | None:
         return None
 
 
-def build_server_built_player_create_from_template(ctx) -> bytes | None:
-    """Build a player CREATE_OBJECT from a sniff template plus targeted patching."""
-    try:
-        payload = bytearray(_load_player_create_template_payload())
-
-        patch_player_guid(payload, ctx)
-        template_block = bytes(payload[_PLAYER_CREATE_MOVEMENT_BLOCK_START:_PLAYER_CREATE_MOVEMENT_BLOCK_END])
-        movement_block = build_movement_block(ctx)
-        if len(movement_block) != (_PLAYER_CREATE_MOVEMENT_BLOCK_END - _PLAYER_CREATE_MOVEMENT_BLOCK_START):
-            return None
-        Logger.info(f"[MOVEMENT DIFF COUNT] {len(_diff_bytes(template_block, movement_block))}")
-        payload[_PLAYER_CREATE_MOVEMENT_BLOCK_START:_PLAYER_CREATE_MOVEMENT_BLOCK_END] = movement_block
-
-        srv_values = build_player_field_values(ctx)
-        if 30 not in srv_values:
-            raise ValueError("player create fields missing field 30")
-        if _UNIT_FIELD_LEVEL not in srv_values:
-            raise ValueError(f"player create fields missing field {_UNIT_FIELD_LEVEL}")
-        for field_index in _BIAS_SENSITIVE_PLAYER_FIELDS:
-            if field_index not in srv_values:
-                raise ValueError(f"player create fields missing field {field_index}")
-
-        mask_bytes, mask_words = build_update_mask(srv_values)
-        field_bytes = _serialize_field_values(srv_values)
-        Logger.info(f"[MASK BUILD] words={mask_words} fields={len(srv_values)}")
-
-        rebuilt_payload = bytearray()
-        rebuilt_payload += payload[:_PLAYER_CREATE_MOVEMENT_BLOCK_END]
-        rebuilt_payload += struct.pack("<B", int(mask_words) & 0xFF)
-        rebuilt_payload += mask_bytes
-        rebuilt_payload += field_bytes
-        rebuilt_payload += struct.pack("<B", 0)
-
-        built_payload = _patch_language_mask_bytes(bytes(rebuilt_payload), ctx)
-        _verify_player_level_field_in_payload(
-            built_payload,
-            int(getattr(ctx, "level", 1) or 1),
-        )
-        return built_payload
-    except Exception as exc:
-        Logger.warning(f"[PLAYER CREATE] server-built failed: {exc}")
-        return None
-
-
 def build_server_built_player_create(ctx) -> bytes | None:
-    """Build player CREATE_OBJECT from code-only assembly, with optional debug fallback."""
-    direct_payload = build_full_player_create(ctx)
-    if direct_payload is None:
-        if not USE_SERVER_BUILT_PLAYER_CREATE_DEBUG_FALLBACK:
-            return None
-        Logger.info("[PLAYER CREATE] direct fallback to template")
-        return build_server_built_player_create_from_template(ctx)
-
-    if USE_SERVER_BUILT_PLAYER_CREATE_DEBUG_FALLBACK:
-        template_payload = build_server_built_player_create_from_template(ctx)
-        if template_payload is not None:
-            differences = _diff_bytes(direct_payload, template_payload)
-            Logger.info(f"[PLAYER CREATE] direct diff={len(differences)}")
-            if differences:
-                Logger.info("[PLAYER CREATE] direct fallback to template")
-                return template_payload
-
-    Logger.info("[PLAYER CREATE] direct path")
-    return direct_payload
+    """Build player CREATE_OBJECT from the single server-built runtime path."""
+    Logger.info("[CREATE_OBJECT] server-built only path active")
+    return build_full_player_create(ctx)
 
 
 def build_server_built_minimal_player_value_update(ctx) -> bytes | None:

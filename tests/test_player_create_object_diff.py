@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 from pathlib import Path
 import pytest
 import struct
@@ -15,7 +16,7 @@ from server.modules.handlers.world.bootstrap.playerobjects import (
     build_movement_block,
     build_update_mask,
     build_player_field_values,
-    build_server_built_player_create_from_template,
+    build_server_built_player_create,
 )
 
 
@@ -1126,8 +1127,8 @@ def test_server_built_movement_block_matches_reference_bytes() -> None:
     assert built_block == reference_block
 
 
-def test_full_player_create_matches_template_path_bytes() -> None:
-    """Full code-built CREATE_OBJECT should stay byte-identical to template assembly."""
+def test_server_built_create_runtime_path_is_single_source_of_truth() -> None:
+    """Runtime CREATE_OBJECT must use only the server-built path."""
     ctx = SimpleNamespace(
         map_id=1,
         char_guid=14,
@@ -1155,9 +1156,15 @@ def test_full_player_create_matches_template_path_bytes() -> None:
         max_level=90,
     )
 
+    runtime_payload = build_server_built_player_create(ctx)
     direct_payload = build_full_player_create(ctx)
-    template_payload = build_server_built_player_create_from_template(ctx)
+    source = inspect.getsource(build_server_built_player_create)
 
+    assert runtime_payload is not None
     assert direct_payload is not None
-    assert template_payload is not None
-    assert direct_payload == template_payload
+    assert runtime_payload == direct_payload
+    assert "template" not in source.lower()
+    assert "replay" not in source.lower()
+    assert not hasattr(importlib.import_module("server.modules.handlers.world.bootstrap.playerobjects"), "_PLAYER_CREATE_TEMPLATE_PATH")
+    assert not hasattr(importlib.import_module("server.modules.handlers.world.bootstrap.playerobjects"), "_load_player_create_template_payload")
+    assert not hasattr(importlib.import_module("server.modules.handlers.world.bootstrap.playerobjects"), "build_server_built_player_create_from_template")
