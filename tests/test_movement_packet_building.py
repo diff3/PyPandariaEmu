@@ -215,6 +215,67 @@ def test_strafe_packets_use_separate_flags_from_turn() -> None:
     assert state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
 
 
+def test_heartbeat_preserves_active_turn_flag_while_moving() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=movement._MOVEMENTFLAG_FORWARD,
+        flags2=0,
+        timestamp_ms=0,
+        counter=0,
+    )
+    session = SimpleNamespace(movement_state=state)
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_TURN_RIGHT", b"", None)
+    movement._store_authoritative_movement(session, "MSG_MOVE_HEARTBEAT", b"", (1.0, 2.0, 3.0, 0.5))
+
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_STOP_TURN", b"", None)
+
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert not state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+
+
+def test_moving_turn_keeps_forward_and_turn_flags_until_stop() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        counter=0,
+    )
+    session = SimpleNamespace(movement_state=state)
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_FORWARD", b"", None)
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_TURN_LEFT", b"", None)
+    for index in range(5):
+        movement._store_authoritative_movement(
+            session,
+            "MSG_MOVE_HEARTBEAT",
+            b"",
+            (float(index), 0.0, 0.0, 0.25 * float(index)),
+        )
+
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert state.flags & movement._MOVEMENTFLAG_TURN_LEFT
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_STOP_TURN", b"", None)
+
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert not state.flags & movement._MOVEMENTFLAG_TURN_LEFT
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_STOP", b"", None)
+
+    assert not state.flags & movement._MOVEMENTFLAG_FORWARD
+
+
 def test_parse_real_start_strafe_left_payload() -> None:
     session = SimpleNamespace(orientation=0.0)
     payload = bytes.fromhex(
@@ -390,6 +451,59 @@ def test_handle_msg_move_jump_force_broadcasts_start(monkeypatch) -> None:
 
     assert calls
     assert calls[-1][1] == {"force": True}
+
+
+def test_handle_start_turn_updates_position_and_orientation(monkeypatch) -> None:
+    session = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        realm_id=1,
+    )
+    ctx = SimpleNamespace(
+        name="MSG_MOVE_START_TURN_RIGHT",
+        opcode=0,
+        payload=b"\x01\x02\x03\x04",
+        decoded={},
+    )
+    movement_state = SimpleNamespace(x=0.0, y=0.0, z=0.0, orientation=0.0, flags=0, flags2=0, timestamp_ms=0, counter=0)
+
+    monkeypatch.setattr(movement, "_consume_pending_teleport_on_movement", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args, **kwargs: (1.0, 2.0, 3.0, 0.5))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_movement_state", lambda _session: movement_state)
+    monkeypatch.setattr(
+        movement,
+        "_sync_session_from_movement_state",
+        lambda target: (
+            setattr(target, "x", movement_state.x),
+            setattr(target, "y", movement_state.y),
+            setattr(target, "z", movement_state.z),
+            setattr(target, "orientation", movement_state.orientation),
+        ),
+    )
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda _session: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_stream_gameobjects", lambda _session: [])
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_normalize_orientation", lambda value: float(value))
+
+    movement.handle_movement_packet(session, ctx)
+
+    assert movement_state.x == 1.0
+    assert movement_state.y == 2.0
+    assert movement_state.z == 3.0
+    assert movement_state.orientation == 0.5
+    assert session.x == 1.0
+    assert session.y == 2.0
+    assert session.z == 3.0
+    assert session.orientation == 0.5
 
 
 def test_handle_movement_packet_keeps_previous_orientation_when_missing(monkeypatch) -> None:

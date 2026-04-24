@@ -734,7 +734,8 @@ def _is_effectively_stationary(
 
 
 def _apply_movement_flags(state, opcode_name: str) -> None:
-    flags = int(getattr(state, "flags", 0) or 0)
+    previous_flags = int(getattr(state, "flags", 0) or 0)
+    flags = int(previous_flags)
     if opcode_name == "MSG_MOVE_START_FORWARD":
         flags |= _MOVEMENTFLAG_FORWARD
         flags &= ~_MOVEMENTFLAG_BACKWARD
@@ -759,8 +760,6 @@ def _apply_movement_flags(state, opcode_name: str) -> None:
         flags &= ~_MOVEMENTFLAG_TURN_LEFT
     elif opcode_name == "MSG_MOVE_STOP_TURN":
         flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
-    elif opcode_name == "MSG_MOVE_HEARTBEAT":
-        flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
     elif opcode_name == "MSG_MOVE_JUMP":
         flags |= _MOVEMENTFLAG_FALLING
         flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
@@ -768,6 +767,21 @@ def _apply_movement_flags(state, opcode_name: str) -> None:
         flags &= ~_MOVEMENTFLAG_FALLING
         flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
     state.flags = int(flags)
+    if opcode_name in {
+        "MSG_MOVE_START_FORWARD",
+        "MSG_MOVE_START_BACKWARD",
+        "MSG_MOVE_START_TURN_LEFT",
+        "MSG_MOVE_START_TURN_RIGHT",
+        "MSG_MOVE_STOP_TURN",
+        "MSG_MOVE_HEARTBEAT",
+        "MSG_MOVE_STOP",
+    }:
+        Logger.debug(
+            "[MOVE_FLAGS] opcode=%s previous=0x%X new=0x%X",
+            opcode_name,
+            previous_flags,
+            int(flags),
+        )
 
 
 def _extract_packet_timestamp(opcode_name: str, payload: bytes) -> int | None:
@@ -1411,15 +1425,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     previous_z = float(getattr(session, "z", 0.0) or 0.0)
     previous_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
     previous_normalized_orientation = _normalize_orientation(previous_orientation)
-
-    if opcode_name in {
-        "MSG_MOVE_START_TURN_LEFT",
-        "MSG_MOVE_START_TURN_RIGHT",
-        "MSG_MOVE_STOP_TURN",
-    }:
-        x = previous_x
-        y = previous_y
-        z = previous_z
 
     if not _accept_movement_update(session, opcode_name, x, y, z, orientation):
         return 0, None

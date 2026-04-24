@@ -402,7 +402,7 @@ def test_state_only_packets_update_movement_state_flags():
     assert (movement._movement_state(session).flags & movement._MOVEMENTFLAG_FORWARD) == 0
 
 
-def test_heartbeat_clears_turn_flags_in_authoritative_state():
+def test_heartbeat_preserves_turn_flags_until_stop_turn():
     session = _session()
     movement._store_authoritative_movement(session, "MSG_MOVE_START_TURN_RIGHT", b"", None)
     assert movement._movement_state(session).flags & movement._MOVEMENTFLAG_RIGHT
@@ -411,6 +411,10 @@ def test_heartbeat_clears_turn_flags_in_authoritative_state():
     parsed = movement.parse_movement_info(session, "MSG_MOVE_HEARTBEAT", payload, decoded={})
     assert parsed is not None
     movement._store_authoritative_movement(session, "MSG_MOVE_HEARTBEAT", payload, parsed)
+
+    assert movement._movement_state(session).flags & movement._MOVEMENTFLAG_RIGHT
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_STOP_TURN", b"", None)
 
     assert (movement._movement_state(session).flags & movement._MOVEMENTFLAG_RIGHT) == 0
 
