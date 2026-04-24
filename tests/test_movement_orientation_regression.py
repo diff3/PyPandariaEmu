@@ -1,6 +1,25 @@
 import struct
+import sys
 import time
 from types import SimpleNamespace
+import types
+
+
+replay_module = types.ModuleType("server.modules.handlers.world.bootstrap.replay")
+replay_module.build_database_gameobject_responses = lambda *args, **kwargs: []
+replay_module.build_multi_u32_update_object_payload = lambda *args, **kwargs: b""
+replay_module.build_single_u32_update_object_payload = lambda *args, **kwargs: b""
+sys.modules.setdefault("server.modules.handlers.world.bootstrap.replay", replay_module)
+
+database_module = types.ModuleType("server.modules.database.DatabaseConnection")
+database_module.DatabaseConnection = type(
+    "DatabaseConnection",
+    (),
+    {
+        "get_gameobjects_near": staticmethod(lambda *args, **kwargs: []),
+    },
+)
+sys.modules.setdefault("server.modules.database.DatabaseConnection", database_module)
 
 from server.modules.handlers.world.opcodes import movement
 from server.modules.protocol.PacketContext import PacketContext
@@ -177,6 +196,26 @@ def test_jump_records_fall_data_in_movement_state():
     assert round(state.fall_vertical_speed, 3) == round(-7.955547, 3)
     assert round(state.fall_sin_angle, 3) == round(0.476731, 3)
     assert round(state.fall_cos_angle, 3) == round(-0.879049, 3)
+
+
+def test_fall_land_clears_fall_data_in_movement_state():
+    session = _session()
+    state = movement._movement_state(session)
+    state.has_fall_data = True
+    state.fall_time = 123
+    state.fall_vertical_speed = -7.9
+    state.fall_horizontal_speed = 2.0
+    state.fall_sin_angle = 0.47
+    state.fall_cos_angle = -0.88
+
+    movement._record_movement_packet_state(session, "MSG_MOVE_FALL_LAND", b"\x00" * 28)
+
+    assert state.has_fall_data is False
+    assert state.fall_time == 0
+    assert state.fall_vertical_speed == 0.0
+    assert state.fall_horizontal_speed == 0.0
+    assert state.fall_sin_angle == 0.0
+    assert state.fall_cos_angle == 0.0
 
 
 def test_parse_real_skyfire_start_turn_right_uses_xzy_prefix_and_orientation():

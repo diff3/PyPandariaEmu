@@ -44,9 +44,16 @@ def _append_guid_byte_seq(payload: bytearray, raw_guid: bytes, order: tuple[int,
 
 _MOVEMENTFLAG_FORWARD = 0x00000001
 _MOVEMENTFLAG_BACKWARD = 0x00000002
-_MOVEMENTFLAG_LEFT = 0x00000010
-_MOVEMENTFLAG_RIGHT = 0x00000020
+_MOVEMENTFLAG_STRAFE_LEFT = 0x00000004
+_MOVEMENTFLAG_STRAFE_RIGHT = 0x00000008
+_MOVEMENTFLAG_TURN_LEFT = 0x00000010
+_MOVEMENTFLAG_TURN_RIGHT = 0x00000020
+_MOVEMENTFLAG_LEFT = _MOVEMENTFLAG_TURN_LEFT
+_MOVEMENTFLAG_RIGHT = _MOVEMENTFLAG_TURN_RIGHT
 _MOVEMENTFLAG_FALLING = 0x00000800
+
+_SMSG_PLAYER_MOVE_JUMP_CONTROL_NO_DIRECTION = bytes.fromhex("8A0C0800000000")
+_SMSG_PLAYER_MOVE_JUMP_CONTROL_WITH_DIRECTION = bytes.fromhex("8A4C0800000000")
 
 
 def _movement_sync_guid(session) -> int:
@@ -96,6 +103,15 @@ def _movement_timestamp_ms(session) -> int:
         now_ms = (existing + 1) & 0xFFFFFFFF
     state.timestamp_ms = now_ms
     return now_ms
+
+
+def _has_valid_fall_direction(state) -> bool:
+    horizontal_speed = float(getattr(state, "fall_horizontal_speed", 0.0) or 0.0)
+    sin_angle = float(getattr(state, "fall_sin_angle", 0.0) or 0.0)
+    cos_angle = float(getattr(state, "fall_cos_angle", 0.0) or 0.0)
+    if not all(math.isfinite(value) for value in (horizontal_speed, sin_angle, cos_angle)):
+        return False
+    return abs(horizontal_speed) > 1e-5 and abs(sin_angle) <= 1.001 and abs(cos_angle) <= 1.001
 
 
 def build_smsg_player_move_payload_old(session) -> bytes | None:
@@ -166,13 +182,42 @@ def build_smsg_player_move_payload_stable_old(session) -> bytes | None:
         return None
 
     raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
-    move_flags = int(state.flags)
-    move_flags2 = int(state.flags2)
     timestamp = _movement_timestamp_ms(session)
     x = float(state.x)
     y = float(state.y)
     z = float(state.z)
     orientation = float(state.orientation)
+    has_fall_data = bool(getattr(state, "has_fall_data", False))
+    fall_time = int(getattr(state, "fall_time", 0) or 0) & 0xFFFFFFFF
+    fall_vertical_speed = float(getattr(state, "fall_vertical_speed", 0.0) or 0.0)
+    if has_fall_data:
+        has_fall_direction = _has_valid_fall_direction(state)
+        payload = bytearray(
+            _SMSG_PLAYER_MOVE_JUMP_CONTROL_WITH_DIRECTION
+            if has_fall_direction
+            else _SMSG_PLAYER_MOVE_JUMP_CONTROL_NO_DIRECTION
+        )
+        payload.extend(struct.pack("<f", y))
+        payload.extend(struct.pack("<f", z))
+        payload.extend(struct.pack("<I", timestamp))
+        payload.extend(struct.pack("<f", orientation))
+        if has_fall_direction:
+            payload.extend(struct.pack("<f", float(state.fall_sin_angle)))
+            payload.extend(struct.pack("<f", float(state.fall_horizontal_speed)))
+            payload.extend(struct.pack("<f", float(state.fall_cos_angle)))
+            payload.extend(struct.pack("<I", fall_time))
+            payload.extend(struct.pack("<f", fall_vertical_speed))
+        else:
+            payload.extend(struct.pack("<f", fall_vertical_speed))
+            payload.extend(struct.pack("<I", fall_time))
+        payload.append((raw_guid[0] ^ 1) & 0xFF)
+        payload.extend(struct.pack("<I", int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF))
+        payload.extend(struct.pack("<f", x))
+        state.counter = (int(getattr(state, "counter", 0) or 0) + 1) & 0xFFFFFFFF
+        return bytes(payload)
+
+    move_flags = int(state.flags)
+    move_flags2 = int(state.flags2)
     has_orientation = not math.isclose(float(orientation), 0.0, abs_tol=1e-6)
     has_counter = int(getattr(state, "counter", 0) or 0) != 0
 
@@ -183,7 +228,7 @@ def build_smsg_player_move_payload_stable_old(session) -> bytes | None:
     bits.write_bits(0, 1)  # MSEZeroBit
     bits.write_bits(1 if raw_guid[0] else 0, 1)
     bits.write_bits(0 if has_orientation else 1, 1)  # MSEHasOrientation -> !hasOrientation
-    bits.write_bits(0, 1)  # MSEHasFallData
+    bits.write_bits(0 if has_fall_data else 0, 1)  # MSEHasFallData; keep no-fall stable byte-for-byte.
     bits.write_bits(0 if has_counter else 1, 1)  # MSEHasCounter -> !counter
     bits.write_bits(1 if raw_guid[3] else 0, 1)
     bits.write_bits(0, 1)  # MSEHasTransportData
@@ -214,6 +259,9 @@ def build_smsg_player_move_payload_stable_old(session) -> bytes | None:
         payload.extend(struct.pack("<I", timestamp))  # MSETimestamp
     if has_orientation:
         payload.extend(struct.pack("<f", orientation))  # MSEOrientation
+    if has_fall_data:
+        payload.extend(struct.pack("<f", fall_vertical_speed))  # MSEJumpVerticalSpeed
+        payload.extend(struct.pack("<I", fall_time))  # MSEFallTime
     if raw_guid[3]:
         payload.append((raw_guid[3] ^ 1) & 0xFF)  # MSEGuidByte3
     if raw_guid[0]:
@@ -695,23 +743,30 @@ def _apply_movement_flags(state, opcode_name: str) -> None:
         flags &= ~_MOVEMENTFLAG_FORWARD
     elif opcode_name == "MSG_MOVE_STOP":
         flags &= ~(_MOVEMENTFLAG_FORWARD | _MOVEMENTFLAG_BACKWARD)
-        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
+    elif opcode_name == "MSG_MOVE_START_STRAFE_LEFT":
+        flags |= _MOVEMENTFLAG_STRAFE_LEFT
+        flags &= ~_MOVEMENTFLAG_STRAFE_RIGHT
+    elif opcode_name == "MSG_MOVE_START_STRAFE_RIGHT":
+        flags |= _MOVEMENTFLAG_STRAFE_RIGHT
+        flags &= ~_MOVEMENTFLAG_STRAFE_LEFT
+    elif opcode_name == "MSG_MOVE_STOP_STRAFE":
+        flags &= ~(_MOVEMENTFLAG_STRAFE_LEFT | _MOVEMENTFLAG_STRAFE_RIGHT)
     elif opcode_name == "MSG_MOVE_START_TURN_LEFT":
-        flags |= _MOVEMENTFLAG_LEFT
-        flags &= ~_MOVEMENTFLAG_RIGHT
+        flags |= _MOVEMENTFLAG_TURN_LEFT
+        flags &= ~_MOVEMENTFLAG_TURN_RIGHT
     elif opcode_name == "MSG_MOVE_START_TURN_RIGHT":
-        flags |= _MOVEMENTFLAG_RIGHT
-        flags &= ~_MOVEMENTFLAG_LEFT
+        flags |= _MOVEMENTFLAG_TURN_RIGHT
+        flags &= ~_MOVEMENTFLAG_TURN_LEFT
     elif opcode_name == "MSG_MOVE_STOP_TURN":
-        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
+        flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
     elif opcode_name == "MSG_MOVE_HEARTBEAT":
-        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
+        flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
     elif opcode_name == "MSG_MOVE_JUMP":
         flags |= _MOVEMENTFLAG_FALLING
-        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
+        flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
     elif opcode_name == "MSG_MOVE_FALL_LAND":
         flags &= ~_MOVEMENTFLAG_FALLING
-        flags &= ~(_MOVEMENTFLAG_LEFT | _MOVEMENTFLAG_RIGHT)
+        flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
     state.flags = int(flags)
 
 
@@ -724,6 +779,8 @@ def _extract_packet_timestamp(opcode_name: str, payload: bytes) -> int | None:
         return int.from_bytes(payload[-4:], "little", signed=False)
     if opcode_name == "MSG_MOVE_STOP" and len(payload) >= 28:
         return int.from_bytes(payload[-4:], "little", signed=False)
+    if opcode_name in {"MSG_MOVE_START_STRAFE_LEFT", "MSG_MOVE_START_STRAFE_RIGHT", "MSG_MOVE_STOP_STRAFE"} and len(payload) >= 24:
+        return int.from_bytes(payload[-4:], "little", signed=False)
     if opcode_name == "MSG_MOVE_JUMP" and len(payload) >= 52:
         return int.from_bytes(payload[-4:], "little", signed=False)
     if opcode_name == "MSG_MOVE_FALL_LAND" and len(payload) >= 28:
@@ -731,6 +788,30 @@ def _extract_packet_timestamp(opcode_name: str, payload: bytes) -> int | None:
     if opcode_name in {"MSG_MOVE_START_TURN_LEFT", "MSG_MOVE_START_TURN_RIGHT", "MSG_MOVE_STOP_TURN"} and len(payload) >= 24:
         return int.from_bytes(payload[-4:], "little", signed=False)
     return None
+
+
+def _extract_jump_fall_data(payload: bytes) -> dict[str, float | int] | None:
+    if len(payload) < 36:
+        return None
+
+    try:
+        vertical_speed = struct.unpack_from("<f", payload, 24)[0]
+        sin_angle = struct.unpack_from("<f", payload, 28)[0]
+        cos_angle = struct.unpack_from("<f", payload, 32)[0]
+        horizontal_speed = struct.unpack_from("<f", payload, 36)[0] if len(payload) >= 40 else 0.0
+    except struct.error:
+        return None
+
+    if not all(math.isfinite(value) for value in (vertical_speed, sin_angle, cos_angle, horizontal_speed)):
+        return None
+
+    return {
+        "fall_time": 0,
+        "fall_vertical_speed": float(vertical_speed),
+        "fall_horizontal_speed": float(horizontal_speed) if abs(float(horizontal_speed)) > 1e-5 else 0.0,
+        "fall_sin_angle": float(sin_angle),
+        "fall_cos_angle": float(cos_angle),
+    }
 
 
 def _is_stale_client_timestamp(current_timestamp_ms: int, incoming_timestamp_ms: int) -> bool:
@@ -818,6 +899,45 @@ def _extract_skyfire_movement_from_payload(
     if opcode_name == "MSG_MOVE_STOP":
         # SkyFire 5.4.8 MovementStop starts with PositionX, PositionY, PositionZ.
         x, y, z = first, second, third
+        if len(payload) >= 24:
+            try:
+                candidate = struct.unpack_from("<f", payload, 20)[0]
+                normalized = _normalize_orientation(candidate)
+                if normalized is not None:
+                    orientation = float(normalized)
+            except struct.error:
+                pass
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_START_STRAFE_LEFT":
+        # SkyFire 5.4.8 MovementStartStrafeLeft starts with PositionY, PositionZ, PositionX.
+        y, z, x = first, second, third
+        if len(payload) >= 32:
+            try:
+                candidate = struct.unpack_from("<f", payload, 28)[0]
+                normalized = _normalize_orientation(candidate)
+                if normalized is not None:
+                    orientation = float(normalized)
+            except struct.error:
+                pass
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_START_STRAFE_RIGHT":
+        # SkyFire 5.4.8 MovementStartStrafeRight starts with PositionY, PositionX, PositionZ.
+        y, x, z = first, second, third
+        if len(payload) >= 32:
+            try:
+                candidate = struct.unpack_from("<f", payload, 28)[0]
+                normalized = _normalize_orientation(candidate)
+                if normalized is not None:
+                    orientation = float(normalized)
+            except struct.error:
+                pass
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_STOP_STRAFE":
+        # SkyFire 5.4.8 MovementStopStrafe starts with PositionZ, PositionX, PositionY.
+        z, x, y = first, second, third
         if len(payload) >= 24:
             try:
                 candidate = struct.unpack_from("<f", payload, 20)[0]
@@ -990,6 +1110,22 @@ def parse_movement_info(
 def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> None:
     state = _movement_state(session)
     _apply_movement_flags(state, opcode_name)
+    if opcode_name == "MSG_MOVE_JUMP":
+        fall_data = _extract_jump_fall_data(payload)
+        if fall_data is not None:
+            state.has_fall_data = True
+            state.fall_time = int(fall_data["fall_time"])
+            state.fall_vertical_speed = float(fall_data["fall_vertical_speed"])
+            state.fall_horizontal_speed = float(fall_data["fall_horizontal_speed"])
+            state.fall_sin_angle = float(fall_data["fall_sin_angle"])
+            state.fall_cos_angle = float(fall_data["fall_cos_angle"])
+    elif opcode_name == "MSG_MOVE_FALL_LAND":
+        state.has_fall_data = False
+        state.fall_time = 0
+        state.fall_vertical_speed = 0.0
+        state.fall_horizontal_speed = 0.0
+        state.fall_sin_angle = 0.0
+        state.fall_cos_angle = 0.0
     timestamp = _extract_packet_timestamp(opcode_name, payload)
     if timestamp is not None:
         state.timestamp_ms = int(timestamp) & 0xFFFFFFFF
@@ -1219,6 +1355,9 @@ def _maybe_periodic_position_save(
 
 @register("MSG_MOVE_START_FORWARD")
 @register("MSG_MOVE_START_BACKWARD")
+@register("MSG_MOVE_START_STRAFE_LEFT")
+@register("MSG_MOVE_START_STRAFE_RIGHT")
+@register("MSG_MOVE_STOP_STRAFE")
 @register("MSG_MOVE_STOP")
 @register("MSG_MOVE_HEARTBEAT")
 @register("MSG_MOVE_JUMP")
@@ -1237,6 +1376,9 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         if opcode_name in {
             "MSG_MOVE_START_FORWARD",
             "MSG_MOVE_START_BACKWARD",
+            "MSG_MOVE_START_STRAFE_LEFT",
+            "MSG_MOVE_START_STRAFE_RIGHT",
+            "MSG_MOVE_STOP_STRAFE",
             "MSG_MOVE_STOP",
             "MSG_MOVE_START_TURN_LEFT",
             "MSG_MOVE_START_TURN_RIGHT",
@@ -1340,7 +1482,15 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     _mark_position_dirty(session)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _maybe_periodic_position_save(session)
-    broadcast_player_state_update(session, force=(opcode_name == "MSG_MOVE_HEARTBEAT"))
+    force_broadcast = opcode_name in {"MSG_MOVE_HEARTBEAT", "MSG_MOVE_JUMP"}
+    if opcode_name == "MSG_MOVE_JUMP":
+        Logger.debug(
+            "[JUMP_BROADCAST] opcode=%s fall_time=%s force=%s",
+            opcode_name,
+            int(getattr(state, "fall_time", 0) or 0),
+            bool(force_broadcast),
+        )
+    broadcast_player_state_update(session, force=force_broadcast)
 
     Logger.debug(
         f"[MOVE] guid=0x{_player_guid(session):X} "
