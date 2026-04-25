@@ -261,30 +261,22 @@ def _result_to_response(
 
 @register("CMSG_AUTOEQUIP_ITEM")
 def handle_autoequip_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    log_cmsg(ctx)
-    raw = bytes(ctx.payload or b"")
-    if len(raw) < 2:
+    decoded = log_cmsg(ctx) or {}
+    src_slot = _decoded_first_int(decoded, "src_slot", "srcSlot", "source_slot", "slot")
+    src_bag = _decoded_first_int(decoded, "src_bag", "srcBag", "source_bag", "bag")
+
+    if src_slot is None or src_bag is None:
         return 0, _system_message("[Inventory] malformed autoequip packet")
 
-    src_slot = int(raw[0])
-    src_bag = int(raw[1])
-    result = auto_equip_item(session, src_bag, src_slot)
+    result = auto_equip_item(session, int(src_bag), int(src_slot))
     return _result_to_response(session, f"autoequip src=({src_bag},{src_slot})", result)
 
 
 @register("CMSG_AUTOEQUIP_ITEM_SLOT")
 def handle_autoequip_item_slot(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    log_cmsg(ctx)
-    decoded = ctx.decoded or {}
-    raw = bytes(ctx.payload or b"")
+    decoded = log_cmsg(ctx) or {}
 
-    slot = int(
-        decoded.get("slot")
-        or decoded.get("dst_slot")
-        or decoded.get("equipment_slot")
-        or (raw[0] if raw else 0)
-        or 0
-    )
+    slot = _decoded_first_int(decoded, "slot", "dst_slot", "equipment_slot")
     item_guid = _coerce_guid_int(
         decoded.get("guid")
         or decoded.get("item_guid")
@@ -292,10 +284,10 @@ def handle_autoequip_item_slot(session, ctx: PacketContext) -> Tuple[int, Option
         or decoded.get("itemGuid")
     )
 
-    if item_guid <= 0:
+    if slot is None or item_guid <= 0:
         return 0, _system_message("[Inventory] malformed autoequip-slot packet")
 
-    result = move_item_to_root_slot_by_guid(session, int(item_guid) & 0xFFFFFFFF, slot)
+    result = move_item_to_root_slot_by_guid(session, int(item_guid) & 0xFFFFFFFF, int(slot))
     return _result_to_response(session, f"autoequip-slot guid={item_guid} dst={slot}", result)
 
 
@@ -337,16 +329,9 @@ def handle_autostore_bag_item(session, ctx: PacketContext) -> Tuple[int, Optiona
 
 @register("CMSG_SWAP_INV_ITEM")
 def handle_swap_inv_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    log_cmsg(ctx)
-    decoded = ctx.decoded or {}
-    raw = bytes(ctx.payload or b"")
+    decoded = log_cmsg(ctx) or {}
     src_slot = _decoded_first_int(decoded, "src_slot", "srcSlot", "source_slot", "slot")
     dst_slot = _decoded_first_int(decoded, "dst_slot", "dstSlot", "dest_slot", "target_slot")
-
-    if src_slot is None and len(raw) >= 1:
-        src_slot = int(raw[0])
-    if dst_slot is None and len(raw) >= 2:
-        dst_slot = int(raw[1])
 
     if src_slot is None or dst_slot is None:
         return 0, _system_message("[Inventory] malformed swap-inv packet")

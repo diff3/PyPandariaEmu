@@ -4,6 +4,8 @@ import sys
 import types
 from types import SimpleNamespace
 
+from server.modules.interpretation.utils import dsl_decode
+
 
 def _import_inventory_handlers():
     stub_modules = {
@@ -43,6 +45,99 @@ inventory_handlers = _import_inventory_handlers()
 
 def _ok_result(message="ok"):
     return SimpleNamespace(ok=True, message=message)
+
+
+def test_autoequip_item_dsl_decodes_runtime_layout():
+    decoded = dsl_decode("CMSG_AUTOEQUIP_ITEM", bytes.fromhex("0114400114"), silent=True)
+
+    assert decoded["src_slot"] == 1
+    assert decoded["src_bag"] == 20
+
+
+def test_autoequip_item_uses_decoded_fields(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        inventory_handlers,
+        "auto_equip_item",
+        lambda session, src_bag, src_slot: (
+            calls.append((src_bag, src_slot)) or _ok_result("item equipped")
+        ),
+    )
+    monkeypatch.setattr(inventory_handlers, "build_inventory_delta_responses", lambda session, result: [])
+
+    ctx = SimpleNamespace(
+        name="CMSG_AUTOEQUIP_ITEM",
+        payload=bytes.fromhex("0000"),
+        decoded={"src_slot": 1, "src_bag": 20},
+    )
+
+    status, responses = inventory_handlers.handle_autoequip_item(object(), ctx)
+
+    assert status == 0
+    assert responses is None
+    assert calls == [(20, 1)]
+
+
+def test_autoequip_item_slot_dsl_decodes_slot_and_packed_guid():
+    decoded = dsl_decode("CMSG_AUTOEQUIP_ITEM_SLOT", bytes([15, 1, 0x34]), silent=True)
+
+    assert decoded["slot"] == 15
+    assert decoded["guid"] == 0x34
+
+
+def test_autoequip_item_slot_uses_decoded_fields(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        inventory_handlers,
+        "move_item_to_root_slot_by_guid",
+        lambda session, item_guid, slot: (
+            calls.append((item_guid, slot)) or _ok_result("item equipped")
+        ),
+    )
+    monkeypatch.setattr(inventory_handlers, "build_inventory_delta_responses", lambda session, result: [])
+
+    ctx = SimpleNamespace(
+        name="CMSG_AUTOEQUIP_ITEM_SLOT",
+        payload=bytes([0]),
+        decoded={"slot": 15, "guid": 0x12345678},
+    )
+
+    status, responses = inventory_handlers.handle_autoequip_item_slot(object(), ctx)
+
+    assert status == 0
+    assert responses is None
+    assert calls == [(0x12345678, 15)]
+
+
+def test_swap_inv_item_dsl_decodes_slots():
+    decoded = dsl_decode("CMSG_SWAP_INV_ITEM", bytes([19, 23]), silent=True)
+
+    assert decoded["src_slot"] == 19
+    assert decoded["dst_slot"] == 23
+
+
+def test_swap_inv_item_uses_decoded_fields(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        inventory_handlers,
+        "swap_character_item",
+        lambda session, src_bag, src_slot, dst_bag, dst_slot: (
+            calls.append((src_bag, src_slot, dst_bag, dst_slot)) or _ok_result("item moved")
+        ),
+    )
+    monkeypatch.setattr(inventory_handlers, "build_inventory_delta_responses", lambda session, result: [])
+
+    ctx = SimpleNamespace(
+        name="CMSG_SWAP_INV_ITEM",
+        payload=b"\x00\x00",
+        decoded={"src_slot": 19, "dst_slot": 23},
+    )
+
+    status, responses = inventory_handlers.handle_swap_inv_item(object(), ctx)
+
+    assert status == 0
+    assert responses is None
+    assert calls == [(0, 19, 0, 23)]
 
 
 def test_swap_item_prefers_decoded_fields_over_raw(monkeypatch):
