@@ -924,13 +924,13 @@ def _build_simple_equipment_transition_responses(session, moved_item, old_bag: i
     elif source_bag_item is not None:
         add_update(batch, "CONTAINER", sync_known_container(session, source_bag_item, [int(old_slot)]))
     add_update(batch, "ITEM", sync_known_item(session, moved_item, item_fields))
+    add_update(batch, "PLAYER", _build_player_slot_values_responses(session, int(new_slot), int(item_guid)))
     add_update(
         batch,
-        "PLAYER",
-        _build_player_equip_values_responses(
+        "PLAYER_VISIBLE",
+        _build_self_visible_item_slot_update_responses(
             session,
             int(new_slot),
-            int(item_guid),
             int(getattr(moved_item, "entry", 0) or 0),
         ),
     )
@@ -1002,13 +1002,13 @@ def _build_equipment_swap_responses(session, equip_slot: int, storage_bag: int, 
     elif bag_item is not None:
         add_update(batch, "CONTAINER", sync_known_container(session, bag_item, [int(storage_slot)]))
     add_update(batch, "ITEM", sync_known_item(session, equipped_item, equipped_fields))
+    add_update(batch, "PLAYER", _build_player_slot_values_responses(session, int(equip_slot), int(equipped_guid)))
     add_update(
         batch,
-        "PLAYER",
-        _build_player_equip_values_responses(
+        "PLAYER_VISIBLE",
+        _build_self_visible_item_slot_update_responses(
             session,
             int(equip_slot),
-            int(equipped_guid),
             int(getattr(equipped_item, "entry", 0) or 0),
         ),
     )
