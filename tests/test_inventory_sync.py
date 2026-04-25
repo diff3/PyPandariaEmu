@@ -745,6 +745,102 @@ def test_inventory_delta_swap_within_same_container_updates_only_changed_slots()
     assert not item_updates
 
 
+def test_inventory_delta_swap_between_bags_updates_both_containers_and_item_links():
+    session = _FakeSession()
+    state = _InventoryState()
+    session.inventory_state = state
+
+    bag_a = _Item(
+        item_guid=1000,
+        bag=0,
+        slot=19,
+        count=1,
+        template=_Template(entry=100, display_id=2000, inventory_type=18, container_slots=6),
+    )
+    bag_b = _Item(
+        item_guid=1001,
+        bag=0,
+        slot=20,
+        count=1,
+        template=_Template(entry=101, display_id=2001, inventory_type=18, container_slots=6),
+    )
+    item_a = _Item(
+        item_guid=2000,
+        bag=1001,
+        slot=1,
+        count=1,
+        template=_Template(entry=200, display_id=3000, inventory_type=0),
+    )
+    item_b = _Item(
+        item_guid=3000,
+        bag=1000,
+        slot=0,
+        count=1,
+        template=_Template(entry=300, display_id=4000, inventory_type=0),
+    )
+    state.put(bag_a)
+    state.put(bag_b)
+    state.put(item_a)
+    state.put(item_b)
+    session.known_inventory_guids = {
+        inventory_sync._make_item_world_guid(1000),
+        inventory_sync._make_item_world_guid(1001),
+        inventory_sync._make_item_world_guid(2000),
+        inventory_sync._make_item_world_guid(3000),
+    }
+    result = SimpleNamespace(
+        changed_positions=((1000, 0), (1001, 1)),
+        changed_items=(item_a, item_b),
+        released_items=(),
+        removed_item_guids=(),
+    )
+
+    responses = inventory_sync.build_inventory_delta_responses(session, result)
+    updates = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {}
+        updates.extend(decoded.get("updates", []))
+
+    assert any(
+        update.get("guid") == inventory_sync._make_item_world_guid(1000)
+        and update["mask"]["set_bits"] == [69, 70]
+        and update["fields"]["u32"] == [
+            int(inventory_sync._make_item_world_guid(3000) & 0xFFFFFFFF),
+            int((inventory_sync._make_item_world_guid(3000) >> 32) & 0xFFFFFFFF),
+        ]
+        for update in updates
+    )
+    assert any(
+        update.get("guid") == inventory_sync._make_item_world_guid(1001)
+        and update["mask"]["set_bits"] == [71, 72]
+        and update["fields"]["u32"] == [
+            int(inventory_sync._make_item_world_guid(2000) & 0xFFFFFFFF),
+            int((inventory_sync._make_item_world_guid(2000) >> 32) & 0xFFFFFFFF),
+        ]
+        for update in updates
+    )
+    assert any(
+        update.get("guid") == inventory_sync._make_item_world_guid(2000)
+        and update["mask"]["set_bits"] == [10, 11]
+        and update["fields"]["u32"] == [
+            int(inventory_sync._make_item_world_guid(1001) & 0xFFFFFFFF),
+            int((inventory_sync._make_item_world_guid(1001) >> 32) & 0xFFFFFFFF),
+        ]
+        for update in updates
+    )
+    assert any(
+        update.get("guid") == inventory_sync._make_item_world_guid(3000)
+        and update["mask"]["set_bits"] == [10, 11]
+        and update["fields"]["u32"] == [
+            int(inventory_sync._make_item_world_guid(1000) & 0xFFFFFFFF),
+            int((inventory_sync._make_item_world_guid(1000) >> 32) & 0xFFFFFFFF),
+        ]
+        for update in updates
+    )
+
+
 def test_sync_item_known_stack_count_change_only_resends_stack_field():
     session = _FakeSession()
     state = _InventoryState()
@@ -1078,6 +1174,43 @@ def test_trigger_inventory_activation_detaches_and_reattaches_equipped_bag_once(
     assert updates[1]["guid"] == 7
     assert updates[1]["mask"]["set_bits"] == [bag_slot_field, bag_slot_field + 1]
     assert updates[1]["fields"]["u32"] == [int(bag_guid & 0xFFFFFFFF), int((bag_guid >> 32) & 0xFFFFFFFF)]
+
+
+def test_trigger_inventory_activation_detaches_and_reattaches_all_equipped_bags():
+    session = _FakeSession()
+    state = _InventoryState()
+    session.inventory_state = state
+    for offset, item_guid in enumerate((1000, 1001, 1002)):
+        state.put(
+            _Item(
+                item_guid=item_guid,
+                bag=0,
+                slot=19 + offset,
+                count=1,
+                template=_Template(entry=100 + offset, display_id=2000 + offset, inventory_type=18, container_slots=6),
+            )
+        )
+
+    responses = inventory_sync.trigger_inventory_activation(session)
+    updates = [
+        dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)["updates"][0]
+        for opcode, payload in responses
+        if opcode == "SMSG_UPDATE_OBJECT"
+    ]
+
+    assert session.inventory_activated is True
+    assert len(updates) == 6
+    for offset, item_guid in enumerate((1000, 1001, 1002)):
+        field_index = inventory_sync._inventory_slot_field_index(0, 19 + offset)
+        bag_guid = inventory_sync._make_item_world_guid(item_guid)
+        clear_update = updates[offset * 2]
+        set_update = updates[(offset * 2) + 1]
+        assert clear_update["guid"] == 7
+        assert clear_update["mask"]["set_bits"] == [field_index, field_index + 1]
+        assert clear_update["fields"]["u32"] == [0, 0]
+        assert set_update["guid"] == 7
+        assert set_update["mask"]["set_bits"] == [field_index, field_index + 1]
+        assert set_update["fields"]["u32"] == [int(bag_guid & 0xFFFFFFFF), int((bag_guid >> 32) & 0xFFFFFFFF)]
 
 
 def test_trigger_inventory_activation_skips_when_already_active():

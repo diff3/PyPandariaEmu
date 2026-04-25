@@ -76,19 +76,32 @@ def _equipped_bag_items(state) -> list:
 
 
 def _find_inventory_activation_bag(session) -> tuple[int, int] | None:
+    activation_bags = _find_inventory_activation_bags(session)
+    return activation_bags[0] if activation_bags else None
+
+
+def _find_inventory_activation_bags(session) -> list[tuple[int, int]]:
     state = getattr(session, "inventory_state", None)
     if state is None or not hasattr(state, "get"):
-        return None
+        return []
 
+    activation_bags: list[tuple[int, int]] = []
     for item in _equipped_bag_items(state):
-        return int(getattr(item, "slot", 0) or 0), int(getattr(item, "item_guid", 0) or 0)
+        activation_bags.append(
+            (
+                int(getattr(item, "slot", 0) or 0),
+                int(getattr(item, "item_guid", 0) or 0),
+            )
+        )
+    if activation_bags:
+        return activation_bags
 
     for slot in range(39):
         item = state.get(0, slot)
         if item is not None and bool(getattr(item, "is_bag", False)):
-            return int(slot), int(getattr(item, "item_guid", 0) or 0)
+            return [(int(slot), int(getattr(item, "item_guid", 0) or 0))]
 
-    return None
+    return []
 
 
 def trigger_inventory_activation(session) -> list[tuple[str, bytes]]:
@@ -102,44 +115,53 @@ def trigger_inventory_activation(session) -> list[tuple[str, bytes]]:
         Logger.debug("[INV_ACTIVATE] no valid bag found")
         return []
 
-    selected = _find_inventory_activation_bag(session)
-    if selected is None:
+    selected_bags = _find_inventory_activation_bags(session)
+    if not selected_bags:
         Logger.debug("[INV_ACTIVATE] no valid bag found")
         return []
 
-    slot, item_low_guid = selected
-    field_index = _inventory_slot_field_index(0, slot)
-    if field_index is None or item_low_guid <= 0:
+    responses = []
+    activated_slots: list[int] = []
+    for slot, item_low_guid in selected_bags:
+        field_index = _inventory_slot_field_index(0, slot)
+        if field_index is None or item_low_guid <= 0:
+            continue
+
+        item_guid = _make_item_world_guid(int(item_low_guid))
+        responses.extend(
+            [
+                (
+                    "SMSG_UPDATE_OBJECT",
+                    build_multi_u32_update_object_payload(
+                        map_id=map_id,
+                        guid=player_guid,
+                        field_updates=[
+                            (field_index, 0),
+                            (field_index + 1, 0),
+                        ],
+                    ),
+                ),
+                (
+                    "SMSG_UPDATE_OBJECT",
+                    build_multi_u32_update_object_payload(
+                        map_id=map_id,
+                        guid=player_guid,
+                        field_updates=[
+                            (field_index, int(item_guid & 0xFFFFFFFF)),
+                            (field_index + 1, int((item_guid >> 32) & 0xFFFFFFFF)),
+                        ],
+                    ),
+                ),
+            ]
+        )
+        activated_slots.append(int(slot))
+
+    if not responses:
         Logger.debug("[INV_ACTIVATE] no valid bag found")
         return []
 
-    item_guid = _make_item_world_guid(int(item_low_guid))
-    responses = [
-        (
-            "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
-                map_id=map_id,
-                guid=player_guid,
-                field_updates=[
-                    (field_index, 0),
-                    (field_index + 1, 0),
-                ],
-            ),
-        ),
-        (
-            "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
-                map_id=map_id,
-                guid=player_guid,
-                field_updates=[
-                    (field_index, int(item_guid & 0xFFFFFFFF)),
-                    (field_index + 1, int((item_guid >> 32) & 0xFFFFFFFF)),
-                ],
-            ),
-        ),
-    ]
     session.inventory_activated = True
-    Logger.debug("[INV_ACTIVATE] triggered slot=%s guid=%s", int(slot), int(item_guid))
+    Logger.debug("[INV_ACTIVATE] triggered slots=%s", activated_slots)
     return responses
 
 
@@ -832,6 +854,22 @@ def _position_snapshot(item, *, bag: int, slot: int):
     )()
 
 
+def _previous_swap_position_snapshot(item, changed_positions: list[tuple[int, int]]):
+    if len(changed_positions) != 2:
+        return None
+
+    current = (int(getattr(item, "bag", 0) or 0), int(getattr(item, "slot", 0) or 0))
+    first = (int(changed_positions[0][0]), int(changed_positions[0][1]))
+    second = (int(changed_positions[1][0]), int(changed_positions[1][1]))
+    if current == first:
+        previous = second
+    elif current == second:
+        previous = first
+    else:
+        return None
+    return _position_snapshot(item, bag=previous[0], slot=previous[1])
+
+
 def _build_simple_equipment_transition_responses(session, moved_item, old_bag: int, old_slot: int, new_bag: int, new_slot: int) -> list[tuple[str, bytes]]:
     item_guid = _make_item_world_guid(int(getattr(moved_item, "item_guid", 0) or 0))
     item_fields = _merge_item_fields(
@@ -1287,6 +1325,8 @@ def build_inventory_delta_responses(session, result) -> list[tuple[str, bytes]]:
                             f"create={item_world_guid not in known_guids}"
                         )
                     previous_item = released_by_guid.get(int(item_guid))
+                    if previous_item is None:
+                        previous_item = _previous_swap_position_snapshot(item, changed_positions)
                     changed_fields = _determine_item_changed_fields(
                         session,
                         item,
