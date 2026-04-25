@@ -449,6 +449,18 @@ def test_move_set_can_fly_payload_uses_movement_sync_guid():
     assert session.movement_state.counter == 27
 
 
+def test_move_unset_can_fly_payload_uses_movement_sync_guid():
+    session = _FakeSession()
+    session.world_guid = 0x0000000700000003
+    session.player_guid = session.world_guid
+    session.movement_state = types.SimpleNamespace(counter=27)
+
+    payload = movement.build_move_set_can_fly_payload(session, False)
+
+    assert payload == bytes.fromhex("24016900000006")
+    assert session.movement_state.counter == 27
+
+
 def test_run_speed_change_ack_returns_player_move_refresh(monkeypatch):
     session = _FakeSession()
     session.world_guid = 0x0000000700000003

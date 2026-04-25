@@ -5,6 +5,7 @@ import struct
 import time
 from typing import Any, Optional, Tuple
 
+from DSL.modules.EncoderHandler import EncoderHandler
 from DSL.modules.bitsHandler import BitWriter
 # from modules.handlers.world.opcodes.chat import _append_feedback_response
 from shared.Logger import Logger
@@ -316,15 +317,19 @@ def build_move_set_speed_payload(session, opcode_name: str, speed: float) -> byt
     low_guid_xor = (raw_guid[0] ^ 1) & 0xFF
     realm_guid_xor = (raw_guid[4] ^ 1) & 0xFF
 
-    payload = bytearray()
     opcode_name = str(opcode_name or "").strip().upper()
 
     if opcode_name == "SMSG_MOVE_SET_WALK_SPEED":
-        payload.append(0x44)
-        payload.extend(struct.pack("<I", counter))
-        payload.extend(struct.pack("<f", float(speed)))
-        payload.extend(bytes((low_guid_xor, realm_guid_xor)))
-        encoded = bytes(payload)
+        encoded = EncoderHandler.encode_packet(
+            opcode_name,
+            {
+                "control_0": 0x44,
+                "counter": counter,
+                "speed": float(speed),
+                "low_guid_xor": low_guid_xor,
+                "realm_guid_xor": realm_guid_xor,
+            },
+        )
         Logger.debug(
             "[SPEED_PACKET] opcode=%s size=%s guid=0x%X speed=%.3f hex=%s",
             opcode_name,
@@ -336,11 +341,16 @@ def build_move_set_speed_payload(session, opcode_name: str, speed: float) -> byt
         return encoded
 
     if opcode_name == "SMSG_MOVE_SET_RUN_SPEED":
-        payload.append(0x41)
-        payload.extend(struct.pack("<I", counter))
-        payload.extend(bytes((realm_guid_xor, low_guid_xor)))
-        payload.extend(struct.pack("<f", float(speed)))
-        encoded = bytes(payload)
+        encoded = EncoderHandler.encode_packet(
+            opcode_name,
+            {
+                "control_0": 0x41,
+                "counter": counter,
+                "realm_guid_xor": realm_guid_xor,
+                "low_guid_xor": low_guid_xor,
+                "speed": float(speed),
+            },
+        )
         Logger.debug(
             "[SPEED_PACKET] opcode=%s size=%s guid=0x%X speed=%.3f hex=%s",
             opcode_name,
@@ -352,11 +362,16 @@ def build_move_set_speed_payload(session, opcode_name: str, speed: float) -> byt
         return encoded
 
     if opcode_name == "SMSG_MOVE_SET_SWIM_SPEED":
-        payload.append(0x48)
-        payload.extend(struct.pack("<I", counter))
-        payload.extend(struct.pack("<f", float(speed)))
-        payload.extend(bytes((realm_guid_xor, low_guid_xor)))
-        encoded = bytes(payload)
+        encoded = EncoderHandler.encode_packet(
+            opcode_name,
+            {
+                "control_0": 0x48,
+                "counter": counter,
+                "speed": float(speed),
+                "realm_guid_xor": realm_guid_xor,
+                "low_guid_xor": low_guid_xor,
+            },
+        )
         Logger.debug(
             "[SPEED_PACKET] opcode=%s size=%s guid=0x%X speed=%.3f hex=%s",
             opcode_name,
@@ -368,10 +383,16 @@ def build_move_set_speed_payload(session, opcode_name: str, speed: float) -> byt
         return encoded
 
     if opcode_name == "SMSG_MOVE_SET_FLIGHT_SPEED":
-        payload.extend(struct.pack("<f", float(speed)))
-        payload.extend(struct.pack("<I", counter))
-        payload.extend(bytes((0x24, low_guid_xor, realm_guid_xor)))
-        encoded = bytes(payload)
+        encoded = EncoderHandler.encode_packet(
+            opcode_name,
+            {
+                "speed": float(speed),
+                "counter": counter,
+                "control_0": 0x24,
+                "low_guid_xor": low_guid_xor,
+                "realm_guid_xor": realm_guid_xor,
+            },
+        )
         Logger.debug(
             "[SPEED_PACKET] opcode=%s size=%s guid=0x%X speed=%.3f hex=%s",
             opcode_name,
@@ -408,18 +429,31 @@ def build_move_set_can_fly_payload(session, enabled: bool) -> bytes:
     realm_guid_xor = (raw_guid[4] ^ 1) & 0xFF
 
     if enabled:
-        payload = bytearray(b"\x14\x13\x00\x00\x00\x00\x00")
-        payload[5] = low_guid_xor
-        payload[6] = realm_guid_xor
+        opcode_name = "SMSG_MOVE_SET_CAN_FLY"
+        encoded = EncoderHandler.encode_packet(
+            opcode_name,
+            {
+                "control_0": 0x14,
+                "control_1": 0x13,
+                "low_guid_xor": low_guid_xor,
+                "realm_guid_xor": realm_guid_xor,
+            },
+        )
     else:
-        payload = bytearray(b"\x24\x00\x69\x00\x00\x00\x00")
-        payload[1] = realm_guid_xor
-        payload[6] = low_guid_xor
+        opcode_name = "SMSG_MOVE_UNSET_CAN_FLY"
+        encoded = EncoderHandler.encode_packet(
+            opcode_name,
+            {
+                "control_0": 0x24,
+                "realm_guid_xor": realm_guid_xor,
+                "control_2": 0x69,
+                "low_guid_xor": low_guid_xor,
+            },
+        )
 
-    encoded = bytes(payload)
     Logger.debug(
         "[FLY_PACKET] opcode=%s size=%s guid=0x%X hex=%s",
-        "SMSG_MOVE_SET_CAN_FLY" if enabled else "SMSG_MOVE_UNSET_CAN_FLY",
+        opcode_name,
         len(encoded),
         guid_value,
         encoded.hex().upper(),
