@@ -1382,67 +1382,9 @@ def _toggle_dnd(session, message: str):
     return code or world_code, responses or world_responses
 
 
-def _handle_chat_command_old(session, message: str) -> Optional[list[tuple[str, bytes]]]:
-    _configure_chat_commands()
-    return chat_commands.handle_command(session, message)
-
-
 def _handle_chat_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
     _configure_chat_commands()
     return chat_commands.handle_command(session, message)
-
-
-def _handle_chat_message_old(session, ctx: PacketContext):
-    chat = decode_chat_message(ctx.name, ctx.payload, ctx.decoded)
-    message = chat["message"]
-    if not message:
-        return 0, None
-
-    command_responses = _handle_chat_command(session, message)
-    if command_responses is not None:
-        return 0, command_responses if command_responses else None
-
-    player_name = session.player_name
-    sender_guid = int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0)
-    language = int(chat.get("language") or 0)
-
-    Logger.debug(f"[CHAT] opcode={ctx.name}")
-    Logger.info(f"[CHAT] {player_name}: {message}")
-
-    if USE_SYSTEM_CHAT_FALLBACK:
-        payload_out = encode_skyfire_messagechat_system_payload(f"[{player_name}] {message}")
-        Logger.info(
-            f"[CHAT][FALLBACK] mode=system player={player_name!r} bytes={len(payload_out)} message={message!r}"
-        )
-    else:
-        payload_out = encode_messagechat_payload(
-            chat_type=CHAT_MSG_SAY,
-            language=language,
-            sender_guid=sender_guid,
-            sender_name=player_name,
-            target_guid=0,
-            target_name="",
-            message=message,
-        )
-
-    chat_response = ("SMSG_MESSAGECHAT", payload_out)
-    targets = chat_router.get_targets(session, "say")
-    dispatched = False
-    if targets:
-        _dispatch_responses_to_sessions(targets, [chat_response])
-        dispatched = True
-
-    # Fallback if we need per-message screen notifications again:
-    # responses: list[tuple[str, bytes]] = [("SMSG_NOTIFICATION", notification_payload)]
-    responses: list[tuple[str, bytes]] = []
-    raw_replay_messagechat = build_raw_replay_messagechat_packet(
-        profile=RAW_REPLAY_SAY_CHAT_PROFILE
-    )
-    if raw_replay_messagechat is not None:
-        responses.append(raw_replay_messagechat)
-    if not dispatched:
-        responses.insert(0, chat_response)
-    return 0, responses
 
 
 def _handle_chat_message(session, ctx: PacketContext):
