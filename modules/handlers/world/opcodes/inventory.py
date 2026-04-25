@@ -19,6 +19,7 @@ from server.modules.handlers.world.inventory_sync import (
     build_login_inventory_sync_responses,
     build_inventory_delta_responses,
     build_container_open_responses,
+    inventory_result_affects_equipment,
     trigger_inventory_activation,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
@@ -243,6 +244,8 @@ def _result_to_response(
     getattr(Logger, level)(f"[Inventory] {prefix} -> {result.message}")
     if result.ok:
         responses = build_inventory_delta_responses(session, result)
+        if inventory_result_affects_equipment(result):
+            resync_player_appearance(session)
         return 0, responses or None
     responses: list[tuple[str, bytes]] = []
 

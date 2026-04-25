@@ -389,10 +389,6 @@ class DatabaseConnection:
         return AuthConnection.session()
 
     @staticmethod
-    def auth_legacy():
-        return AuthConnection.session()
-
-    @staticmethod
     def auth_old():
         return AuthConnection.session()
 

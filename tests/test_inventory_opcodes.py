@@ -78,6 +78,43 @@ def test_autoequip_item_uses_decoded_fields(monkeypatch):
     assert calls == [(20, 1)]
 
 
+def test_autoequip_item_resyncs_peer_appearance_when_equipment_changes(monkeypatch):
+    calls = []
+    resync_calls = []
+    result = SimpleNamespace(
+        ok=True,
+        message="item equipped",
+        changed_positions=((0, 2), (0, 24)),
+    )
+    monkeypatch.setattr(
+        inventory_handlers,
+        "auto_equip_item",
+        lambda session, src_bag, src_slot: (
+            calls.append((src_bag, src_slot)) or result
+        ),
+    )
+    monkeypatch.setattr(inventory_handlers, "build_inventory_delta_responses", lambda session, current_result: [])
+    monkeypatch.setattr(
+        inventory_handlers,
+        "resync_player_appearance",
+        lambda session: resync_calls.append(session),
+    )
+
+    session = object()
+    ctx = SimpleNamespace(
+        name="CMSG_AUTOEQUIP_ITEM",
+        payload=bytes.fromhex("0000"),
+        decoded={"src_slot": 24, "src_bag": 255},
+    )
+
+    status, responses = inventory_handlers.handle_autoequip_item(session, ctx)
+
+    assert status == 0
+    assert responses is None
+    assert calls == [(255, 24)]
+    assert resync_calls == [session]
+
+
 def test_autoequip_item_slot_dsl_decodes_slot_and_packed_guid():
     decoded = dsl_decode("CMSG_AUTOEQUIP_ITEM_SLOT", bytes([15, 1, 0x34]), silent=True)
 
