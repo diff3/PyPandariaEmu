@@ -109,9 +109,6 @@ def _import_chat_handlers():
             "inventory_result_affects_equipment": lambda result: False,
             "trigger_inventory_activation": lambda session: [],
         },
-        "server.modules.handlers.world.teleport.runtime": {
-            "teleport_player": lambda *args, **kwargs: [],
-        },
         "server.modules.handlers.world.teleport.teleport_service": {
             "add_teleport": lambda *args, **kwargs: {},
             "find_teleport": lambda *args, **kwargs: None,
