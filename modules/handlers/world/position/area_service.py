@@ -9,6 +9,23 @@ from server.modules.dbc import read_dbc
 _WORLD_MAP_AREAS: Optional[list[tuple[int, int, float, float, float, float, int]]] = None
 _AREA_PARENTS: Optional[dict[int, int]] = None
 
+# Some sandbox/internal locations are valid AreaTable zones but are not covered
+# by WorldMapArea bounding boxes. Keep these overrides narrow so normal zone
+# resolution continues to come from DBC data.
+_EXPLICIT_ZONE_AREAS: tuple[tuple[int, int, float, float, float, float], ...] = (
+    # GM Island, Kalimdor. game_tele GMIsland: map=1 x=16226.2 y=16257.0.
+    (1, 876, 15900.0, 16600.0, 15900.0, 16600.0),
+)
+
+
+def _resolve_explicit_zone_area(map_id: int, x: float, y: float) -> int:
+    for candidate_map_id, area_id, x1, x2, y1, y2 in _EXPLICIT_ZONE_AREAS:
+        if int(candidate_map_id) != int(map_id):
+            continue
+        if min(x1, x2) <= float(x) <= max(x1, x2) and min(y1, y2) <= float(y) <= max(y1, y2):
+            return _resolve_parent_zone(int(area_id))
+    return 0
+
 
 def _load_world_map_areas() -> list[tuple[int, int, float, float, float, float, int]]:
     global _WORLD_MAP_AREAS
@@ -101,7 +118,7 @@ def resolve_zone_from_position(map_id: int, x: float, y: float) -> int:
             matches.append((_bbox_area(x1, x2, y1, y2), int(area_id)))
 
     if not matches:
-        return 0
+        return _resolve_explicit_zone_area(int(map_id), float(x), float(y))
 
     matches.sort(key=lambda item: (float(item[0]), int(item[1])))
     return _resolve_parent_zone(int(matches[0][1]))

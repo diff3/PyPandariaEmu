@@ -86,4 +86,11 @@ def test_enum_characters_uses_zone_resolved_from_position(monkeypatch):
 def test_world_map_area_resolver_finds_orgrimmar_zone():
     from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 
+    assert resolve_zone_from_position(0, -8833.38, 628.628) == 1519
     assert resolve_zone_from_position(1, 1572.95, -4395.64) == 1637
+
+
+def test_world_map_area_resolver_finds_gm_island_zone():
+    from server.modules.handlers.world.position.area_service import resolve_zone_from_position
+
+    assert resolve_zone_from_position(1, 16226.2, 16257.0) == 876
