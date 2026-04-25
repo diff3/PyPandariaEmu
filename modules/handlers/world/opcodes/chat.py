@@ -1026,16 +1026,6 @@ def _who_guid_bytes(value: int) -> bytes:
     return GuidHelper.to_le_bytes(int(value or 0) & 0xFFFFFFFFFFFFFFFF)
 
 
-def _append_xor_guid_bytes(
-    payload: bytearray,
-    raw_guid: bytes,
-    mask_bits: dict[int, int],
-    order: tuple[int, ...],
-) -> None:
-    for index in order:
-        if mask_bits.get(index):
-            payload.append((raw_guid[index] ^ 1) & 0xFF)
-
 def build_smsg_who(players: list[dict]) -> list[tuple[str, bytes]]:
     bits = BitWriter()
     bytes_part = bytearray()
@@ -1201,122 +1191,6 @@ def build_smsg_who(players: list[dict]) -> list[tuple[str, bytes]]:
             p.get("class_id"),
             p.get("race"),
             p.get("zone_id"),
-        )
-
-    return [("SMSG_WHO", bytes(payload))]
-
-def build_smsg_who_old(players: list[dict[str, int | str]]) -> list[tuple[str, bytes]]:
-    count = len(players or [])
-    bits = BitWriter()
-    bits.write_bits(int(count) & 0x3F, 6)
-
-    rows: list[dict[str, int | str | bytes | dict[int, int]]] = []
-    for player in players or []:
-        name_bytes = str(player.get("name", "") or "").encode("utf-8")
-        guild_name_bytes = b""
-        player_guid = _who_guid_bytes(int(player.get("guid", 0) or 0))
-        guild_guid = b"\x00" * 8
-        account_guid = b"\x00" * 8
-        player_mask = {index: 1 if player_guid[index] else 0 for index in range(8)}
-        guild_mask = {index: 1 if guild_guid[index] else 0 for index in range(8)}
-        account_mask = {index: 1 if account_guid[index] else 0 for index in range(8)}
-
-        bits.write_bits(account_mask[2], 1)
-        bits.write_bits(player_mask[2], 1)
-        bits.write_bits(account_mask[7], 1)
-        bits.write_bits(guild_mask[5], 1)
-        bits.write_bits(len(guild_name_bytes) & 0x7F, 7)
-        bits.write_bits(account_mask[1], 1)
-        bits.write_bits(account_mask[5], 1)
-        bits.write_bits(guild_mask[7], 1)
-        bits.write_bits(player_mask[5], 1)
-        bits.write_bits(0, 1)
-        bits.write_bits(guild_mask[1], 1)
-        bits.write_bits(player_mask[6], 1)
-        bits.write_bits(guild_mask[2], 1)
-        bits.write_bits(player_mask[4], 1)
-        bits.write_bits(guild_mask[0], 1)
-        bits.write_bits(guild_mask[3], 1)
-        bits.write_bits(account_mask[6], 1)
-        bits.write_bits(0, 1)
-        bits.write_bits(player_mask[1], 1)
-        bits.write_bits(guild_mask[4], 1)
-        bits.write_bits(account_mask[0], 1)
-        for _ in range(5):
-            bits.write_bits(0, 7)
-        bits.write_bits(player_mask[3], 1)
-        bits.write_bits(guild_mask[6], 1)
-        bits.write_bits(player_mask[0], 1)
-        bits.write_bits(account_mask[4], 1)
-        bits.write_bits(account_mask[3], 1)
-        bits.write_bits(player_mask[7], 1)
-        bits.write_bits(len(name_bytes) & 0x3F, 6)
-
-        rows.append(
-            {
-                "name": str(player.get("name", "") or ""),
-                "name_bytes": name_bytes,
-                "guild_name_bytes": guild_name_bytes,
-                "player_guid": player_guid,
-                "guild_guid": guild_guid,
-                "account_guid": account_guid,
-                "player_mask": player_mask,
-                "guild_mask": guild_mask,
-                "account_mask": account_mask,
-                "realm_id": int(player.get("realm_id", 0) or 0),
-                "class_id": int(player.get("class_id", 0) or 0),
-                "race": int(player.get("race", 0) or 0),
-                "gender": int(player.get("gender", 0) or 0),
-                "level": int(player.get("level", 1) or 1),
-                "zone_id": int(player.get("zone_id", 0) or 0),
-            }
-        )
-
-    payload = bytearray(bits.getvalue())
-
-    for row in rows:
-        player_guid = row["player_guid"]
-        guild_guid = row["guild_guid"]
-        account_guid = row["account_guid"]
-        player_mask = row["player_mask"]
-        guild_mask = row["guild_mask"]
-        account_mask = row["account_mask"]
-
-        _append_xor_guid_bytes(payload, player_guid, player_mask, (1,))
-        payload.extend(struct.pack("<i", int(row["realm_id"])))
-        _append_xor_guid_bytes(payload, player_guid, player_mask, (7, 4))
-        payload.extend(row["name_bytes"])
-        _append_xor_guid_bytes(payload, guild_guid, guild_mask, (1,))
-        _append_xor_guid_bytes(payload, player_guid, player_mask, (0,))
-        _append_xor_guid_bytes(payload, guild_guid, guild_mask, (2, 0, 4))
-        _append_xor_guid_bytes(payload, player_guid, player_mask, (3,))
-        _append_xor_guid_bytes(payload, guild_guid, guild_mask, (6,))
-        payload.extend(struct.pack("<i", 0))
-        payload.extend(row["guild_name_bytes"])
-        _append_xor_guid_bytes(payload, guild_guid, guild_mask, (3,))
-        _append_xor_guid_bytes(payload, account_guid, account_mask, (4,))
-        payload.extend(struct.pack("<B", int(row["class_id"]) & 0xFF))
-        _append_xor_guid_bytes(payload, account_guid, account_mask, (7,))
-        _append_xor_guid_bytes(payload, player_guid, player_mask, (6, 2))
-        _append_xor_guid_bytes(payload, account_guid, account_mask, (2, 3))
-        payload.extend(struct.pack("<B", int(row["race"]) & 0xFF))
-        _append_xor_guid_bytes(payload, guild_guid, guild_mask, (7,))
-        _append_xor_guid_bytes(payload, account_guid, account_mask, (1, 5, 6))
-        _append_xor_guid_bytes(payload, player_guid, player_mask, (5,))
-        _append_xor_guid_bytes(payload, account_guid, account_mask, (0,))
-        payload.extend(struct.pack("<B", int(row["gender"]) & 0xFF))
-        _append_xor_guid_bytes(payload, guild_guid, guild_mask, (5,))
-        payload.extend(struct.pack("<B", int(row["level"]) & 0xFF))
-        payload.extend(struct.pack("<i", int(row["zone_id"])))
-        payload.extend(struct.pack("<i", int(row["realm_id"])))
-
-    Logger.info("[WHO] count=%s", int(count))
-    for row in rows:
-        Logger.info(
-            "[WHO] player=%s lvl=%s zone=%s",
-            str(row["name"] or ""),
-            int(row["level"]),
-            int(row["zone_id"]),
         )
 
     return [("SMSG_WHO", bytes(payload))]
