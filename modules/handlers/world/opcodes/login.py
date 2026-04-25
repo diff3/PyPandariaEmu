@@ -67,6 +67,7 @@ from server.modules.handlers.world.state.runtime import (
     attach_session_to_world_state,
     build_explored_zones_update_response,
     pack_wow_game_time,
+    refresh_region_weather,
     sync_all_players_on_map,
     sync_player_visibility,
 )
@@ -371,6 +372,8 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
 
     _set_login_state(session, LoginState.WORLD_BOOTSTRAP)
     Logger.debug("[LOGIN] sending init packet sequence")
+    refresh_region_weather(session)
+    ctx.weather = dict(getattr(session, "weather", {}) or {})
 
     responses: list[tuple[str, bytes]] = []
     pre_update_packets = build_pre_update_object_packets(ctx)
@@ -716,7 +719,7 @@ def handle_player_login(session, ctx: PacketContext):
     session.phase_data = {}
     session.world_states = {}
     session.single_world_state = {}
-    session.weather = dict(getattr(getattr(session, "region", None), "weather", {}) or {})
+    refresh_region_weather(session)
 
     session.server_time = int(time.time())
     session.game_time = pack_wow_game_time(

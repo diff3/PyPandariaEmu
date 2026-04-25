@@ -817,8 +817,6 @@ def cmd_learnspell(session, args: list[str]) -> list[tuple[str, bytes]]:
 @register_command("castspell", ".castspell <spell_id>", require_args=True)
 def cmd_castspell(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Cast one runtime test spell through the existing spell path."""
-    from server.modules.handlers.world.opcodes.movement import resync_movement
-
     if len(args) != 1:
         return _notification_response("Usage: .castspell <spell_id>")
 
@@ -840,7 +838,6 @@ def cmd_castspell(session, args: list[str]) -> list[tuple[str, bytes]]:
         return _notification_response(f"Spell {int(spell_id)} has no runtime cast handler")
 
     responses = list(spells_handlers.handle_mount(session, int(spell_id)))
-    responses.extend(resync_movement(session))
     responses.extend(_notification_response(f"Casted spell {int(spell_id)}"))
     return responses
 
@@ -891,8 +888,6 @@ def build_spell_start(player, spell_id: int) -> tuple[str, bytes]:
 
 @register_command("mount", ".mount", allow_args=False)
 def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.opcodes.movement import resync_movement
-
     mount_spell_id = int(_helper("chat_mount_spell_id"))
     Logger.info("[Mount] spell_id=%s", mount_spell_id)
     responses = list(spells_handlers.handle_mount(session, mount_spell_id))
@@ -901,7 +896,6 @@ def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
         float(getattr(session, "run_speed", 0.0) or 0.0),
         bool(getattr(session, "is_mounted", False)),
     )
-    responses.extend(resync_movement(session))
     Logger.info("[Mount] committed")
     return _append_feedback_response(responses, "[Mount] mount requested")
 
@@ -928,8 +922,6 @@ def cmd_mount_old(session, args: list[str]) -> list[tuple[str, bytes]]:
 @register_command("dismount", ".dismount", allow_args=False)
 def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Clear the debug mount display."""
-    from server.modules.handlers.world.opcodes.movement import resync_movement
-
     Logger.info("[Mount] .dismount -> clear display")
     responses = list(spells_handlers.dismount(session))
     Logger.info(
@@ -937,7 +929,6 @@ def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
         int(getattr(session, "mount_spell", 0) or 0),
         float(getattr(session, "run_speed", 0.0) or 0.0),
     )
-    responses.extend(resync_movement(session))
     Logger.info("[Mount] committed")
     Logger.info("[Mount][Debug] chat .dismount responses=%s", len(responses))
     return _append_feedback_response(responses, "[Mount] dismount requested")

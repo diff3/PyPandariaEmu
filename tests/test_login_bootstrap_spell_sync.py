@@ -122,6 +122,52 @@ def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> 
     assert session.post_loading_sent is True
 
 
+def test_world_bootstrap_refreshes_weather_before_weather_packet(monkeypatch) -> None:
+    """Use current session weather when the initial SMSG_WEATHER is built."""
+    session = SimpleNamespace(
+        post_loading_sent=False,
+        player_object_sent=True,
+        loading_screen_done=False,
+        login_state=LoginState.PLAYER_LOGIN,
+        weather={"weather_type": 0, "density": 0.0, "abrupt": 0},
+    )
+    ctx = SimpleNamespace(weather={})
+    captured_weather = {}
+
+    monkeypatch.setattr(login_handlers, "_set_login_state", lambda _session, _state: None)
+    monkeypatch.setattr(login_handlers, "build_pre_update_object_packets", lambda _ctx: [])
+    monkeypatch.setattr(login_handlers, "build_post_update_object_packets", lambda _ctx: [])
+    monkeypatch.setattr(
+        login_handlers,
+        "refresh_region_weather",
+        lambda current_session: setattr(
+            current_session,
+            "weather",
+            {"weather_type": 5, "density": 0.75, "abrupt": 0},
+        ),
+    )
+    monkeypatch.setattr(
+        login_handlers.spells_handlers,
+        "build_active_mover_spell_sync_responses",
+        lambda _session: [],
+    )
+    monkeypatch.setattr(login_handlers, "build_login_inventory_sync_responses", lambda _session: [])
+    monkeypatch.setattr(login_handlers, "trigger_inventory_activation", lambda _session: [])
+    monkeypatch.setattr(login_handlers, "build_explored_zones_update_response", lambda _session: None)
+
+    def build_bootstrap(current_ctx):
+        captured_weather.update(current_ctx.weather)
+        return [("SMSG_WEATHER", b"weather")]
+
+    monkeypatch.setattr(login_handlers, "build_world_bootstrap_packets", build_bootstrap)
+
+    responses = login_handlers._queue_world_bootstrap_transition(session, ctx)
+
+    assert captured_weather == {"weather_type": 5, "density": 0.75, "abrupt": 0}
+    assert ctx.weather == {"weather_type": 5, "density": 0.75, "abrupt": 0}
+    assert responses == [("SMSG_WEATHER", b"weather")]
+
+
 def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
     """Queue a post-teleport spell sync so language/mount state survives world transfers."""
     session = SimpleNamespace(

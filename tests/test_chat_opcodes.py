@@ -1505,7 +1505,7 @@ def test_invfix_returns_full_inventory_sync_via_login_pipeline(monkeypatch):
     assert alice.inventory_activated is False
 
 
-def test_mount_command_updates_visuals_speed_and_movement(monkeypatch):
+def test_mount_command_updates_visuals_and_speed_without_movement_resync(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
         "encode_skyfire_messagechat_system_payload",
@@ -1535,7 +1535,6 @@ def test_mount_command_updates_visuals_speed_and_movement(monkeypatch):
 
     assert responses == [
         ("SMSG_UPDATE_OBJECT", b"mount-spell|59535"),
-        ("SMSG_PLAYER_MOVE", b"move-resync"),
         ("SMSG_MESSAGECHAT", b"system|[Mount] mount requested"),
     ]
     assert alice.is_mounted is True
@@ -1543,7 +1542,7 @@ def test_mount_command_updates_visuals_speed_and_movement(monkeypatch):
     assert alice.run_speed == 14.0
 
 
-def test_dismount_command_clears_mount_display_and_restores_speed(monkeypatch):
+def test_dismount_command_clears_mount_display_without_movement_resync(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
         "encode_skyfire_messagechat_system_payload",
@@ -1574,7 +1573,6 @@ def test_dismount_command_clears_mount_display_and_restores_speed(monkeypatch):
 
     assert responses == [
         ("SMSG_UPDATE_OBJECT", b"dismount-spell"),
-        ("SMSG_PLAYER_MOVE", b"move-resync"),
         ("SMSG_MESSAGECHAT", b"system|[Mount] dismount requested"),
     ]
     assert alice.is_mounted is False
@@ -1785,7 +1783,7 @@ def test_learnspell_adds_runtime_spell_and_returns_known_spells_sync(monkeypatch
     ]
 
 
-def test_castspell_mount_uses_mount_handler_and_resyncs(monkeypatch):
+def test_castspell_mount_uses_mount_handler_without_movement_resync(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(
@@ -1807,7 +1805,6 @@ def test_castspell_mount_uses_mount_handler_and_resyncs(monkeypatch):
     assert captured == {"spell_id": 59535}
     assert responses == [
         ("SMSG_UPDATE_OBJECT", b"mount"),
-        ("SMSG_PLAYER_MOVE", b"move-resync"),
         ("SMSG_MESSAGECHAT", b"system|Casted spell 59535"),
     ]
 
@@ -2806,6 +2803,25 @@ def test_world_login_context_uses_config_motd_when_session_missing(tmp_path):
 
     assert ctx.motd == "Config MOTD"
     monkeypatch.undo()
+
+
+def test_world_login_context_preserves_mount_runtime_fields():
+    login_context = importlib.import_module("server.modules.handlers.world.login.context")
+    session = WorldSession()
+    session.account_data_times = {}
+    session.account_data_mask = 0
+    session.addons = []
+    session.banned_addons = []
+    session.known_spells = []
+    session.action_buttons = []
+    session.weather = {}
+    session.unit_flags = 0x08000020
+    session.mount_display_id = 2404
+
+    ctx = login_context.WorldLoginContext.from_session(session)
+
+    assert ctx.unit_flags == 0x08000020
+    assert ctx.mount_display_id == 2404
 
 
 def test_server_restart_schedules_worldserver_shutdown(monkeypatch):

@@ -819,6 +819,8 @@ _MINIMAL_UPDATE_OBJECT_1773613176_0002_ENTRY_OFFSET = 477
 _MINIMAL_UPDATE_OBJECT_1773613176_0002_OFFSET_ADJUST = (
     _MINIMAL_UPDATE_OBJECT_1773613176_0002_ENTRY_OFFSET - 6
 )
+_UNIT_FLAG_MOUNT = 0x08000000
+_PLAYER_MOUNT_STATE_FLAGS_BASE = 0x00000008
 _PLAYER_DISPLAY_IDS = {
     1: {0: 49, 1: 50},
     2: {0: 51, 1: 52},
@@ -1029,8 +1031,10 @@ _EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS = {
     "guid1_0": 530,
     "display_power": 832,
     "faction_template": 856,
+    "mount_state_flags": 860,
     "display_id": 888,
     "native_display_id": 892,
+    "mount_display_id": 896,
     "health": 836,
     "power_primary": 840,
     "max_health": 844,
@@ -1645,6 +1649,11 @@ def _patch_live_update_object_1773613176_0002_fields(ctx: Any, payload: bytearra
     _patch_u32(payload, offsets["faction_template"], faction_template)
     _patch_u32(payload, offsets["display_id"], display_id)
     _patch_u32(payload, offsets["native_display_id"], display_id)
+    mount_display_id = int(getattr(ctx, "mount_display_id", 0) or 0)
+    if mount_display_id > 0:
+        mount_state_flags = _PLAYER_MOUNT_STATE_FLAGS_BASE | _UNIT_FLAG_MOUNT
+        _patch_u32(payload, offsets["mount_state_flags"], mount_state_flags)
+        _patch_u32(payload, offsets["mount_display_id"], mount_display_id)
 
     _patch_u32(payload, offsets["level"], level)
     

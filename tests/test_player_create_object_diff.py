@@ -975,6 +975,55 @@ def test_horde_player_create_packs_unit_field_bytes_0_from_ctx() -> None:
     assert field_values[30] == expected
 
 
+def test_player_create_preserves_mounted_runtime_fields() -> None:
+    """Remote CREATE_OBJECT should include current mount state for already-mounted players."""
+    payload = build_create_payload(
+        use_server_built_player_create=False,
+        ctx=SimpleNamespace(
+            map_id=1,
+            char_guid=13,
+            player_guid=13,
+            world_guid=13,
+            exact_0002_low_guid=13,
+            exact_0002_remote_player=True,
+            race=10,
+            class_id=4,
+            gender=1,
+            x=16212.216796875,
+            y=16253.169921875,
+            z=14.770503044128418,
+            orientation=1.6979784965515137,
+            health=102,
+            max_health=102,
+            power_primary=40,
+            max_power=40,
+            level=90,
+            faction_template=1610,
+            display_id=52,
+            native_display_id=52,
+            mount_display_id=2404,
+            player_bytes=393218,
+            player_bytes2=16777220,
+            player_bytes3=1,
+            max_level=90,
+        ),
+    )
+    region = locate_update_field_region(payload)
+    field_indices = extract_field_indices(
+        payload[region["mask_start"] : region["mask_end"]],
+        region["mask_blocks"],
+    )
+    field_values = parse_field_values(
+        payload[region["field_start"] : region["field_end"]],
+        field_indices,
+    )
+
+    assert 61 in field_indices
+    assert 71 in field_indices
+    assert field_values[61] == 0x08000008
+    assert field_values[71] == 2404
+
+
 def test_horde_replay_and_server_create_match_remaining_sensitive_fields() -> None:
     """Lock replay vs server parity for the currently known Horde-sensitive fields."""
     ctx = SimpleNamespace(
