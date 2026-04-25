@@ -101,23 +101,6 @@ def _load_payload_packet_focus(opcode_name: str) -> Optional[bytes]:
     return None
 
 
-def _load_payload_packet_old(opcode_name: str) -> Optional[bytes]:
-    """Load payload-only bytes for a server opcode from debug/captures."""
-    paths = [
-        get_debug_root() / f"{opcode_name}.json",
-        get_captures_root() / "debug" / f"{opcode_name}.json",
-        get_captures_root(focus=True) / "debug" / f"{opcode_name}.json",
-    ]
-
-    for path in paths:
-        if not path.exists():
-            continue
-        payload = _load_payload_from_path(path)
-        if payload is not None:
-            return payload
-
-    return None
-
 CAPTURE_DIR = get_captures_root(focus=True) / "debug"
 
 def _load_payload_packet(opcode_name: str) -> Optional[bytes]:
@@ -179,16 +162,6 @@ def build_SMSG_SET_DUNGEON_DIFFICULTY(ctx) -> bytes:
 # ---------------------------------------------------------------------
 # Pre-loading packets
 # ---------------------------------------------------------------------
-
-def build_SMSG_ACCOUNT_DATA_TIMES_old(ctx) -> bytes:
-    now = int(time.time())
-    return _encode("SMSG_ACCOUNT_DATA_TIMES", {
-        "has_account_data_times": 1,
-        "mask": 0,
-        "timestamps": [now] * 8,
-        "server_time": now,
-    })
-
 
 def build_SMSG_ACCOUNT_DATA_TIMES(_ctx=None) -> bytes:
     now = int(time.time())
@@ -288,11 +261,6 @@ def build_SMSG_BATTLE_PAY_GET_PURCHASE_LIST_RESPONSE(_ctx=None) -> bytes:
     return b"\x00" * 7
 
 
-def build_SMSG_MOTD_old(ctx) -> bytes:
-    return _encode("SMSG_MOTD", {
-        "motd": ctx.motd,
-    })
-
 def build_SMSG_MOTD(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {"motd": "Welcome to PyPandaria"})()
     motd = str(getattr(ctx, "motd", "Welcome to PyPandaria") or "")
@@ -363,10 +331,6 @@ def build_SMSG_UPDATE_TALENT_DATA(ctx) -> bytes:
         "spec_group_count": 0,
         "spec_groups": [],
     })
-
-
-def build_SMSG_WORLD_SERVER_INFO_old(ctx) -> bytes:
-    return _encode("SMSG_WORLD_SERVER_INFO", ctx.world_server_info)
 
 
 def build_SMSG_WORLD_SERVER_INFO(_ctx=None) -> bytes:
@@ -638,14 +602,6 @@ def build_SMSG_LOAD_EQUIPMENT_SET(ctx) -> bytes:
     })
 
 
-def build_SMSG_LOGIN_SET_TIME_SPEED_old(ctx) -> bytes:
-    return _encode("SMSG_LOGIN_SET_TIME_SPEED", {
-        "server_time": ctx.server_time,
-        "game_time": 0,
-        "speed": 1.0,
-    })
-
-
 def build_SMSG_LOGIN_SET_TIME_SPEED(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {"server_time": int(time.time())})()
     server_time = int(getattr(ctx, "server_time", int(time.time())))
@@ -692,22 +648,6 @@ def build_SMSG_SETUP_CURRENCY(ctx) -> bytes:
 # ---------------------------------------------------------------------
 # Post-loading packets (world entered)
 # ---------------------------------------------------------------------
-
-def build_SMSG_LOGIN_VERIFY_WORLD_old(ctx) -> bytes:
-    row = DatabaseConnection.get_character(2, 1)
-    if not row:
-        raise RuntimeError("Character 2 not found in DB")
-
-    return EncoderHandler.encode_packet(
-        "SMSG_LOGIN_VERIFY_WORLD",
-        {
-            "x": float(row.position_x),
-            "facing": float(row.orientation),
-            "y": float(row.position_y),
-            "map": int(row.map),
-            "z": float(row.position_z),
-        },
-    )
 
 def build_SMSG_LOGIN_VERIFY_WORLD(_ctx=None) -> bytes:
     ctx = _ctx or type(
@@ -2216,18 +2156,6 @@ def _build_manual_active_mover_payload(mover_guid: int) -> bytes:
         )
     return bytes(payload)
 
-def build_SMSG_PHASE_SHIFT_CHANGE_old(ctx) -> bytes:
-    return _encode("SMSG_PHASE_SHIFT_CHANGE", {
-        "phase_mask": 1,
-        "terrain_swap": 0,
-        "phase_count": 0,
-        "phase_ids": [],
-        "visible_map_count": 0,
-        "visible_map_ids": [],
-        "ui_map_phase_count": 0,
-        "ui_map_phase_ids": [],
-    })
-
 def build_SMSG_PHASE_SHIFT_CHANGE(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
     return _encode("SMSG_PHASE_SHIFT_CHANGE", {
@@ -2261,14 +2189,6 @@ def build_SMSG_NEW_WORLD(_ctx=None) -> bytes:
         "y": float(getattr(ctx, "y", 0.0) or 0.0),
         "z": float(getattr(ctx, "z", 0.0) or 0.0),
         "orientation": float(getattr(ctx, "orientation", 0.0) or 0.0),
-    })
-
-def build_SMSG_INIT_WORLD_STATES_old(ctx) -> bytes:
-    return _encode("SMSG_INIT_WORLD_STATES", {
-        "map_id": ctx.map_id,
-        "zone_id": ctx.zone,
-        "area_id": 0,
-        "world_states": [],
     })
 
 def build_SMSG_INIT_WORLD_STATES(_ctx=None) -> bytes:
@@ -2333,11 +2253,6 @@ def build_SMSG_WEATHER(ctx) -> bytes:
 def build_SMSG_HOTFIX_NOTIFY_BLOB(_ctx=None) -> bytes:
     return _encode("SMSG_HOTFIX_NOTIFY_BLOB", {
         "count": 0,
-    })
-
-def build_SMSG_TIME_SYNC_REQUEST_old(ctx) -> bytes:
-    return _encode("SMSG_TIME_SYNC_REQUEST", {
-        "sequence_id": ctx.time_sync_seq,
     })
 
 def build_SMSG_TIME_SYNC_REQUEST(_ctx=None) -> bytes:
@@ -2479,17 +2394,6 @@ def build_SMSG_MOVE_SET_ACTIVE_MOVER(_ctx=None) -> bytes:
         f"active_mover_guid={hex(int(mover_guid))} mask=0x{mover_guid_mask:02X}"
     )
     return _build_manual_active_mover_payload(mover_guid)
-
-def build_SMSG_MOVE_SET_ACTIVE_MOVER_old(ctx) -> bytes:
-    mover_guid = GuidHelper.make(
-        high=HighGuid.PLAYER,
-        realm=int(getattr(ctx, "realm_id", 0) or 0),
-        low=int(getattr(ctx, "char_guid", 0) or 0),
-    )
-
-    return _encode("SMSG_MOVE_SET_ACTIVE_MOVER", {
-        "moverGUID": mover_guid,
-    })
 
 def build_ENUM_CHARACTERS_RESULT(account_id: int, realm_id: int) -> bytes:
     """
