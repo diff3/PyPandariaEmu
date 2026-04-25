@@ -688,6 +688,15 @@ def _broadcast_mount_visual_to_visible_peers(session, display_id: int) -> None:
     display_value = int(getattr(session, "display_id", 0) or 0)
     native_display_value = int(getattr(session, "native_display_id", display_value) or display_value)
     mount_state_flags = _player_mount_state_flags(session, int(display_id))
+    try:
+        from server.modules.handlers.world.opcodes import movement as movement_handlers
+    except Exception:
+        movement_handlers = None
+    move_payload = None
+    if movement_handlers is not None:
+        builder = getattr(movement_handlers, "build_smsg_player_move_payload", None)
+        if callable(builder):
+            move_payload = builder(session)
     responses = [
         (
             "SMSG_UPDATE_OBJECT",
@@ -705,13 +714,16 @@ def _broadcast_mount_visual_to_visible_peers(session, display_id: int) -> None:
         ("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(session)),
         ("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session)),
     ]
+    if move_payload is not None:
+        responses.append(("SMSG_PLAYER_MOVE", move_payload))
     dispatch_responses_to_sessions(peers, responses)
     Logger.info(
-        "[MOUNT_SYNC] peer visual/speed update guid=%s display=%s run=%.3f peers=%s",
+        "[MOUNT_SYNC] peer visual/speed/move update guid=%s display=%s run=%.3f peers=%s move=%s",
         int(source_guid),
         int(display_id),
         float(getattr(session, "run_speed", 0.0) or 0.0),
         len(peers),
+        "yes" if move_payload is not None else "no",
     )
 
 

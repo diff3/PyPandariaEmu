@@ -233,6 +233,7 @@ def test_handle_mount_and_dismount_use_aura_visual_and_speed(monkeypatch):
 def test_mount_and_dismount_broadcast_visual_update_to_visible_peers(monkeypatch):
     spells_handlers = _import_spells_handlers()
     runtime_module = sys.modules["server.modules.handlers.world.state.runtime"]
+    movement_module = sys.modules["server.modules.handlers.world.opcodes.movement"]
     peer = SimpleNamespace(visible_guids={3})
     hidden_peer = SimpleNamespace(visible_guids=set())
     dispatched = []
@@ -245,6 +246,7 @@ def test_mount_and_dismount_broadcast_visual_update_to_visible_peers(monkeypatch
     monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda spell_id: 2404)
     monkeypatch.setattr(spells_handlers, "build_move_set_run_speed_payload", lambda session: b"run")
     monkeypatch.setattr(spells_handlers, "build_move_set_flight_speed_payload", lambda session: b"flight")
+    monkeypatch.setattr(movement_module, "build_smsg_player_move_payload", lambda session: b"move", raising=False)
     monkeypatch.setattr(
         spells_handlers,
         "build_multi_u32_update_object_payload",
@@ -280,24 +282,23 @@ def test_mount_and_dismount_broadcast_visual_update_to_visible_peers(monkeypatch
     spells_handlers.handle_mount(session, 59535)
     spells_handlers.dismount(session)
 
-    assert dispatched == [
-        (
-            [peer],
-            [
-                ("SMSG_UPDATE_OBJECT", b"mount-update-2"),
-                ("SMSG_MOVE_SET_RUN_SPEED", b"run"),
-                ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight"),
-            ],
-        ),
-        (
-            [peer],
-            [
-                ("SMSG_UPDATE_OBJECT", b"mount-update-4"),
-                ("SMSG_MOVE_SET_RUN_SPEED", b"run"),
-                ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight"),
-            ],
-        ),
+    assert len(dispatched) == 2
+    assert dispatched[0][0] == [peer]
+    assert dispatched[0][1][0:3] == [
+        ("SMSG_UPDATE_OBJECT", b"mount-update-2"),
+        ("SMSG_MOVE_SET_RUN_SPEED", b"run"),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight"),
     ]
+    assert dispatched[0][1][3][0] == "SMSG_PLAYER_MOVE"
+    assert dispatched[0][1][3][1]
+    assert dispatched[1][0] == [peer]
+    assert dispatched[1][1][0:3] == [
+        ("SMSG_UPDATE_OBJECT", b"mount-update-4"),
+        ("SMSG_MOVE_SET_RUN_SPEED", b"run"),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight"),
+    ]
+    assert dispatched[1][1][3][0] == "SMSG_PLAYER_MOVE"
+    assert dispatched[1][1][3][1]
     assert payload_calls[1] == {
         "map_id": 1,
         "guid": 3,

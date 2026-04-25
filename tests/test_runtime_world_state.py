@@ -295,3 +295,29 @@ def test_send_player_create_appends_remote_visible_item_updates(monkeypatch):
         ("SMSG_UPDATE_OBJECT", b"visible-items-2"),
     ]]
     assert source.char_guid in observer.visible_guids
+
+
+def test_resync_player_appearance_appends_remote_visible_item_updates(monkeypatch):
+    source = _make_session(name="Source", guid=7, map_id=1, state=GlobalState())
+    peer = _make_session(name="Peer", guid=8, map_id=1, state=GlobalState())
+    source.login_state = "IN_WORLD"
+    peer.login_state = "IN_WORLD"
+    peer.visible_guids.add(source.char_guid)
+
+    monkeypatch.setattr(runtime, "_build_player_remove_update_response", lambda session: ("SMSG_UPDATE_OBJECT", b"remove"))
+    monkeypatch.setattr(runtime, "_build_player_create_update_response", lambda session: ("SMSG_UPDATE_OBJECT", b"create"))
+    monkeypatch.setattr(runtime, "iter_in_world_sessions", lambda map_id=None: [source, peer])
+
+    inventory_sync_module = types.ModuleType("server.modules.handlers.world.inventory_sync")
+    inventory_sync_module.build_self_visible_item_update_responses = lambda session: [
+        ("SMSG_UPDATE_OBJECT", b"visible-items")
+    ]
+    sys.modules["server.modules.handlers.world.inventory_sync"] = inventory_sync_module
+
+    runtime.resync_player_appearance(source)
+
+    assert peer.send_response_log == [[
+        ("SMSG_UPDATE_OBJECT", b"remove"),
+        ("SMSG_UPDATE_OBJECT", b"create"),
+        ("SMSG_UPDATE_OBJECT", b"visible-items"),
+    ]]

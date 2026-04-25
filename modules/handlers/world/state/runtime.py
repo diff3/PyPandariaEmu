@@ -791,6 +791,8 @@ def sync_all_players_on_map(map_id: int) -> None:
 
 
 def resync_player_appearance(source_session) -> None:
+    from server.modules.handlers.world.inventory_sync import build_self_visible_item_update_responses
+
     if not _is_session_in_world(source_session):
         return
 
@@ -816,6 +818,7 @@ def resync_player_appearance(source_session) -> None:
             responses.append(remove_response)
         if create_response is not None:
             responses.append(create_response)
+            responses.extend(build_self_visible_item_update_responses(source_session))
         if responses:
             dispatch_responses_to_sessions([peer], responses)
 

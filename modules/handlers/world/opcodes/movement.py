@@ -219,7 +219,10 @@ def build_smsg_player_move_payload_stable_old(session) -> bytes | None:
 
     move_flags = int(state.flags)
     move_flags2 = int(state.flags2)
-    has_orientation = not math.isclose(float(orientation), 0.0, abs_tol=1e-6)
+    # Facing 0.0 is a valid orientation. Omitting it makes the normal
+    # SMSG_PLAYER_MOVE layout flip between two binary shapes as players rotate
+    # through zero, which causes remote drift/correction artifacts.
+    has_orientation = True
     has_counter = int(getattr(state, "counter", 0) or 0) != 0
 
     bits = BitWriter()

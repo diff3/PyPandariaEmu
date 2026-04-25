@@ -63,6 +63,29 @@ def test_build_smsg_player_move_payload_no_fall_output_unchanged(monkeypatch) ->
     assert payload.hex() == "891a00000000000020400000604040420f000000403f060000c03f"
 
 
+def test_build_smsg_player_move_payload_keeps_zero_orientation_in_normal_layout(monkeypatch) -> None:
+    monkeypatch.setattr(movement.time, "time", lambda: 1000.0)
+    state = SimpleNamespace(
+        x=1.5,
+        y=2.5,
+        z=3.5,
+        orientation=0.0,
+        flags=0,
+        flags2=0,
+        timestamp_ms=123,
+        counter=0,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+    )
+    session = SimpleNamespace(char_guid=7, world_guid=7, movement_state=state)
+
+    payload = movement.build_smsg_player_move_payload(session)
+
+    assert payload is not None
+    assert payload.hex() == "891a00000000000020400000604040420f0000000000060000c03f"
+
+
 def test_build_smsg_player_move_payload_with_fall_data_includes_minimal_fall_body(monkeypatch) -> None:
     monkeypatch.setattr(movement.time, "time", lambda: 1000.0)
     state = SimpleNamespace(
