@@ -811,6 +811,17 @@ def apply_player_state_change(
             session.teleport_pending = False
             session.worldport_ack_pending = False
             session.near_teleport_pending = True
+            saved = movement_handlers._save_session_position(
+                session,
+                reason="near-teleport-start",
+                online=1,
+                force=True,
+            )
+            if not saved:
+                Logger.warning(
+                    "[Teleport] same-map position persist fallback failed destination=%s",
+                    str(getattr(session, "teleport_destination", "") or "?"),
+                )
             return apply_state_and_resync(
                 session,
                 [("SMSG_MOVE_TELEPORT", movement_handlers.build_same_map_teleport_payload(session))],

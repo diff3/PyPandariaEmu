@@ -818,11 +818,6 @@ def mount_direct(player, display_id: int, run_speed: float | None = None) -> lis
     Logger.info("[Mount][Debug] mount_direct total_responses=%s", len(responses))
     return responses
 
-# from server.modules.handlers.world.login.context import WorldLoginContext
-# from server.modules.handlers.world.login.packets import build_login_packet
-from server.modules.handlers.world.login.packets import build_login_packet
-from server.modules.handlers.world.login.context import WorldLoginContext
-
 def handle_mount(player, spell_id: int):
     player.is_mounted = True
     player.mount_spell = int(spell_id)
@@ -830,21 +825,6 @@ def handle_mount(player, spell_id: int):
     _apply_mount_movement_speeds(player)
     return send_mount_update(player, int(spell_id))
 
-def handle_mount_old(player, spell_id: int) -> list[tuple[str, bytes]]:
-    player.is_mounted = True
-    player.mount_spell = int(spell_id)
-
-    # TEMP: hardcoded mount display (from your logs)
-    player.mount_display_id = 31007
-
-    _apply_mount_movement_speeds(player)
-
-    ctx = WorldLoginContext.from_session(player)
-    ctx.mount_display_id = player.mount_display_id
-
-    payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
-
-    return [("SMSG_UPDATE_OBJECT", payload)]
 
 def dismount(player) -> list[tuple[str, bytes]]:
     player.is_mounted = False

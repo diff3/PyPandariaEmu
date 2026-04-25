@@ -100,6 +100,7 @@ def _import_chat_handlers():
             "_build_out_of_range_update_object_payload": lambda *, map_id, guid: b"",
             "resync_movement": lambda session: [("SMSG_PLAYER_MOVE", b"move-resync")],
             "_save_current_position_like_command": lambda *args, **kwargs: True,
+            "_save_session_position": lambda *args, **kwargs: True,
         },
         "server.modules.handlers.world.inventory_sync": {
             "build_login_inventory_sync_responses": lambda session: [],
@@ -205,6 +206,7 @@ def _install_movement_stub(monkeypatch, **overrides):
     module.resync_movement = lambda session: [("SMSG_PLAYER_MOVE", b"move-resync")]
     module.build_same_map_teleport_payload = lambda session: b"teleport-payload"
     module._save_current_position_like_command = lambda *args, **kwargs: True
+    module._save_session_position = lambda *args, **kwargs: True
     module._capture_persist_position_from_session = lambda session: None
     module._mark_position_dirty = lambda session: None
     module._movement_state = lambda session: SimpleNamespace(
@@ -219,6 +221,9 @@ def _install_movement_stub(monkeypatch, **overrides):
     for name, value in overrides.items():
         setattr(module, name, value)
     monkeypatch.setitem(sys.modules, "server.modules.handlers.world.opcodes.movement", module)
+    opcodes_module = sys.modules.get("server.modules.handlers.world.opcodes")
+    if opcodes_module is not None:
+        monkeypatch.setattr(opcodes_module, "movement", module, raising=False)
     return module
 
 
@@ -2232,6 +2237,7 @@ def test_apply_player_state_change_mount_updates_fields_and_resyncs_movement(mon
 
 def test_apply_player_state_change_same_map_position_queues_near_teleport(monkeypatch):
     movement_module = _install_movement_stub(monkeypatch)
+    saved = {}
     monkeypatch.setattr(
         movement_module,
         "_movement_state",
@@ -2240,6 +2246,12 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     )
     monkeypatch.setattr(movement_module, "_capture_persist_position_from_session", lambda session: None, raising=False)
     monkeypatch.setattr(movement_module, "_mark_position_dirty", lambda session: None, raising=False)
+    monkeypatch.setattr(
+        movement_module,
+        "_save_session_position",
+        lambda session, **kwargs: saved.update({"kwargs": dict(kwargs)}) or True,
+        raising=False,
+    )
     monkeypatch.setattr(movement_module, "build_same_map_teleport_payload", lambda session: b"teleport", raising=False)
     monkeypatch.setattr(
         chat_handlers,
@@ -2269,6 +2281,11 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     assert alice.orientation == 1.5
     assert alice.near_teleport_pending is True
     assert alice.teleport_pending is False
+    assert saved["kwargs"] == {
+        "reason": "near-teleport-start",
+        "online": 1,
+        "force": True,
+    }
     assert len(responses) == 2
     assert responses[0][0] == "SMSG_MOVE_TELEPORT"
     assert responses[1] == ("SMSG_PLAYER_MOVE", b"move")
