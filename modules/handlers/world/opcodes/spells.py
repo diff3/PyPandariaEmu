@@ -664,6 +664,57 @@ def build_mount_visual_responses(session, display_id: int) -> list[tuple[str, by
     ]
 
 
+def _broadcast_mount_visual_to_visible_peers(session, display_id: int) -> None:
+    from server.modules.handlers.world.state.runtime import (
+        _visible_guid_set,
+        dispatch_responses_to_sessions,
+        iter_in_world_sessions,
+    )
+
+    source_guid = int(getattr(session, "char_guid", 0) or 0)
+    update_guid = _player_object_guid(session)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    if source_guid <= 0 or update_guid <= 0:
+        return
+
+    peers = [
+        peer
+        for peer in iter_in_world_sessions(map_id=map_id)
+        if peer is not session and source_guid in _visible_guid_set(peer)
+    ]
+    if not peers:
+        return
+
+    display_value = int(getattr(session, "display_id", 0) or 0)
+    native_display_value = int(getattr(session, "native_display_id", display_value) or display_value)
+    mount_state_flags = _player_mount_state_flags(session, int(display_id))
+    responses = [
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=map_id,
+                guid=update_guid,
+                field_updates=[
+                    (_PLAYER_FIELD_MOUNT_STATE_FLAGS, mount_state_flags),
+                    (_PLAYER_FIELD_DISPLAYID, display_value),
+                    (_PLAYER_FIELD_NATIVEDISPLAYID, native_display_value),
+                    (_PLAYER_FIELD_MOUNTDISPLAYID, int(display_id)),
+                ],
+            ),
+        ),
+        ("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(session)),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session)),
+    ]
+    dispatch_responses_to_sessions(peers, responses)
+    Logger.info(
+        "[MOUNT_SYNC] peer visual/speed update guid=%s display=%s run=%.3f peers=%s",
+        int(source_guid),
+        int(display_id),
+        float(getattr(session, "run_speed", 0.0) or 0.0),
+        len(peers),
+    )
+
+
 def apply_mount_aura(session, spell_id: int) -> list[tuple[str, bytes]]:
     spell_id = int(spell_id or 0)
     if spell_id <= 0:
@@ -776,6 +827,7 @@ def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
     responses.extend(apply_mount_aura(player, spell_id))
     if display_id > 0:
         responses.extend(build_mount_visual_responses(player, display_id))
+        _broadcast_mount_visual_to_visible_peers(player, display_id)
     responses.append(_build_run_speed_update_response(player))
     responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(player)))
     responses.extend(_notification_response(f"Mounted spell={int(spell_id)} speed={float(player.run_speed):.2f}"))
@@ -785,6 +837,7 @@ def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
 def send_dismount_update(player) -> list[tuple[str, bytes]]:
     responses: list[tuple[str, bytes]] = list(remove_mount_aura(player))
     responses.extend(build_mount_visual_responses(player, 0))
+    _broadcast_mount_visual_to_visible_peers(player, 0)
     responses.append(_build_run_speed_update_response(player))
     responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(player)))
     responses.extend(_notification_response(f"Dismounted speed={float(player.run_speed):.2f}"))

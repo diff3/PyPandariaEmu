@@ -35,6 +35,11 @@ def _import_spells_handlers():
             "build_move_set_run_speed_payload": lambda session: b"",
             "build_move_set_flight_speed_payload": lambda session: b"",
         },
+        "server.modules.handlers.world.state.runtime": {
+            "_visible_guid_set": lambda session: getattr(session, "visible_guids", set()),
+            "dispatch_responses_to_sessions": lambda targets, responses: None,
+            "iter_in_world_sessions": lambda map_id=None: [],
+        },
         "server.modules.handlers.world.mount.mount_service": {
             "ALL_MOUNT_SPELLS": set(),
             "get_mount_display_id": lambda spell_id: 0,
@@ -223,6 +228,96 @@ def test_handle_mount_and_dismount_use_aura_visual_and_speed(monkeypatch):
     assert session.is_mounted is False
     assert session.mount_spell is None
     assert session.active_mount_aura_spell_id is None
+
+
+def test_mount_and_dismount_broadcast_visual_update_to_visible_peers(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    runtime_module = sys.modules["server.modules.handlers.world.state.runtime"]
+    peer = SimpleNamespace(visible_guids={3})
+    hidden_peer = SimpleNamespace(visible_guids=set())
+    dispatched = []
+    payload_calls = []
+
+    def fake_build_multi_u32_update_object_payload(**fields):
+        payload_calls.append(fields)
+        return f"mount-update-{len(payload_calls)}".encode()
+
+    monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda spell_id: 2404)
+    monkeypatch.setattr(spells_handlers, "build_move_set_run_speed_payload", lambda session: b"run")
+    monkeypatch.setattr(spells_handlers, "build_move_set_flight_speed_payload", lambda session: b"flight")
+    monkeypatch.setattr(
+        spells_handlers,
+        "build_multi_u32_update_object_payload",
+        fake_build_multi_u32_update_object_payload,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "iter_in_world_sessions",
+        lambda map_id=None: [peer, hidden_peer],
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "dispatch_responses_to_sessions",
+        lambda targets, responses: dispatched.append((list(targets), list(responses))),
+    )
+
+    session = SimpleNamespace(
+        map_id=1,
+        char_guid=3,
+        world_guid=0x0003000100000003,
+        unit_flags=0x00000020,
+        mount_display_id=0,
+        mount_spell=None,
+        is_mounted=False,
+        run_speed=7.0,
+        fly_speed=7.0,
+        display_id=15475,
+        native_display_id=15475,
+        active_mount_aura_spell_id=None,
+        active_mount_aura_slot=0,
+    )
+
+    spells_handlers.handle_mount(session, 59535)
+    spells_handlers.dismount(session)
+
+    assert dispatched == [
+        (
+            [peer],
+            [
+                ("SMSG_UPDATE_OBJECT", b"mount-update-2"),
+                ("SMSG_MOVE_SET_RUN_SPEED", b"run"),
+                ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight"),
+            ],
+        ),
+        (
+            [peer],
+            [
+                ("SMSG_UPDATE_OBJECT", b"mount-update-4"),
+                ("SMSG_MOVE_SET_RUN_SPEED", b"run"),
+                ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight"),
+            ],
+        ),
+    ]
+    assert payload_calls[1] == {
+        "map_id": 1,
+        "guid": 3,
+        "field_updates": [
+            (61, 0x08000008),
+            (69, 15475),
+            (70, 15475),
+            (71, 2404),
+        ],
+    }
+    assert payload_calls[3] == {
+        "map_id": 1,
+        "guid": 3,
+        "field_updates": [
+            (61, 0x00000008),
+            (69, 15475),
+            (70, 15475),
+            (71, 0),
+        ],
+    }
 
 
 def test_initialize_session_language_state_sets_orcish_for_alliance():
