@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib
+import math
 import sys
 import types
 from types import SimpleNamespace
@@ -66,6 +67,150 @@ def test_build_gameobject_update_payload_uses_gameobject_guid():
 
     assert update_type == 1
     assert packed_guid == replay.GameObjectGuid.from_spawn_guid(4, 1)
+
+
+def test_build_gameobject_update_payload_uses_db_rotation(monkeypatch):
+    from server.modules.handlers.world.bootstrap import gameobjects
+
+    captured = {}
+
+    def fake_encode_packet(opcode_name, fields):
+        captured["opcode_name"] = opcode_name
+        captured["fields"] = dict(fields)
+        return b"payload"
+
+    monkeypatch.setattr(gameobjects.EncoderHandler, "encode_packet", fake_encode_packet)
+    entry = {
+        "guid": 4,
+        "entry": 175354,
+        "x": 1569.97,
+        "y": -4397.41,
+        "z": 16.05,
+        "orientation": 1.5,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.6816387600233341,
+        "rotation3": 0.7316888688738209,
+        "display_id": 3015,
+        "flags": 40,
+        "size": 1.0,
+        "type": 15,
+        "state": 1,
+        "animprogress": 255,
+        "faction": 0,
+    }
+
+    payload = gameobjects._build_gameobject_update_payload(map_id=1, entry=entry, realm_id=1)
+    field_values = gameobjects._build_gameobject_field_values(
+        entry,
+        world_guid=gameobjects.GameObjectGuid.from_spawn_guid(4, 1),
+    )
+
+    assert payload == b"payload"
+    assert captured["opcode_name"] == "GAMEOBJECT_CREATE"
+    assert captured["fields"]["stationary_orientation"] == gameobjects._stationary_orientation(entry)
+    assert captured["fields"]["gameobject_rotation_packed"] == gameobjects._gameobject_rotation_packed(entry)
+    assert captured["fields"]["gameobject_rotation_packed"] != 0
+    assert field_values[14] == gameobjects._u32_from_float(entry["rotation2"])
+    assert field_values[15] == gameobjects._u32_from_float(entry["rotation3"])
+
+
+def test_build_gameobject_update_payload_derives_upright_rotation_from_orientation(monkeypatch):
+    from server.modules.handlers.world.bootstrap import gameobjects
+
+    captured = {}
+
+    monkeypatch.setattr(
+        gameobjects.EncoderHandler,
+        "encode_packet",
+        lambda opcode_name, fields: captured.setdefault("fields", dict(fields)) or b"payload",
+    )
+    entry = {
+        "guid": 4,
+        "entry": 175354,
+        "x": 1569.97,
+        "y": -4397.41,
+        "z": 16.05,
+        "orientation": 1.5,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "display_id": 3015,
+        "flags": 40,
+        "size": 1.0,
+        "type": 15,
+        "state": 1,
+        "animprogress": 255,
+        "faction": 0,
+    }
+
+    gameobjects._build_gameobject_update_payload(map_id=1, entry=entry, realm_id=1)
+    field_values = gameobjects._build_gameobject_field_values(
+        entry,
+        world_guid=gameobjects.GameObjectGuid.from_spawn_guid(4, 1),
+    )
+
+    assert captured["fields"]["stationary_orientation"] == entry["orientation"]
+    assert captured["fields"]["gameobject_rotation_packed"] == gameobjects._gameobject_rotation_packed(entry)
+    assert captured["fields"]["gameobject_rotation_packed"] != 0
+    assert field_values[14] == gameobjects._u32_from_float(math.sin(0.75))
+    assert field_values[15] == gameobjects._u32_from_float(math.cos(0.75))
+
+
+def test_gameobject_stationary_orientation_uses_db_quaternion_yaw():
+    from server.modules.handlers.world.bootstrap import gameobjects
+
+    entry = {
+        "orientation": -1.65806,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.737277,
+        "rotation3": -0.67559,
+    }
+
+    expected = math.fmod(2.0 * math.atan2(entry["rotation2"], entry["rotation3"]), math.tau)
+    if expected < 0.0:
+        expected += math.tau
+
+    assert gameobjects._stationary_orientation(entry) == expected
+    assert gameobjects._stationary_orientation(entry) > 0.0
+
+
+def test_gameobject_rotation_uses_large_command_board_db_orientation_without_display_hack():
+    from server.modules.handlers.world.bootstrap import gameobjects
+
+    entry = {
+        "orientation": 0.383971,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "display_id": 10014,
+    }
+
+    assert gameobjects._stationary_orientation(entry) == 0.383971
+    rotation = gameobjects._rotation_components(entry)
+    assert rotation[0] == 0.0
+    assert rotation[1] == 0.0
+    assert math.isclose(rotation[2], math.sin(gameobjects._stationary_orientation(entry) * 0.5))
+    assert math.isclose(rotation[3], math.cos(gameobjects._stationary_orientation(entry) * 0.5))
+    assert gameobjects._gameobject_rotation_packed(entry) != 0
+
+
+def test_gameobject_stationary_orientation_does_not_flip_other_identity_models():
+    from server.modules.handlers.world.bootstrap import gameobjects
+
+    entry = {
+        "orientation": 0.383971,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "display_id": 3015,
+    }
+
+    assert gameobjects._stationary_orientation(entry) == 0.383971
 
 
 def test_replay_movement_focus_sequence_appends_db_gameobjects():

@@ -899,26 +899,6 @@ def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
     Logger.info("[Mount] committed")
     return _append_feedback_response(responses, "[Mount] mount requested")
 
-#@register_command("mount", ".mount", allow_args=False)
-def cmd_mount_old(session, args: list[str]) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.opcodes.spells import build_raw_update_object
-
-    Logger.error("[MOUNT HARD OVERRIDE FINAL]")
-
-    display_id = 31007
-
-    session.unit_flags = 0x08000000
-    session.mount_display_id = display_id
-
-    fields = [
-        (96, session.unit_flags),
-        (106, display_id),
-        (110, 0x00080000),
-       (55, 1),
-    ]
-
-    return [build_raw_update_object(session, fields)]
-
 @register_command("dismount", ".dismount", allow_args=False)
 def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Clear the debug mount display."""

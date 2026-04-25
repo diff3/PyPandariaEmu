@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import struct
 from typing import Any, Mapping
 
@@ -16,7 +17,6 @@ _GAMEOBJECT_OBJECT_TYPE = 5
 _GAMEOBJECT_MASK_BLOCKS = 1
 _GAMEOBJECT_DYNAMIC_MASK_BLOCKS = 0
 _GAMEOBJECT_MOVEMENT_BLOCK_UINT32 = 0
-_GAMEOBJECT_ROTATION_PACKED = 0
 
 _OBJECT_FIELD_GUID_LOW = 0
 _OBJECT_FIELD_GUID_HIGH = 1
@@ -30,6 +30,8 @@ _GAMEOBJECT_FIELD_FACTION = 16
 _GAMEOBJECT_FIELD_BYTES_1 = 18
 _GAMEOBJECT_FIELD_BYTES_2 = 19
 _GAMEOBJECT_ROTATION_COMPONENT_KEYS = ("rotation0", "rotation1", "rotation2", "rotation3")
+_PACKED_QUATERNION_X_SCALE = 2_097_152
+_PACKED_QUATERNION_YZ_SCALE = 1_048_576
 
 
 def _entry_int(entry: Mapping[str, Any], key: str, default: int = 0) -> int:
@@ -45,6 +47,113 @@ def _entry_float(entry: Mapping[str, Any], key: str, default: float = 0.0) -> fl
 def _u32_from_float(value: float) -> int:
     """Pack a float into a little-endian uint32 value."""
     return struct.unpack("<I", struct.pack("<f", float(value)))[0]
+
+
+def _rotation_has_quaternion(entry: Mapping[str, Any]) -> bool:
+    return any(
+        abs(_entry_float(entry, key)) > 0.000001
+        for key in ("rotation0", "rotation1", "rotation2")
+    ) or abs(abs(_entry_float(entry, "rotation3")) - 1.0) > 0.000001
+
+
+def _rotation_has_yaw_only(entry: Mapping[str, Any]) -> bool:
+    return (
+        abs(_entry_float(entry, "rotation0")) <= 0.000001
+        and abs(_entry_float(entry, "rotation1")) <= 0.000001
+        and _rotation_has_quaternion(entry)
+    )
+
+
+def _normalize_quaternion(
+    x: float,
+    y: float,
+    z: float,
+    w: float,
+) -> tuple[float, float, float, float]:
+    length = math.sqrt((x * x) + (y * y) + (z * z) + (w * w))
+    if length <= 0.000001:
+        return 0.0, 0.0, 0.0, 1.0
+
+    x /= length
+    y /= length
+    z /= length
+    w /= length
+    if w < 0.0:
+        x = -x
+        y = -y
+        z = -z
+        w = -w
+    return float(x), float(y), float(z), float(w)
+
+
+def _clamp(value: int, minimum: int, maximum: int) -> int:
+    return max(int(minimum), min(int(maximum), int(value)))
+
+
+def _pack_signed(value: int, bits: int) -> int:
+    return int(value) & ((1 << int(bits)) - 1)
+
+
+def _pack_gameobject_rotation(x: float, y: float, z: float, w: float) -> int:
+    """Pack a normalized GameObject quaternion into the 5.4.x create block."""
+    x, y, z, _w = _normalize_quaternion(x, y, z, w)
+    packed_x = _clamp(
+        round(x * _PACKED_QUATERNION_X_SCALE),
+        -_PACKED_QUATERNION_X_SCALE,
+        _PACKED_QUATERNION_X_SCALE - 1,
+    )
+    packed_y = _clamp(
+        round(y * _PACKED_QUATERNION_YZ_SCALE),
+        -_PACKED_QUATERNION_YZ_SCALE,
+        _PACKED_QUATERNION_YZ_SCALE - 1,
+    )
+    packed_z = _clamp(
+        round(z * _PACKED_QUATERNION_YZ_SCALE),
+        -_PACKED_QUATERNION_YZ_SCALE,
+        _PACKED_QUATERNION_YZ_SCALE - 1,
+    )
+
+    return (
+        (_pack_signed(packed_x, 22) << 42)
+        | (_pack_signed(packed_y, 21) << 21)
+        | _pack_signed(packed_z, 21)
+    )
+
+
+def _stationary_orientation(entry: Mapping[str, Any]) -> float:
+    """Use DB quaternion yaw when available so facing and rotation fields agree."""
+    if _rotation_has_yaw_only(entry):
+        orientation = 2.0 * math.atan2(
+            _entry_float(entry, "rotation2"),
+            _entry_float(entry, "rotation3"),
+        )
+    else:
+        orientation = _entry_float(entry, "orientation")
+    orientation = math.fmod(float(orientation), math.tau)
+    if orientation < 0.0:
+        orientation += math.tau
+    return float(orientation)
+
+
+def _rotation_components(entry: Mapping[str, Any]) -> tuple[float, float, float, float]:
+    if _rotation_has_quaternion(entry):
+        return _normalize_quaternion(
+            *(_entry_float(entry, key) for key in _GAMEOBJECT_ROTATION_COMPONENT_KEYS)
+        )
+
+    orientation = _stationary_orientation(entry)
+    if abs(orientation) > 0.000001:
+        return _normalize_quaternion(
+            0.0,
+            0.0,
+            math.sin(orientation * 0.5),
+            math.cos(orientation * 0.5),
+        )
+    return 0.0, 0.0, 0.0, 1.0
+
+
+def _gameobject_rotation_packed(entry: Mapping[str, Any]) -> int:
+    return _pack_gameobject_rotation(*_rotation_components(entry))
 
 
 def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1) -> tuple[bytes, bytes]:
@@ -90,8 +199,7 @@ def _build_gameobject_field_values(entry: Mapping[str, Any], *, world_guid: int)
     faction = _entry_int(entry, "faction")
     if faction != 0:
         field_values[_GAMEOBJECT_FIELD_FACTION] = faction
-    for offset, key in enumerate(_GAMEOBJECT_ROTATION_COMPONENT_KEYS):
-        value = _entry_float(entry, key)
+    for offset, value in enumerate(_rotation_components(entry)):
         if value != 0.0:
             field_values[_GAMEOBJECT_FIELD_ROTATION_START + offset] = _u32_from_float(value)
     if _GAMEOBJECT_FIELD_ROTATION_START + 3 not in field_values:
@@ -109,7 +217,7 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
 
     stationary_y = _entry_float(entry, "y")
     stationary_z = _entry_float(entry, "z")
-    stationary_orientation = _entry_float(entry, "orientation")
+    stationary_orientation = _stationary_orientation(entry)
     stationary_x = _entry_float(entry, "x")
 
     return EncoderHandler.encode_packet(
@@ -132,7 +240,7 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
             "stationary_x": stationary_x,
             # The current create flags expect these two fields explicitly.
             "movement_block_uint32": _GAMEOBJECT_MOVEMENT_BLOCK_UINT32,
-            "gameobject_rotation_packed": _GAMEOBJECT_ROTATION_PACKED,
+            "gameobject_rotation_packed": _gameobject_rotation_packed(entry),
             "mask_blocks": len(mask_bytes) // 4,
             "mask": mask_bytes,
             "fields": field_bytes,

@@ -50,7 +50,7 @@ def _dsl_fields():
         "stationary_orientation": float(entry["orientation"]),
         "stationary_x": float(entry["x"]),
         "movement_block_uint32": 0,
-        "gameobject_rotation_packed": 0,
+        "gameobject_rotation_packed": gameobjects._gameobject_rotation_packed(entry),
         "mask_blocks": len(mask_bytes) // 4,
         "mask": mask_bytes,
         "fields": field_bytes,

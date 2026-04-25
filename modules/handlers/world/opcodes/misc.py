@@ -193,33 +193,6 @@ def handle_logout_request(session, ctx):
     ]
 
 
-def handle_logout_request_bk(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    log_cmsg(ctx)
-    Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
-    broadcast_player_remove(session)
-    if USE_DB_ACCOUNT_DATA_137:
-        flush_account_data_types_to_db(session, tuple(DB_ACCOUNT_DATA_137_TYPES), seed_defaults=True)
-    persist_session_inventory(session)
-    save_current_position_like_command(session, reason="logout", online=0, force=True)
-
-    try:
-        logout_response = EncoderHandler.encode_packet(
-            "SMSG_LOGOUT_RESPONSE",
-            {
-                "logout_result": 0,
-                "instant_logout": 1,
-            },
-        )
-    except Exception as exc:
-        Logger.error(f"[WorldHandlers] SMSG_LOGOUT_RESPONSE encode failed: {exc}")
-        return 1, None
-
-    return 0, [
-        ("SMSG_LOGOUT_RESPONSE", logout_response),
-        ("SMSG_LOGOUT_COMPLETE", b""),
-    ]
-
-
 @register("CMSG_TIME_SYNC_RESPONSE")
 def handle_time_sync_response(session, ctx: PacketContext):
     decoded = ctx.decoded or {}
@@ -260,49 +233,6 @@ def handle_time_sync_response(session, ctx: PacketContext):
 def handle_discarded_time_sync_acks(session, ctx: PacketContext):
     Logger.info("[TIME_SYNC] Client discarded pending time sync ACKs")
     return 0, None
-
-
-def handle_request_account_data_old(session, ctx: PacketContext):
-    if USE_DB_ACCOUNT_DATA_137:
-        account_id = int(getattr(session, "account_id", 0) or 0)
-        char_guid = int(getattr(session, "char_guid", 0) or 0)
-        if account_id:
-            load_global_account_data(session, account_id)
-        if char_guid:
-            load_character_account_data(session, char_guid)
-        Logger.info("[ACCOUNT_DATA] mode=db request using preloaded global+character data")
-
-    data_type = decode_account_data_request_type(ctx.payload)
-    Logger.info(f"[ACCOUNT_DATA] request type={data_type} raw={ctx.payload.hex()}")
-
-    if not SEND_ACCOUNT_DATA_TO_CLIENT:
-        Logger.info(f"[ACCOUNT_DATA] suppressing SMSG_UPDATE_ACCOUNT_DATA type={data_type}")
-        return 0, None
-
-    if is_global_account_data_type(int(data_type)):
-        load_global_account_data(session)
-    else:
-        load_character_account_data(session)
-
-    stored_text = session.account_data.get(int(data_type))
-    if stored_text is None:
-        stored_text = account_data_text_for_type(int(data_type), str(session.account_name or ""))
-
-    normalized_text = normalize_account_data_text(int(data_type), str(stored_text or ""))
-    if normalized_text != str(stored_text or ""):
-        stored_text = normalized_text
-        session.account_data[int(data_type)] = stored_text
-        stored_timestamp = int(session.account_data_times.get(int(data_type)) or time.time())
-        session.account_data_times[int(data_type)] = stored_timestamp
-        persist_account_data_entry(session, int(data_type), stored_text, stored_timestamp)
-
-    stored_timestamp = session.account_data_times.get(int(data_type))
-    response = build_update_account_data_payload(
-        int(data_type),
-        str(stored_text or ""),
-        timestamp=int(stored_timestamp) if stored_timestamp is not None else None,
-    )
-    return 0, [("SMSG_UPDATE_ACCOUNT_DATA", response)]
 
 
 @register("CMSG_REQUEST_ACCOUNT_DATA")
