@@ -55,35 +55,6 @@ SPELL_LANGUAGE_COMMON = 668
 SPELL_LANGUAGE_ORCISH = 669
 
 
-def _load_raw_from_path(path: Path) -> Optional[bytes]:
-    """Load raw (header+payload) bytes from a JSON dump path."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        Logger.error(f"[WorldHandlers] Failed to read {path}: {exc}")
-        return None
-
-    raw_hex = data.get("raw_data_hex")
-    if raw_hex:
-        try:
-            return bytes.fromhex(raw_hex.replace(" ", ""))
-        except Exception:
-            Logger.error(f"[WorldHandlers] Invalid raw_data_hex in {path}")
-            return None
-
-    header_hex = data.get("raw_header_hex")
-    payload_hex = data.get("hex_compact") or data.get("hex_spaced")
-    if header_hex and payload_hex:
-        try:
-            header_bytes = bytes.fromhex(header_hex.replace(" ", ""))
-            payload_bytes = bytes.fromhex(payload_hex.replace(" ", ""))
-            return header_bytes + payload_bytes
-        except Exception:
-            Logger.error(f"[WorldHandlers] Invalid hex fields in {path}")
-            return None
-    return None
-
-
 def _load_payload_from_path(path: Path) -> Optional[bytes]:
     """Load payload-only bytes from a JSON dump path."""
     try:
@@ -110,45 +81,6 @@ def _load_payload_from_path(path: Path) -> Optional[bytes]:
         except Exception:
             Logger.error(f"[WorldHandlers] Invalid raw hex fields in {path}")
             return None
-
-    return None
-
-
-def _load_raw_packet(opcode_name: str) -> Optional[bytes]:
-    """
-    Load raw (header+payload) bytes for a server opcode from debug or captures.
-    Includes focus captures if present.
-    """
-    paths = [
-        get_debug_root() / f"{opcode_name}.json",
-        get_captures_root() / "debug" / f"{opcode_name}.json",
-        get_captures_root(focus=True) / "debug" / f"{opcode_name}.json",
-    ]
-
-    for path in paths:
-        if not path.exists():
-            continue
-        raw = _load_raw_from_path(path)
-        if raw:
-           return raw, True
-
-    return None
-
-def _load_raw_packet_focus(opcode_name: str) -> Optional[bytes]:
-    """
-    Load raw (header+payload) bytes for a server opcode from debug or captures.
-    Includes focus captures if present.
-    """
-    paths = [
-        get_captures_root(focus=True) / "debug" / f"{opcode_name}.json",
-    ]
-
-    for path in paths:
-        if not path.exists():
-            continue
-        raw = _load_raw_from_path(path)
-        if raw:
-            return raw, True
 
     return None
 
@@ -790,68 +722,6 @@ def build_SMSG_LOGIN_VERIFY_WORLD(_ctx=None) -> bytes:
         "map": int(getattr(ctx, "map_id", 0)),
         "z": float(getattr(ctx, "z", 0.0)),
     })
-
-
-def build_SMSG_UPDATE_OBJECT_old(_ctx=None) -> bytes:
-    """
-    Send captured raw SMSG_UPDATE_OBJECT.
-    Bypasses DSL completely.
-    """
-    raw = _load_raw_packet("SMSG_UPDATE_OBJECT")
-    if not raw:
-        raise RuntimeError("Raw SMSG_UPDATE_OBJECT not found")
-    return raw
-
-
-def build_SMSG_UPDATE_OBJECT_1768335962(_ctx=None) -> bytes:
-    """
-    Send captured raw SMSG_UPDATE_OBJECT.
-    Bypasses DSL completely.
-    """
-    raw = _load_raw_packet_focus("SMSG_UPDATE_OBJECT")
-    if not raw:
-        raise RuntimeError("Raw SMSG_UPDATE_OBJECT not found")
-    return raw
-
-def build_SMSG_UPDATE_OBJECT_1768335964(_ctx=None) -> bytes:
-    """
-    Send captured raw SMSG_UPDATE_OBJECT.
-    Bypasses DSL completely.
-    """
-    raw = _load_raw_packet_focus("SMSG_UPDATE_OBJECT_1768335964")
-    if not raw:
-        raise RuntimeError("Raw SMSG_UPDATE_OBJECT_1768335964 not found")
-    return raw
-
-def build_SMSG_UPDATE_OBJECT_1768336025(_ctx=None) -> bytes:
-    """
-    Send captured raw SMSG_UPDATE_OBJECT.
-    Bypasses DSL completely.
-    """
-    raw = _load_raw_packet_focus("SMSG_UPDATE_OBJECT_1768336025")
-    if not raw:
-        raise RuntimeError("Raw SMSG_UPDATE_OBJECT_1768336025 not found")
-    return raw
-
-def build_SMSG_UPDATE_OBJECT_1768336030(_ctx=None) -> bytes:
-    """
-    Send captured raw SMSG_UPDATE_OBJECT.
-    Bypasses DSL completely.
-    """
-    raw = _load_raw_packet_focus("SMSG_UPDATE_OBJECT_1768336030")
-    if not raw:
-        raise RuntimeError("Raw SMSG_UPDATE_OBJECT_1768336030 not found")
-    return raw
-
-def build_SMSG_UPDATE_OBJECT_1768336134(_ctx=None) -> bytes:
-    """
-    Send captured raw SMSG_UPDATE_OBJECT.
-    Bypasses DSL completely.
-    """
-    raw = _load_raw_packet_focus("SMSG_UPDATE_OBJECT_1768336134")
-    if not raw:
-        raise RuntimeError("Raw SMSG_UPDATE_OBJECT_1768336134 not found")
-    return raw
 
 
 _EXACT_UPDATE_OBJECT_1773613181_0005_DEFAULT = bytes.fromhex(
