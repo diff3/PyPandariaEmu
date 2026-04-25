@@ -322,6 +322,20 @@ def test_parse_real_stop_strafe_payload() -> None:
     assert round(orientation, 3) == round(3.197581, 3)
 
 
+def test_stop_strafe_zero_orientation_preserves_previous_facing() -> None:
+    session = SimpleNamespace(orientation=1.25)
+    payload = bytearray()
+    payload.extend(struct.pack("<fff", 12.0, 34.0, 56.0))
+    payload.extend(b"\x00" * 8)
+    payload.extend(struct.pack("<f", 0.0))
+
+    parsed = movement.parse_movement_info(session, "MSG_MOVE_STOP_STRAFE", bytes(payload), decoded={})
+
+    assert parsed is not None
+    _x, _y, _z, orientation = parsed
+    assert orientation == 1.25
+
+
 def test_fall_land_clears_fall_data_in_movement_state() -> None:
     state = SimpleNamespace(
         x=0.0,
@@ -349,6 +363,60 @@ def test_fall_land_clears_fall_data_in_movement_state() -> None:
     assert state.fall_horizontal_speed == 0.0
     assert state.fall_sin_angle == 0.0
     assert state.fall_cos_angle == 0.0
+
+
+def test_stale_fall_land_still_clears_fall_state() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=movement._MOVEMENTFLAG_FALLING,
+        flags2=0,
+        timestamp_ms=1000,
+        counter=0,
+        has_fall_data=True,
+        fall_time=123,
+        fall_vertical_speed=-7.9,
+        fall_horizontal_speed=2.0,
+        fall_sin_angle=0.47,
+        fall_cos_angle=-0.88,
+    )
+    session = SimpleNamespace(movement_state=state)
+    payload = (b"\x00" * 24) + (999).to_bytes(4, "little")
+
+    ok = movement._store_authoritative_movement(session, "MSG_MOVE_FALL_LAND", payload, None)
+
+    assert ok is False
+    assert state.has_fall_data is False
+    assert state.fall_time == 0
+    assert state.fall_vertical_speed == 0.0
+    assert state.fall_horizontal_speed == 0.0
+    assert state.fall_sin_angle == 0.0
+    assert state.fall_cos_angle == 0.0
+    assert not state.flags & movement._MOVEMENTFLAG_FALLING
+
+
+def test_stale_stop_strafe_still_clears_strafe_flags() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_STRAFE_LEFT,
+        flags2=0,
+        timestamp_ms=1000,
+        counter=0,
+    )
+    session = SimpleNamespace(movement_state=state)
+    payload = (b"\x00" * 20) + (999).to_bytes(4, "little")
+
+    ok = movement._store_authoritative_movement(session, "MSG_MOVE_STOP_STRAFE", payload, None)
+
+    assert ok is False
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert not state.flags & movement._MOVEMENTFLAG_STRAFE_LEFT
+    assert not state.flags & movement._MOVEMENTFLAG_STRAFE_RIGHT
 
 
 def test_handle_movement_packet_updates_session_position_and_orientation(monkeypatch) -> None:

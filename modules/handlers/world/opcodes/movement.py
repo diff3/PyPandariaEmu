@@ -784,6 +784,51 @@ def _apply_movement_flags(state, opcode_name: str) -> None:
         )
 
 
+def _clear_jump_fall_state(state) -> bool:
+    previous_flags = int(getattr(state, "flags", 0) or 0)
+    previous_has_fall_data = bool(getattr(state, "has_fall_data", False))
+    previous_fall_values = (
+        int(getattr(state, "fall_time", 0) or 0),
+        float(getattr(state, "fall_vertical_speed", 0.0) or 0.0),
+        float(getattr(state, "fall_horizontal_speed", 0.0) or 0.0),
+        float(getattr(state, "fall_sin_angle", 0.0) or 0.0),
+        float(getattr(state, "fall_cos_angle", 0.0) or 0.0),
+    )
+
+    state.flags = previous_flags & ~_MOVEMENTFLAG_FALLING
+    state.has_fall_data = False
+    state.fall_time = 0
+    state.fall_vertical_speed = 0.0
+    state.fall_horizontal_speed = 0.0
+    state.fall_sin_angle = 0.0
+    state.fall_cos_angle = 0.0
+
+    return (
+        previous_has_fall_data
+        or bool(previous_flags & _MOVEMENTFLAG_FALLING)
+        or any(value != 0 for value in previous_fall_values)
+    )
+
+
+def _clear_strafe_state(state) -> bool:
+    previous_flags = int(getattr(state, "flags", 0) or 0)
+    state.flags = previous_flags & ~(_MOVEMENTFLAG_STRAFE_LEFT | _MOVEMENTFLAG_STRAFE_RIGHT)
+    return int(state.flags) != previous_flags
+
+
+def _apply_early_movement_cleanup(session, opcode_name: str) -> None:
+    if opcode_name not in {"MSG_MOVE_FALL_LAND", "MSG_MOVE_STOP_STRAFE"}:
+        return
+
+    state = _movement_state(session)
+    if opcode_name == "MSG_MOVE_FALL_LAND":
+        if _clear_jump_fall_state(state):
+            Logger.debug("[LAND_RESET] cleared fall state")
+    elif opcode_name == "MSG_MOVE_STOP_STRAFE":
+        if _clear_strafe_state(state):
+            Logger.debug("[STOP_STRAFE_RESET] cleared strafe flags")
+
+
 def _extract_packet_timestamp(opcode_name: str, payload: bytes) -> int | None:
     if opcode_name == "MSG_MOVE_HEARTBEAT" and len(payload) >= 32:
         return int.from_bytes(payload[-4:], "little", signed=False)
@@ -957,7 +1002,21 @@ def _extract_skyfire_movement_from_payload(
                 candidate = struct.unpack_from("<f", payload, 20)[0]
                 normalized = _normalize_orientation(candidate)
                 if normalized is not None:
-                    orientation = float(normalized)
+                    previous_normalized = _normalize_orientation(
+                        float(getattr(session, "orientation", 0.0) or 0.0)
+                    )
+                    if (
+                        math.isclose(float(normalized), 0.0, abs_tol=1e-6)
+                        and previous_normalized is not None
+                        and not math.isclose(float(previous_normalized), 0.0, abs_tol=1e-6)
+                    ):
+                        Logger.debug(
+                            "[STOP_ORIENTATION_GUARD] opcode=%s preserved previous=%.3f parsed=0.000",
+                            opcode_name,
+                            float(previous_normalized),
+                        )
+                    else:
+                        orientation = float(normalized)
             except struct.error:
                 pass
         return (float(x), float(y), float(z), float(orientation))
@@ -1134,12 +1193,7 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
             state.fall_sin_angle = float(fall_data["fall_sin_angle"])
             state.fall_cos_angle = float(fall_data["fall_cos_angle"])
     elif opcode_name == "MSG_MOVE_FALL_LAND":
-        state.has_fall_data = False
-        state.fall_time = 0
-        state.fall_vertical_speed = 0.0
-        state.fall_horizontal_speed = 0.0
-        state.fall_sin_angle = 0.0
-        state.fall_cos_angle = 0.0
+        _clear_jump_fall_state(state)
     timestamp = _extract_packet_timestamp(opcode_name, payload)
     if timestamp is not None:
         state.timestamp_ms = int(timestamp) & 0xFFFFFFFF
@@ -1152,6 +1206,7 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
 
 def _store_authoritative_movement(session, opcode_name: str, payload: bytes, movement: tuple[float, float, float, float] | None) -> None:
     state = _movement_state(session)
+    _apply_early_movement_cleanup(session, opcode_name)
     incoming_timestamp = _extract_packet_timestamp(opcode_name, payload)
     if incoming_timestamp is not None and _is_stale_client_timestamp(state.timestamp_ms, incoming_timestamp):
         Logger.debug(
@@ -1384,6 +1439,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     Logger.debug(f"[MOVE] opcode={opcode_name}")
     _consume_pending_teleport_on_movement(session, opcode_name)
     _clear_dance_emote_state_on_move(session)
+    _apply_early_movement_cleanup(session, opcode_name)
 
     movement = parse_movement_info(session, opcode_name, ctx.payload, ctx.decoded)
     if movement is None:
