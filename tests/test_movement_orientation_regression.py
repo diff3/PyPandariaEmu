@@ -202,6 +202,26 @@ def test_parse_real_skyfire_fall_land_uses_yzx_prefix():
     assert orientation == session.orientation
 
 
+def test_parse_real_skyfire_40_byte_fall_land_uses_offset_36_orientation():
+    session = _session()
+    payload = bytes.fromhex(
+        "DFEC7D4643F948414F817D4682880000041000000000040CB2030000"
+        "D893FEC083B42C05C3A46240"
+    )
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_FALL_LAND",
+        payload,
+        decoded={},
+    )
+
+    assert parsed is not None
+    _x, _y, _z, orientation = parsed
+    assert round(orientation, 6) == round(3.541306257, 6)
+    assert round(orientation, 6) != round(struct.unpack_from("<f", payload, 32)[0], 6)
+
+
 def test_parse_real_skyfire_start_forward_uses_zxy_prefix_and_orientation():
     session = _session()
     payload = bytes.fromhex("EFD74F41CD867D4633F97D4628000000421000000000080C209BF6051C422940")
@@ -238,6 +258,25 @@ def test_parse_real_skyfire_stop_uses_xyz_prefix_and_orientation():
     assert round(y, 3) == round(16255.974609, 3)
     assert round(z, 3) == round(12.992843, 3)
     assert round(orientation, 3) == round(2.64466, 3)
+
+
+def test_parse_real_skyfire_32_byte_stop_uses_offset_24_orientation():
+    session = _session()
+    payload = bytes.fromhex(
+        "F6AA7D46820D7E466B50644112000002009000000000A00C208D8E4043922C05"
+    )
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_STOP",
+        payload,
+        decoded={},
+    )
+
+    assert parsed is not None
+    _x, _y, _z, orientation = parsed
+    assert round(orientation, 6) == round(4.454727173, 6)
+    assert round(orientation, 6) != round(struct.unpack_from("<f", payload, 20)[0], 6)
 
 
 def test_parse_real_skyfire_jump_uses_yxz_prefix_and_orientation():
@@ -506,6 +545,98 @@ def test_straight_heartbeat_real_payload_still_preserves_orientation():
     assert round(session.x, 3) == round(16222.623047, 3)
     assert session.orientation == 2.08364
     assert session.persist_orientation == 2.08364
+
+
+def test_straight_heartbeat_recovers_from_zero_orientation_with_last_valid_facing():
+    session = _session()
+    session.orientation = 0.0
+    state = movement._movement_state(session)
+    state.orientation = 0.0
+    state.last_valid_orientation = 4.900827
+    state.flags = movement._MOVEMENTFLAG_FORWARD
+    ctx = PacketContext(
+        sock=None,
+        direction="C→S",
+        opcode=0,
+        name="MSG_MOVE_HEARTBEAT",
+        payload=b"",
+        decoded={
+            "x": 11.0,
+            "y": 20.0,
+            "z": 30.0,
+            "facing": 4.900827,
+        },
+    )
+
+    movement.handle_movement_packet(session, ctx)
+
+    assert round(session.orientation, 6) == round(4.900827, 6)
+    assert round(session.persist_orientation, 6) == round(4.900827, 6)
+
+
+def test_airborne_heartbeat_accepts_valid_orientation_without_turn_flags():
+    session = _session()
+    session.x = 10.0
+    session.y = 20.0
+    session.z = 30.0
+    session.orientation = 4.900827
+    state = movement._movement_state(session)
+    state.x = 10.0
+    state.y = 20.0
+    state.z = 30.0
+    state.orientation = 4.900827
+    state.flags = movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_FALLING
+    state.has_fall_data = True
+    ctx = PacketContext(
+        sock=None,
+        direction="C→S",
+        opcode=0,
+        name="MSG_MOVE_HEARTBEAT",
+        payload=b"",
+        decoded={
+            "x": 11.0,
+            "y": 20.0,
+            "z": 31.0,
+            "facing": 0.839534,
+        },
+    )
+
+    movement.handle_movement_packet(session, ctx)
+
+    assert round(session.orientation, 6) == round(0.839534, 6)
+    assert round(movement._movement_state(session).orientation, 6) == round(0.839534, 6)
+    assert round(session.persist_orientation, 6) == round(0.839534, 6)
+
+
+def test_airborne_real_heartbeat_accepts_blood_elf_air_spin_orientation():
+    session = _session()
+    session.x = 16227.683
+    session.y = 16260.043
+    session.z = 14.873
+    session.orientation = 4.900827
+    state = movement._movement_state(session)
+    state.x = session.x
+    state.y = session.y
+    state.z = session.z
+    state.orientation = session.orientation
+    state.flags = movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_FALLING
+    state.has_fall_data = True
+    ctx = PacketContext(
+        sock=None,
+        direction="C→S",
+        opcode=0,
+        name="MSG_MOVE_HEARTBEAT",
+        payload=bytes.fromhex(
+            "6568764171557D4600057E46000000904540000821800C88A77C3F"
+            "4902253ECDCC0041D893FEC0A6020000A0E2063D77BE2C05"
+        ),
+        decoded={},
+    )
+
+    movement.handle_movement_packet(session, ctx)
+
+    assert round(session.orientation, 6) == round(0.032930970, 6)
+    assert round(movement._movement_state(session).orientation, 6) == round(0.032930970, 6)
 
 
 def test_turning_heartbeat_with_invalid_orientation_keeps_previous_orientation():

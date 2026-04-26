@@ -82,8 +82,45 @@ def _movement_state(session):
     state.server_movement_timestamp_ms = int(
         getattr(state, "server_movement_timestamp_ms", 0) or 0
     ) & 0xFFFFFFFF
+    state.last_valid_orientation = float(
+        getattr(
+            state,
+            "last_valid_orientation",
+            getattr(session, "last_valid_orientation", getattr(session, "orientation", 0.0)),
+        )
+        or 0.0
+    )
+    if math.isclose(float(state.last_valid_orientation), 0.0, abs_tol=1e-6):
+        session_orientation = _normalize_orientation(getattr(session, "orientation", None))
+        if session_orientation is not None and not math.isclose(
+            float(session_orientation),
+            0.0,
+            abs_tol=1e-6,
+        ):
+            state.last_valid_orientation = float(session_orientation)
     state.counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
     return state
+
+
+def _remember_valid_orientation(session, orientation: float | None) -> None:
+    normalized = _normalize_orientation(orientation)
+    if normalized is None or math.isclose(float(normalized), 0.0, abs_tol=1e-6):
+        return
+    state = _movement_state(session)
+    state.last_valid_orientation = float(normalized)
+    setattr(session, "last_valid_orientation", float(normalized))
+
+
+def _last_known_valid_orientation(session) -> float | None:
+    state = _movement_state(session)
+    for value in (
+        getattr(state, "last_valid_orientation", None),
+        getattr(session, "last_valid_orientation", None),
+    ):
+        normalized = _normalize_orientation(value)
+        if normalized is not None and not math.isclose(float(normalized), 0.0, abs_tol=1e-6):
+            return float(normalized)
+    return None
 
 
 def _sync_session_from_movement_state(session) -> None:
@@ -92,6 +129,7 @@ def _sync_session_from_movement_state(session) -> None:
     session.y = float(state.y)
     session.z = float(state.z)
     session.orientation = float(state.orientation)
+    _remember_valid_orientation(session, state.orientation)
 
 
 def _movement_flags_for_sync(session) -> int:
@@ -1055,14 +1093,24 @@ def _extract_skyfire_movement_from_payload(
     if opcode_name == "MSG_MOVE_STOP":
         # SkyFire 5.4.8 MovementStop starts with PositionX, PositionY, PositionZ.
         x, y, z = first, second, third
-        if len(payload) >= 24:
+        orientation_offsets = ()
+        if len(payload) >= 51:
+            # Jump/fall STOP variants carry extra control fields. The known
+            # captures do not place facing at the simple ground offsets.
+            orientation_offsets = ()
+        elif len(payload) >= 32:
+            orientation_offsets = (24,)
+        elif len(payload) >= 28:
+            orientation_offsets = (20,)
+        for offset in orientation_offsets:
             try:
-                candidate = struct.unpack_from("<f", payload, 20)[0]
-                normalized = _normalize_orientation(candidate)
-                if normalized is not None:
-                    orientation = float(normalized)
+                candidate = struct.unpack_from("<f", payload, offset)[0]
             except struct.error:
-                pass
+                continue
+            normalized = _normalize_orientation(candidate)
+            if normalized is not None:
+                orientation = float(normalized)
+                break
         return (float(x), float(y), float(z), float(orientation))
 
     if opcode_name == "MSG_MOVE_START_STRAFE_LEFT":
@@ -1180,8 +1228,10 @@ def _extract_skyfire_movement_from_payload(
         # SkyFire 5.4.8 MovementFallLand starts with PositionY, PositionZ, PositionX.
         y, z, x = first, second, third
         orientation_offsets = ()
-        if len(payload) >= 36:
-            orientation_offsets = (32, 24)
+        if len(payload) >= 40:
+            orientation_offsets = (36,)
+        elif len(payload) >= 36:
+            orientation_offsets = (32,)
         elif len(payload) >= 28:
             orientation_offsets = (24,)
         for offset in orientation_offsets:
@@ -1622,9 +1672,20 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                 movement_flags
                 & (_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
             )
+            is_airborne = bool(
+                movement_flags & _MOVEMENTFLAG_FALLING
+                or bool(getattr(state, "has_fall_data", False))
+            )
             if is_turning:
                 Logger.debug(
                     "[Movement] accepting turning %s orientation %.6f -> %.6f",
+                    opcode_name,
+                    float(previous_normalized_orientation),
+                    float(normalized_orientation),
+                )
+            elif is_airborne:
+                Logger.debug(
+                    "[Movement] accepting airborne %s orientation %.6f -> %.6f",
                     opcode_name,
                     float(previous_normalized_orientation),
                     float(normalized_orientation),
@@ -1656,14 +1717,37 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                     float(previous_normalized_orientation),
                     float(normalized_orientation),
                 )
-            if not is_turning:
-                normalized_orientation = float(previous_normalized_orientation)
+            if not (is_turning or is_airborne):
+                previous_is_zero = math.isclose(
+                    float(previous_normalized_orientation),
+                    0.0,
+                    abs_tol=1e-6,
+                )
+                incoming_is_nonzero = not math.isclose(
+                    float(normalized_orientation),
+                    0.0,
+                    abs_tol=1e-6,
+                )
+                if previous_is_zero and incoming_is_nonzero:
+                    recovered_orientation = _last_known_valid_orientation(session)
+                    if recovered_orientation is None:
+                        recovered_orientation = float(normalized_orientation)
+                    Logger.debug(
+                        "[Movement] recovering %s orientation %.6f -> %.6f",
+                        opcode_name,
+                        float(previous_normalized_orientation),
+                        float(recovered_orientation),
+                    )
+                    normalized_orientation = float(recovered_orientation)
+                else:
+                    normalized_orientation = float(previous_normalized_orientation)
 
     state = _movement_state(session)
     state.x = float(x)
     state.y = float(y)
     state.z = float(z)
     state.orientation = float(normalized_orientation)
+    _remember_valid_orientation(session, state.orientation)
     _sync_session_from_movement_state(session)
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
