@@ -33,6 +33,7 @@ from server.modules.handlers.world.position.area_service import resolve_zone_fro
 from server.modules.handlers.world.state.runtime import (
     broadcast_player_state_update,
     build_same_map_teleport_self_resync_responses,
+    force_bilateral_visibility_resync,
 )
 
 
@@ -52,6 +53,7 @@ _MOVEMENTFLAG_TURN_RIGHT = 0x00000020
 _MOVEMENTFLAG_LEFT = _MOVEMENTFLAG_TURN_LEFT
 _MOVEMENTFLAG_RIGHT = _MOVEMENTFLAG_TURN_RIGHT
 _MOVEMENTFLAG_FALLING = 0x00000800
+_MOVEMENTFLAG2_CIRCLE_RUN_SYNC = 0x00000800
 
 _SMSG_PLAYER_MOVE_JUMP_CONTROL_NO_DIRECTION = bytes.fromhex("8A0C0800000000")
 _SMSG_PLAYER_MOVE_JUMP_CONTROL_WITH_DIRECTION = bytes.fromhex("8A4C0800000000")
@@ -77,6 +79,9 @@ def _movement_state(session):
     state.flags2 = int(getattr(state, "flags2", 0) or 0)
     state.timestamp_ms = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
     state.client_timestamp_ms = int(getattr(state, "client_timestamp_ms", 0) or 0) & 0xFFFFFFFF
+    state.server_movement_timestamp_ms = int(
+        getattr(state, "server_movement_timestamp_ms", 0) or 0
+    ) & 0xFFFFFFFF
     state.counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
     return state
 
@@ -106,6 +111,19 @@ def _movement_timestamp_ms(session) -> int:
     return now_ms
 
 
+def _outbound_movement_timestamp_ms(session) -> int:
+    state = _movement_state(session)
+    existing = int(getattr(state, "server_movement_timestamp_ms", 0) or 0)
+    now_ms = int(time.time() * 1000.0) & 0xFFFFFFFF
+    if existing <= 0:
+        state.server_movement_timestamp_ms = now_ms
+        return now_ms
+    if now_ms <= existing:
+        now_ms = (existing + 1) & 0xFFFFFFFF
+    state.server_movement_timestamp_ms = now_ms
+    return now_ms
+
+
 def _has_valid_fall_direction(state) -> bool:
     horizontal_speed = float(getattr(state, "fall_horizontal_speed", 0.0) or 0.0)
     sin_angle = float(getattr(state, "fall_sin_angle", 0.0) or 0.0)
@@ -124,7 +142,7 @@ def build_smsg_player_move_payload_old(session) -> bytes | None:
     raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
     move_flags = int(state.flags)
     move_flags2 = int(state.flags2)
-    timestamp = _movement_timestamp_ms(session)
+    timestamp = _outbound_movement_timestamp_ms(session)
     x = float(state.x)
     y = float(state.y)
     z = float(state.z)
@@ -183,7 +201,7 @@ def build_smsg_player_move_payload_stable_old(session) -> bytes | None:
         return None
 
     raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
-    timestamp = _movement_timestamp_ms(session)
+    timestamp = _outbound_movement_timestamp_ms(session)
     x = float(state.x)
     y = float(state.y)
     z = float(state.z)
@@ -773,6 +791,7 @@ def _is_effectively_stationary(
 def _apply_movement_flags(state, opcode_name: str) -> None:
     previous_flags = int(getattr(state, "flags", 0) or 0)
     flags = int(previous_flags)
+    flags2 = int(getattr(state, "flags2", 0) or 0)
     if opcode_name == "MSG_MOVE_START_FORWARD":
         flags |= _MOVEMENTFLAG_FORWARD
         flags &= ~_MOVEMENTFLAG_BACKWARD
@@ -803,7 +822,15 @@ def _apply_movement_flags(state, opcode_name: str) -> None:
     elif opcode_name == "MSG_MOVE_FALL_LAND":
         flags &= ~_MOVEMENTFLAG_FALLING
         flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
+    if (
+        flags & _MOVEMENTFLAG_FORWARD
+        and flags & (_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
+    ):
+        flags2 |= _MOVEMENTFLAG2_CIRCLE_RUN_SYNC
+    else:
+        flags2 &= ~_MOVEMENTFLAG2_CIRCLE_RUN_SYNC
     state.flags = int(flags)
+    state.flags2 = int(flags2)
     if opcode_name in {
         "MSG_MOVE_START_FORWARD",
         "MSG_MOVE_START_BACKWARD",
@@ -853,14 +880,41 @@ def _clear_strafe_state(state) -> bool:
     return int(state.flags) != previous_flags
 
 
+def _clear_landed_movement_state(state) -> bool:
+    previous_flags = int(getattr(state, "flags", 0) or 0)
+    previous_turning = bool(previous_flags & (_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT))
+    changed = _clear_jump_fall_state(state)
+    state.flags = int(getattr(state, "flags", 0) or 0) & ~(
+        _MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT
+    )
+    return changed or previous_turning
+
+
 def _apply_early_movement_cleanup(session, opcode_name: str) -> None:
-    if opcode_name not in {"MSG_MOVE_FALL_LAND", "MSG_MOVE_STOP_STRAFE"}:
+    if opcode_name not in {
+        "MSG_MOVE_FALL_LAND",
+        "MSG_MOVE_START_FORWARD",
+        "MSG_MOVE_STOP",
+        "MSG_MOVE_STOP_STRAFE",
+    }:
         return
 
     state = _movement_state(session)
     if opcode_name == "MSG_MOVE_FALL_LAND":
         if _clear_jump_fall_state(state):
             Logger.debug("[LAND_RESET] cleared fall state")
+    elif opcode_name in {"MSG_MOVE_START_FORWARD", "MSG_MOVE_STOP"}:
+        has_fall_state = (
+            bool(getattr(state, "has_fall_data", False))
+            or bool(int(getattr(state, "flags", 0) or 0) & _MOVEMENTFLAG_FALLING)
+        )
+        if has_fall_state:
+            if _clear_landed_movement_state(state):
+                Logger.debug(
+                    "[POST_JUMP_RESET] opcode=%s cleared fall/turn state flags=0x%X",
+                    opcode_name,
+                    int(getattr(state, "flags", 0) or 0),
+                )
     elif opcode_name == "MSG_MOVE_STOP_STRAFE":
         if _clear_strafe_state(state):
             Logger.debug("[STOP_STRAFE_RESET] cleared strafe flags")
@@ -962,7 +1016,10 @@ def _extract_skyfire_movement_from_payload(
         if len(payload) >= 51:
             orientation_offsets = (23, 20)
         elif len(payload) >= 32:
-            orientation_offsets = (18, 20)
+            # The 32-byte heartbeat facing field matches START/STOP_TURN at
+            # offset 24. Offset 18 sits inside the packed flag block and
+            # decodes to stable garbage such as 2.515625 for TURN_RIGHT.
+            orientation_offsets = (24,)
         for offset in orientation_offsets:
             try:
                 candidate = struct.unpack_from("<f", payload, offset)[0]
@@ -1247,13 +1304,28 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
     incoming_timestamp = _extract_packet_timestamp(opcode_name, payload)
     if incoming_timestamp is not None and _is_stale_client_timestamp(state.timestamp_ms, incoming_timestamp):
         Logger.debug(
-            "[Movement] ignoring stale %s timestamp current=%u incoming=%u",
+            "[Movement] ignoring stale %s timestamp current=%u incoming=%u "
+            "outbound=%u flags=0x%X orientation=%.6f fall=%s",
             opcode_name,
             int(state.timestamp_ms),
             int(incoming_timestamp),
+            int(getattr(state, "server_movement_timestamp_ms", 0) or 0),
+            int(getattr(state, "flags", 0) or 0),
+            float(getattr(state, "orientation", 0.0) or 0.0),
+            bool(getattr(state, "has_fall_data", False)),
         )
         return False
     _record_movement_packet_state(session, opcode_name, payload)
+    current_flags = int(getattr(state, "flags", 0) or 0)
+    if opcode_name == "MSG_MOVE_STOP" and current_flags & (
+        _MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT
+    ):
+        Logger.debug(
+            "[Movement] STOP left active turn flags=0x%X timestamp=%u outbound=%u",
+            current_flags,
+            int(getattr(state, "timestamp_ms", 0) or 0),
+            int(getattr(state, "server_movement_timestamp_ms", 0) or 0),
+        )
     if movement is not None:
         x, y, z, orientation = movement
         state.x = float(x)
@@ -1541,7 +1613,20 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         )
     elif opcode_name == "MSG_MOVE_HEARTBEAT":
         if previous_normalized_orientation is not None:
-            if opcode_name == "MSG_MOVE_HEARTBEAT" and _is_effectively_stationary(
+            state = _movement_state(session)
+            movement_flags = int(getattr(state, "flags", 0) or 0)
+            is_turning = bool(
+                movement_flags
+                & (_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
+            )
+            if is_turning:
+                Logger.debug(
+                    "[Movement] accepting turning %s orientation %.6f -> %.6f",
+                    opcode_name,
+                    float(previous_normalized_orientation),
+                    float(normalized_orientation),
+                )
+            elif _is_effectively_stationary(
                 session,
                 x,
                 y,
@@ -1568,7 +1653,8 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                     float(previous_normalized_orientation),
                     float(normalized_orientation),
                 )
-            normalized_orientation = float(previous_normalized_orientation)
+            if not is_turning:
+                normalized_orientation = float(previous_normalized_orientation)
 
     state = _movement_state(session)
     state.x = float(x)
@@ -1651,6 +1737,7 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
     _mark_position_dirty(session)
     _save_session_position(session, reason="near-teleport", online=1, force=True)
     broadcast_player_state_update(session, force=True)
+    force_bilateral_visibility_resync(session, reason="near-teleport-ack")
     if fixspeed_pending:
         self_resync_responses = build_same_map_teleport_self_resync_responses(session)
     else:
@@ -1709,6 +1796,7 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
     _mark_position_dirty(session)
     _save_session_position(session, reason="worldport", online=1, force=True)
     broadcast_player_state_update(session, force=True)
+    force_bilateral_visibility_resync(session, reason="worldport-ack")
 
     Logger.info(
         "[Teleport] world transfer ack destination=%s pos=(%.2f %.2f %.2f %.2f)",

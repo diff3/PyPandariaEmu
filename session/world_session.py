@@ -25,6 +25,7 @@ class MovementState:
     flags2: int = 0
     timestamp_ms: int = 0
     client_timestamp_ms: int = 0
+    server_movement_timestamp_ms: int = 0
     counter: int = 0
     has_fall_data: bool = False
     fall_time: int = 0

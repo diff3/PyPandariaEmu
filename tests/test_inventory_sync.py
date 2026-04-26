@@ -205,6 +205,38 @@ def test_self_visible_item_update_uses_equipment_slots_not_raw_cache_order():
     assert update["fields"]["u32"][0:4] == [0, 0, 4321, 0]
 
 
+def test_inventory_delta_remove_equipped_item_clears_visible_slot():
+    session = _FakeSession()
+    state = _InventoryState()
+    session.inventory_state = state
+    session.known_inventory_guids = {
+        inventory_sync._make_item_world_guid(2001),
+    }
+    result = SimpleNamespace(
+        changed_positions=((0, 4),),
+        changed_items=(),
+        released_items=(),
+        removed_item_guids=(2001,),
+        created_item_guids=(),
+    )
+
+    responses = inventory_sync.build_inventory_delta_responses(session, result)
+    updates = []
+    for opcode, payload in responses:
+        if opcode != "SMSG_UPDATE_OBJECT":
+            continue
+        updates.extend(dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)["updates"])
+
+    visible_field = inventory_sync._PLAYER_FIELD_VISIBLE_ITEMS + (4 * 2)
+    visible_updates = [
+        update for update in updates
+        if update.get("guid") == session.char_guid
+        and update["mask"]["set_bits"] == [visible_field, visible_field + 1]
+    ]
+    assert visible_updates
+    assert visible_updates[0]["fields"]["u32"] == [0, 0]
+
+
 def test_item_snapshot_uses_bag_guid_as_contained_in_for_bag_contents():
     session = _FakeSession()
     state = _InventoryState()

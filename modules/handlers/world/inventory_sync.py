@@ -622,6 +622,13 @@ def _build_self_visible_item_slot_update_responses(session, slot: int, display_i
     session.equipment_cache_raw = cached
 
     field_index = _PLAYER_FIELD_VISIBLE_ITEMS + (int(slot) * 2)
+    Logger.debug(
+        "[VISIBLE_SLOT] player=%s slot=%s field=%s entry=%s enchant=0",
+        int(getattr(session, "char_guid", 0) or 0),
+        int(slot),
+        int(field_index),
+        int(display_id),
+    )
     return [
         (
             "SMSG_UPDATE_OBJECT",

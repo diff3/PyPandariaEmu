@@ -13,6 +13,7 @@ from shared.ConfigLoader import ConfigLoader
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.handlers.world.position.position_service import position_delta, position_from_session
 from server.modules.handlers.world.state.global_state import global_state
+from server.modules.handlers.world.state.player_visible_snapshot import build_player_visible_snapshot
 from server.modules.handlers.world.state.region_manager import region_manager
 
 PLAYER_VISIBILITY_DISTANCE = 120.0
@@ -623,8 +624,6 @@ def _build_player_create_responses(source_session) -> list[tuple[str, bytes]]:
 
 
 def _send_player_create(observer_session, source_session) -> bool:
-    from server.modules.handlers.world.inventory_sync import build_self_visible_item_update_responses
-
     source_guid = _session_guid(source_session)
     if source_guid <= 0:
         return False
@@ -633,16 +632,17 @@ def _send_player_create(observer_session, source_session) -> bool:
     if source_guid in visible_guids:
         return False
 
+    from server.modules.handlers.world.inventory_sync import build_self_visible_item_update_responses
+
     responses = _build_player_create_responses(source_session)
     if responses:
         responses.extend(build_self_visible_item_update_responses(source_session))
     if not responses:
         return False
 
-    # --- LOG START ---
     observer_guid = int(getattr(observer_session, "char_guid", 0) or 0)
-    source_guid = int(getattr(source_session, "char_guid", 0) or 0)
-    tag = "SELF" if observer_guid == source_guid else "OTHER"
+    visible_snapshot = build_player_visible_snapshot(source_session)
+    tag = "SELF" if observer_guid == int(visible_snapshot.guid) else "OTHER"
 
     for opcode, payload in responses:
         if opcode != "SMSG_UPDATE_OBJECT":
@@ -665,7 +665,13 @@ def _send_player_create(observer_session, source_session) -> bool:
             Logger.info(
                 f"[CREATE SEND {tag}] "
                 f"observer={observer_guid} "
-                f"source={source_guid} "
+                f"source={int(visible_snapshot.guid)} "
+                f"map={int(visible_snapshot.map_id)} "
+                f"pos=({float(visible_snapshot.x):.3f},"
+                f"{float(visible_snapshot.y):.3f},"
+                f"{float(visible_snapshot.z):.3f},"
+                f"{float(visible_snapshot.orientation):.3f}) "
+                f"mount={int(visible_snapshot.mount_display_id)} "
                 f"create_guid={create_guid} "
                 f"mask_words={mask_blocks} "
                 f"fields={len(field_indices)} "
@@ -674,7 +680,6 @@ def _send_player_create(observer_session, source_session) -> bool:
 
         except Exception as exc:
             Logger.warning(f"[CREATE LOG ERROR] {exc}")
-    # --- LOG END ---
 
     dispatch_responses_to_sessions([observer_session], responses)
     visible_guids.add(source_guid)
@@ -774,6 +779,61 @@ def sync_player_visibility(target_session) -> None:
     )
 
 
+def force_bilateral_visibility_resync(target_session, *, reason: str = "manual") -> None:
+    """Rebuild both visibility directions for one player using normal paths."""
+    if not _is_session_in_world(target_session):
+        return
+
+    target_guid = _session_guid(target_session)
+    if target_guid <= 0:
+        return
+
+    same_map_sessions = iter_in_world_sessions(
+        map_id=int(getattr(target_session, "map_id", 0) or 0)
+    )
+    other_sessions = [
+        session for session in same_map_sessions if session is not target_session
+    ]
+    if not other_sessions:
+        return
+
+    created_for_target = 0
+    created_for_peers = 0
+    removed_links = 0
+
+    for other in other_sessions:
+        other_guid = _session_guid(other)
+        if other_guid <= 0:
+            continue
+
+        if _sessions_in_visibility_range(target_session, other):
+            _visible_guid_set(target_session).discard(other_guid)
+            _visible_guid_set(other).discard(target_guid)
+            if _send_player_create(target_session, other):
+                created_for_target += 1
+            if _send_player_create(other, target_session):
+                created_for_peers += 1
+            continue
+
+        if _send_player_remove(target_session, other):
+            removed_links += 1
+        if _send_player_remove(other, target_session):
+            removed_links += 1
+
+    Logger.info(
+        "[MULTI] forced bilateral visibility player=%s map=%s reason=%s "
+        "peers=%s created_for_player=%s created_for_peers=%s removed=%s visible=%s",
+        int(target_guid),
+        int(getattr(target_session, "map_id", 0) or 0),
+        str(reason),
+        len(other_sessions),
+        int(created_for_target),
+        int(created_for_peers),
+        int(removed_links),
+        len(_visible_guid_set(target_session)),
+    )
+
+
 def sync_all_players_on_map(map_id: int) -> None:
     sessions = iter_in_world_sessions(map_id=int(map_id))
     if len(sessions) < 2:
@@ -825,6 +885,40 @@ def resync_player_appearance(source_session) -> None:
     Logger.info(
         f"[MULTI] appearance resync player={int(getattr(source_session, 'char_guid', 0) or 0)} "
         f"map={int(getattr(source_session, 'map_id', 0) or 0)} peers={len(peers)}"
+    )
+
+
+def broadcast_visible_equipment_update(source_session) -> None:
+    """Send current visible equipment fields to peers already seeing source."""
+    from server.modules.handlers.world.inventory_sync import build_self_visible_item_update_responses
+
+    if not _is_session_in_world(source_session):
+        return
+
+    source_guid = _session_guid(source_session)
+    if source_guid <= 0:
+        return
+
+    responses = build_self_visible_item_update_responses(source_session)
+    if not responses:
+        return
+
+    peers = [
+        session
+        for session in iter_in_world_sessions(
+            map_id=int(getattr(source_session, "map_id", 0) or 0)
+        )
+        if session is not source_session and source_guid in _visible_guid_set(session)
+    ]
+    if not peers:
+        return
+
+    dispatch_responses_to_sessions(peers, responses)
+    Logger.info(
+        "[MULTI] visible equipment update player=%s map=%s peers=%s",
+        int(source_guid),
+        int(getattr(source_session, "map_id", 0) or 0),
+        len(peers),
     )
 
 

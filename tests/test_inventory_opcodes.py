@@ -23,6 +23,7 @@ def _import_inventory_handlers():
             "encode_skyfire_messagechat_system_payload": lambda message: message.encode(),
         },
         "server.modules.handlers.world.state.runtime": {
+            "broadcast_visible_equipment_update": lambda session: None,
             "resync_player_appearance": lambda session: None,
             "build_self_player_appearance_responses": lambda session: [],
         },
@@ -80,6 +81,7 @@ def test_autoequip_item_uses_decoded_fields(monkeypatch):
 
 def test_autoequip_item_resyncs_peer_appearance_when_equipment_changes(monkeypatch):
     calls = []
+    visible_calls = []
     resync_calls = []
     result = SimpleNamespace(
         ok=True,
@@ -94,6 +96,11 @@ def test_autoequip_item_resyncs_peer_appearance_when_equipment_changes(monkeypat
         ),
     )
     monkeypatch.setattr(inventory_handlers, "build_inventory_delta_responses", lambda session, current_result: [])
+    monkeypatch.setattr(
+        inventory_handlers,
+        "broadcast_visible_equipment_update",
+        lambda session: visible_calls.append(session),
+    )
     monkeypatch.setattr(
         inventory_handlers,
         "resync_player_appearance",
@@ -112,6 +119,7 @@ def test_autoequip_item_resyncs_peer_appearance_when_equipment_changes(monkeypat
     assert status == 0
     assert responses is None
     assert calls == [(255, 24)]
+    assert visible_calls == [session]
     assert resync_calls == [session]
 
 

@@ -25,6 +25,7 @@ from server.modules.handlers.world.inventory_sync import (
 from server.modules.handlers.world.packet_logging import log_cmsg
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.handlers.world.state.runtime import (
+    broadcast_visible_equipment_update,
     resync_player_appearance,
 )
 
@@ -245,6 +246,7 @@ def _result_to_response(
     if result.ok:
         responses = build_inventory_delta_responses(session, result)
         if inventory_result_affects_equipment(result):
+            broadcast_visible_equipment_update(session)
             resync_player_appearance(session)
         return 0, responses or None
     responses: list[tuple[str, bytes]] = []

@@ -193,6 +193,11 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
     )
     monkeypatch.setattr(
         movement,
+        "force_bilateral_visibility_resync",
+        lambda target, *, reason: calls.append(("visibility", reason)),
+    )
+    monkeypatch.setattr(
+        movement,
         "build_same_map_teleport_self_resync_responses",
         lambda target: [("SMSG_UPDATE_OBJECT", b"0006")],
     )
@@ -217,6 +222,7 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
         ("dirty", session),
         ("save", {"reason": "near-teleport", "online": 1, "force": True}),
         ("broadcast", True),
+        ("visibility", "near-teleport-ack"),
     ]
 
 
@@ -233,6 +239,7 @@ def test_same_map_teleport_ack_with_fixspeed_refreshes_speed_and_player_move(mon
     monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
     monkeypatch.setattr(movement, "_save_session_position", lambda target, **kwargs: None)
     monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, *, force=False: None)
+    monkeypatch.setattr(movement, "force_bilateral_visibility_resync", lambda target, *, reason: None)
     monkeypatch.setattr(
         movement,
         "build_same_map_teleport_self_resync_responses",
@@ -280,10 +287,16 @@ def test_worldport_ack_keeps_teleport_pending_for_loading_screen_completion(monk
     session.worldport_ack_pending = True
     session.teleport_destination = "Silvermoon"
 
+    calls = []
     monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
     monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
     monkeypatch.setattr(movement, "_save_session_position", lambda target, **kwargs: None)
     monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, *, force=False: None)
+    monkeypatch.setattr(
+        movement,
+        "force_bilateral_visibility_resync",
+        lambda target, *, reason: calls.append((target, reason)),
+    )
     monkeypatch.setattr(
         movement,
         "encode_skyfire_messagechat_system_payload",
@@ -298,6 +311,7 @@ def test_worldport_ack_keeps_teleport_pending_for_loading_screen_completion(monk
     assert session.near_teleport_pending is False
     assert session.teleport_destination == "Silvermoon"
     assert responses == [("SMSG_MESSAGECHAT", b"[Teleport] worldport ack -> Silvermoon")]
+    assert calls == [(session, "worldport-ack")]
 
 
 def test_areatrigger_same_map_can_teleport_again_after_ack(monkeypatch):

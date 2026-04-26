@@ -16,6 +16,45 @@ database_module.DatabaseConnection = type("DatabaseConnection", (), {})
 sys.modules.setdefault("server.modules.database.DatabaseConnection", database_module)
 
 from server.modules.handlers.world.opcodes import movement
+from server.modules.handlers.world.state.player_visible_snapshot import (
+    build_player_visible_snapshot,
+)
+
+
+def _payload_bits_msb(payload: bytes):
+    for byte in payload:
+        for bit in range(7, -1, -1):
+            yield (byte >> bit) & 1
+
+
+def _read_bits(bit_iter, width: int) -> int:
+    value = 0
+    for _index in range(width):
+        value = (value << 1) | next(bit_iter)
+    return value
+
+
+def _decode_smsg_player_move_state(payload: bytes) -> tuple[int, int, float]:
+    bit_iter = _payload_bits_msb(payload)
+    _read_bits(bit_iter, 5)
+    has_orientation = not bool(_read_bits(bit_iter, 1))
+    _read_bits(bit_iter, 6)
+    has_flags = not bool(_read_bits(bit_iter, 1))
+    _read_bits(bit_iter, 1)
+    movement_flags = _read_bits(bit_iter, 30) if has_flags else 0
+    has_flags2 = not bool(_read_bits(bit_iter, 1))
+    _read_bits(bit_iter, 3)
+    movement_flags2 = _read_bits(bit_iter, 13) if has_flags2 else 0
+    _read_bits(bit_iter, 24)
+
+    offset = 11 if has_flags2 else 9
+    _y = struct.unpack_from("<f", payload, offset)[0]
+    offset += 4
+    _z = struct.unpack_from("<f", payload, offset)[0]
+    offset += 4
+    offset += 4  # timestamp
+    orientation = struct.unpack_from("<f", payload, offset)[0] if has_orientation else 0.0
+    return movement_flags, movement_flags2, orientation
 
 
 def test_build_smsg_player_move_payload_uses_session_state() -> None:
@@ -38,6 +77,293 @@ def test_build_smsg_player_move_payload_uses_session_state() -> None:
     assert struct.pack("<f", 3.5) in payload
     assert struct.pack("<f", 1.5) in payload
     assert struct.pack("<f", 0.75) in payload
+
+
+def test_peer_move_build_does_not_advance_inbound_timestamp(monkeypatch) -> None:
+    monkeypatch.setattr(movement.time, "time", lambda: 1.010)
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=1.0,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=1,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+    )
+    session = SimpleNamespace(char_guid=2, world_guid=2, movement_state=state)
+    start_turn_payload = (b"\x00" * 20) + (1000).to_bytes(4, "little")
+    stop_turn_payload = (b"\x00" * 20) + (1001).to_bytes(4, "little")
+
+    ok = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_START_TURN_RIGHT",
+        start_turn_payload,
+        None,
+    )
+    assert ok is True
+    assert state.timestamp_ms == 1000
+    assert state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+
+    payload = movement.build_smsg_player_move_payload(session)
+
+    assert payload is not None
+    assert state.timestamp_ms == 1000
+    assert state.server_movement_timestamp_ms == 1010
+
+    ok = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_STOP_TURN",
+        stop_turn_payload,
+        None,
+    )
+
+    assert ok is True
+    assert state.timestamp_ms == 1001
+    assert not state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+
+
+def test_stop_turn_after_peer_move_build_clears_peer_turn_flags(monkeypatch) -> None:
+    monkeypatch.setattr(movement.time, "time", lambda: 1.010)
+    state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=1,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+    )
+    session = SimpleNamespace(
+        char_guid=2,
+        world_guid=2,
+        map_id=1,
+        zone=1,
+        movement_state=state,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+    )
+    start_turn_payload = (b"\x00" * 20) + (1000).to_bytes(4, "little")
+    stop_turn_payload = (b"\x00" * 20) + (1001).to_bytes(4, "little")
+
+    assert movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_START_TURN_RIGHT",
+        start_turn_payload,
+        None,
+    )
+    assert movement.build_smsg_player_move_payload(session) is not None
+    assert movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_STOP_TURN",
+        stop_turn_payload,
+        None,
+    )
+
+    payload = movement.build_smsg_player_move_payload(session)
+    movement_flags, _movement_flags2, _orientation = _decode_smsg_player_move_state(payload)
+
+    assert not state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+    assert not movement_flags & movement._MOVEMENTFLAG_TURN_RIGHT
+
+
+def test_forward_turn_right_sets_reference_flags2_for_peer_prediction() -> None:
+    state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=1,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+    )
+    session = SimpleNamespace(
+        char_guid=2,
+        world_guid=2,
+        map_id=1,
+        zone=1,
+        movement_state=state,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+    )
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_FORWARD", b"", None)
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_TURN_RIGHT", b"", None)
+
+    payload = movement.build_smsg_player_move_payload(session)
+    movement_flags, movement_flags2, _orientation = _decode_smsg_player_move_state(payload)
+
+    assert movement_flags == (
+        movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_TURN_RIGHT
+    )
+    assert movement_flags2 == movement._MOVEMENTFLAG2_CIRCLE_RUN_SYNC
+    assert payload[:8].hex() == "8810000002104000"
+
+
+def test_forward_turn_left_sets_reference_flags2_for_peer_prediction() -> None:
+    state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=1,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+    )
+    session = SimpleNamespace(
+        char_guid=2,
+        world_guid=2,
+        map_id=1,
+        zone=1,
+        movement_state=state,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+    )
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_FORWARD", b"", None)
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_TURN_LEFT", b"", None)
+
+    payload = movement.build_smsg_player_move_payload(session)
+    movement_flags, movement_flags2, _orientation = _decode_smsg_player_move_state(payload)
+
+    assert movement_flags == (
+        movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_TURN_LEFT
+    )
+    assert movement_flags2 == movement._MOVEMENTFLAG2_CIRCLE_RUN_SYNC
+    assert payload[:8].hex() == "8810000001104000"
+
+
+def test_circle_run_flags2_clears_when_combination_ends() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=0,
+    )
+    session = SimpleNamespace(movement_state=state)
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_FORWARD", b"", None)
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_TURN_RIGHT", b"", None)
+    assert state.flags2 & movement._MOVEMENTFLAG2_CIRCLE_RUN_SYNC
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_STOP_TURN", b"", None)
+    assert not state.flags2 & movement._MOVEMENTFLAG2_CIRCLE_RUN_SYNC
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_START_TURN_LEFT", b"", None)
+    assert state.flags2 & movement._MOVEMENTFLAG2_CIRCLE_RUN_SYNC
+
+    movement._store_authoritative_movement(session, "MSG_MOVE_STOP", b"", None)
+    assert not state.flags2 & movement._MOVEMENTFLAG2_CIRCLE_RUN_SYNC
+
+
+def test_post_jump_ground_movement_clears_fall_and_turn_state() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=movement._MOVEMENTFLAG_FALLING | movement._MOVEMENTFLAG_TURN_RIGHT,
+        flags2=0,
+        timestamp_ms=1000,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=True,
+        fall_time=123,
+        fall_vertical_speed=-7.9,
+        fall_horizontal_speed=2.0,
+        fall_sin_angle=0.47,
+        fall_cos_angle=-0.88,
+    )
+    session = SimpleNamespace(movement_state=state)
+
+    ok = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_START_FORWARD",
+        b"",
+        (1.0, 2.0, 3.0, 0.5),
+    )
+
+    assert ok is True
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert not state.flags & movement._MOVEMENTFLAG_FALLING
+    assert not state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+    assert state.has_fall_data is False
+    assert state.fall_time == 0
+    assert state.fall_vertical_speed == 0.0
+
+
+def test_snapshot_and_smsg_player_move_agree_on_orientation_and_flags() -> None:
+    state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.75,
+        flags=movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_TURN_LEFT,
+        flags2=movement._MOVEMENTFLAG2_CIRCLE_RUN_SYNC,
+        timestamp_ms=1000,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=1,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+    )
+    session = SimpleNamespace(
+        char_guid=2,
+        world_guid=2,
+        map_id=1,
+        zone=1,
+        movement_state=state,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.75,
+    )
+
+    snapshot = build_player_visible_snapshot(session)
+    payload = movement.build_smsg_player_move_payload(session)
+    movement_flags, movement_flags2, orientation = _decode_smsg_player_move_state(payload)
+
+    assert snapshot.orientation == 1.75
+    assert round(orientation, 6) == round(snapshot.orientation, 6)
+    assert movement_flags == snapshot.movement_flags
+    assert movement_flags2 == snapshot.movement_flags2
 
 
 def test_build_smsg_player_move_payload_no_fall_output_unchanged(monkeypatch) -> None:
