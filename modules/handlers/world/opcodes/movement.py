@@ -1014,7 +1014,10 @@ def _extract_skyfire_movement_from_payload(
         z, x, y = first, second, third
         orientation_offsets = ()
         if len(payload) >= 51:
-            orientation_offsets = (23, 20)
+            # The 51-byte heartbeat carries jump/fall control data before
+            # facing. SkyFire captures place facing at offset 43; offsets 23
+            # and 20 read airborne sin/cos or packed movement data.
+            orientation_offsets = (43,)
         elif len(payload) >= 32:
             # The 32-byte heartbeat facing field matches START/STOP_TURN at
             # offset 24. Offset 18 sits inside the packed flag block and

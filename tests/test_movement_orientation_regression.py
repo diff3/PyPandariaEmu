@@ -143,6 +143,46 @@ def test_parse_real_turning_heartbeat_left_uses_offset_24_orientation():
     assert round(orientation, 6) != round(struct.unpack_from("<f", payload, 18)[0], 6)
 
 
+def test_parse_real_airborne_heartbeat_uses_offset_43_orientation():
+    session = _session()
+    payload = bytes.fromhex(
+        "A96B7741C1A27D4600FB7D46000000904540000800800C433FC7BE"
+        "F6D16BBF00000000D893FEC0F4010000C3A4624015A52C05"
+    )
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_HEARTBEAT",
+        payload,
+        decoded={},
+    )
+
+    assert parsed is not None
+    _x, _y, _z, orientation = parsed
+    assert round(orientation, 6) == round(3.541306257, 6)
+    assert round(orientation, 6) != round(struct.unpack_from("<f", payload, 23)[0], 6)
+
+
+def test_parse_real_air_spin_heartbeat_uses_offset_43_orientation():
+    session = _session()
+    payload = bytes.fromhex(
+        "6568764171557D4600057E46000000904540000821800C88A77C3F"
+        "4902253ECDCC0041D893FEC0A6020000A0E2063D77BE2C05"
+    )
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_HEARTBEAT",
+        payload,
+        decoded={},
+    )
+
+    assert parsed is not None
+    _x, _y, _z, orientation = parsed
+    assert round(orientation, 6) == round(0.032930970, 6)
+    assert round(orientation, 6) != round(struct.unpack_from("<f", payload, 23)[0], 6)
+
+
 def test_parse_real_skyfire_fall_land_uses_yzx_prefix():
     session = _session()
     payload = bytes.fromhex("F1107E46E355564137907D46828800000C1000090F00000000000000A27BF6057FFD8240")
