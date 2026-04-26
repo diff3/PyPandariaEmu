@@ -22,6 +22,7 @@ sys.modules.setdefault("server.modules.database.DatabaseConnection", database_mo
 
 replay_module = types.ModuleType("server.modules.handlers.world.bootstrap.replay")
 replay_module.build_single_u32_update_object_payload = lambda **kwargs: b""
+replay_module.build_multi_u32_update_object_payload = lambda **kwargs: b""
 replay_module.build_database_gameobject_responses = lambda session, loaded_guids=None: []
 sys.modules["server.modules.handlers.world.bootstrap.replay"] = replay_module
 
@@ -223,6 +224,49 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
         ("save", {"reason": "near-teleport", "online": 1, "force": True}),
         ("broadcast", True),
         ("visibility", "near-teleport-ack"),
+    ]
+
+
+def test_same_map_teleport_ack_refreshes_mounted_state(monkeypatch):
+    from server.modules.handlers.world.opcodes import spells as spells_handlers
+
+    session = _FakeSession()
+    session.is_mounted = True
+    session.mount_display_id = 2404
+    session.mount_spell = 59535
+    session.run_speed = 14.0
+    session.fly_speed = 14.0
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
+    monkeypatch.setattr(movement, "_save_session_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, *, force=False: calls.append(("broadcast", force)))
+    monkeypatch.setattr(movement, "force_bilateral_visibility_resync", lambda target, *, reason: calls.append(("visibility", reason)))
+    monkeypatch.setattr(movement, "build_same_map_teleport_self_resync_responses", lambda target: [])
+    monkeypatch.setattr(movement, "build_move_set_run_speed_payload", lambda target: b"run-speed")
+    monkeypatch.setattr(movement, "build_move_set_flight_speed_payload", lambda target: b"flight-speed")
+    monkeypatch.setattr(movement, "build_smsg_player_move_payload", lambda target: b"move")
+    monkeypatch.setattr(movement, "encode_skyfire_messagechat_system_payload", lambda message: message.encode("utf-8"))
+    monkeypatch.setattr(spells_handlers, "build_mount_visual_responses", lambda target, display_id: [
+        ("SMSG_UPDATE_OBJECT", f"mount:{display_id}".encode("ascii"))
+    ])
+    monkeypatch.setattr(spells_handlers, "_broadcast_mount_visual_to_visible_peers", lambda target, display_id: calls.append(("mount-peers", display_id)))
+
+    status, responses = movement.handle_move_teleport_ack(session, None)
+
+    assert status == 0
+    assert responses == [
+        ("SMSG_MESSAGECHAT", b"[Teleport] same-map ack -> Orgrimmar"),
+        ("SMSG_UPDATE_OBJECT", b"mount:2404"),
+        ("SMSG_MOVE_SET_RUN_SPEED", b"run-speed"),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight-speed"),
+        ("SMSG_PLAYER_MOVE", b"move"),
+    ]
+    assert calls == [
+        ("broadcast", True),
+        ("visibility", "near-teleport-ack"),
+        ("mount-peers", 2404),
     ]
 
 

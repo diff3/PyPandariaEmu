@@ -305,6 +305,11 @@ def test_force_bilateral_visibility_resync_recreates_both_directions(monkeypatch
     target.visible_guids.add(peer.char_guid)
 
     monkeypatch.setattr(runtime, "iter_in_world_sessions", lambda map_id=None: [target, peer])
+    monkeypatch.setattr(
+        runtime,
+        "_build_player_remove_update_response",
+        lambda session, **kwargs: ("SMSG_UPDATE_OBJECT", f"remove:{session.char_guid}".encode("ascii")),
+    )
     monkeypatch.setattr(runtime, "_build_player_create_responses", lambda session: [
         ("SMSG_UPDATE_OBJECT", f"create:{session.char_guid}".encode("ascii"))
     ])
@@ -319,14 +324,44 @@ def test_force_bilateral_visibility_resync_recreates_both_directions(monkeypatch
 
     assert peer.char_guid in target.visible_guids
     assert target.char_guid in peer.visible_guids
-    assert target.send_response_log == [[
-        ("SMSG_UPDATE_OBJECT", b"create:8"),
-        ("SMSG_UPDATE_OBJECT", b"visible:8"),
-    ]]
+    assert target.send_response_log == [
+        [("SMSG_UPDATE_OBJECT", b"remove:8")],
+        [
+            ("SMSG_UPDATE_OBJECT", b"create:8"),
+            ("SMSG_UPDATE_OBJECT", b"visible:8"),
+        ],
+    ]
     assert peer.send_response_log == [[
         ("SMSG_UPDATE_OBJECT", b"create:7"),
         ("SMSG_UPDATE_OBJECT", b"visible:7"),
     ]]
+
+
+def test_force_player_visibility_destroy_sends_old_observer_destroy(monkeypatch):
+    state = GlobalState()
+    target = _make_session(name="Target", guid=7, map_id=1, state=state)
+    peer = _make_session(name="Peer", guid=8, map_id=1, state=state)
+    hidden = _make_session(name="Hidden", guid=9, map_id=1, state=state)
+    target.visible_guids.add(peer.char_guid)
+    peer.visible_guids.add(target.char_guid)
+
+    monkeypatch.setattr(runtime, "iter_in_world_sessions", lambda map_id=None: [target, peer, hidden])
+    monkeypatch.setattr(
+        runtime,
+        "_build_player_remove_update_response",
+        lambda session, **kwargs: (
+            "SMSG_UPDATE_OBJECT",
+            f"remove:{session.char_guid}:map={kwargs.get('map_id')}".encode("ascii"),
+        ),
+    )
+
+    runtime.force_player_visibility_destroy(target, reason="teleport-start", map_id=1)
+
+    assert target.visible_guids == set()
+    assert target.char_guid not in peer.visible_guids
+    assert target.char_guid not in hidden.visible_guids
+    assert peer.send_response_log == [[("SMSG_UPDATE_OBJECT", b"remove:7:map=1")]]
+    assert hidden.send_response_log == []
 
 
 def test_broadcast_visible_equipment_update_sends_zero_slots_to_visible_peers(monkeypatch):

@@ -46,7 +46,9 @@ from server.modules.handlers.world.commands import chat_commands
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.state.runtime import (
+    attach_session_to_world_state,
     build_explored_zones_update_response,
+    force_player_visibility_destroy,
     set_session_explored_zones_state,
 )
 from server.modules.handlers.world.opcodes import spells as spells_handlers
@@ -785,9 +787,15 @@ def apply_player_state_change(
         field_updates[_UNIT_FIELD_FLAGS] = int(unit_flags)
 
     if position is not None:
-        target_map_id = int(getattr(session, "map_id", 0) or 0) if map_id is None else int(map_id)
-        same_map = int(getattr(session, "map_id", 0) or 0) == target_map_id
+        old_map_id = int(getattr(session, "map_id", 0) or 0)
+        target_map_id = old_map_id if map_id is None else int(map_id)
+        same_map = old_map_id == target_map_id
         x, y, z, orientation = position
+        force_player_visibility_destroy(
+            session,
+            reason="teleport-start",
+            map_id=old_map_id,
+        )
         session.x = float(x)
         session.y = float(y)
         session.z = float(z)
@@ -805,6 +813,7 @@ def apply_player_state_change(
         movement_state.orientation = float(orientation)
         movement_state.flags = 0
         movement_state.flags2 = 0
+        attach_session_to_world_state(session, map_id=target_map_id)
         movement_handlers._capture_persist_position_from_session(session)
         movement_handlers._mark_position_dirty(session)
         if same_map:
@@ -1290,6 +1299,17 @@ def _set_stand_state(session, stand_state: int) -> list[tuple[str, bytes]]:
     ]
 
 
+def _decode_stand_state(ctx: PacketContext) -> int:
+    decoded = getattr(ctx, "decoded", None) or {}
+    for key in ("stand_state", "standState", "state", "anim_tier"):
+        if key in decoded:
+            return int(decoded.get(key) or 0)
+    payload = bytes(getattr(ctx, "payload", b"") or b"")
+    if payload:
+        return int(payload[0])
+    return _STAND_STATE_STANDING
+
+
 def _clear_stand_state(session) -> list[tuple[str, bytes]]:
     if _current_stand_state(session) == _STAND_STATE_STANDING:
         return []
@@ -1661,6 +1681,20 @@ def handle_send_text_emote(session, ctx: PacketContext) -> Tuple[int, Optional[l
         )
         responses.append(("SMSG_EMOTE", emote_payload))
 
+    return _dispatch_or_return(session, responses)
+
+
+@register("CMSG_STANDSTATECHANGE")
+def handle_stand_state_change(session, ctx: PacketContext):
+    decoded = log_cmsg(ctx)
+    stand_state = _decode_stand_state(ctx)
+    Logger.info(
+        "[STAND_STATE] player=%s state=%s decoded=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        int(stand_state),
+        decoded or {},
+    )
+    responses = _set_stand_state(session, stand_state)
     return _dispatch_or_return(session, responses)
 
 

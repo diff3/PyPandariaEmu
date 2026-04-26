@@ -1809,6 +1809,48 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
     return 0, (stream_responses or None)
 
 
+def _post_teleport_multiplayer_resync(
+    session,
+    *,
+    reason: str,
+) -> list[tuple[str, bytes]]:
+    """Rebuild live peer state after teleport ACK using existing runtime paths."""
+    broadcast_player_state_update(session, force=True)
+    force_bilateral_visibility_resync(session, reason=reason)
+
+    if not bool(getattr(session, "is_mounted", False)):
+        return []
+
+    try:
+        from server.modules.handlers.world.opcodes import spells as spells_handlers
+    except Exception as exc:
+        Logger.warning("[Teleport] mount resync unavailable reason=%s err=%s", reason, exc)
+        return []
+
+    display_id = int(getattr(session, "mount_display_id", 0) or 0)
+    if display_id <= 0:
+        mount_spell = int(getattr(session, "mount_spell", 0) or 0)
+        display_id = int(spells_handlers.get_mount_display_id(mount_spell) or 0)
+    if display_id <= 0:
+        return []
+
+    responses = list(spells_handlers.build_mount_visual_responses(session, display_id))
+    responses.append(("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(session)))
+    responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session)))
+    move_payload = build_smsg_player_move_payload(session)
+    if move_payload is not None:
+        responses.append(("SMSG_PLAYER_MOVE", move_payload))
+
+    spells_handlers._broadcast_mount_visual_to_visible_peers(session, display_id)
+    Logger.info(
+        "[Teleport] post-ack mount resync player=%s display=%s reason=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        int(display_id),
+        str(reason),
+    )
+    return responses
+
+
 @register("CMSG_MOVE_TELEPORT_ACK")
 def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     if not bool(getattr(session, "near_teleport_pending", False)):
@@ -1823,8 +1865,10 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     _save_session_position(session, reason="near-teleport", online=1, force=True)
-    broadcast_player_state_update(session, force=True)
-    force_bilateral_visibility_resync(session, reason="near-teleport-ack")
+    post_teleport_responses = _post_teleport_multiplayer_resync(
+        session,
+        reason="near-teleport-ack",
+    )
     if fixspeed_pending:
         self_resync_responses = build_same_map_teleport_self_resync_responses(session)
     else:
@@ -1846,6 +1890,7 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         )
     ]
     responses.extend(self_resync_responses)
+    responses.extend(post_teleport_responses)
     if fixspeed_pending:
         for opcode_name, speed_value in (
             ("SMSG_MOVE_SET_WALK_SPEED", float(getattr(session, "walk_speed", 2.5) or 2.5)),
@@ -1882,8 +1927,10 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     _save_session_position(session, reason="worldport", online=1, force=True)
-    broadcast_player_state_update(session, force=True)
-    force_bilateral_visibility_resync(session, reason="worldport-ack")
+    post_teleport_responses = _post_teleport_multiplayer_resync(
+        session,
+        reason="worldport-ack",
+    )
 
     Logger.info(
         "[Teleport] world transfer ack destination=%s pos=(%.2f %.2f %.2f %.2f)",
@@ -1894,7 +1941,7 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
         float(getattr(session, "orientation", 0.0) or 0.0),
     )
 
-    return 0, [
+    responses = [
         (
             "SMSG_MESSAGECHAT",
             encode_skyfire_messagechat_system_payload(
@@ -1902,6 +1949,8 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
             ),
         )
     ]
+    responses.extend(post_teleport_responses)
+    return 0, responses
 @register("CMSG_MOVE_FORCE_RUN_SPEED_CHANGE_ACK")
 def handle_move_force_run_speed_change_ack(session, _ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     Logger.debug(

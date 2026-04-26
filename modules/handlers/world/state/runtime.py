@@ -595,7 +595,11 @@ def _build_player_move_response(source_session) -> tuple[str, bytes] | None:
     return ("SMSG_PLAYER_MOVE", payload)
 
 
-def _build_player_remove_update_response(source_session) -> tuple[str, bytes] | None:
+def _build_player_remove_update_response(
+    source_session,
+    *,
+    map_id: int | None = None,
+) -> tuple[str, bytes] | None:
     from server.modules.handlers.world.login.context import WorldLoginContext
     from server.modules.handlers.world.login.packets import build_login_packet
 
@@ -604,7 +608,11 @@ def _build_player_remove_update_response(source_session) -> tuple[str, bytes] | 
         return None
 
     ctx = WorldLoginContext.from_session(source_session)
-    ctx.exact_0007_map_id = int(getattr(source_session, "map_id", 0) or 0)
+    ctx.exact_0007_map_id = (
+        int(getattr(source_session, "map_id", 0) or 0)
+        if map_id is None
+        else int(map_id)
+    )
     ctx.exact_0007_out_of_range_guids = [low_guid]
     payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613205_0007", ctx)
     if payload is None:
@@ -702,6 +710,66 @@ def _send_player_remove(observer_session, source_session) -> bool:
 
     dispatch_responses_to_sessions([observer_session], [remove_response])
     return True
+
+
+def force_player_visibility_destroy(
+    target_session,
+    *,
+    reason: str = "manual",
+    map_id: int | None = None,
+) -> None:
+    """Destroy one player from every observer cache before moving/recreating it."""
+    target_guid = _session_guid(target_session)
+    if target_guid <= 0:
+        return
+
+    remove_response = _build_player_remove_update_response(target_session, map_id=map_id)
+    removed_for_observers = 0
+    cleared_for_target = 0
+    target_visible = _visible_guid_set(target_session)
+    source_map_id = (
+        int(getattr(target_session, "map_id", 0) or 0)
+        if map_id is None
+        else int(map_id)
+    )
+
+    for observer in iter_in_world_sessions():
+        if observer is target_session:
+            continue
+
+        observer_guid = _session_guid(observer)
+        if observer_guid in target_visible:
+            target_visible.discard(observer_guid)
+            cleared_for_target += 1
+
+        observer_visible = _visible_guid_set(observer)
+        if target_guid not in observer_visible:
+            continue
+
+        observer_visible.discard(target_guid)
+        if remove_response is None:
+            continue
+
+        Logger.info(
+            "[DESTROY SEND] observer=%s source=%s map=%s reason=%s",
+            int(getattr(observer, "char_guid", 0) or 0),
+            int(target_guid),
+            int(source_map_id),
+            str(reason),
+        )
+        dispatch_responses_to_sessions([observer], [remove_response])
+        removed_for_observers += 1
+
+    target_visible.clear()
+    Logger.info(
+        "[MULTI] forced visibility destroy player=%s map=%s reason=%s "
+        "destroyed=%s cleared_for_player=%s",
+        int(target_guid),
+        int(source_map_id),
+        str(reason),
+        int(removed_for_observers),
+        int(cleared_for_target),
+    )
 
 
 def _reconcile_session_visibility_pair(
@@ -807,6 +875,10 @@ def force_bilateral_visibility_resync(target_session, *, reason: str = "manual")
             continue
 
         if _sessions_in_visibility_range(target_session, other):
+            if _send_player_remove(target_session, other):
+                removed_links += 1
+            if _send_player_remove(other, target_session):
+                removed_links += 1
             _visible_guid_set(target_session).discard(other_guid)
             _visible_guid_set(other).discard(target_guid)
             if _send_player_create(target_session, other):

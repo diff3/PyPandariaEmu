@@ -840,6 +840,33 @@ def test_sleep_text_emote_sets_sleep_state(monkeypatch):
     assert bob.send_response_log == [expected]
 
 
+def test_stand_state_change_broadcasts_visible_update(monkeypatch):
+    monkeypatch.setattr(chat_handlers, "log_cmsg", lambda ctx: ctx.decoded)
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_single_u32_update_object_payload",
+        lambda **fields: f"update|{fields['guid']}|{fields['field_index']}|{fields['value']}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    bob = _make_session(state, "Bob", 1002)
+    ctx = SimpleNamespace(
+        name="CMSG_STANDSTATECHANGE",
+        payload=b"",
+        decoded={"stand_state": 1},
+    )
+
+    code, responses = chat_handlers.handle_stand_state_change(alice, ctx)
+
+    assert code == 0
+    assert responses is None
+    assert alice.player_stand_state == 1
+    expected = [("SMSG_UPDATE_OBJECT", b"update|1001|76|1")]
+    assert alice.send_response_log == [expected]
+    assert bob.send_response_log == [expected]
+
+
 def test_normal_emote_clears_sleep_state_before_animation(monkeypatch):
     monkeypatch.setattr(
         chat_handlers.EncoderHandler,
