@@ -40,6 +40,7 @@ from server.modules.database.WorldModel import (
     PlayerCreateInfoSpellCustom,
 )
 
+from server.modules.database.AuthModel import Account
 
 class DatabaseConnection:
     """Handles DB connections for characters-db and world-db."""
@@ -167,6 +168,86 @@ class DatabaseConnection:
             Logger.info("Database initialized (characters + world)")
         else:
             Logger.info("Database initialized (characters)")
+
+    @staticmethod
+    def initialize_auth():
+        """Initialize auth database only. Used by AuthServer."""
+        config = ConfigLoader.load_config()
+        db = config["database"]
+
+        # Reuse existing auth session if already initialized
+        if AuthConnection._auth_session is not None:
+            return
+
+        auth_db = db.get("auth_db")
+        if not auth_db:
+            raise RuntimeError("Missing auth_db in database configuration")
+
+        auth_url = (
+            f"mysql+pymysql://{db['username']}:{db['password']}@"
+            f"{db['host']}:{db['port']}/{auth_db}?charset=utf8"
+        )
+
+        AuthConnection._auth_engine = create_engine(
+            auth_url,
+            pool_pre_ping=True
+        )
+
+        AuthConnection._auth_session = scoped_session(
+            sessionmaker(
+                bind=AuthConnection._auth_engine,
+                autoflush=False
+            )
+        )
+
+        AuthConnection._auth_db_name = auth_db
+
+        Logger.info("Auth database initialized")
+
+    @staticmethod
+    def initialize_characters():
+        """Initialize characters database only. Used by AuthServer realm list."""
+        config = ConfigLoader.load_config()
+        db = config["database"]
+
+        # Reuse existing characters session if already initialized
+        if DatabaseConnection._char_session is not None:
+            return
+
+        characters_db = db.get("characters_db")
+        if not characters_db:
+            raise RuntimeError("Missing characters_db in database configuration")
+
+        char_url = (
+            f"mysql+pymysql://{db['username']}:{db['password']}@"
+            f"{db['host']}:{db['port']}/{characters_db}?charset=utf8"
+        )
+
+        DatabaseConnection._char_engine = create_engine(
+            char_url,
+            pool_pre_ping=True
+        )
+
+        DatabaseConnection._char_session = scoped_session(
+            sessionmaker(
+                bind=DatabaseConnection._char_engine,
+                autoflush=False
+            )
+        )
+
+        DatabaseConnection._characters_db_name = characters_db
+
+        Logger.info("Characters database initialized")
+
+
+    @classmethod
+    def get_all_auth_accounts(cls):
+        """
+        Return all auth accounts used for login cache preload.
+        """
+
+        return cls.auth().query(Account).all()
+
 
     # WORLD CACHE
     @staticmethod

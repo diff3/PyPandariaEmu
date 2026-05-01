@@ -37,8 +37,6 @@ from server.modules.handlers.world.opcodes import misc as misc_handlers
 from server.modules.handlers.world.opcodes import movement as movement_handlers
 from server.modules.handlers.world.opcodes import spells as spells_handlers
 
-from shared.Logger import Logger
-
 BASE_DIR = Path(__file__).resolve().parents[3]
 
 

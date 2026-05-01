@@ -14,6 +14,8 @@ Used by AuthServer to process DSL-decoded packets.
 
 import os
 import socket
+import threading
+import time
 import traceback
 
 from shared.Logger import Logger
@@ -26,18 +28,28 @@ from DSL.modules.EncoderHandler import EncoderHandler
 
 from server.modules.crypto.SRP6Session import SRP6Session
 from server.modules.database.DatabaseConnection import DatabaseConnection
-
+from server.session.auth_cache import ACCOUNT_CACHE, ACCOUNT_CACHE_LOCK
 
 # ---- Global state ---------------------------------------------------------
 
-srp6_sessions: dict[int, SRP6Session] = {}
-authenticated_users: dict[int, str] = {}
+# srp6_sessions: dict[int, SRP6Session] = {}
+# authenticated_users: dict[int, str] = {}
 
 # Opcode maps: int → name (per direction) + reverse for convenience
 # AUTH_CLIENT_OPCODES, AUTH_SERVER_OPCODES, _ = load_auth_opcodes()
-AUTH_SERVER_OPCODE_BY_NAME = {name: code for code, name in AUTH_SERVER_OPCODES.items()}
+AUTH_SERVER_OPCODE_BY_NAME = {
+    name: code for code, name in AUTH_SERVER_OPCODES.items()
+}
 _srp6_mode = "skyfire"
 AUTH_LOGON_PROOF_ERROR_GENERIC = 4
+ERR_UNKNOWN_ACCOUNT = 11
+REALM_CACHE = {}
+REALM_CACHE_TS = 0.0
+REALM_CACHE_TTL = 5.0
+REALM_STATUS = {}
+REALM_STATUS_TS = 0.0
+REALM_STATUS_TTL = 5.0
+REALM_LOCK = threading.Lock()
 
 
 def set_srp6_mode(mode: str) -> None:
@@ -45,44 +57,140 @@ def set_srp6_mode(mode: str) -> None:
     _srp6_mode = str(mode or "skyfire")
 
 
+def extract_username(decoded: dict) -> str | None:
+    value = str(decoded.get("I") or decoded.get("username") or "")
+    value = value.strip().upper()
+    return value or None
+
+
+def reset_auth_state(conn_ctx):
+    conn_ctx.srp_session = None
+    conn_ctx.username = None
+
+
+def normalize_account(account) -> dict | None:
+    if account is None:
+        return None
+
+    username = str(getattr(account, "username", "") or "").strip().upper()
+    if not username:
+        return None
+
+    return {
+        "id": getattr(account, "id", None),
+        "username": username,
+        "salt": bytes(getattr(account, "salt", b"") or b""),
+        "verifier": bytes(getattr(account, "verifier", b"") or b""),
+        "session_key": getattr(account, "session_key", None),
+    }
+
+
+def get_account(username: str) -> dict | None:
+    username = str(username or "").strip().upper()
+    if not username:
+        return None
+
+    with ACCOUNT_CACHE_LOCK:
+        account = ACCOUNT_CACHE.get(username)
+    if account:
+        return account
+
+    try:
+        db_account = DatabaseConnection.get_user_by_username(username)
+    except Exception as exc:
+        Logger.error("[AUTH] DB lookup failed: %s", exc)
+        return None
+
+    account = normalize_account(db_account)
+    if account is None:
+        return None
+
+    with ACCOUNT_CACHE_LOCK:
+        ACCOUNT_CACHE[username] = account
+
+    return account
+
+
+def update_account_login(account_id, session_key, client_ip) -> None:
+    if account_id is None:
+        raise ValueError("missing account_id")
+
+    session = DatabaseConnection.auth()
+    try:
+        from datetime import datetime
+        from server.modules.database.AuthModel import Account
+
+        db_account = session.query(Account).filter(
+            Account.id == account_id
+        ).first()
+
+        if not db_account:
+            raise RuntimeError(f"account not found: {account_id}")
+
+        db_account.session_key = session_key
+        db_account.last_login = datetime.utcnow()
+        db_account.last_ip = client_ip
+
+        session.commit()
+
+    except Exception as exc:
+        session.rollback()
+        Logger.error("[AUTH] update_account_login failed: %s", exc)
+        Logger.error(traceback.format_exc())
+        raise
+
+
 # ---- AUTH_LOGON_CHALLENGE ----------------------------------------------
 
 def handle_AUTH_LOGON_CHALLENGE_C(ctx: PacketContext):
-    client_socket = ctx.sock
     decoded = ctx.decoded or {}
+    conn_ctx = ctx.connection_ctx
 
-    username = (decoded.get("I") or decoded.get("username") or "").upper()
+    username = extract_username(decoded)
+
     if not username:
-        return 0, EncoderHandler.encode_packet(
-            "AUTH_LOGON_CHALLENGE_S", {"cmd": 0, "error": 4}
-        )
+        reset_auth_state(conn_ctx)
 
-    account = DatabaseConnection.get_user_by_username(username)
+        return 0, build_AUTH_LOGON_CHALLENGE_FAILURE_S()
+
+    account = get_account(username)
+
     if account is None:
-        return 0, EncoderHandler.encode_packet(
-            "AUTH_LOGON_CHALLENGE_S", {"cmd": 0, "error": 4}
-        )
+        reset_auth_state(conn_ctx)
 
-    salt = account.salt
-    verifier = account.verifier
+        return 0, build_AUTH_LOGON_CHALLENGE_FAILURE_S()
+
+    salt = account["salt"]
+    verifier = account["verifier"]
 
     if not salt or not verifier:
-        return 0, EncoderHandler.encode_packet(
-            "AUTH_LOGON_CHALLENGE_S", {"cmd": 0, "error": 2}
-        )
+        reset_auth_state(conn_ctx)
 
-    session = SRP6Session(username, salt, verifier, mode=_srp6_mode)
-    fd = client_socket.fileno()
-    srp6_sessions[fd] = session
+        return 0, build_AUTH_LOGON_CHALLENGE_FAILURE_S()
+
+    # Always create a fresh SRP session per connection
+    session = SRP6Session(
+        username,
+        salt,
+        verifier,
+        mode=_srp6_mode,
+    )
+
+    conn_ctx.srp_session = session
+    conn_ctx.username = username
 
     try:
         B_bytes = session.generate_B()
+
     except Exception as exc:
-        Logger.error(f"[AUTH_LOGON_CHALLENGE] SRP6 generate_B failed: {exc}")
-        srp6_sessions.pop(fd, None)
-        return 0, EncoderHandler.encode_packet(
-            "AUTH_LOGON_CHALLENGE_S", {"cmd": 0, "error": 2}
+        Logger.error(
+            "[AUTH_LOGON_CHALLENGE] SRP6 generate_B failed: %s",
+            exc,
         )
+
+        conn_ctx.srp_session = None
+
+        return 0, build_AUTH_LOGON_CHALLENGE_FAILURE_S()
 
     fields = {
         "cmd": 0,
@@ -95,13 +203,15 @@ def handle_AUTH_LOGON_CHALLENGE_C(ctx: PacketContext):
         "N": session.core.get_N_bytes(),
         "s": salt,
         "unk3": os.urandom(16),
+        # "unk3": b"\x00" * 16,
         "securityFlags": 0,
     }
 
     try:
         return 0, build_AUTH_LOGON_CHALLENGE_S(fields)
+
     except Exception:
-        srp6_sessions.pop(fd, None)
+        conn_ctx.srp_session = None
         return 1, None
 
 
@@ -113,17 +223,26 @@ def build_AUTH_LOGON_CHALLENGE_S(fields: dict) -> bytes:
     return EncoderHandler.encode_packet("AUTH_LOGON_CHALLENGE_S", fields)
 
 
+def build_AUTH_LOGON_CHALLENGE_FAILURE_S() -> bytes:
+    return build_AUTH_LOGON_CHALLENGE_S({
+        "cmd": 0,
+        "error": ERR_UNKNOWN_ACCOUNT,
+    })
+
+
 # ---- AUTH_LOGON_PROOF --------------------------------------------------
 
 def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
-    client_socket = ctx.sock
     decoded = ctx.decoded or {}
+    conn_ctx = ctx.connection_ctx
 
-    fd = client_socket.fileno()
-    session = srp6_sessions.get(fd)
+    session = conn_ctx.srp_session
 
     if not session:
-        Logger.error("[AUTH_LOGON_PROOF] No SRP session for socket")
+        Logger.error(
+            "[AUTH_LOGON_PROOF] No SRP session for connection"
+        )
+
         return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
 
     A_raw = decoded.get("A")
@@ -132,34 +251,66 @@ def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
     try:
         A = bytes.fromhex(A_raw) if isinstance(A_raw, str) else A_raw
         M1 = bytes.fromhex(M1_raw) if isinstance(M1_raw, str) else M1_raw
+
     except ValueError:
-        Logger.error("[AUTH_LOGON_PROOF] Invalid hex in A or M1")
-        srp6_sessions.pop(fd, None)
+        Logger.error(
+            "[AUTH_LOGON_PROOF] Invalid hex in A or M1"
+        )
+
+        conn_ctx.srp_session = None
+
         return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
 
     if not A or not M1:
-        Logger.error("[AUTH_LOGON_PROOF] Missing A or M1")
-        srp6_sessions.pop(fd, None)
+        Logger.error(
+            "[AUTH_LOGON_PROOF] Missing A or M1"
+        )
+
+        conn_ctx.srp_session = None
+
         return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
 
     ok, M2, session_key = session.verify_proof(A, M1)
+
     if not ok:
-        Logger.error("[AUTH_LOGON_PROOF] SRP proof failed")
-        srp6_sessions.pop(fd, None)
+        Logger.error(
+            "[AUTH_LOGON_PROOF] SRP proof failed"
+        )
+        Logger.warning(
+            "[AUTH_FAIL] user=%s ip=%s reason=srp_failed",
+            session.username,
+            ctx.sock.getpeername()[0],
+        )
+
+        # Hard reset immediately on bad password
+        conn_ctx.srp_session = None
+
         return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
 
     try:
-        account = DatabaseConnection.get_user_by_username(session.username)
-        if account:
-            from datetime import datetime
-            account.session_key = session_key
-            account.last_login = datetime.utcnow()
-            account.last_ip = client_socket.getpeername()[0]
-            DatabaseConnection.auth().commit()
-    except Exception as exc:
-        Logger.error(f"[AUTH_LOGON_PROOF] Failed to update DB: {exc}")
+        account = get_account(session.username)
+        if not account:
+            conn_ctx.srp_session = None
+            return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
 
-    authenticated_users[fd] = session.username
+        update_account_login(
+            account.get("id"),
+            session_key,
+            ctx.sock.getpeername()[0],
+        )
+
+        account["session_key"] = session_key
+
+    except Exception as exc:
+        Logger.error(
+            "[AUTH_LOGON_PROOF] Failed to update DB: %s",
+            exc,
+        )
+        conn_ctx.srp_session = None
+        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
+
+    # Username already lives in conn_ctx
+    conn_ctx.username = session.username
 
     try:
         fields = {
@@ -170,13 +321,22 @@ def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
             "unk2": 0,
             "unk3": 0,
         }
+
         out = build_AUTH_LOGON_PROOF_S(fields)
+
     except Exception as exc:
-        Logger.error(f"[AUTH_LOGON_PROOF_S] Encoding failed: {exc}")
-        srp6_sessions.pop(fd, None)
+        Logger.error(
+            "[AUTH_LOGON_PROOF_S] Encoding failed: %s",
+            exc,
+        )
+
+        conn_ctx.srp_session = None
+
         return 1, None
 
-    srp6_sessions.pop(fd, None)
+    # Cleanup temporary SRP state after success
+    conn_ctx.srp_session = None
+
     return 0, out
 
 
@@ -187,7 +347,9 @@ def build_AUTH_LOGON_PROOF_S(fields: dict) -> bytes:
     return EncoderHandler.encode_packet("AUTH_LOGON_PROOF_S", fields)
 
 
-def build_AUTH_LOGON_PROOF_FAILURE_S(error: int = AUTH_LOGON_PROOF_ERROR_GENERIC) -> bytes:
+def build_AUTH_LOGON_PROOF_FAILURE_S(
+    error: int = AUTH_LOGON_PROOF_ERROR_GENERIC,
+) -> bytes:
     """
     Encode a minimal AUTH_LOGON_PROOF_S failure response.
     """
@@ -217,7 +379,7 @@ def calculate_population(char_count: int) -> float:
 
 def is_realm_online(address: str, port: int) -> bool:
     try:
-        with socket.create_connection((address, port), timeout=0.1):
+        with socket.create_connection((address, port), timeout=0.05):
             return True
     except Exception:
         return False
@@ -227,18 +389,75 @@ def realm_flag(online: bool) -> int:
     return 0 if online else 4
 
 
+def get_realms():
+    global REALM_CACHE_TS
+
+    now = time.time()
+
+    with REALM_LOCK:
+        if REALM_CACHE and (now - REALM_CACHE_TS) < REALM_CACHE_TTL:
+            return list(REALM_CACHE.values())
+
+    realms = DatabaseConnection.get_all_realms()
+    if not realms:
+        return []
+
+    new_cache = {realm.id: realm for realm in realms}
+
+    with REALM_LOCK:
+        REALM_CACHE.clear()
+        REALM_CACHE.update(new_cache)
+        REALM_CACHE_TS = now
+
+    return list(new_cache.values())
+
+
+def refresh_realm_status(realms):
+    global REALM_STATUS_TS
+
+    now = time.time()
+
+    with REALM_LOCK:
+        if (now - REALM_STATUS_TS) < REALM_STATUS_TTL:
+            return
+
+    new_status = {}
+
+    for realm in realms:
+        try:
+            online = is_realm_online(realm.address, realm.port)
+        except Exception:
+            online = False
+
+        new_status[realm.id] = online
+
+    with REALM_LOCK:
+        REALM_STATUS.clear()
+        REALM_STATUS.update(new_status)
+        REALM_STATUS_TS = now
+
+
 def build_realmlist_entries(realms, account_id):
+    refresh_realm_status(realms)
+
     entries = []
+    char_counts = {}
+
+    with REALM_LOCK:
+        status_snapshot = dict(REALM_STATUS)
 
     for realm in realms:
         if account_id is None:
             char_count = 0
         else:
-            char_count = DatabaseConnection.count_characters_for_account(
-                account_id, realm.id
-            )
+            char_count = char_counts.get(realm.id)
+            if char_count is None:
+                char_count = DatabaseConnection.count_characters_for_account(
+                    account_id, realm.id
+                )
+                char_counts[realm.id] = char_count
 
-        online = is_realm_online(realm.address, realm.port)
+        online = status_snapshot.get(realm.id, False)
 
         entries.append({
             "icon": realm.icon,
@@ -256,31 +475,50 @@ def build_realmlist_entries(realms, account_id):
 
 
 def handle_REALM_LIST_C(ctx: PacketContext):
-    client_socket = ctx.sock
+    conn_ctx = ctx.connection_ctx
 
-    fd = client_socket.fileno()
-    username = authenticated_users.get(fd)
-
+    username = conn_ctx.username
     account_id = None
 
     if username:
-        acc = DatabaseConnection.get_user_by_username(username)
-        if acc:
-            account_id = acc.id
+        account = get_account(username)
+        if not account:
+            return 1, None
 
-    db_realms = DatabaseConnection.get_all_realms()
+        account_id = account.get("id")
+        if not account_id:
+            return 1, None
+
+    db_realms = get_realms()
+
     if not db_realms:
-        Logger.error("[REALM_LIST] No realms in DB")
+        Logger.error(
+            "[REALM_LIST] No realms in DB"
+        )
         return 1, None
 
-    realm_entries = build_realmlist_entries(db_realms, account_id)
+    realm_entries = build_realmlist_entries(
+        db_realms,
+        account_id,
+    )
 
     try:
-        out = build_REALM_LIST_S(realm_entries)
+        out = build_REALM_LIST_S(
+            realm_entries
+        )
+
         return 0, out
+
     except Exception as exc:
-        Logger.error(f"[REALM_LIST_S] Encoding failed: {exc}")
-        Logger.error(traceback.format_exc())
+        Logger.error(
+            "[REALM_LIST_S] Encoding failed: %s",
+            exc,
+        )
+
+        Logger.error(
+            traceback.format_exc()
+        )
+
         return 1, None
 
 

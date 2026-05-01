@@ -1,45 +1,52 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import socket
 import signal
-import traceback
+import socket
 import threading
 import time
+import traceback
 
 from dataclasses import dataclass
 from enum import Enum
 
+import server.session.auth_cache as auth_cache
 from DSL.modules.DslRuntime import DslRuntime
-from shared.Logger import Logger
-from shared.ConfigLoader import ConfigLoader
+from server.modules.crypto.SRP6Session import SRP6Session
+from server.modules.database.DatabaseConnection import DatabaseConnection
+from server.modules.handlers.AuthHandlers import opcode_handlers, set_srp6_mode
+from server.modules.opcodes.AuthOpcodes import (
+    AUTH_CLIENT_OPCODES,
+    AUTH_SERVER_OPCODES,
+)
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.protocol.ServerOutput import (
     decode_enabled,
     dsl_warnings_enabled,
-    project_name,
     log_decoded_packet,
     log_raw_packet,
+    project_name,
     should_log_packet,
 )
+from shared.ConfigLoader import ConfigLoader
+from shared.Logger import Logger
 
-from server.modules.crypto.SRP6Session import SRP6Session
-from server.modules.opcodes.AuthOpcodes import AUTH_CLIENT_OPCODES, AUTH_SERVER_OPCODES
 
+AUTH_DEFS = [
+    "AUTH_LOGON_CHALLENGE_C",
+    "AUTH_LOGON_CHALLENGE_S",
+    "AUTH_LOGON_PROOF_C",
+    "AUTH_LOGON_PROOF_S",
+    "REALM_LIST_C",
+    "REALM_LIST_S",
+    "AUTH_RECONNECT_CHALLENGE_C",
+    "AUTH_RECONNECT_CHALLENGE_S",
+]
 
-config = ConfigLoader.load_config()
-DatabaseConnection = None
-AuthHandlersModule = None
-AUTH_HANDLERS = {}
-set_srp6_mode = None
-
-HOST = config["authserver"]["host"]
-PORT = config["authserver"]["port"]
-running = True
-runtime = None
 MAX_CONNECTION_TIME_SECONDS = 5.0
 REALM_LIST_CONNECTION_TIME_SECONDS = 300.0
 MAX_CONNECTION_STEPS = 10
+
 INITIAL_STATE = "AUTH_LOGON_CHALLENGE"
 STATE_FLOW = (
     "AUTH_LOGON_CHALLENGE",
@@ -52,6 +59,19 @@ STATE_BY_OPCODE = {
     "REALM_LIST_C": "REALM_LIST",
     "AUTH_RECONNECT_CHALLENGE_C": "AUTH_LOGON_CHALLENGE",
 }
+config = ConfigLoader.load_config()
+HOST = config["authserver"]["host"]
+PORT = config["authserver"]["port"]
+
+running = True
+runtime = None
+AUTH_RATE_LIMIT = {}
+AUTH_RATE_WINDOW = 10
+AUTH_RATE_MAX = 5
+RATE_LIMIT_LOCK = threading.Lock()
+MAX_CONNECTIONS = config["authserver"].get("max_connections", 100)
+ACTIVE_CONNECTIONS = {"count": 0}
+CONNECTION_LOCK = threading.Lock()
 
 
 class StepResult(str, Enum):
@@ -62,16 +82,42 @@ class StepResult(str, Enum):
     FATAL = "FATAL"
 
 
+FAILURE_RESULTS = frozenset(
+    (
+        StepResult.FAIL,
+        StepResult.FATAL,
+        StepResult.INVALID,
+        StepResult.TIMEOUT,
+    )
+)
+
+
+def validate_logon(decoded: dict) -> bool:
+    return extract_username(decoded) is not None
+
+
+def validate_proof(decoded: dict) -> bool:
+    return bool(decoded.get("A") and decoded.get("M1"))
+
+
+def extract_username(decoded: dict) -> str | None:
+    value = str(decoded.get("I") or decoded.get("username") or "")
+    value = value.strip().upper()
+    return value or None
+
+
+VALIDATORS = {
+    "AUTH_LOGON_CHALLENGE_C": validate_logon,
+    "AUTH_LOGON_PROOF_C": validate_proof,
+}
+VALIDATION_ERRORS = {
+    "AUTH_LOGON_CHALLENGE_C": "missing username",
+    "AUTH_LOGON_PROOF_C": "missing proof values",
+}
+
+
 @dataclass
 class ConnectionContext:
-    """
-    Explicit per-connection authentication state.
-
-    Lives for the entire socket session and tracks flow-control data used by
-    AuthServer. It does not change handler signatures; handlers still receive
-    PacketContext, while AuthServer owns retries, rollback and termination.
-    """
-
     state: str = INITIAL_STATE
     retry_count: int = 0
     step_count: int = 0
@@ -86,8 +132,10 @@ def next_state(state: str) -> str:
         index = STATE_FLOW.index(str(state))
     except ValueError:
         return INITIAL_STATE
-    if index >= (len(STATE_FLOW) - 1):
+
+    if index >= len(STATE_FLOW) - 1:
         return STATE_FLOW[-1]
+
     return STATE_FLOW[index + 1]
 
 
@@ -96,153 +144,139 @@ def previous_state(state: str) -> str:
         index = STATE_FLOW.index(str(state))
     except ValueError:
         return INITIAL_STATE
+
     if index <= 0:
         return INITIAL_STATE
+
     return STATE_FLOW[index - 1]
 
 
 def connection_time_limit_for_state(state: str) -> float:
     if str(state or "") == "REALM_LIST":
         return REALM_LIST_CONNECTION_TIME_SECONDS
+
     return MAX_CONNECTION_TIME_SECONDS
 
 
-def validate_packet(conn_ctx: ConnectionContext, packet_ctx: PacketContext) -> tuple[bool, str | None]:
-    opcode_name = str(packet_ctx.name or "")
-    decoded = dict(packet_ctx.decoded or {})
+def terminate_connection(
+    sock: socket.socket,
+    conn_ctx: ConnectionContext,
+    reason: str,
+) -> None:
+    if conn_ctx.last_error != reason:
+        conn_ctx.last_error = reason
+        Logger.warning(
+            "[AuthServer] terminate state=%s user=%s reason=%s",
+            conn_ctx.state,
+            conn_ctx.username,
+            reason,
+        )
 
-    if opcode_name == "AUTH_LOGON_CHALLENGE_C":
-        username = str(decoded.get("I") or decoded.get("username") or "").strip()
-        if not username:
-            return False, "missing username"
-    elif opcode_name == "AUTH_LOGON_PROOF_C":
-        if not decoded.get("A") or not decoded.get("M1"):
-            return False, "missing proof values"
-
-    expected_state = STATE_BY_OPCODE.get(opcode_name)
-    if expected_state and conn_ctx.state not in {expected_state, previous_state(expected_state)}:
-        return False, f"unexpected opcode for state={conn_ctx.state}"
-
-    return True, None
-
-
-def _sync_connection_state(conn_ctx: ConnectionContext, packet_ctx: PacketContext) -> None:
-    decoded = dict(packet_ctx.decoded or {})
-
-    username = str(decoded.get("I") or decoded.get("username") or conn_ctx.username or "").strip().upper()
-    if username:
-        conn_ctx.username = username
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
 
 
-def _reset_auth_flow(conn_ctx: ConnectionContext) -> None:
-    """Reset connection flow to a clean logon-challenge start."""
-    conn_ctx.state = INITIAL_STATE
-    conn_ctx.retry_count = 0
-    conn_ctx.username = None
-    conn_ctx.srp_session = None
-
-
-def step_controller(conn_ctx: ConnectionContext, handler, packet_ctx: PacketContext):
-    """
-    Execute one authenticated protocol step with explicit flow control.
-
-    Inputs:
-    - conn_ctx: connection lifetime state
-    - handler: existing AuthHandler callable
-    - packet_ctx: decoded packet wrapper passed through unchanged
-
-    Returns:
-    - (StepResult, response_bytes | None)
-
-    Failure behavior:
-    - INVALID resets to INITIAL_STATE
-    - FAIL retries once, then rolls back one logical state
-    - TIMEOUT/FATAL instruct the caller to terminate the connection
-    """
+def pre_check(
+    conn_ctx: ConnectionContext,
+    packet_ctx: PacketContext,
+) -> StepResult:
     now = time.time()
     time_limit = connection_time_limit_for_state(conn_ctx.state)
-    if (now - float(conn_ctx.start_time or now)) > time_limit:
+
+    if now - float(conn_ctx.start_time or now) > time_limit:
         conn_ctx.last_error = "connection exceeded time limit"
         Logger.warning(
             "[TIMEOUT] connection exceeded limit state=%s limit=%s",
             conn_ctx.state,
             time_limit,
         )
-        return StepResult.TIMEOUT, None
+        return StepResult.TIMEOUT
 
     conn_ctx.step_count += 1
+
     if conn_ctx.step_count > MAX_CONNECTION_STEPS:
         conn_ctx.last_error = "step limit exceeded"
-        Logger.warning("[TIMEOUT] step limit exceeded state=%s steps=%s", conn_ctx.state, conn_ctx.step_count)
-        return StepResult.TIMEOUT, None
-
-    valid, validation_error = validate_packet(conn_ctx, packet_ctx)
-    if not valid:
-        previous = conn_ctx.state
-        conn_ctx.state = INITIAL_STATE
-        conn_ctx.retry_count = 0
-        conn_ctx.last_error = validation_error
         Logger.warning(
-            "[FSM] %s + INVALID -> %s reason=%s",
-            previous,
+            "[TIMEOUT] step limit exceeded state=%s steps=%s",
             conn_ctx.state,
-            validation_error,
+            conn_ctx.step_count,
         )
-        return StepResult.INVALID, None
+        return StepResult.TIMEOUT
 
+    opcode_name = str(packet_ctx.name or "")
+    decoded = dict(packet_ctx.decoded or {})
+    validator = VALIDATORS.get(opcode_name)
+
+    if validator is not None and not validator(decoded):
+        conn_ctx.last_error = VALIDATION_ERRORS.get(
+            opcode_name,
+            "packet validation failed",
+        )
+        Logger.warning(
+            "[FSM] INVALID state=%s reason=%s",
+            conn_ctx.state,
+            conn_ctx.last_error,
+        )
+        return StepResult.INVALID
+
+    expected_state = STATE_BY_OPCODE.get(opcode_name)
+    if expected_state:
+        previous = previous_state(expected_state)
+        if conn_ctx.state not in (expected_state, previous):
+            conn_ctx.last_error = (
+                f"unexpected opcode for state={conn_ctx.state}"
+            )
+            Logger.warning(
+                "[FSM] INVALID state=%s reason=%s",
+                conn_ctx.state,
+                conn_ctx.last_error,
+            )
+            return StepResult.INVALID
+
+    return StepResult.SUCCESS
+
+
+def post_check(
+    conn_ctx: ConnectionContext,
+    packet_ctx: PacketContext,
+    handler_error: int,
+) -> StepResult:
     current_state = conn_ctx.state
     expected_state = STATE_BY_OPCODE.get(packet_ctx.name, current_state)
 
-    try:
-        err, response = handler(packet_ctx)
-    except Exception as exc:
-        conn_ctx.last_error = str(exc)
-        Logger.error("[FATAL] state=%s opcode=%s error=%s", current_state, packet_ctx.name, exc)
-        Logger.error(traceback.format_exc())
-        return StepResult.FATAL, None
+    if int(handler_error or 0) != 0:
+        conn_ctx.last_error = f"handler returned err={handler_error}"
+        Logger.warning(
+            "[FSM] FAIL state=%s opcode=%s reason=%s",
+            current_state,
+            packet_ctx.name,
+            conn_ctx.last_error,
+        )
+        return StepResult.FAIL
 
-    _sync_connection_state(conn_ctx, packet_ctx)
+    next_logical_state = next_state(expected_state or current_state)
 
-    if int(err or 0) == 0:
-        next_logical_state = next_state(expected_state or current_state)
-        Logger.debug("[FSM] %s + SUCCESS -> %s", current_state, next_logical_state)
-        conn_ctx.state = next_logical_state
-        conn_ctx.retry_count = 0
-        conn_ctx.last_error = None
-        return StepResult.SUCCESS, response
+    Logger.debug(
+        "[FSM] %s + SUCCESS -> %s",
+        current_state,
+        next_logical_state,
+    )
 
-    conn_ctx.last_error = f"handler returned err={err}"
-    if packet_ctx.name == "AUTH_LOGON_PROOF_C" and response:
-        Logger.warning("[FSM] %s + FAIL -> %s reason=proof_failed_reset", current_state, INITIAL_STATE)
-        _reset_auth_flow(conn_ctx)
-        return StepResult.FAIL, response
-
-    if conn_ctx.retry_count < 1:
-        conn_ctx.retry_count += 1
-        Logger.warning("[RETRY] %s (%s)", current_state, conn_ctx.retry_count)
-        return StepResult.FAIL, response
-
-    rollback_state = previous_state(current_state)
-    Logger.warning("[ROLLBACK] %s -> %s", current_state, rollback_state)
-    Logger.warning("[FSM] %s + FAIL -> %s", current_state, rollback_state)
-    conn_ctx.state = rollback_state
-    conn_ctx.retry_count = 0
-    return StepResult.FAIL, response
+    conn_ctx.state = next_logical_state
+    conn_ctx.last_error = None
+    return StepResult.SUCCESS
 
 
-# ---- Signal handling ----------------------------------------------------
-
-def sigint(sig, frame):
-    """Gracefully stop authserver on Ctrl+C."""
+def sigint(_sig, _frame) -> None:
     global running
+
     Logger.info("Shutting down AuthServer (Ctrl+C)...")
     running = False
 
 
-# ---- Utility helpers ----------------------------------------------------
-
 def safe_decode(direction: str, name: str, payload: bytes) -> dict:
-    """Decode DSL packets without crashing handler logic."""
     if runtime is None:
         return {}
 
@@ -254,30 +288,156 @@ def safe_decode(direction: str, name: str, payload: bytes) -> dict:
             warn=dsl_warnings_enabled("authserver"),
         ) or {}
     except Exception as exc:
-        Logger.error(f"{direction}: decode failed for {name}: {exc}")
+        Logger.error("%s: decode failed for %s: %s", direction, name, exc)
         Logger.error(traceback.format_exc())
         return {}
 
 
-# ---- Client session handler ---------------------------------------------
+def log_client_packet(opcode_name: str, data: bytes, decoded: dict) -> None:
+    if should_log_packet("authserver", opcode_name):
+        Logger.debug("[AuthServer] C->S %s", opcode_name)
+
+    log_raw_packet("authserver", opcode_name, "Raw", data)
+    log_decoded_packet(
+        "authserver",
+        opcode_name,
+        decoded,
+        label=opcode_name,
+    )
+
+
+def process_packet(
+    conn_ctx: ConnectionContext,
+    data: bytes,
+    sock: socket.socket,
+) -> tuple[StepResult, bytes | None]:
+    if not data:
+        conn_ctx.last_error = "empty packet"
+        Logger.warning("[AuthServer] empty client packet")
+        return StepResult.INVALID, None
+
+    opcode = data[0]
+    opcode_name = AUTH_CLIENT_OPCODES.get(opcode)
+
+    if opcode_name is None:
+        conn_ctx.last_error = f"unknown opcode 0x{opcode:02X}"
+        Logger.warning("[AuthServer] %s", conn_ctx.last_error)
+        return StepResult.INVALID, None
+
+    decoded = safe_decode("Client", opcode_name, data)
+    log_client_packet(opcode_name, data, decoded)
+
+    handler = opcode_handlers.get(opcode_name)
+    if handler is None:
+        conn_ctx.last_error = f"missing handler for {opcode_name}"
+        Logger.warning("[AuthServer] %s", conn_ctx.last_error)
+        return StepResult.INVALID, None
+
+    packet_ctx = PacketContext(
+        sock=sock,
+        direction="C",
+        opcode=opcode,
+        name=opcode_name,
+        payload=data,
+        decoded=decoded,
+        connection_ctx=conn_ctx,
+    )
+
+    step_result = pre_check(conn_ctx, packet_ctx)
+    if step_result != StepResult.SUCCESS:
+        return step_result, None
+
+    try:
+        handler_error, response = handler(packet_ctx)
+    except Exception as exc:
+        conn_ctx.last_error = str(exc)
+
+        Logger.error(
+            "[FATAL] state=%s opcode=%s error=%s",
+            conn_ctx.state,
+            packet_ctx.name,
+            exc,
+        )
+        Logger.error(traceback.format_exc())
+
+        return StepResult.FATAL, None
+
+    username = extract_username(decoded)
+    if username:
+        conn_ctx.username = username
+
+    step_result = post_check(conn_ctx, packet_ctx, handler_error)
+    return step_result, response
+
+
+def send_server_response(
+    sock: socket.socket,
+    conn_ctx: ConnectionContext,
+    addr: tuple[str, int],
+    response: bytes,
+) -> str | None:
+    if not response:
+        conn_ctx.last_error = "empty server response"
+        Logger.error("[AuthServer] empty server response addr=%s", addr)
+        return None
+
+    server_opcode = response[0]
+    server_name = AUTH_SERVER_OPCODES.get(server_opcode)
+
+    if not server_name:
+        reason = f"invalid server opcode 0x{server_opcode:02X}"
+        conn_ctx.last_error = reason
+        Logger.error("[AuthServer] %s addr=%s", reason, addr)
+        return None
+
+    server_logging_enabled = should_log_packet(
+        "authserver",
+        server_name,
+    )
+
+    if server_logging_enabled:
+        Logger.debug("[AuthServer] S->C %s", server_name)
+
+    log_raw_packet(
+        "authserver",
+        server_name,
+        "Raw",
+        response,
+    )
+
+    if server_logging_enabled and decode_enabled("authserver"):
+        decoded = safe_decode("Server", server_name, response)
+        log_decoded_packet(
+            "authserver",
+            server_name,
+            decoded,
+            label=server_name,
+        )
+
+    try:
+        sock.sendall(response)
+    except OSError as exc:
+        conn_ctx.last_error = f"send failed: {exc}"
+        Logger.error("[AuthServer] %s addr=%s", conn_ctx.last_error, addr)
+        return None
+
+    if server_name == "REALM_LIST_S":
+        conn_ctx.last_error = None
+        timeout = connection_time_limit_for_state(conn_ctx.state)
+        sock.settimeout(timeout)
+
+        Logger.debug(
+            "[AuthServer] realm list ready addr=%s timeout=%s",
+            addr,
+            timeout,
+        )
+
+    return server_name
+
 
 def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
-    """
-    Handle one auth connection from recv through decode, validate, step control and send.
+    Logger.info("Connection start addr=%s", addr)
 
-    Inputs:
-    - sock: accepted client socket
-    - addr: peer address tuple
-
-    Outputs:
-    - None. Responses are written directly to the socket.
-
-    Failure behavior:
-    - invalid packets reset logical state safely
-    - timeout or fatal conditions terminate the connection
-    - handler crashes do not propagate past the connection boundary
-    """
-    Logger.info("[AuthServer] connection start addr=%s", addr)
     conn_ctx = ConnectionContext(start_time=time.time())
     sock.settimeout(MAX_CONNECTION_TIME_SECONDS)
 
@@ -288,187 +448,199 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
             except socket.timeout:
                 if conn_ctx.state == "REALM_LIST":
                     conn_ctx.last_error = None
-                    Logger.debug("[AuthServer] auth flow complete addr=%s state=%s", addr, conn_ctx.state)
-                else:
-                    conn_ctx.last_error = "idle timeout"
-                    Logger.info("[AuthServer] idle timeout addr=%s state=%s", addr, conn_ctx.state)
-                break
+                    Logger.debug(
+                        "[AuthServer] auth flow complete addr=%s state=%s",
+                        addr,
+                        conn_ctx.state,
+                    )
+                    break
+
+                terminate_connection(sock, conn_ctx, "idle timeout")
+                return
 
             if not data:
-                Logger.info("[AuthServer] connection closed addr=%s state=%s", addr, conn_ctx.state)
-                break
-
-            opcode = data[0]
-            opcode_name = AUTH_CLIENT_OPCODES.get(opcode)
-
-            if opcode_name is None:
-                Logger.warning(f"{addr}: Unknown opcode 0x{opcode:02X}")
-                break
-
-            packet_logging_enabled = should_log_packet("authserver", opcode_name)
-            if packet_logging_enabled:
-                Logger.info(f"[AuthServer] C→S {opcode_name}")
-            log_raw_packet("authserver", opcode_name, "Raw", data)
-
-            decoded = safe_decode("Client", opcode_name, data)
-            log_decoded_packet("authserver", opcode_name, decoded, label=opcode_name)
-
-            handler = AUTH_HANDLERS.get(opcode_name)
-            if handler is None:
-                Logger.warning(f"{addr}: No handler for {opcode_name}")
-                break
-
-            try:
-                ctx = PacketContext(
-                    sock=sock,
-                    direction="C",
-                    opcode=opcode,
-                    name=opcode_name,
-                    payload=data,
-                    decoded=decoded,
-                    connection_ctx=conn_ctx,
-                )
-                result, response = step_controller(conn_ctx, handler, ctx)
-            except Exception as exc:
-                conn_ctx.last_error = str(exc)
-                Logger.error(f"{addr}: Step controller crash: {exc}")
-                Logger.error(traceback.format_exc())
-                break
-
-            if result in {StepResult.TIMEOUT, StepResult.FATAL}:
-                Logger.warning(
-                    "[AuthServer] terminating addr=%s result=%s state=%s error=%s",
-                    addr,
-                    result.value,
-                    conn_ctx.state,
-                    conn_ctx.last_error,
-                )
-                break
-
-            if result == StepResult.INVALID:
-                continue
-
-            if not response:
                 Logger.info(
-                    "[AuthServer] no response addr=%s result=%s state=%s",
+                    "Connection closed addr=%s state=%s",
                     addr,
-                    result.value,
                     conn_ctx.state,
                 )
-                continue
-
-            server_op = response[0]
-            server_name = AUTH_SERVER_OPCODES.get(server_op)
-
-            if server_name:
-                server_logging_enabled = should_log_packet("authserver", server_name)
-                if server_logging_enabled:
-                    Logger.info(f"[AuthServer] S→C {server_name}")
-                log_raw_packet("authserver", server_name, "Raw", response)
-                if server_logging_enabled and decode_enabled("authserver"):
-                    log_decoded_packet(
-                        "authserver",
-                        server_name,
-                        safe_decode("Server", server_name, response),
-                        label=server_name,
-                    )
-
-            try:
-                sock.sendall(response)
-            except Exception as exc:
-                Logger.error(f"{addr}: Failed to send response: {exc}")
                 break
 
-            if server_name == "REALM_LIST_S":
-                conn_ctx.last_error = None
-                sock.settimeout(connection_time_limit_for_state(conn_ctx.state))
-                Logger.debug(
-                    "[AuthServer] auth flow ready for repeat realm list addr=%s timeout=%s",
+            ip = addr[0]
+            now = time.time()
+            exceeded = False
+
+            with RATE_LIMIT_LOCK:
+                bucket = AUTH_RATE_LIMIT.get(ip, [])
+                bucket = [
+                    t for t in bucket if now - t < AUTH_RATE_WINDOW
+                ]
+
+                if len(bucket) >= AUTH_RATE_MAX:
+                    exceeded = True
+                else:
+                    bucket.append(now)
+                    AUTH_RATE_LIMIT[ip] = bucket
+
+            if exceeded:
+                Logger.warning("[AUTH] rate limit exceeded ip=%s", ip)
+                terminate_connection(sock, conn_ctx, "rate limit")
+                return
+
+            result, response = process_packet(conn_ctx, data, sock)
+
+            if response:
+                server_name = send_server_response(
+                    sock,
+                    conn_ctx,
                     addr,
-                    connection_time_limit_for_state(conn_ctx.state),
+                    response,
                 )
+                if server_name is None:
+                    terminate_connection(sock, conn_ctx, "server send failed")
+                    return
+
+            if result in FAILURE_RESULTS:
+                terminate_connection(
+                    sock,
+                    conn_ctx,
+                    conn_ctx.last_error or f"auth failed result={result.value}",
+                )
+                return
 
     except Exception as exc:
-        Logger.error(f"{addr}: Unexpected error: {exc}")
+        Logger.error("%s: unexpected error: %s", addr, exc)
         Logger.error(traceback.format_exc())
+        terminate_connection(sock, conn_ctx, f"unexpected error: {exc}")
 
     finally:
         Logger.info(
-            "[AuthServer] connection stop addr=%s state=%s steps=%s username=%s error=%s",
+            "[AuthServer] connection stop addr=%s state=%s steps=%s "
+            "username=%s error=%s",
             addr,
             conn_ctx.state,
             conn_ctx.step_count,
             conn_ctx.username,
             conn_ctx.last_error,
         )
-        sock.close()
 
+        try:
+            sock.close()
+        except OSError:
+            pass
 
-# ---- Server loop --------------------------------------------------------
+        with CONNECTION_LOCK:
+            ACTIVE_CONNECTIONS["count"] = max(
+                0,
+                ACTIVE_CONNECTIONS["count"] - 1,
+            )
+
 
 def start_server() -> None:
     global running
 
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((HOST, PORT))
-    srv.listen(5)
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_sock.bind((HOST, PORT))
+    server_sock.listen(5)
+    server_sock.settimeout(1.0)
 
-    Logger.info(f"AuthServer listening on {HOST}:{PORT}")
+    Logger.success("AuthServer listening on %s:%s", HOST, PORT)
 
-    while running:
-        try:
-            srv.settimeout(1.0)
-            sock, addr = srv.accept()
+    try:
+        while running:
+            try:
+                client_sock, addr = server_sock.accept()
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                Logger.error("Server accept error: %s", exc)
+                Logger.error(traceback.format_exc())
+                continue
+
+            with CONNECTION_LOCK:
+                if ACTIVE_CONNECTIONS["count"] >= MAX_CONNECTIONS:
+                    Logger.warning(
+                        "[AuthServer] connection refused "
+                        "(limit reached) addr=%s",
+                        addr,
+                    )
+                    client_sock.close()
+                    continue
+
+                ACTIVE_CONNECTIONS["count"] += 1
+
             threading.Thread(
                 target=handle_client,
-                args=(sock, addr),
+                args=(client_sock, addr),
                 daemon=True,
             ).start()
-        except socket.timeout:
-            continue
-        except Exception as exc:
-            Logger.error(f"Server error: {exc}")
-            Logger.error(traceback.format_exc())
-
-    Logger.info("AuthServer stopping...")
-    srv.close()
+    finally:
+        Logger.info("AuthServer stopping...")
+        server_sock.close()
 
 
-# ---- Main entry ---------------------------------------------------------
+def preload_account_cache() -> None:
+    try:
+        accounts = DatabaseConnection.get_all_auth_accounts()
+        new_cache = {}
 
-def run_auth():
-    global runtime, DatabaseConnection, AuthHandlersModule, AUTH_HANDLERS, set_srp6_mode
+        for account in accounts:
+            username = str(account.username or "").strip().upper()
+            if not username:
+                continue
+
+            new_cache[username] = {
+                "id": account.id,
+                "username": username,
+                "salt": bytes(account.salt or b""),
+                "verifier": bytes(account.verifier or b""),
+            }
+
+        with auth_cache.ACCOUNT_CACHE_LOCK:
+            auth_cache.ACCOUNT_CACHE.clear()
+            auth_cache.ACCOUNT_CACHE.update(new_cache)
+
+        Logger.info(
+            "Account cache loaded (%s accounts)",
+            len(new_cache),
+        )
+    except Exception as exc:
+        Logger.error("Account cache preload failed: %s", exc)
+        Logger.error(traceback.format_exc())
+        raise
+
+
+def run_auth() -> None:
+    global runtime
 
     Logger.configure(scope="dsl", reset=True)
     Logger.configure(scope="authserver", reset=True)
+
     signal.signal(signal.SIGINT, sigint)
     signal.signal(signal.SIGTERM, sigint)
-    Logger.info(f"{project_name()} AuthServer")
-    from server.modules.database.DatabaseConnection import DatabaseConnection as _DatabaseConnection
-    import server.modules.handlers.AuthHandlers as _AuthHandlersModule
-    from server.modules.handlers.AuthHandlers import (
-        opcode_handlers as _AUTH_HANDLERS,
-        set_srp6_mode as _set_srp6_mode,
-    )
 
-    DatabaseConnection = _DatabaseConnection
-    AuthHandlersModule = _AuthHandlersModule
-    AUTH_HANDLERS = _AUTH_HANDLERS
-    set_srp6_mode = _set_srp6_mode
+    Logger.info("%s AuthServer", project_name())
 
-    DatabaseConnection.initialize()
+    DatabaseConnection.initialize_auth()
+    DatabaseConnection.initialize_characters()
+    preload_account_cache()
+
     set_srp6_mode(config.get("crypto", {}).get("srp6_mode", "skyfire"))
 
     try:
         runtime = DslRuntime(watch=False)
-        loaded, total = runtime.load_runtime_all()
-        pct = int((loaded * 100 / total)) if total else 0
-        Logger.info(f"DSL runtime ready [{loaded}/{total}] {pct}%")
+        loaded, total = runtime.load_runtime_selected(
+            AUTH_DEFS,
+            progress=True,
+        )
     except Exception as exc:
-        Logger.error(f"[AuthServer] Runtime init failed: {exc}")
+        Logger.error("[AuthServer] Runtime init failed: %s", exc)
         Logger.error(traceback.format_exc())
         raise
+
+    pct = int((loaded * 100 / total)) if total else 0
+    Logger.info("DSL runtime ready [%s/%s] %s%%", loaded, total, pct)
 
     start_server()
 
