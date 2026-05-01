@@ -100,6 +100,21 @@ MOUNT_DISPLAY_BY_SPELL: dict[int, int] = {
     134735: 42703,   # Grand Expedition Yak
     72286: 31007,    # Invincible
 }
+FLYING_MOUNT_SPELLS: frozenset[int] = frozenset(
+    {
+        32235,  # Golden Gryphon
+        63644,  # Argent Hippogryph
+        68398,  # Big Love Rocket
+        68976,  # X-53 Touring Rocket
+        72286,  # Invincible
+        76271,  # X-53 Touring Rocket
+        76282,  # X-53 Touring Rocket
+        76292,  # X-53 Touring Rocket
+        76294,  # X-53 Touring Rocket
+        89832,  # Drake of the West Wind
+        113873, # Pandaren Kite
+    }
+)
 DEFAULT_TEST_MOUNT_DISPLAY_ID = 31007
 
 
@@ -162,6 +177,13 @@ def load_mount_spells(db) -> None:
 def is_mount_spell(spell_id: int) -> bool:
     try:
         return int(spell_id) in ALL_MOUNT_SPELLS
+    except Exception:
+        return False
+
+
+def is_flying_mount_spell(spell_id: int) -> bool:
+    try:
+        return int(spell_id) in FLYING_MOUNT_SPELLS
     except Exception:
         return False
 

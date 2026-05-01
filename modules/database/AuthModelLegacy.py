@@ -3,8 +3,11 @@
 
 from sqlalchemy import Column, Integer, String, DateTime, Float, BigInteger
 from sqlalchemy.dialects.mysql import TINYINT
-from server.modules.database.Base import Base
+from sqlalchemy.orm import declarative_base
 from datetime import datetime
+
+
+Base = declarative_base()
 
 
 # -------------------------------------------------------

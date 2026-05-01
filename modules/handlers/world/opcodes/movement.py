@@ -53,6 +53,10 @@ _MOVEMENTFLAG_TURN_RIGHT = 0x00000020
 _MOVEMENTFLAG_LEFT = _MOVEMENTFLAG_TURN_LEFT
 _MOVEMENTFLAG_RIGHT = _MOVEMENTFLAG_TURN_RIGHT
 _MOVEMENTFLAG_FALLING = 0x00000800
+_MOVEMENTFLAG_ASCENDING = 0x00200000
+_MOVEMENTFLAG_DESCENDING = 0x00400000
+_MOVEMENTFLAG_CAN_FLY = 0x00800000
+_MOVEMENTFLAG_FLYING = 0x01000000
 _MOVEMENTFLAG2_CIRCLE_RUN_SYNC = 0x00000800
 
 _SMSG_PLAYER_MOVE_JUMP_CONTROL_NO_DIRECTION = bytes.fromhex("8A0C0800000000")
@@ -99,6 +103,8 @@ def _movement_state(session):
         ):
             state.last_valid_orientation = float(session_orientation)
     state.counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
+    state.is_ascending = bool(getattr(state, "is_ascending", False))
+    state.is_descending = bool(getattr(state, "is_descending", False))
     return state
 
 
@@ -134,6 +140,36 @@ def _sync_session_from_movement_state(session) -> None:
 
 def _movement_flags_for_sync(session) -> int:
     return int(_movement_state(session).flags)
+
+
+def _movement_flags_for_outbound_sync(session, state=None) -> int:
+    if state is None:
+        state = _movement_state(session)
+
+    flags = int(getattr(state, "flags", 0) or 0)
+    can_fly = bool(getattr(session, "can_fly", False))
+    is_flying = bool(getattr(session, "is_flying", False))
+
+    if can_fly:
+        flags |= _MOVEMENTFLAG_CAN_FLY
+    else:
+        flags &= ~_MOVEMENTFLAG_CAN_FLY
+
+    if is_flying:
+        flags |= _MOVEMENTFLAG_FLYING
+    else:
+        flags &= ~_MOVEMENTFLAG_FLYING
+
+    if bool(getattr(state, "is_ascending", False)):
+        flags |= _MOVEMENTFLAG_ASCENDING
+        flags &= ~_MOVEMENTFLAG_DESCENDING
+    elif bool(getattr(state, "is_descending", False)):
+        flags |= _MOVEMENTFLAG_DESCENDING
+        flags &= ~_MOVEMENTFLAG_ASCENDING
+    else:
+        flags &= ~(_MOVEMENTFLAG_ASCENDING | _MOVEMENTFLAG_DESCENDING)
+
+    return int(flags)
 
 
 def _movement_timestamp_ms(session) -> int:
@@ -178,7 +214,7 @@ def build_smsg_player_move_payload_old(session) -> bytes | None:
         return None
 
     raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
-    move_flags = int(state.flags)
+    move_flags = _movement_flags_for_outbound_sync(session, state)
     move_flags2 = int(state.flags2)
     timestamp = _outbound_movement_timestamp_ms(session)
     x = float(state.x)
@@ -273,7 +309,7 @@ def build_smsg_player_move_payload_stable_old(session) -> bytes | None:
         state.counter = (int(getattr(state, "counter", 0) or 0) + 1) & 0xFFFFFFFF
         return bytes(payload)
 
-    move_flags = int(state.flags)
+    move_flags = _movement_flags_for_outbound_sync(session, state)
     move_flags2 = int(state.flags2)
     # Facing 0.0 is a valid orientation. Omitting it makes the normal
     # SMSG_PLAYER_MOVE layout flip between two binary shapes as players rotate
@@ -860,6 +896,29 @@ def _apply_movement_flags(state, opcode_name: str) -> None:
     elif opcode_name == "MSG_MOVE_FALL_LAND":
         flags &= ~_MOVEMENTFLAG_FALLING
         flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
+        flags &= ~(
+            _MOVEMENTFLAG_FLYING
+            | _MOVEMENTFLAG_ASCENDING
+            | _MOVEMENTFLAG_DESCENDING
+        )
+        state.is_ascending = False
+        state.is_descending = False
+    elif opcode_name == "MSG_MOVE_START_ASCEND":
+        state.is_ascending = True
+        state.is_descending = False
+        flags |= _MOVEMENTFLAG_ASCENDING
+        flags &= ~_MOVEMENTFLAG_DESCENDING
+    elif opcode_name == "MSG_MOVE_STOP_ASCEND":
+        state.is_ascending = False
+        flags &= ~_MOVEMENTFLAG_ASCENDING
+    elif opcode_name == "MSG_MOVE_START_DESCEND":
+        state.is_descending = True
+        state.is_ascending = False
+        flags |= _MOVEMENTFLAG_DESCENDING
+        flags &= ~_MOVEMENTFLAG_ASCENDING
+    elif opcode_name == "MSG_MOVE_STOP_DESCEND":
+        state.is_descending = False
+        flags &= ~_MOVEMENTFLAG_DESCENDING
     if (
         flags & _MOVEMENTFLAG_FORWARD
         and flags & (_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
@@ -1085,6 +1144,21 @@ def _extract_skyfire_movement_from_payload(
                 pass
         return (float(x), float(y), float(z), float(orientation))
 
+    if opcode_name == "MSG_MOVE_START_ASCEND":
+        # Pandaria 5.4.8 flying mount captures place START_ASCEND as
+        # PositionX, PositionY, PositionZ, with facing near the packet tail.
+        x, y, z = first, second, third
+        for offset in (25, 28):
+            try:
+                candidate = struct.unpack_from("<f", payload, offset)[0]
+            except struct.error:
+                continue
+            normalized = _normalize_orientation(candidate)
+            if normalized is not None:
+                orientation = float(normalized)
+                break
+        return (float(x), float(y), float(z), float(orientation))
+
     if opcode_name == "MSG_MOVE_START_BACKWARD":
         # SkyFire 5.4.8 MovementStartBackward starts with PositionY, PositionZ, PositionX.
         y, z, x = first, second, third
@@ -1103,6 +1177,21 @@ def _extract_skyfire_movement_from_payload(
         elif len(payload) >= 28:
             orientation_offsets = (20,)
         for offset in orientation_offsets:
+            try:
+                candidate = struct.unpack_from("<f", payload, offset)[0]
+            except struct.error:
+                continue
+            normalized = _normalize_orientation(candidate)
+            if normalized is not None:
+                orientation = float(normalized)
+                break
+        return (float(x), float(y), float(z), float(orientation))
+
+    if opcode_name == "MSG_MOVE_STOP_ASCEND":
+        # Captured STOP_ASCEND packets match heartbeat order: PositionZ,
+        # PositionX, PositionY. Keeping this exact avoids broad float scanning.
+        z, x, y = first, second, third
+        for offset in (27, 23):
             try:
                 candidate = struct.unpack_from("<f", payload, offset)[0]
             except struct.error:
@@ -1369,6 +1458,10 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
         )
         return False
     _record_movement_packet_state(session, opcode_name, payload)
+    if opcode_name == "MSG_MOVE_FALL_LAND":
+        setattr(session, "is_flying", False)
+    elif opcode_name in {"MSG_MOVE_START_ASCEND", "MSG_MOVE_START_DESCEND"}:
+        setattr(session, "is_flying", True)
     current_flags = int(getattr(state, "flags", 0) or 0)
     if opcode_name == "MSG_MOVE_STOP" and current_flags & (
         _MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT
@@ -1592,6 +1685,10 @@ def _maybe_periodic_position_save(
 @register("MSG_MOVE_STOP")
 @register("MSG_MOVE_HEARTBEAT")
 @register("MSG_MOVE_JUMP")
+@register("MSG_MOVE_START_ASCEND")
+@register("MSG_MOVE_STOP_ASCEND")
+@register("MSG_MOVE_START_DESCEND")
+@register("MSG_MOVE_STOP_DESCEND")
 @register("MSG_MOVE_START_TURN_LEFT")
 @register("MSG_MOVE_START_TURN_RIGHT")
 @register("MSG_MOVE_STOP_TURN")
@@ -1612,6 +1709,10 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             "MSG_MOVE_START_STRAFE_RIGHT",
             "MSG_MOVE_STOP_STRAFE",
             "MSG_MOVE_STOP",
+            "MSG_MOVE_START_ASCEND",
+            "MSG_MOVE_STOP_ASCEND",
+            "MSG_MOVE_START_DESCEND",
+            "MSG_MOVE_STOP_DESCEND",
             "MSG_MOVE_START_TURN_LEFT",
             "MSG_MOVE_START_TURN_RIGHT",
             "MSG_MOVE_STOP_TURN",
@@ -1753,7 +1854,14 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     _mark_position_dirty(session)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _maybe_periodic_position_save(session)
-    force_broadcast = opcode_name in {"MSG_MOVE_HEARTBEAT", "MSG_MOVE_JUMP"}
+    force_broadcast = opcode_name in {
+        "MSG_MOVE_HEARTBEAT",
+        "MSG_MOVE_JUMP",
+        "MSG_MOVE_START_ASCEND",
+        "MSG_MOVE_STOP_ASCEND",
+        "MSG_MOVE_START_DESCEND",
+        "MSG_MOVE_STOP_DESCEND",
+    }
     if opcode_name == "MSG_MOVE_JUMP":
         Logger.debug(
             "[JUMP_BROADCAST] opcode=%s fall_time=%s force=%s",
@@ -1815,10 +1923,13 @@ def _post_teleport_multiplayer_resync(
     reason: str,
 ) -> list[tuple[str, bytes]]:
     """Rebuild live peer state after teleport ACK using existing runtime paths."""
-    broadcast_player_state_update(session, force=True)
-    force_bilateral_visibility_resync(session, reason=reason)
-
-    if not bool(getattr(session, "is_mounted", False)):
+    if not (
+        bool(getattr(session, "is_mounted", False))
+        or int(getattr(session, "mount_spell", 0) or 0)
+        or int(getattr(session, "mount_display_id", 0) or 0)
+    ):
+        broadcast_player_state_update(session, force=True)
+        force_bilateral_visibility_resync(session, reason=reason)
         return []
 
     try:
@@ -1827,25 +1938,16 @@ def _post_teleport_multiplayer_resync(
         Logger.warning("[Teleport] mount resync unavailable reason=%s err=%s", reason, exc)
         return []
 
-    display_id = int(getattr(session, "mount_display_id", 0) or 0)
-    if display_id <= 0:
-        mount_spell = int(getattr(session, "mount_spell", 0) or 0)
-        display_id = int(spells_handlers.get_mount_display_id(mount_spell) or 0)
-    if display_id <= 0:
-        return []
-
-    responses = list(spells_handlers.build_mount_visual_responses(session, display_id))
-    responses.append(("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(session)))
-    responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session)))
+    responses = list(spells_handlers.dismount(session))
     move_payload = build_smsg_player_move_payload(session)
     if move_payload is not None:
         responses.append(("SMSG_PLAYER_MOVE", move_payload))
 
-    spells_handlers._broadcast_mount_visual_to_visible_peers(session, display_id)
+    broadcast_player_state_update(session, force=True)
+    force_bilateral_visibility_resync(session, reason=reason)
     Logger.info(
-        "[Teleport] post-ack mount resync player=%s display=%s reason=%s",
+        "[Teleport] post-ack dismount player=%s reason=%s",
         int(getattr(session, "char_guid", 0) or 0),
-        int(display_id),
         str(reason),
     )
     return responses

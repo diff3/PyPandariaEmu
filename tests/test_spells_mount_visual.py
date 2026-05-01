@@ -32,6 +32,9 @@ def _import_spells_handlers():
             "register": lambda *args, **kwargs: (lambda fn: fn),
         },
         "server.modules.handlers.world.opcodes.movement": {
+            "build_move_set_can_fly_payload": lambda session, enabled: (
+                b"can-fly-on" if enabled else b"can-fly-off"
+            ),
             "build_move_set_run_speed_payload": lambda session: b"",
             "build_move_set_flight_speed_payload": lambda session: b"",
         },
@@ -44,6 +47,7 @@ def _import_spells_handlers():
             "ALL_MOUNT_SPELLS": set(),
             "get_mount_display_id": lambda spell_id: 0,
             "granted_mount_spells": lambda: [],
+            "is_flying_mount_spell": lambda spell_id: False,
             "is_mount_spell": lambda spell_id: False,
         },
     }
@@ -221,13 +225,80 @@ def test_handle_mount_and_dismount_use_aura_visual_and_speed(monkeypatch):
     dismount_responses = spells_handlers.dismount(session)
     assert [opcode for opcode, _payload in dismount_responses[:4]] == [
         "SMSG_AURA_UPDATE",
+        "SMSG_DISMOUNT",
         "SMSG_UPDATE_OBJECT",
         "SMSG_MOVE_SET_RUN_SPEED",
-        "SMSG_MOVE_SET_FLIGHT_SPEED",
     ]
     assert session.is_mounted is False
     assert session.mount_spell is None
     assert session.active_mount_aura_spell_id is None
+
+
+def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda spell_id: 31007)
+    monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda spell_id: True)
+    monkeypatch.setattr(spells_handlers, "build_move_set_run_speed_payload", lambda session: b"run")
+    monkeypatch.setattr(spells_handlers, "build_move_set_flight_speed_payload", lambda session: b"flight")
+    monkeypatch.setattr(
+        spells_handlers,
+        "build_multi_u32_update_object_payload",
+        lambda **fields: b"mount-update",
+    )
+
+    session = SimpleNamespace(
+        map_id=1,
+        char_guid=3,
+        world_guid=0x0003000100000003,
+        unit_flags=0x00000020,
+        mount_display_id=0,
+        mount_spell=None,
+        is_mounted=False,
+        can_fly=False,
+        is_flying=False,
+        movement_state=SimpleNamespace(
+            flags=0,
+            is_ascending=False,
+            is_descending=False,
+        ),
+        run_speed=7.0,
+        fly_speed=7.0,
+        display_id=15475,
+        native_display_id=15475,
+        active_mount_aura_spell_id=None,
+        active_mount_aura_slot=0,
+    )
+
+    mount_responses = spells_handlers.handle_mount(session, 72286)
+    duplicate_responses = spells_handlers.handle_mount(session, 72286)
+    assert session.can_fly is True
+    assert session.is_flying is True
+    assert session.movement_state.flags & spells_handlers._MOVEMENTFLAG_FLYING_CAPABILITY
+
+    dismount_responses = spells_handlers.dismount(session)
+
+    assert [opcode for opcode, _payload in mount_responses[:6]] == [
+        "SMSG_AURA_UPDATE",
+        "SMSG_UPDATE_OBJECT",
+        "SMSG_SPLINE_MOVE_SET_FLYING",
+        "SMSG_MOVE_SET_CAN_FLY",
+        "SMSG_MOVE_SET_RUN_SPEED",
+        "SMSG_MOVE_SET_FLIGHT_SPEED",
+    ]
+    assert mount_responses[2][1] == bytes.fromhex("1002")
+    assert mount_responses[3][1] == b"can-fly-on"
+    assert "SMSG_MOVE_SET_CAN_FLY" not in [opcode for opcode, _payload in duplicate_responses]
+    assert [opcode for opcode, _payload in dismount_responses[:4]] == [
+        "SMSG_AURA_UPDATE",
+        "SMSG_DISMOUNT",
+        "SMSG_MOVE_UNSET_CAN_FLY",
+        "SMSG_SPLINE_MOVE_UNSET_FLYING",
+    ]
+    assert dismount_responses[2][1] == b"can-fly-off"
+    assert dismount_responses[3][1] == bytes.fromhex("0202")
+    assert session.can_fly is False
+    assert session.is_flying is False
+    assert not session.movement_state.flags & spells_handlers._MOVEMENTFLAG_FLYING_CAPABILITY
 
 
 def test_mount_and_dismount_broadcast_visual_update_to_visible_peers(monkeypatch):

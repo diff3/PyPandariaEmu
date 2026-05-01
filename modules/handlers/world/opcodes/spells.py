@@ -16,6 +16,7 @@ from server.modules.handlers.world.bootstrap.replay import (
 )
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes.movement import (
+    build_move_set_can_fly_payload,
     build_move_set_flight_speed_payload,
     build_move_set_run_speed_payload,
 )
@@ -23,8 +24,10 @@ from server.modules.handlers.world.mount.mount_service import (
     ALL_MOUNT_SPELLS,
     get_mount_display_id,
     granted_mount_spells,
+    is_flying_mount_spell,
     is_mount_spell,
 )
+from DSL.modules.bitsHandler import BitWriter
 
 from server.modules.game import player
 
@@ -82,6 +85,16 @@ _PLAYER_FIELD_MOUNTDISPLAYID = 71
 _UNIT_FIELD_FLAGS = 0x60
 _UNIT_FIELD_MOUNTDISPLAYID = 0x6A
 _MOUNT_SPEED_MULTIPLIER = 2.0
+_MOVEMENTFLAG_CAN_FLY = 0x00800000
+_MOVEMENTFLAG_FLYING = 0x01000000
+_MOVEMENTFLAG_ASCENDING = 0x00200000
+_MOVEMENTFLAG_DESCENDING = 0x00400000
+_MOVEMENTFLAG_FLYING_CAPABILITY = _MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING
+_MOVEMENTFLAG_FLYING_STATE = (
+    _MOVEMENTFLAG_FLYING
+    | _MOVEMENTFLAG_ASCENDING
+    | _MOVEMENTFLAG_DESCENDING
+)
 _LANG_ORCISH = 1
 _LANG_COMMON = 7
 _KNOWN_LANGUAGES_ALL = 0xFFFFFFFF
@@ -785,6 +798,118 @@ def build_fly_state_responses(session) -> list[tuple[str, bytes]]:
         source_label="fly_toggle",
     )
 
+
+def _movement_guid_value(session) -> int:
+    return int(
+        getattr(session, "char_guid", 0)
+        or getattr(session, "world_guid", 0)
+        or getattr(session, "player_guid", 0)
+        or 0
+    )
+
+
+def _append_guid_xor_bytes(
+    payload: bytearray,
+    raw_guid: bytes,
+    order: tuple[int, ...],
+) -> None:
+    for index in order:
+        value = raw_guid[index]
+        if value:
+            payload.append((value ^ 1) & 0xFF)
+
+
+def build_spline_move_flying_payload(session) -> bytes:
+    guid_value = _movement_guid_value(session)
+    raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
+
+    bits = BitWriter()
+    for index in (4, 1, 2, 0, 7, 5, 3, 6):
+        bits.write_bits(1 if raw_guid[index] else 0, 1)
+
+    payload = bytearray(bits.getvalue())
+    _append_guid_xor_bytes(payload, raw_guid, (4, 7, 1, 0, 3, 5, 6, 2))
+    return bytes(payload)
+
+
+def build_spline_move_unset_flying_payload(session) -> bytes:
+    guid_value = _movement_guid_value(session)
+    raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
+
+    bits = BitWriter()
+    for index in (1, 5, 7, 2, 6, 3, 0, 4):
+        bits.write_bits(1 if raw_guid[index] else 0, 1)
+
+    payload = bytearray(bits.getvalue())
+    _append_guid_xor_bytes(payload, raw_guid, (2, 5, 4, 6, 1, 0, 7, 3))
+    return bytes(payload)
+
+
+def build_smsg_dismount_payload(session) -> bytes:
+    guid_value = _movement_guid_value(session)
+    raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
+
+    bits = BitWriter()
+    for index in (6, 3, 0, 7, 1, 2, 5, 4):
+        bits.write_bits(1 if raw_guid[index] else 0, 1)
+
+    payload = bytearray(bits.getvalue())
+    for index in (3, 6, 7, 5, 1, 4, 2, 0):
+        if raw_guid[index]:
+            payload.append(raw_guid[index])
+    return bytes(payload)
+
+
+def _set_flying_capability_state(session, enabled: bool) -> bool:
+    previous = bool(getattr(session, "can_fly", False))
+    session.can_fly = bool(enabled)
+    session.is_flying = bool(enabled)
+
+    state = getattr(session, "movement_state", None)
+    if state is not None:
+        flags = int(getattr(state, "flags", 0) or 0)
+        if enabled:
+            flags |= _MOVEMENTFLAG_FLYING_CAPABILITY
+        else:
+            flags &= ~(
+                _MOVEMENTFLAG_CAN_FLY
+                | _MOVEMENTFLAG_FLYING_STATE
+            )
+            state.is_ascending = False
+            state.is_descending = False
+        state.flags = int(flags)
+
+    return previous != bool(enabled)
+
+
+def build_mount_flying_capability_responses(player, spell_id: int) -> list[tuple[str, bytes]]:
+    if not is_flying_mount_spell(int(spell_id)):
+        return []
+    if not _set_flying_capability_state(player, True):
+        return []
+    return [
+        ("SMSG_SPLINE_MOVE_SET_FLYING", build_spline_move_flying_payload(player)),
+        ("SMSG_MOVE_SET_CAN_FLY", build_move_set_can_fly_payload(player, True)),
+    ]
+
+
+def build_dismount_flying_capability_responses(player) -> list[tuple[str, bytes]]:
+    state = getattr(player, "movement_state", None)
+    state_flags = int(getattr(state, "flags", 0) or 0) if state is not None else 0
+    has_flying_state = (
+        bool(getattr(player, "can_fly", False))
+        or bool(getattr(player, "is_flying", False))
+        or bool(state_flags & (_MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING_STATE))
+    )
+    if not has_flying_state:
+        return []
+    _set_flying_capability_state(player, False)
+    return [
+        ("SMSG_MOVE_UNSET_CAN_FLY", build_move_set_can_fly_payload(player, False)),
+        ("SMSG_SPLINE_MOVE_UNSET_FLYING", build_spline_move_unset_flying_payload(player)),
+    ]
+
+
 def build_raw_update_object(player, fields):
     payload = bytearray()
 
@@ -840,6 +965,7 @@ def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
     if display_id > 0:
         responses.extend(build_mount_visual_responses(player, display_id))
         _broadcast_mount_visual_to_visible_peers(player, display_id)
+    responses.extend(build_mount_flying_capability_responses(player, int(spell_id)))
     responses.append(_build_run_speed_update_response(player))
     responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(player)))
     responses.extend(_notification_response(f"Mounted spell={int(spell_id)} speed={float(player.run_speed):.2f}"))
@@ -848,6 +974,10 @@ def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
 
 def send_dismount_update(player) -> list[tuple[str, bytes]]:
     responses: list[tuple[str, bytes]] = list(remove_mount_aura(player))
+    if int(getattr(player, "active_fly_aura_spell_id", 0) or 0):
+        responses.extend(remove_fly_aura(player))
+    responses.append(("SMSG_DISMOUNT", build_smsg_dismount_payload(player)))
+    responses.extend(build_dismount_flying_capability_responses(player))
     responses.extend(build_mount_visual_responses(player, 0))
     _broadcast_mount_visual_to_visible_peers(player, 0)
     responses.append(_build_run_speed_update_response(player))
@@ -895,7 +1025,7 @@ def dismount(player) -> list[tuple[str, bytes]]:
     player.is_mounted = False
     player.mount_spell = None
     player.mount_display_id = 0
-    player.unit_flags &= ~_UNIT_FLAG_MOUNT
+    player.unit_flags = int(getattr(player, "unit_flags", 0) or 0) & ~_UNIT_FLAG_MOUNT
     _restore_default_movement_speeds(player)
     return send_dismount_update(player)
 

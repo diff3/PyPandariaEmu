@@ -19,8 +19,6 @@ from server.modules.handlers.world.state.region_manager import region_manager
 PLAYER_VISIBILITY_DISTANCE = 120.0
 _PLAYER_FIELD_EXPLORED_ZONES = (0x8 + 0x98) + 0x5BB
 _PLAYER_EXPLORED_ZONES_SIZE = 200
-
-
 WEATHER_TYPES: dict[str, int] = {
     "clear": 0,
     "fine": 0,

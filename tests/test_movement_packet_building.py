@@ -79,6 +79,140 @@ def test_build_smsg_player_move_payload_uses_session_state() -> None:
     assert struct.pack("<f", 0.75) in payload
 
 
+def test_build_smsg_player_move_payload_adds_flying_flags_for_peers() -> None:
+    state = SimpleNamespace(
+        x=1.5,
+        y=2.5,
+        z=30.5,
+        orientation=1.25,
+        flags=0,
+        flags2=0,
+        timestamp_ms=123,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+        is_ascending=True,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        world_guid=7,
+        movement_state=state,
+        can_fly=True,
+        is_flying=True,
+    )
+
+    payload = movement.build_smsg_player_move_payload(session)
+    movement_flags, _movement_flags2, orientation = _decode_smsg_player_move_state(payload)
+
+    assert movement_flags & movement._MOVEMENTFLAG_CAN_FLY
+    assert movement_flags & movement._MOVEMENTFLAG_FLYING
+    assert movement_flags & movement._MOVEMENTFLAG_ASCENDING
+    assert not movement_flags & movement._MOVEMENTFLAG_DESCENDING
+    assert round(orientation, 6) == 1.25
+
+
+def test_fall_land_stops_flying_animation_but_keeps_capability() -> None:
+    state = SimpleNamespace(
+        x=1.5,
+        y=2.5,
+        z=30.5,
+        orientation=1.25,
+        flags=(
+            movement._MOVEMENTFLAG_CAN_FLY
+            | movement._MOVEMENTFLAG_FLYING
+            | movement._MOVEMENTFLAG_ASCENDING
+        ),
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+        is_ascending=True,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        world_guid=7,
+        movement_state=state,
+        can_fly=True,
+        is_flying=True,
+    )
+
+    ok = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_FALL_LAND",
+        b"",
+        (1.5, 2.5, 30.5, 1.25),
+    )
+    payload = movement.build_smsg_player_move_payload(session)
+    movement_flags, _movement_flags2, orientation = _decode_smsg_player_move_state(payload)
+
+    assert ok is True
+    assert session.can_fly is True
+    assert session.is_flying is False
+    assert state.is_ascending is False
+    assert state.is_descending is False
+    assert movement_flags & movement._MOVEMENTFLAG_CAN_FLY
+    assert not movement_flags & movement._MOVEMENTFLAG_FLYING
+    assert not movement_flags & movement._MOVEMENTFLAG_ASCENDING
+    assert not movement_flags & movement._MOVEMENTFLAG_DESCENDING
+    assert round(orientation, 6) == 1.25
+
+
+def test_stable_moving_heartbeats_keep_flying_animation() -> None:
+    state = SimpleNamespace(
+        x=1.5,
+        y=2.5,
+        z=30.5,
+        orientation=1.25,
+        flags=(
+            movement._MOVEMENTFLAG_CAN_FLY
+            | movement._MOVEMENTFLAG_FLYING
+            | movement._MOVEMENTFLAG_FORWARD
+            | movement._MOVEMENTFLAG_TURN_RIGHT
+        ),
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        world_guid=7,
+        movement_state=state,
+        can_fly=True,
+        is_flying=True,
+    )
+
+    for index in range(4):
+        ok = movement._store_authoritative_movement(
+            session,
+            "MSG_MOVE_HEARTBEAT",
+            b"",
+            (1.5 + float(index), 2.5, 30.5, 1.25),
+        )
+        assert ok is True
+
+    payload = movement.build_smsg_player_move_payload(session)
+    movement_flags, _movement_flags2, _orientation = _decode_smsg_player_move_state(payload)
+
+    assert session.is_flying is True
+    assert movement_flags & movement._MOVEMENTFLAG_FLYING
+
+
 def test_peer_move_build_does_not_advance_inbound_timestamp(monkeypatch) -> None:
     monkeypatch.setattr(movement.time, "time", lambda: 1.010)
     state = SimpleNamespace(
@@ -997,3 +1131,66 @@ def test_handle_msg_move_set_facing_updates_session_orientation(monkeypatch) -> 
     movement.handle_msg_move_set_facing(session, ctx)
 
     assert session.orientation == 1.25
+
+
+def test_post_teleport_resync_dismounts_active_mount(monkeypatch) -> None:
+    calls = []
+    spells_module = types.ModuleType("server.modules.handlers.world.opcodes.spells")
+
+    def fake_dismount(session):
+        session.is_mounted = False
+        session.mount_spell = None
+        session.mount_display_id = 0
+        session.can_fly = False
+        session.is_flying = False
+        return [("SMSG_DISMOUNT", b"dismount")]
+
+    spells_module.dismount = fake_dismount
+    monkeypatch.setitem(
+        sys.modules,
+        "server.modules.handlers.world.opcodes.spells",
+        spells_module,
+    )
+    opcodes_module = sys.modules["server.modules.handlers.world.opcodes"]
+    monkeypatch.setattr(opcodes_module, "spells", spells_module, raising=False)
+    monkeypatch.setattr(
+        movement,
+        "broadcast_player_state_update",
+        lambda *args, **kwargs: calls.append(("broadcast", args, kwargs)),
+    )
+    monkeypatch.setattr(
+        movement,
+        "force_bilateral_visibility_resync",
+        lambda *args, **kwargs: calls.append(("resync", args, kwargs)),
+    )
+    monkeypatch.setattr(
+        movement,
+        "build_smsg_player_move_payload",
+        lambda session: b"move",
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        world_guid=7,
+        is_mounted=True,
+        mount_spell=72286,
+        mount_display_id=31007,
+        can_fly=True,
+        is_flying=True,
+    )
+
+    responses = movement._post_teleport_multiplayer_resync(
+        session,
+        reason="test-teleport",
+    )
+
+    assert responses == [
+        ("SMSG_DISMOUNT", b"dismount"),
+        ("SMSG_PLAYER_MOVE", b"move"),
+    ]
+    assert session.is_mounted is False
+    assert session.mount_spell is None
+    assert session.mount_display_id == 0
+    assert session.can_fly is False
+    assert session.is_flying is False
+    assert calls[0][0] == "broadcast"
+    assert calls[1][0] == "resync"
