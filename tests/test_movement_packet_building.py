@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import struct
 import sys
 from types import SimpleNamespace
@@ -805,6 +806,483 @@ def test_parse_real_stop_strafe_payload() -> None:
     assert round(orientation, 3) == round(3.197581, 3)
 
 
+def test_parse_flying_heartbeat_len_31_reads_orientation_from_offset_23() -> None:
+    session = SimpleNamespace(orientation=0.0, is_flying=True, can_fly=True)
+    payload = bytes.fromhex(
+        "B80DF7410A567E463D557E46000000924141A000000602E1C0A64051A4BF0B"
+    )
+
+    parsed = movement.parse_movement_info(session, "MSG_MOVE_HEARTBEAT", payload, decoded={})
+
+    assert parsed is not None
+    x, y, z, orientation = parsed
+    assert round(x, 3) == round(16277.509766, 3)
+    assert round(y, 3) == round(16277.30957, 3)
+    assert round(z, 3) == round(30.881699, 3)
+    assert round(orientation, 3) == round(5.211045, 3)
+
+
+def test_parse_flying_heartbeat_len_30_preserves_previous_facing_when_no_valid_candidate_exists() -> None:
+    session = SimpleNamespace(orientation=6.282735, is_flying=True, can_fly=True)
+    payload = bytearray()
+    payload.extend(struct.pack("<fff", 176.719711, 1445.731812, 3442.134521))
+    while len(payload) < 30:
+        payload.append(0)
+
+    parsed = movement.parse_movement_info(session, "MSG_MOVE_HEARTBEAT", bytes(payload), decoded={})
+
+    assert parsed is not None
+    x, y, z, orientation = parsed
+    assert round(x, 3) == round(1445.731812, 3)
+    assert round(y, 3) == round(3442.134521, 3)
+    assert round(z, 3) == round(176.719711, 3)
+    assert round(orientation, 3) == round(6.282735, 3)
+
+
+def test_parse_flying_heartbeat_len_30_rejects_small_false_near_zero_orientation() -> None:
+    session = SimpleNamespace(orientation=5.959146, is_flying=True, can_fly=True)
+    payload = bytearray()
+    payload.extend(struct.pack("<fff", 171.161972, 1442.490479, 3433.467285))
+    while len(payload) < 23:
+        payload.append(0)
+    payload.extend(struct.pack("<f", 0.011767))
+    while len(payload) < 30:
+        payload.append(0)
+
+    parsed = movement.parse_movement_info(session, "MSG_MOVE_HEARTBEAT", bytes(payload), decoded={})
+
+    assert parsed is not None
+    _x, _y, _z, orientation = parsed
+    assert round(orientation, 3) == round(5.959146, 3)
+
+
+def test_parse_stop_ascend_len_35_reads_orientation_from_offset_31() -> None:
+    session = SimpleNamespace(orientation=0.0)
+    payload = bytes.fromhex(
+        "A20FE741EB057E4606027E4652800000004180000002063DD3BF0BB6B002BF2C320E40"
+    )
+
+    parsed = movement.parse_movement_info(session, "MSG_MOVE_STOP_ASCEND", payload, decoded={})
+
+    assert parsed is not None
+    x, y, z, orientation = parsed
+    assert round(x, 3) == round(16257.479492, 3)
+    assert round(y, 3) == round(16256.505859, 3)
+    assert round(z, 3) == round(28.882633, 3)
+    assert round(orientation, 3) == round(2.221812, 3)
+
+
+def test_start_ascend_sequence_begins_with_exact_yxz_coordinate_order() -> None:
+    sequence = movement._SKYFIRE_FLYING_MOVEMENT_SEQUENCES["MSG_MOVE_START_ASCEND"]
+
+    assert sequence[:3] == (
+        "MSEPositionY",
+        "MSEPositionX",
+        "MSEPositionZ",
+    )
+
+
+def test_start_backward_sequence_begins_with_exact_yzx_coordinate_order() -> None:
+    sequence = movement._SKYFIRE_FLYING_MOVEMENT_SEQUENCES["MSG_MOVE_START_BACKWARD"]
+
+    assert sequence[:3] == (
+        "MSEPositionY",
+        "MSEPositionZ",
+        "MSEPositionX",
+    )
+
+
+def test_parse_start_ascend_prefers_plausible_layout_for_current_position() -> None:
+    session = SimpleNamespace(
+        x=100.0,
+        y=200.0,
+        z=30.0,
+        orientation=1.25,
+        is_flying=True,
+        can_fly=True,
+    )
+    payload = bytearray()
+    payload.extend(struct.pack("<fff", 30.0, 100.0, 200.0))
+    payload.extend(b"\x00" * 13)
+    payload.extend(struct.pack("<f", 1.5))
+    while len(payload) < 33:
+        payload.append(0)
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_START_ASCEND",
+        bytes(payload),
+        decoded={},
+    )
+
+    assert parsed is not None
+    x, y, z, orientation = parsed
+    assert x == 100.0
+    assert y == 200.0
+    assert z == 30.0
+    assert orientation == 1.5
+
+
+def test_parse_start_ascend_len_30_preserves_previous_facing_when_only_zeroish_candidate_exists() -> None:
+    session = SimpleNamespace(
+        x=1447.887695,
+        y=3429.055908,
+        z=171.161896,
+        orientation=3.542,
+        is_flying=True,
+        can_fly=True,
+    )
+    payload = bytearray()
+    payload.extend(struct.pack("<fff", 3429.055908, 1447.887695, 171.161896))
+    while len(payload) < 23:
+        payload.append(0)
+    payload.extend(struct.pack("<f", 1.0e-8))
+    while len(payload) < 30:
+        payload.append(0)
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_START_ASCEND",
+        bytes(payload),
+        decoded={},
+    )
+
+    assert parsed is not None
+    x, y, z, orientation = parsed
+    assert round(x, 3) == round(1447.887695, 3)
+    assert round(y, 3) == round(3429.055908, 3)
+    assert round(z, 3) == round(171.161896, 3)
+    assert round(orientation, 3) == round(3.542, 3)
+
+
+def test_parse_stop_ascend_len_30_preserves_previous_facing_when_payload_has_no_valid_orientation() -> None:
+    session = SimpleNamespace(
+        orientation=3.542,
+        is_flying=True,
+        can_fly=True,
+    )
+    payload = bytearray()
+    payload.extend(struct.pack("<fff", 173.135895, 1447.887695, 3429.055908))
+    while len(payload) < 30:
+        payload.append(0)
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_STOP_ASCEND",
+        bytes(payload),
+        decoded={},
+    )
+
+    assert parsed is not None
+    x, y, z, orientation = parsed
+    assert round(x, 3) == round(1447.887695, 3)
+    assert round(y, 3) == round(3429.055908, 3)
+    assert round(z, 3) == round(173.135895, 3)
+    assert round(orientation, 3) == round(3.542, 3)
+
+
+def test_real_stop_ascend_sequence_extracts_pitch_and_timestamp() -> None:
+    session = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        is_flying=True,
+        can_fly=True,
+        movement_state=SimpleNamespace(pitch=0.0),
+    )
+    payload = bytes.fromhex(
+        "A20FE741EB057E4606027E4652800000004180000002063DD3BF0BB6B002BF2C320E40"
+    )
+
+    parsed = movement._parse_skyfire_flying_movement_info(
+        session,
+        "MSG_MOVE_STOP_ASCEND",
+        payload,
+    )
+
+    assert parsed is not None
+    assert round(parsed["x"], 3) == round(16257.479492, 3)
+    assert round(parsed["y"], 3) == round(16256.505859, 3)
+    assert round(parsed["z"], 3) == round(28.882633, 3)
+    assert round(parsed["orientation"], 6) == round(2.221812248, 6)
+    assert round(parsed["pitch"], 6) == round(-0.510508895, 6)
+    assert parsed["flags"] == (
+        movement._MOVEMENTFLAG_CAN_FLY
+        | movement._MOVEMENTFLAG_FLYING
+    )
+    assert parsed["timestamp"] == 197120829
+    assert parsed["parser_path"] == "skyfire_sequence:MSG_MOVE_STOP_ASCEND"
+
+
+def test_real_stop_turn_sequence_extracts_orientation_flags_and_timestamp() -> None:
+    session = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        movement_state=SimpleNamespace(pitch=0.0),
+    )
+    payload = bytes.fromhex("368A7D46ED85504159F77D4600000022A210000C91D8873FF1ACF605")
+
+    parsed = movement._parse_skyfire_flying_movement_info(
+        session,
+        "MSG_MOVE_STOP_TURN",
+        payload,
+    )
+
+    assert parsed is not None
+    assert round(parsed["x"], 3) == round(16226.552734, 3)
+    assert round(parsed["y"], 3) == round(16253.836914, 3)
+    assert round(parsed["z"], 3) == round(13.032697, 3)
+    assert round(parsed["orientation"], 6) == round(1.061296582, 6)
+    assert parsed["flags"] == 0
+    assert not parsed["flags"] & movement._MOVEMENTFLAG_TURN_LEFT
+    assert not parsed["flags"] & movement._MOVEMENTFLAG_TURN_RIGHT
+    assert parsed["flags2"] == 0x800
+    assert parsed["timestamp"] == 100052209
+    assert parsed["parser_path"] == "skyfire_sequence:MSG_MOVE_STOP_TURN"
+
+
+def test_record_stop_turn_state_uses_sequence_flags_authoritatively() -> None:
+    session = SimpleNamespace(
+        movement_state=SimpleNamespace(
+            x=0.0,
+            y=0.0,
+            z=0.0,
+            orientation=0.0,
+            flags=movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_TURN_RIGHT,
+            flags2=99,
+            timestamp_ms=0,
+            counter=0,
+            pitch=0.0,
+        )
+    )
+    payload = bytes.fromhex("368A7D46ED85504159F77D4600000022A210000C91D8873FF1ACF605")
+
+    parsed = movement._parse_skyfire_flying_movement_info(
+        session,
+        "MSG_MOVE_STOP_TURN",
+        payload,
+    )
+
+    assert parsed is not None
+    movement._record_movement_packet_state(session, "MSG_MOVE_STOP_TURN", payload)
+    state = movement._movement_state(session)
+
+    assert state.flags == parsed["flags"]
+    assert state.flags2 == parsed["flags2"]
+    assert state.timestamp_ms == parsed["timestamp"]
+    assert state.flags == 0
+    assert not state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+
+
+def test_record_stop_state_uses_sequence_flags_authoritatively() -> None:
+    session = SimpleNamespace(
+        movement_state=SimpleNamespace(
+            x=0.0,
+            y=0.0,
+            z=0.0,
+            orientation=0.0,
+            flags=(
+                movement._MOVEMENTFLAG_FORWARD
+                | movement._MOVEMENTFLAG_TURN_LEFT
+                | movement._MOVEMENTFLAG_TURN_RIGHT
+            ),
+            flags2=77,
+            timestamp_ms=0,
+            counter=0,
+            pitch=0.0,
+        )
+    )
+    payload = bytes.fromhex("727A7D46E6FF7D46AFE24F41120000020890000C1C422940169DF605")
+
+    parsed = movement._parse_skyfire_flying_movement_info(
+        session,
+        "MSG_MOVE_STOP",
+        payload,
+    )
+
+    assert parsed is not None
+    movement._record_movement_packet_state(session, "MSG_MOVE_STOP", payload)
+    state = movement._movement_state(session)
+
+    assert state.flags == parsed["flags"]
+    assert state.flags2 == parsed["flags2"]
+    assert state.timestamp_ms == parsed["timestamp"]
+    assert not state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert not state.flags & movement._MOVEMENTFLAG_TURN_LEFT
+    assert not state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+
+
+def test_real_start_forward_sequence_extracts_orientation_flags_and_timestamp() -> None:
+    session = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        movement_state=SimpleNamespace(pitch=0.0),
+    )
+    payload = bytes.fromhex("EFD74F41CD867D4633F97D4628000000421000000000080C209BF6051C422940")
+
+    parsed = movement._parse_skyfire_flying_movement_info(
+        session,
+        "MSG_MOVE_START_FORWARD",
+        payload,
+    )
+
+    assert parsed is not None
+    assert round(parsed["x"], 3) == round(16225.700195, 3)
+    assert round(parsed["y"], 3) == round(16254.299805, 3)
+    assert round(parsed["z"], 3) == round(12.990218, 3)
+    assert round(parsed["orientation"], 6) == round(2.644660234, 6)
+    assert parsed["flags"] & movement._MOVEMENTFLAG_FORWARD
+    assert parsed["flags2"] == 0x800
+    assert parsed["timestamp"] == 100047648
+    assert parsed["parser_path"] == "skyfire_sequence:MSG_MOVE_START_FORWARD"
+
+
+def test_parse_flying_stop_turn_preserves_previous_facing_when_payload_is_zeroish() -> None:
+    session = SimpleNamespace(
+        orientation=6.283,
+        is_flying=True,
+        can_fly=True,
+    )
+    payload = bytearray()
+    payload.extend(struct.pack("<fff", 1441.156494, 176.719711, 3436.836670))
+    while len(payload) < 24:
+        payload.append(0)
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_STOP_TURN",
+        bytes(payload),
+        decoded={},
+    )
+
+    assert parsed is not None
+    x, y, z, orientation = parsed
+    assert round(x, 3) == round(1441.156494, 3)
+    assert round(y, 3) == round(3436.836670, 3)
+    assert round(z, 3) == round(176.719711, 3)
+    assert round(orientation, 3) == round(6.283, 3)
+
+
+def test_store_authoritative_flying_heartbeat_uses_sequence_flags_pitch_timestamp_and_fall_data() -> None:
+    session = SimpleNamespace(
+        char_guid=7,
+        world_guid=7,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.25,
+        can_fly=True,
+        is_flying=True,
+        movement_state=SimpleNamespace(
+            x=10.0,
+            y=20.0,
+            z=30.0,
+            orientation=0.25,
+            flags=0,
+            flags2=0,
+            timestamp_ms=0,
+            server_movement_timestamp_ms=0,
+            counter=0,
+            pitch=0.0,
+            has_fall_data=False,
+            fall_time=0,
+            fall_vertical_speed=0.0,
+            fall_horizontal_speed=0.0,
+            fall_sin_angle=0.0,
+            fall_cos_angle=0.0,
+            is_ascending=False,
+            is_descending=False,
+        ),
+    )
+    payload = bytes.fromhex(
+        "A96B7741C1A27D4600FB7D46000000904540000800800C433FC7BE"
+        "F6D16BBF00000000D893FEC0F4010000C3A4624015A52C05"
+    )
+
+    parsed = movement.parse_movement_info(session, "MSG_MOVE_HEARTBEAT", payload, decoded={})
+    stored = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_HEARTBEAT",
+        payload,
+        parsed,
+    )
+    state = movement._movement_state(session)
+
+    assert stored is True
+    assert parsed is not None
+    assert round(parsed[0], 3) == round(16232.6884765625, 3)
+    assert round(parsed[1], 3) == round(16254.75, 3)
+    assert round(parsed[2], 3) == round(15.4637842178, 3)
+    assert round(parsed[3], 6) == round(3.5413062572, 6)
+    assert state.flags == movement._MOVEMENTFLAG_FALLING
+    assert state.flags2 == 0
+    assert state.timestamp_ms == 86811925
+    assert state.pitch == 0.0
+    assert state.has_fall_data is True
+    assert state.fall_time == 500
+    assert round(state.fall_vertical_speed, 6) == round(-7.9555473328, 6)
+    assert round(state.fall_horizontal_speed, 6) == 0.0
+    assert round(state.fall_sin_angle, 6) == round(-0.3891545236, 6)
+    assert round(state.fall_cos_angle, 6) == round(-0.9211724997, 6)
+    assert state.is_ascending is False
+    assert state.is_descending is False
+
+
+def test_parse_flying_start_turn_right_rejects_small_false_near_zero_orientation() -> None:
+    session = SimpleNamespace(
+        orientation=5.257773,
+        is_flying=True,
+        can_fly=True,
+    )
+    payload = bytearray()
+    payload.extend(struct.pack("<fff", 1447.513, 171.161972, 3438.344))
+    while len(payload) < 24:
+        payload.append(0)
+    payload.extend(struct.pack("<f", 0.011767))
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_START_TURN_RIGHT",
+        bytes(payload),
+        decoded={},
+    )
+
+    assert parsed is not None
+    _x, _y, _z, orientation = parsed
+    assert round(orientation, 3) == round(5.257773, 3)
+
+
+def test_parse_flying_stop_preserves_previous_facing_when_payload_is_zeroish() -> None:
+    session = SimpleNamespace(
+        orientation=5.959146,
+        is_flying=True,
+        can_fly=True,
+    )
+    payload = bytearray()
+    payload.extend(struct.pack("<fff", 1444.620, 3431.111, 173.248032))
+    while len(payload) < 24:
+        payload.append(0)
+
+    parsed = movement.parse_movement_info(
+        session,
+        "MSG_MOVE_STOP",
+        bytes(payload),
+        decoded={},
+    )
+
+    assert parsed is not None
+    x, y, z, orientation = parsed
+    assert round(x, 3) == round(1444.620, 3)
+    assert round(y, 3) == round(3431.111, 3)
+    assert round(z, 3) == round(173.248032, 3)
+    assert round(orientation, 3) == round(5.959146, 3)
+
+
 def test_stop_strafe_zero_orientation_preserves_previous_facing() -> None:
     session = SimpleNamespace(orientation=1.25)
     payload = bytearray()
@@ -1104,6 +1582,190 @@ def test_handle_movement_packet_keeps_previous_orientation_when_missing(monkeypa
     assert session.y == 2.0
     assert session.z == 3.0
     assert session.orientation == 1.75
+
+
+def test_handle_flying_heartbeat_accepts_new_orientation_even_when_not_turning(monkeypatch) -> None:
+    session = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        realm_id=1,
+        can_fly=True,
+        is_flying=True,
+    )
+    ctx = SimpleNamespace(
+        name="MSG_MOVE_HEARTBEAT",
+        opcode=0,
+        payload=b"\x00" * 31,
+        decoded={},
+    )
+    movement_state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+    )
+
+    monkeypatch.setattr(movement, "_consume_pending_teleport_on_movement", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args, **kwargs: (10.0, 20.0, 30.0, 5.211044788360596))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_movement_state", lambda _session: movement_state)
+    monkeypatch.setattr(
+        movement,
+        "_sync_session_from_movement_state",
+        lambda target: (
+            setattr(target, "x", movement_state.x),
+            setattr(target, "y", movement_state.y),
+            setattr(target, "z", movement_state.z),
+            setattr(target, "orientation", movement_state.orientation),
+        ),
+    )
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda _session: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_periodic_position_save", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_stream_gameobjects", lambda _session: [])
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda *args, **kwargs: None)
+
+    movement.handle_movement_packet(session, ctx)
+
+    assert round(session.orientation, 3) == round(5.211045, 3)
+
+
+def test_handle_flying_heartbeat_keeps_parsed_orientation_without_fallback(monkeypatch) -> None:
+    session = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        realm_id=1,
+        can_fly=True,
+        is_flying=True,
+    )
+    ctx = SimpleNamespace(
+        name="MSG_MOVE_HEARTBEAT",
+        opcode=0,
+        payload=b"\x00" * 30,
+        decoded={},
+    )
+    movement_state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+    )
+
+    monkeypatch.setattr(movement, "_consume_pending_teleport_on_movement", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args, **kwargs: (10.0, 25.0, 30.0, 1.25))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_movement_state", lambda _session: movement_state)
+    monkeypatch.setattr(
+        movement,
+        "_sync_session_from_movement_state",
+        lambda target: (
+            setattr(target, "x", movement_state.x),
+            setattr(target, "y", movement_state.y),
+            setattr(target, "z", movement_state.z),
+            setattr(target, "orientation", movement_state.orientation),
+        ),
+    )
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda _session: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_periodic_position_save", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_stream_gameobjects", lambda _session: [])
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda *args, **kwargs: None)
+
+    movement.handle_movement_packet(session, ctx)
+
+    assert round(session.orientation, 3) == round(1.25, 3)
+
+
+def test_handle_flying_heartbeat_accepts_orientation_when_can_fly_without_turn_flags(monkeypatch) -> None:
+    session = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        realm_id=1,
+        can_fly=True,
+        is_flying=False,
+    )
+    ctx = SimpleNamespace(
+        name="MSG_MOVE_HEARTBEAT",
+        opcode=0,
+        payload=b"\x00" * 31,
+        decoded={},
+    )
+    movement_state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+    )
+    debug_messages: list[str] = []
+
+    monkeypatch.setattr(movement, "_consume_pending_teleport_on_movement", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args, **kwargs: (10.0, 20.0, 30.0, 5.211044788360596))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_movement_state", lambda _session: movement_state)
+    monkeypatch.setattr(
+        movement,
+        "_sync_session_from_movement_state",
+        lambda target: (
+            setattr(target, "x", movement_state.x),
+            setattr(target, "y", movement_state.y),
+            setattr(target, "z", movement_state.z),
+            setattr(target, "orientation", movement_state.orientation),
+        ),
+    )
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda _session: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_periodic_position_save", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_stream_gameobjects", lambda _session: [])
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        movement.Logger,
+        "debug",
+        lambda message, *args: debug_messages.append(message % args if args else message),
+    )
+
+    movement.handle_movement_packet(session, ctx)
+
+    assert round(session.orientation, 3) == round(5.211045, 3)
+    assert any(
+        "[ORIENTATION_ACCEPT]" in message and "is_flying=True" in message and "accepted=True" in message
+        for message in debug_messages
+    )
 
 
 def test_handle_msg_move_set_facing_updates_session_orientation(monkeypatch) -> None:

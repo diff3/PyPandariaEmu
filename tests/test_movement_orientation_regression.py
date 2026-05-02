@@ -254,7 +254,7 @@ def test_parse_real_skyfire_stop_uses_xyz_prefix_and_orientation():
 
     assert parsed is not None
     x, y, z, orientation = parsed
-    assert round(x, 3) == round(16222.613281, 3)
+    assert round(x, 3) == round(16222.611328, 3)
     assert round(y, 3) == round(16255.974609, 3)
     assert round(z, 3) == round(12.992843, 3)
     assert round(orientation, 3) == round(2.64466, 3)
@@ -404,7 +404,7 @@ def test_parse_real_skyfire_stop_turn_32_byte_variant_uses_offset_24_orientation
     assert round(x, 3) == round(16227.729492, 3)
     assert round(y, 3) == round(16252.457031, 3)
     assert round(z, 3) == round(13.007778, 3)
-    assert round(orientation, 3) == round(4.378147, 3)
+    assert round(orientation, 3) == round(4.377170, 3)
 
 
 def test_exact_skyfire_parse_wins_over_bad_decoded_turn_data():

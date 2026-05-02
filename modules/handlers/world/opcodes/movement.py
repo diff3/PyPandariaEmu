@@ -6,7 +6,7 @@ import time
 from typing import Any, Optional, Tuple
 
 from DSL.modules.EncoderHandler import EncoderHandler
-from DSL.modules.bitsHandler import BitWriter
+from DSL.modules.bitsHandler import BitInterPreter, BitWriter
 # from modules.handlers.world.opcodes.chat import _append_feedback_response
 from shared.Logger import Logger
 from server.modules.game.guid import GameObjectGuid, GuidHelper
@@ -59,6 +59,777 @@ _MOVEMENTFLAG_CAN_FLY = 0x00800000
 _MOVEMENTFLAG_FLYING = 0x01000000
 _MOVEMENTFLAG2_CIRCLE_RUN_SYNC = 0x00000800
 
+_SKYFIRE_FLYING_MOVEMENT_OPCODES = frozenset({
+    "MSG_MOVE_HEARTBEAT",
+    "MSG_MOVE_START_ASCEND",
+    "MSG_MOVE_STOP_ASCEND",
+    "MSG_MOVE_START_DESCEND",
+    "MSG_MOVE_STOP_DESCEND",
+})
+
+_SKYFIRE_MOVEMENT_HEARTBEAT_SEQUENCE = (
+    "MSEPositionZ",
+    "MSEPositionX",
+    "MSEPositionY",
+    "MSEForcesCount",
+    "MSEHasMovementFlags",
+    "MSEZeroBit",
+    "MSEHasCounter",
+    "MSEHasGuidByte3",
+    "MSEHasGuidByte6",
+    "MSEHasPitch",
+    "MSEZeroBit",
+    "MSEZeroBit",
+    "MSEHasGuidByte7",
+    "MSEHasGuidByte2",
+    "MSEHasGuidByte4",
+    "MSEHasMovementFlags2",
+    "MSEHasOrientation",
+    "MSEHasTimestamp",
+    "MSEHasTransportData",
+    "MSEHasFallData",
+    "MSEHasGuidByte5",
+    "MSEHasSplineElevation",
+    "MSEHasGuidByte1",
+    "MSEHasGuidByte0",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportGuidByte6",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportGuidByte7",
+    "MSEHasTransportTime3",
+    "MSEHasTransportGuidByte1",
+    "MSEHasTransportGuidByte2",
+    "MSEHasTransportGuidByte4",
+    "MSEHasTransportTime2",
+    "MSEMovementFlags",
+    "MSEHasFallDirection",
+    "MSEMovementFlags2",
+    "MSEGuidByte2",
+    "MSEGuidByte3",
+    "MSEGuidByte6",
+    "MSEGuidByte1",
+    "MSEGuidByte4",
+    "MSEGuidByte7",
+    "MSEForces",
+    "MSEGuidByte5",
+    "MSEGuidByte0",
+    "MSEFallSinAngle",
+    "MSEFallCosAngle",
+    "MSEFallHorizontalSpeed",
+    "MSEFallVerticalSpeed",
+    "MSEFallTime",
+    "MSETransportGuidByte1",
+    "MSETransportGuidByte3",
+    "MSETransportGuidByte2",
+    "MSETransportGuidByte0",
+    "MSETransportTime3",
+    "MSETransportSeat",
+    "MSETransportGuidByte7",
+    "MSETransportPositionX",
+    "MSETransportGuidByte4",
+    "MSETransportTime2",
+    "MSETransportPositionY",
+    "MSETransportGuidByte6",
+    "MSETransportGuidByte5",
+    "MSETransportPositionZ",
+    "MSETransportTime",
+    "MSETransportOrientation",
+    "MSECounter",
+    "MSEOrientation",
+    "MSEPitch",
+    "MSETimestamp",
+    "MSESplineElevation",
+)
+
+_SKYFIRE_MOVEMENT_START_ASCEND_SEQUENCE = (
+    "MSEPositionY",
+    "MSEPositionX",
+    "MSEPositionZ",
+    "MSEHasOrientation",
+    "MSEHasGuidByte3",
+    "MSEHasTransportData",
+    "MSEHasMovementFlags",
+    "MSEZeroBit",
+    "MSEHasGuidByte0",
+    "MSEHasGuidByte4",
+    "MSEHasTimestamp",
+    "MSEHasGuidByte7",
+    "MSEZeroBit",
+    "MSEHasPitch",
+    "MSEHasGuidByte5",
+    "MSEHasMovementFlags2",
+    "MSEZeroBit",
+    "MSEHasGuidByte6",
+    "MSEHasGuidByte2",
+    "MSEHasCounter",
+    "MSEForcesCount",
+    "MSEHasGuidByte1",
+    "MSEHasSplineElevation",
+    "MSEHasFallData",
+    "MSEHasTransportGuidByte4",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportTime2",
+    "MSEHasTransportGuidByte1",
+    "MSEHasTransportTime3",
+    "MSEHasTransportGuidByte6",
+    "MSEHasTransportGuidByte2",
+    "MSEHasTransportGuidByte7",
+    "MSEHasFallDirection",
+    "MSEMovementFlags2",
+    "MSEMovementFlags",
+    "MSEGuidByte2",
+    "MSEGuidByte5",
+    "MSEForces",
+    "MSEGuidByte1",
+    "MSEGuidByte0",
+    "MSEGuidByte4",
+    "MSEGuidByte7",
+    "MSEGuidByte6",
+    "MSEGuidByte3",
+    "MSEOrientation",
+    "MSETimestamp",
+    "MSETransportGuidByte3",
+    "MSETransportTime",
+    "MSETransportPositionY",
+    "MSETransportOrientation",
+    "MSETransportGuidByte6",
+    "MSETransportTime3",
+    "MSETransportPositionX",
+    "MSETransportGuidByte2",
+    "MSETransportTime2",
+    "MSETransportGuidByte1",
+    "MSETransportGuidByte7",
+    "MSETransportPositionZ",
+    "MSETransportSeat",
+    "MSETransportGuidByte0",
+    "MSETransportGuidByte4",
+    "MSETransportGuidByte5",
+    "MSESplineElevation",
+    "MSEFallVerticalSpeed",
+    "MSEFallSinAngle",
+    "MSEFallCosAngle",
+    "MSEFallHorizontalSpeed",
+    "MSEFallTime",
+    "MSEPitch",
+    "MSECounter",
+)
+
+_SKYFIRE_MOVEMENT_START_DESCEND_SEQUENCE = (
+    "MSEPositionX",
+    "MSEPositionY",
+    "MSEPositionZ",
+    "MSEHasFallData",
+    "MSEHasMovementFlags",
+    "MSEHasGuidByte7",
+    "MSEHasGuidByte0",
+    "MSEHasGuidByte4",
+    "MSEHasMovementFlags2",
+    "MSEHasPitch",
+    "MSEHasGuidByte6",
+    "MSEHasGuidByte2",
+    "MSEZeroBit",
+    "MSEHasCounter",
+    "MSEForcesCount",
+    "MSEHasTransportData",
+    "MSEHasOrientation",
+    "MSEHasGuidByte1",
+    "MSEZeroBit",
+    "MSEZeroBit",
+    "MSEHasGuidByte3",
+    "MSEHasGuidByte5",
+    "MSEHasSplineElevation",
+    "MSEHasTimestamp",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportTime3",
+    "MSEHasTransportGuidByte7",
+    "MSEHasTransportTime2",
+    "MSEHasTransportGuidByte1",
+    "MSEHasTransportGuidByte4",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportGuidByte6",
+    "MSEHasTransportGuidByte2",
+    "MSEMovementFlags2",
+    "MSEMovementFlags",
+    "MSEHasFallDirection",
+    "MSEGuidByte4",
+    "MSEGuidByte7",
+    "MSEGuidByte1",
+    "MSEGuidByte3",
+    "MSEForces",
+    "MSEGuidByte2",
+    "MSEGuidByte6",
+    "MSEGuidByte0",
+    "MSEGuidByte5",
+    "MSETransportPositionX",
+    "MSETransportGuidByte0",
+    "MSETransportGuidByte3",
+    "MSETransportGuidByte7",
+    "MSETransportSeat",
+    "MSETransportGuidByte5",
+    "MSETransportGuidByte1",
+    "MSETransportPositionY",
+    "MSETransportTime3",
+    "MSETransportTime",
+    "MSETransportGuidByte4",
+    "MSETransportTime2",
+    "MSETransportOrientation",
+    "MSETransportPositionZ",
+    "MSETransportGuidByte2",
+    "MSETransportGuidByte6",
+    "MSEFallTime",
+    "MSEFallCosAngle",
+    "MSEFallHorizontalSpeed",
+    "MSEFallSinAngle",
+    "MSEFallVerticalSpeed",
+    "MSEPitch",
+    "MSECounter",
+    "MSESplineElevation",
+    "MSEOrientation",
+    "MSETimestamp",
+)
+
+_SKYFIRE_MOVEMENT_STOP_ASCEND_SEQUENCE = (
+    "MSEPositionZ",
+    "MSEPositionX",
+    "MSEPositionY",
+    "MSEHasOrientation",
+    "MSEHasGuidByte0",
+    "MSEHasGuidByte3",
+    "MSEHasGuidByte7",
+    "MSEHasGuidByte2",
+    "MSEHasGuidByte6",
+    "MSEHasMovementFlags2",
+    "MSEHasTimestamp",
+    "MSEHasCounter",
+    "MSEHasTransportData",
+    "MSEHasPitch",
+    "MSEZeroBit",
+    "MSEZeroBit",
+    "MSEHasGuidByte4",
+    "MSEZeroBit",
+    "MSEHasGuidByte5",
+    "MSEForcesCount",
+    "MSEHasFallData",
+    "MSEHasMovementFlags",
+    "MSEHasGuidByte1",
+    "MSEHasSplineElevation",
+    "MSEHasTransportTime2",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportGuidByte4",
+    "MSEHasTransportGuidByte6",
+    "MSEHasTransportGuidByte2",
+    "MSEHasTransportGuidByte1",
+    "MSEHasTransportTime3",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportGuidByte7",
+    "MSEMovementFlags2",
+    "MSEMovementFlags",
+    "MSEHasFallDirection",
+    "MSEGuidByte0",
+    "MSEForces",
+    "MSEGuidByte4",
+    "MSEGuidByte5",
+    "MSEGuidByte1",
+    "MSEGuidByte7",
+    "MSEGuidByte6",
+    "MSEGuidByte3",
+    "MSEGuidByte2",
+    "MSETransportGuidByte5",
+    "MSETransportPositionY",
+    "MSETransportGuidByte4",
+    "MSETransportGuidByte7",
+    "MSETransportGuidByte1",
+    "MSETransportGuidByte3",
+    "MSETransportTime2",
+    "MSETransportPositionX",
+    "MSETransportOrientation",
+    "MSETransportGuidByte0",
+    "MSETransportGuidByte2",
+    "MSETransportPositionZ",
+    "MSETransportTime3",
+    "MSETransportTime",
+    "MSETransportSeat",
+    "MSETransportGuidByte6",
+    "MSEFallCosAngle",
+    "MSEFallHorizontalSpeed",
+    "MSEFallSinAngle",
+    "MSEFallTime",
+    "MSEFallVerticalSpeed",
+    "MSETimestamp",
+    "MSESplineElevation",
+    "MSEPitch",
+    "MSECounter",
+    "MSEOrientation",
+)
+
+_SKYFIRE_MOVEMENT_START_FORWARD_SEQUENCE = (
+    "MSEPositionZ",
+    "MSEPositionX",
+    "MSEPositionY",
+    "MSEHasMovementFlags2",
+    "MSEZeroBit",
+    "MSEHasCounter",
+    "MSEZeroBit",
+    "MSEHasGuidByte0",
+    "MSEHasOrientation",
+    "MSEHasFallData",
+    "MSEForcesCount",
+    "MSEHasGuidByte4",
+    "MSEHasGuidByte1",
+    "MSEHasTimestamp",
+    "MSEHasGuidByte7",
+    "MSEHasPitch",
+    "MSEHasTransportData",
+    "MSEHasGuidByte5",
+    "MSEHasMovementFlags",
+    "MSEHasGuidByte3",
+    "MSEHasSplineElevation",
+    "MSEHasGuidByte2",
+    "MSEHasGuidByte6",
+    "MSEZeroBit",
+    "MSEHasTransportGuidByte1",
+    "MSEHasTransportTime3",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportGuidByte4",
+    "MSEHasTransportGuidByte2",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportGuidByte7",
+    "MSEHasTransportGuidByte6",
+    "MSEHasTransportTime2",
+    "MSEHasFallDirection",
+    "MSEMovementFlags2",
+    "MSEMovementFlags",
+    "MSEGuidByte1",
+    "MSEGuidByte6",
+    "MSEGuidByte7",
+    "MSEForces",
+    "MSEGuidByte5",
+    "MSEGuidByte0",
+    "MSEGuidByte3",
+    "MSEGuidByte2",
+    "MSEGuidByte4",
+    "MSETransportGuidByte3",
+    "MSETransportGuidByte1",
+    "MSETransportGuidByte6",
+    "MSETransportPositionZ",
+    "MSETransportGuidByte4",
+    "MSETransportTime3",
+    "MSETransportSeat",
+    "MSETransportGuidByte7",
+    "MSETransportOrientation",
+    "MSETransportTime2",
+    "MSETransportGuidByte5",
+    "MSETransportGuidByte2",
+    "MSETransportPositionX",
+    "MSETransportGuidByte0",
+    "MSETransportPositionY",
+    "MSETransportTime",
+    "MSEFallCosAngle",
+    "MSEFallSinAngle",
+    "MSEFallHorizontalSpeed",
+    "MSEFallTime",
+    "MSEFallVerticalSpeed",
+    "MSETimestamp",
+    "MSEPitch",
+    "MSESplineElevation",
+    "MSEOrientation",
+    "MSECounter",
+)
+
+_SKYFIRE_MOVEMENT_START_BACKWARD_SEQUENCE = (
+    "MSEPositionY",
+    "MSEPositionZ",
+    "MSEPositionX",
+    "MSEHasTimestamp",
+    "MSEHasOrientation",
+    "MSEHasGuidByte7",
+    "MSEHasGuidByte2",
+    "MSEForcesCount",
+    "MSEHasFallData",
+    "MSEZeroBit",
+    "MSEHasGuidByte5",
+    "MSEHasGuidByte3",
+    "MSEHasGuidByte6",
+    "MSEHasSplineElevation",
+    "MSEHasGuidByte4",
+    "MSEHasTransportData",
+    "MSEHasGuidByte0",
+    "MSEHasMovementFlags",
+    "MSEHasPitch",
+    "MSEHasCounter",
+    "MSEHasMovementFlags2",
+    "MSEZeroBit",
+    "MSEHasGuidByte1",
+    "MSEZeroBit",
+    "MSEHasTransportGuidByte1",
+    "MSEHasTransportTime2",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportGuidByte7",
+    "MSEHasTransportTime3",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportGuidByte6",
+    "MSEHasTransportGuidByte2",
+    "MSEHasTransportGuidByte4",
+    "MSEMovementFlags2",
+    "MSEMovementFlags",
+    "MSEHasFallDirection",
+    "MSEForces",
+    "MSEGuidByte1",
+    "MSEGuidByte3",
+    "MSEGuidByte5",
+    "MSEGuidByte2",
+    "MSEGuidByte0",
+    "MSEGuidByte4",
+    "MSEGuidByte7",
+    "MSEGuidByte6",
+    "MSECounter",
+    "MSETransportTime",
+    "MSETransportGuidByte4",
+    "MSETransportGuidByte1",
+    "MSETransportGuidByte5",
+    "MSETransportGuidByte3",
+    "MSETransportGuidByte6",
+    "MSETransportSeat",
+    "MSETransportOrientation",
+    "MSETransportPositionX",
+    "MSETransportGuidByte0",
+    "MSETransportPositionY",
+    "MSETransportTime3",
+    "MSETransportGuidByte7",
+    "MSETransportTime2",
+    "MSETransportPositionZ",
+    "MSETransportGuidByte2",
+    "MSEOrientation",
+    "MSEFallTime",
+    "MSEFallSinAngle",
+    "MSEFallCosAngle",
+    "MSEFallHorizontalSpeed",
+    "MSEFallVerticalSpeed",
+    "MSEPitch",
+    "MSETimestamp",
+    "MSESplineElevation",
+)
+
+_SKYFIRE_MOVEMENT_START_TURN_LEFT_SEQUENCE = (
+    "MSEPositionZ",
+    "MSEPositionX",
+    "MSEPositionY",
+    "MSEHasOrientation",
+    "MSEHasGuidByte4",
+    "MSEHasGuidByte5",
+    "MSEZeroBit",
+    "MSEHasTimestamp",
+    "MSEZeroBit",
+    "MSEZeroBit",
+    "MSEHasCounter",
+    "MSEHasGuidByte3",
+    "MSEHasGuidByte1",
+    "MSEHasMovementFlags2",
+    "MSEHasMovementFlags",
+    "MSEHasGuidByte0",
+    "MSEHasGuidByte2",
+    "MSEForcesCount",
+    "MSEHasTransportData",
+    "MSEHasGuidByte7",
+    "MSEHasPitch",
+    "MSEHasSplineElevation",
+    "MSEHasFallData",
+    "MSEHasGuidByte6",
+    "MSEHasTransportTime3",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportGuidByte6",
+    "MSEHasTransportGuidByte2",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportGuidByte4",
+    "MSEHasTransportGuidByte7",
+    "MSEHasTransportTime2",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportGuidByte1",
+    "MSEMovementFlags",
+    "MSEMovementFlags2",
+    "MSEHasFallDirection",
+    "MSEGuidByte7",
+    "MSEGuidByte3",
+    "MSEGuidByte6",
+    "MSEGuidByte4",
+    "MSEGuidByte1",
+    "MSEForces",
+    "MSEGuidByte5",
+    "MSEGuidByte0",
+    "MSEGuidByte2",
+    "MSEFallTime",
+    "MSEFallHorizontalSpeed",
+    "MSEFallCosAngle",
+    "MSEFallSinAngle",
+    "MSEFallVerticalSpeed",
+    "MSEPitch",
+    "MSETransportPositionY",
+    "MSETransportGuidByte3",
+    "MSETransportPositionX",
+    "MSETransportOrientation",
+    "MSETransportGuidByte5",
+    "MSETransportTime2",
+    "MSETransportPositionZ",
+    "MSETransportGuidByte2",
+    "MSETransportGuidByte1",
+    "MSETransportGuidByte7",
+    "MSETransportGuidByte4",
+    "MSETransportGuidByte0",
+    "MSETransportTime3",
+    "MSETransportSeat",
+    "MSETransportGuidByte6",
+    "MSETransportTime",
+    "MSEOrientation",
+    "MSESplineElevation",
+    "MSECounter",
+    "MSETimestamp",
+)
+
+_SKYFIRE_MOVEMENT_START_TURN_RIGHT_SEQUENCE = (
+    "MSEPositionX",
+    "MSEPositionZ",
+    "MSEPositionY",
+    "MSEZeroBit",
+    "MSEZeroBit",
+    "MSEHasGuidByte1",
+    "MSEHasGuidByte0",
+    "MSEHasMovementFlags",
+    "MSEHasFallData",
+    "MSEHasPitch",
+    "MSEHasCounter",
+    "MSEForcesCount",
+    "MSEHasSplineElevation",
+    "MSEHasMovementFlags2",
+    "MSEHasOrientation",
+    "MSEHasGuidByte2",
+    "MSEHasTimestamp",
+    "MSEHasGuidByte4",
+    "MSEHasGuidByte6",
+    "MSEHasGuidByte5",
+    "MSEHasGuidByte3",
+    "MSEZeroBit",
+    "MSEHasTransportData",
+    "MSEHasGuidByte7",
+    "MSEHasTransportGuidByte2",
+    "MSEHasTransportTime2",
+    "MSEHasTransportGuidByte6",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportGuidByte7",
+    "MSEHasTransportGuidByte4",
+    "MSEHasTransportTime3",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportGuidByte1",
+    "MSEMovementFlags",
+    "MSEMovementFlags2",
+    "MSEHasFallDirection",
+    "MSEGuidByte5",
+    "MSEGuidByte1",
+    "MSEGuidByte3",
+    "MSEGuidByte0",
+    "MSEGuidByte4",
+    "MSEGuidByte2",
+    "MSEGuidByte6",
+    "MSEForces",
+    "MSEGuidByte7",
+    "MSEFallSinAngle",
+    "MSEFallHorizontalSpeed",
+    "MSEFallCosAngle",
+    "MSEFallVerticalSpeed",
+    "MSEFallTime",
+    "MSEPitch",
+    "MSETransportTime3",
+    "MSETransportGuidByte3",
+    "MSETransportTime2",
+    "MSETransportGuidByte7",
+    "MSETransportGuidByte1",
+    "MSETransportPositionX",
+    "MSETransportSeat",
+    "MSETransportGuidByte5",
+    "MSETransportGuidByte4",
+    "MSETransportGuidByte2",
+    "MSETransportGuidByte0",
+    "MSETransportPositionZ",
+    "MSETransportTime",
+    "MSETransportPositionY",
+    "MSETransportGuidByte6",
+    "MSETransportOrientation",
+    "MSEOrientation",
+    "MSETimestamp",
+    "MSESplineElevation",
+    "MSECounter",
+)
+
+_SKYFIRE_MOVEMENT_STOP_SEQUENCE = (
+    "MSEPositionX",
+    "MSEPositionY",
+    "MSEPositionZ",
+    "MSEHasGuidByte5",
+    "MSEHasGuidByte2",
+    "MSEHasFallData",
+    "MSEHasGuidByte0",
+    "MSEZeroBit",
+    "MSEZeroBit",
+    "MSEHasCounter",
+    "MSEHasGuidByte1",
+    "MSEForcesCount",
+    "MSEHasPitch",
+    "MSEHasGuidByte3",
+    "MSEHasGuidByte4",
+    "MSEHasTransportData",
+    "MSEZeroBit",
+    "MSEHasGuidByte6",
+    "MSEHasMovementFlags",
+    "MSEHasTimestamp",
+    "MSEHasMovementFlags2",
+    "MSEHasOrientation",
+    "MSEHasSplineElevation",
+    "MSEHasGuidByte7",
+    "MSEHasTransportTime2",
+    "MSEHasTransportGuidByte7",
+    "MSEHasTransportGuidByte4",
+    "MSEHasTransportGuidByte1",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportGuidByte2",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportTime3",
+    "MSEHasTransportGuidByte6",
+    "MSEHasFallDirection",
+    "MSEMovementFlags2",
+    "MSEMovementFlags",
+    "MSEGuidByte0",
+    "MSEGuidByte3",
+    "MSEForces",
+    "MSEGuidByte6",
+    "MSEGuidByte1",
+    "MSEGuidByte4",
+    "MSEGuidByte2",
+    "MSEGuidByte5",
+    "MSEGuidByte7",
+    "MSEOrientation",
+    "MSEFallVerticalSpeed",
+    "MSEFallHorizontalSpeed",
+    "MSEFallSinAngle",
+    "MSEFallCosAngle",
+    "MSEFallTime",
+    "MSESplineElevation",
+    "MSETransportPositionX",
+    "MSETransportTime",
+    "MSETransportGuidByte3",
+    "MSETransportOrientation",
+    "MSETransportPositionY",
+    "MSETransportGuidByte2",
+    "MSETransportGuidByte6",
+    "MSETransportGuidByte7",
+    "MSETransportGuidByte1",
+    "MSETransportGuidByte4",
+    "MSETransportTime3",
+    "MSETransportGuidByte0",
+    "MSETransportSeat",
+    "MSETransportPositionZ",
+    "MSETransportGuidByte5",
+    "MSETransportTime2",
+    "MSECounter",
+    "MSEPitch",
+    "MSETimestamp",
+)
+
+_SKYFIRE_MOVEMENT_STOP_TURN_SEQUENCE = (
+    "MSEPositionX",
+    "MSEPositionZ",
+    "MSEPositionY",
+    "MSEHasTransportData",
+    "MSEForcesCount",
+    "MSEZeroBit",
+    "MSEHasGuidByte4",
+    "MSEHasGuidByte5",
+    "MSEHasCounter",
+    "MSEHasGuidByte3",
+    "MSEZeroBit",
+    "MSEHasFallData",
+    "MSEHasGuidByte0",
+    "MSEHasGuidByte1",
+    "MSEHasPitch",
+    "MSEHasGuidByte6",
+    "MSEHasMovementFlags",
+    "MSEHasGuidByte2",
+    "MSEZeroBit",
+    "MSEHasMovementFlags2",
+    "MSEHasSplineElevation",
+    "MSEHasOrientation",
+    "MSEHasGuidByte7",
+    "MSEHasTimestamp",
+    "MSEMovementFlags2",
+    "MSEHasTransportGuidByte1",
+    "MSEHasTransportTime3",
+    "MSEHasTransportTime2",
+    "MSEHasTransportGuidByte3",
+    "MSEHasTransportGuidByte6",
+    "MSEHasTransportGuidByte2",
+    "MSEHasTransportGuidByte0",
+    "MSEHasTransportGuidByte5",
+    "MSEHasTransportGuidByte7",
+    "MSEHasTransportGuidByte4",
+    "MSEMovementFlags",
+    "MSEHasFallDirection",
+    "MSEGuidByte2",
+    "MSEGuidByte3",
+    "MSEGuidByte6",
+    "MSEForces",
+    "MSEGuidByte0",
+    "MSEGuidByte5",
+    "MSEGuidByte4",
+    "MSEGuidByte7",
+    "MSEGuidByte1",
+    "MSETransportTime",
+    "MSETransportTime3",
+    "MSETransportSeat",
+    "MSETransportPositionY",
+    "MSETransportPositionX",
+    "MSETransportTime2",
+    "MSETransportGuidByte4",
+    "MSETransportGuidByte3",
+    "MSETransportOrientation",
+    "MSETransportGuidByte0",
+    "MSETransportPositionZ",
+    "MSETransportGuidByte6",
+    "MSETransportGuidByte7",
+    "MSETransportGuidByte5",
+    "MSETransportGuidByte1",
+    "MSETransportGuidByte2",
+    "MSEOrientation",
+    "MSETimestamp",
+    "MSEFallSinAngle",
+    "MSEFallCosAngle",
+    "MSEFallHorizontalSpeed",
+    "MSEFallVerticalSpeed",
+    "MSEFallTime",
+    "MSECounter",
+    "MSESplineElevation",
+    "MSEPitch",
+)
+
+_SKYFIRE_FLYING_MOVEMENT_SEQUENCES = {
+    "MSG_MOVE_HEARTBEAT": _SKYFIRE_MOVEMENT_HEARTBEAT_SEQUENCE,
+    "MSG_MOVE_START_FORWARD": _SKYFIRE_MOVEMENT_START_FORWARD_SEQUENCE,
+    "MSG_MOVE_START_BACKWARD": _SKYFIRE_MOVEMENT_START_BACKWARD_SEQUENCE,
+    "MSG_MOVE_START_TURN_LEFT": _SKYFIRE_MOVEMENT_START_TURN_LEFT_SEQUENCE,
+    "MSG_MOVE_START_TURN_RIGHT": _SKYFIRE_MOVEMENT_START_TURN_RIGHT_SEQUENCE,
+    "MSG_MOVE_STOP": _SKYFIRE_MOVEMENT_STOP_SEQUENCE,
+    "MSG_MOVE_STOP_TURN": _SKYFIRE_MOVEMENT_STOP_TURN_SEQUENCE,
+    "MSG_MOVE_START_ASCEND": _SKYFIRE_MOVEMENT_START_ASCEND_SEQUENCE,
+    "MSG_MOVE_STOP_ASCEND": _SKYFIRE_MOVEMENT_STOP_ASCEND_SEQUENCE,
+    "MSG_MOVE_START_DESCEND": _SKYFIRE_MOVEMENT_START_DESCEND_SEQUENCE,
+}
+
 _SMSG_PLAYER_MOVE_JUMP_CONTROL_NO_DIRECTION = bytes.fromhex("8A0C0800000000")
 _SMSG_PLAYER_MOVE_JUMP_CONTROL_WITH_DIRECTION = bytes.fromhex("8A4C0800000000")
 
@@ -86,6 +857,7 @@ def _movement_state(session):
     state.server_movement_timestamp_ms = int(
         getattr(state, "server_movement_timestamp_ms", 0) or 0
     ) & 0xFFFFFFFF
+    state.pitch = float(getattr(state, "pitch", 0.0) or 0.0)
     state.last_valid_orientation = float(
         getattr(
             state,
@@ -106,6 +878,426 @@ def _movement_state(session):
     state.is_ascending = bool(getattr(state, "is_ascending", False))
     state.is_descending = bool(getattr(state, "is_descending", False))
     return state
+
+
+def _wrap_pitch(value: float) -> float:
+    wrapped = math.fmod(float(value) + math.pi, math.tau)
+    if wrapped < 0.0:
+        wrapped += math.tau
+    return wrapped - math.pi
+
+
+def _read_u32(payload: bytes, offset: int) -> tuple[int, int]:
+    return struct.unpack_from("<I", payload, offset)[0], offset + 4
+
+
+def _read_i8(payload: bytes, offset: int) -> tuple[int, int]:
+    return struct.unpack_from("<b", payload, offset)[0], offset + 1
+
+
+def _read_f32(payload: bytes, offset: int) -> tuple[float, int]:
+    return struct.unpack_from("<f", payload, offset)[0], offset + 4
+
+
+def _byte_seq_present(flag_map: dict[str, bool], element: str) -> bool:
+    if element.startswith("MSEGuidByte"):
+        return bool(flag_map.get(f"MSEHasGuidByte{element[-1]}", False))
+    if element.startswith("MSETransportGuidByte"):
+        return bool(flag_map.get(f"MSEHasTransportGuidByte{element[-1]}", False))
+    return True
+
+
+def _read_skyfire_movement_bit_fields(
+    payload: bytes,
+    sequence: tuple[str, ...],
+) -> tuple[dict[str, Any], int]:
+    values: dict[str, Any] = {
+        "hasMovementFlags": False,
+        "hasMovementFlags2": False,
+        "hasTimestamp": False,
+        "hasOrientation": False,
+        "hasTransportData": False,
+        "hasTransportTime2": False,
+        "hasTransportTime3": False,
+        "hasTransportVehicleId": False,
+        "hasPitch": False,
+        "hasFallData": False,
+        "hasFallDirection": False,
+        "hasSplineElevation": False,
+        "hasCounter": False,
+        "forcesCount": 0,
+        "flags": 0,
+        "flags2": 0,
+    }
+    byte_pos = 0
+    bit_pos = 0
+
+    for element in sequence:
+        if element.startswith("MSEHasGuidByte") or element.startswith("MSEHasTransportGuidByte"):
+            if element.startswith("MSEHasTransportGuidByte") and not values["hasTransportData"]:
+                continue
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values[element] = bool(bit)
+            continue
+        if element == "MSEHasMovementFlags":
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values["hasMovementFlags"] = not bool(bit)
+            continue
+        if element == "MSEHasMovementFlags2":
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values["hasMovementFlags2"] = not bool(bit)
+            continue
+        if element == "MSEHasTimestamp":
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values["hasTimestamp"] = not bool(bit)
+            continue
+        if element == "MSEHasOrientation":
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values["hasOrientation"] = not bool(bit)
+            continue
+        if element == "MSEHasTransportData":
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values["hasTransportData"] = bool(bit)
+            continue
+        if element == "MSEHasTransportTime2":
+            if values["hasTransportData"]:
+                bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+                values["hasTransportTime2"] = bool(bit)
+            continue
+        if element == "MSEHasTransportTime3":
+            if values["hasTransportData"]:
+                bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+                values["hasTransportTime3"] = bool(bit)
+            continue
+        if element == "MSEHasTransportVehicleId":
+            if values["hasTransportData"]:
+                bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+                values["hasTransportVehicleId"] = bool(bit)
+            continue
+        if element == "MSEHasPitch":
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values["hasPitch"] = not bool(bit)
+            continue
+        if element == "MSEHasFallData":
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values["hasFallData"] = bool(bit)
+            continue
+        if element == "MSEHasFallDirection":
+            if values["hasFallData"]:
+                bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+                values["hasFallDirection"] = bool(bit)
+            continue
+        if element == "MSEHasSplineElevation":
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values["hasSplineElevation"] = not bool(bit)
+            continue
+        if element == "MSEHasCounter":
+            bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            values["hasCounter"] = not bool(bit)
+            continue
+        if element == "MSEForcesCount":
+            count, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 22)
+            values["forcesCount"] = int(count)
+            continue
+        if element == "MSEMovementFlags":
+            if values["hasMovementFlags"]:
+                flags, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 30)
+                values["flags"] = int(flags)
+            continue
+        if element == "MSEMovementFlags2":
+            if values["hasMovementFlags2"]:
+                flags2, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 13)
+                values["flags2"] = int(flags2)
+            continue
+        if element in {"MSEZeroBit", "MSEOneBit"}:
+            _bit, byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+            continue
+
+    byte_offset = int(byte_pos + (1 if bit_pos else 0))
+    return values, byte_offset
+
+
+def _should_use_skyfire_flying_sequence(session, opcode_name: str) -> bool:
+    if opcode_name in {
+        "MSG_MOVE_START_FORWARD",
+        "MSG_MOVE_START_BACKWARD",
+        "MSG_MOVE_START_TURN_LEFT",
+        "MSG_MOVE_START_TURN_RIGHT",
+        "MSG_MOVE_STOP",
+        "MSG_MOVE_STOP_TURN",
+        "MSG_MOVE_START_ASCEND",
+        "MSG_MOVE_STOP_ASCEND",
+        "MSG_MOVE_START_DESCEND",
+        "MSG_MOVE_STOP_DESCEND",
+    }:
+        return True
+    if opcode_name != "MSG_MOVE_HEARTBEAT":
+        return False
+    return bool(getattr(session, "is_flying", False)) or bool(getattr(session, "can_fly", False))
+
+
+def _parse_skyfire_flying_movement_info(
+    session,
+    opcode_name: str,
+    payload: bytes,
+) -> Optional[dict[str, Any]]:
+    if not _should_use_skyfire_flying_sequence(session, opcode_name):
+        return None
+    sequence = _SKYFIRE_FLYING_MOVEMENT_SEQUENCES.get(opcode_name)
+    if sequence is None or not payload:
+        return None
+
+    try:
+        flags: dict[str, Any] = {
+            "hasMovementFlags": False,
+            "hasMovementFlags2": False,
+            "hasTimestamp": False,
+            "hasOrientation": False,
+            "hasTransportData": False,
+            "hasTransportTime2": False,
+            "hasTransportTime3": False,
+            "hasTransportVehicleId": False,
+            "hasPitch": False,
+            "hasFallData": False,
+            "hasFallDirection": False,
+            "hasSplineElevation": False,
+            "hasCounter": False,
+            "forcesCount": 0,
+            "flags": 0,
+            "flags2": 0,
+        }
+        cursor = 0
+        bit_pos = 0
+
+        def _align_cursor() -> None:
+            nonlocal cursor, bit_pos
+            if bit_pos:
+                cursor += 1
+                bit_pos = 0
+
+        def _read_bit_value() -> int:
+            nonlocal cursor, bit_pos
+            bit, cursor, bit_pos = BitInterPreter.read_bit(payload, cursor, bit_pos)
+            return int(bit)
+
+        def _read_bits_value(width: int) -> int:
+            nonlocal cursor, bit_pos
+            value, cursor, bit_pos = BitInterPreter.read_bits(payload, cursor, bit_pos, width)
+            return int(value)
+
+        parsed: dict[str, Any] = {
+            "x": float(getattr(session, "x", 0.0) or 0.0),
+            "y": float(getattr(session, "y", 0.0) or 0.0),
+            "z": float(getattr(session, "z", 0.0) or 0.0),
+            "orientation": float(getattr(session, "orientation", 0.0) or 0.0),
+            "pitch": float(getattr(_movement_state(session), "pitch", 0.0) or 0.0),
+            "flags": int(flags["flags"]),
+            "flags2": int(flags["flags2"]),
+            "timestamp": None,
+            "has_fall_data": bool(flags["hasFallData"]),
+            "has_fall_direction": bool(flags["hasFallDirection"]),
+            "fall_time": 0,
+            "fall_vertical_speed": 0.0,
+            "fall_horizontal_speed": 0.0,
+            "fall_sin_angle": 0.0,
+            "fall_cos_angle": 0.0,
+            "parser_path": f"skyfire_sequence:{opcode_name}",
+        }
+
+        for element in sequence:
+            if element.startswith("MSEHasGuidByte") or element.startswith("MSEHasTransportGuidByte"):
+                if element.startswith("MSEHasTransportGuidByte") and not flags["hasTransportData"]:
+                    continue
+                flags[element] = bool(_read_bit_value())
+                continue
+            if element == "MSEHasMovementFlags":
+                flags["hasMovementFlags"] = not bool(_read_bit_value())
+                continue
+            if element == "MSEHasMovementFlags2":
+                flags["hasMovementFlags2"] = not bool(_read_bit_value())
+                continue
+            if element == "MSEHasTimestamp":
+                flags["hasTimestamp"] = not bool(_read_bit_value())
+                continue
+            if element == "MSEHasOrientation":
+                flags["hasOrientation"] = not bool(_read_bit_value())
+                continue
+            if element == "MSEHasTransportData":
+                flags["hasTransportData"] = bool(_read_bit_value())
+                continue
+            if element == "MSEHasTransportTime2":
+                if flags["hasTransportData"]:
+                    flags["hasTransportTime2"] = bool(_read_bit_value())
+                continue
+            if element == "MSEHasTransportTime3":
+                if flags["hasTransportData"]:
+                    flags["hasTransportTime3"] = bool(_read_bit_value())
+                continue
+            if element == "MSEHasTransportVehicleId":
+                if flags["hasTransportData"]:
+                    flags["hasTransportVehicleId"] = bool(_read_bit_value())
+                continue
+            if element == "MSEHasPitch":
+                flags["hasPitch"] = not bool(_read_bit_value())
+                continue
+            if element == "MSEHasFallData":
+                flags["hasFallData"] = bool(_read_bit_value())
+                continue
+            if element == "MSEHasFallDirection":
+                if flags["hasFallData"]:
+                    flags["hasFallDirection"] = bool(_read_bit_value())
+                continue
+            if element == "MSEHasSplineElevation":
+                flags["hasSplineElevation"] = not bool(_read_bit_value())
+                continue
+            if element == "MSEHasCounter":
+                flags["hasCounter"] = not bool(_read_bit_value())
+                continue
+            if element == "MSEForcesCount":
+                flags["forcesCount"] = _read_bits_value(22)
+                continue
+            if element == "MSEMovementFlags":
+                if flags["hasMovementFlags"]:
+                    flags["flags"] = _read_bits_value(30)
+                continue
+            if element == "MSEMovementFlags2":
+                if flags["hasMovementFlags2"]:
+                    flags["flags2"] = _read_bits_value(13)
+                continue
+            if element in {"MSEZeroBit", "MSEOneBit"}:
+                _read_bit_value()
+                continue
+
+            _align_cursor()
+            if element in {"MSEGuidByte0", "MSEGuidByte1", "MSEGuidByte2", "MSEGuidByte3", "MSEGuidByte4", "MSEGuidByte5", "MSEGuidByte6", "MSEGuidByte7"}:
+                if _byte_seq_present(flags, element):
+                    cursor += 1
+                continue
+            if element in {
+                "MSETransportGuidByte0",
+                "MSETransportGuidByte1",
+                "MSETransportGuidByte2",
+                "MSETransportGuidByte3",
+                "MSETransportGuidByte4",
+                "MSETransportGuidByte5",
+                "MSETransportGuidByte6",
+                "MSETransportGuidByte7",
+            }:
+                if flags["hasTransportData"] and _byte_seq_present(flags, element):
+                    cursor += 1
+                continue
+            if element == "MSEPositionX":
+                parsed["x"], cursor = _read_f32(payload, cursor)
+                continue
+            if element == "MSEPositionY":
+                parsed["y"], cursor = _read_f32(payload, cursor)
+                continue
+            if element == "MSEPositionZ":
+                parsed["z"], cursor = _read_f32(payload, cursor)
+                continue
+            if element == "MSEOrientation":
+                if flags["hasOrientation"]:
+                    orientation, cursor = _read_f32(payload, cursor)
+                    parsed["orientation"] = float(orientation)
+                continue
+            if element == "MSEPitch":
+                if flags["hasPitch"]:
+                    pitch, cursor = _read_f32(payload, cursor)
+                    parsed["pitch"] = _wrap_pitch(pitch)
+                continue
+            if element == "MSETimestamp":
+                if flags["hasTimestamp"]:
+                    parsed["timestamp"], cursor = _read_u32(payload, cursor)
+                continue
+            if element == "MSEFallTime":
+                if flags["hasFallData"]:
+                    parsed["fall_time"], cursor = _read_u32(payload, cursor)
+                continue
+            if element == "MSEFallVerticalSpeed":
+                if flags["hasFallData"]:
+                    parsed["fall_vertical_speed"], cursor = _read_f32(payload, cursor)
+                continue
+            if element == "MSEFallCosAngle":
+                if flags["hasFallData"] and flags["hasFallDirection"]:
+                    parsed["fall_cos_angle"], cursor = _read_f32(payload, cursor)
+                continue
+            if element == "MSEFallSinAngle":
+                if flags["hasFallData"] and flags["hasFallDirection"]:
+                    parsed["fall_sin_angle"], cursor = _read_f32(payload, cursor)
+                continue
+            if element == "MSEFallHorizontalSpeed":
+                if flags["hasFallData"] and flags["hasFallDirection"]:
+                    parsed["fall_horizontal_speed"], cursor = _read_f32(payload, cursor)
+                continue
+            if element == "MSECounter":
+                if flags["hasCounter"]:
+                    _counter, cursor = _read_u32(payload, cursor)
+                continue
+            if element == "MSEForces":
+                cursor += int(flags["forcesCount"]) * 4
+                continue
+            if element in {
+                "MSETransportPositionX",
+                "MSETransportPositionY",
+                "MSETransportPositionZ",
+                "MSETransportOrientation",
+                "MSETransportTime",
+                "MSETransportTime2",
+                "MSETransportTime3",
+                "MSESplineElevation",
+                "MSETransportVehicleId",
+            }:
+                if element == "MSESplineElevation":
+                    if flags["hasSplineElevation"]:
+                        _spline, cursor = _read_f32(payload, cursor)
+                elif flags["hasTransportData"]:
+                    if element == "MSETransportOrientation":
+                        _value, cursor = _read_f32(payload, cursor)
+                    elif element in {"MSETransportPositionX", "MSETransportPositionY", "MSETransportPositionZ"}:
+                        _value, cursor = _read_f32(payload, cursor)
+                    elif element == "MSETransportTime":
+                        _value, cursor = _read_u32(payload, cursor)
+                    elif element == "MSETransportTime2" and flags["hasTransportTime2"]:
+                        _value, cursor = _read_u32(payload, cursor)
+                    elif element == "MSETransportTime3" and flags["hasTransportTime3"]:
+                        _value, cursor = _read_u32(payload, cursor)
+                    elif element == "MSETransportVehicleId" and flags["hasTransportVehicleId"]:
+                        _value, cursor = _read_u32(payload, cursor)
+                continue
+            if element == "MSETransportSeat":
+                if flags["hasTransportData"]:
+                    _seat, cursor = _read_i8(payload, cursor)
+                continue
+
+        parsed["flags"] = int(flags["flags"])
+        parsed["flags2"] = int(flags["flags2"])
+        parsed["has_fall_data"] = bool(flags["hasFallData"])
+        parsed["has_fall_direction"] = bool(flags["hasFallDirection"])
+
+        Logger.debug(
+            "[FLY_PARSE] opcode=%s path=%s len=%u pos=(%.6f, %.6f, %.6f) "
+            "orientation=%.6f pitch=%.6f flags=0x%X flags2=0x%X timestamp=%s fall=%s",
+            opcode_name,
+            parsed["parser_path"],
+            len(payload),
+            float(parsed["x"]),
+            float(parsed["y"]),
+            float(parsed["z"]),
+            float(parsed["orientation"]),
+            float(parsed["pitch"]),
+            int(parsed["flags"]),
+            int(parsed["flags2"]),
+            "None" if parsed["timestamp"] is None else int(parsed["timestamp"]),
+            bool(parsed["has_fall_data"]),
+        )
+        return parsed
+    except (IndexError, struct.error):
+        Logger.debug(
+            "[FLY_PARSE] opcode=%s path=skyfire_sequence failed len=%u",
+            opcode_name,
+            len(payload),
+        )
+        return None
 
 
 def _remember_valid_orientation(session, orientation: float | None) -> None:
@@ -838,6 +2030,23 @@ def _normalize_orientation(value: float | None) -> float | None:
     return orientation
 
 
+def _orientation_from_xy_delta(
+    previous_x: float,
+    previous_y: float,
+    current_x: float,
+    current_y: float,
+    *,
+    minimum_planar_delta: float = 0.05,
+) -> float | None:
+    dx = float(current_x) - float(previous_x)
+    dy = float(current_y) - float(previous_y)
+    if not math.isfinite(dx) or not math.isfinite(dy):
+        return None
+    if math.hypot(dx, dy) < float(minimum_planar_delta):
+        return None
+    return _normalize_orientation(math.atan2(dy, dx))
+
+
 def _is_effectively_stationary(
     session,
     x: float,
@@ -1096,6 +2305,18 @@ def _extract_skyfire_movement_from_payload(
     opcode_name: str,
     payload: bytes,
 ) -> Optional[tuple[float, float, float, float]]:
+    parsed = _parse_skyfire_flying_movement_info(session, opcode_name, payload)
+    if parsed is not None:
+        return (
+            float(parsed["x"]),
+            float(parsed["y"]),
+            float(parsed["z"]),
+            float(parsed["orientation"]),
+        )
+
+    if opcode_name in _SKYFIRE_FLYING_MOVEMENT_SEQUENCES and len(payload) < 28:
+        return None
+
     if len(payload) < 12:
         return None
 
@@ -1105,31 +2326,129 @@ def _extract_skyfire_movement_from_payload(
         return None
 
     orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+    previous_orientation = _normalize_orientation(
+        float(getattr(session, "orientation", 0.0) or 0.0)
+    )
+    is_flying_session = bool(getattr(session, "is_flying", False)) or bool(
+        getattr(session, "can_fly", False)
+    )
 
-    if opcode_name == "MSG_MOVE_HEARTBEAT":
-        # SkyFire 5.4.8 MovementHeartBeat starts with PositionZ, PositionX, PositionY.
-        z, x, y = first, second, third
-        orientation_offsets = ()
-        if len(payload) >= 51:
-            # The 51-byte heartbeat carries jump/fall control data before
-            # facing. SkyFire captures place facing at offset 43; offsets 23
-            # and 20 read airborne sin/cos or packed movement data.
-            orientation_offsets = (43,)
-        elif len(payload) >= 32:
-            # The 32-byte heartbeat facing field matches START/STOP_TURN at
-            # offset 24. Offset 18 sits inside the packed flag block and
-            # decodes to stable garbage such as 2.515625 for TURN_RIGHT.
-            orientation_offsets = (24,)
-        for offset in orientation_offsets:
+    def _orientation_debug_candidates(offsets: tuple[int, ...]) -> list[tuple[int, float, float | None]]:
+        candidates: list[tuple[int, float, float | None]] = []
+        for offset in offsets:
             try:
                 candidate = struct.unpack_from("<f", payload, offset)[0]
             except struct.error:
                 continue
-            normalized = _normalize_orientation(candidate)
-            if normalized is not None:
-                orientation = float(normalized)
-                break
-        return (float(x), float(y), float(z), float(orientation))
+            candidates.append((int(offset), float(candidate), _normalize_orientation(candidate)))
+        return candidates
+
+    def _select_orientation_from_offsets(
+        offsets: tuple[int, ...],
+        *,
+        prefer_nonzero: bool = False,
+        avoid_tau_alias: bool = False,
+    ) -> tuple[float, int | None, list[tuple[int, float, float | None]]]:
+        zeroish_epsilon = 0.01
+        flying_zeroish_epsilon = 0.1 if is_flying_session else zeroish_epsilon
+        candidates = _orientation_debug_candidates(offsets)
+        valid = [
+            (offset, raw_value, normalized)
+            for offset, raw_value, normalized in candidates
+            if normalized is not None
+        ]
+        if not valid:
+            return float(orientation), None, candidates
+
+        nonzero_valid = [
+            item
+            for item in valid
+            if not math.isclose(float(item[2]), 0.0, abs_tol=flying_zeroish_epsilon)
+            and not math.isclose(float(item[2]), math.tau, abs_tol=flying_zeroish_epsilon)
+        ]
+        if (
+            prefer_nonzero
+            and previous_orientation is not None
+            and not math.isclose(float(previous_orientation), 0.0, abs_tol=flying_zeroish_epsilon)
+            and nonzero_valid
+        ):
+            valid = nonzero_valid
+        elif avoid_tau_alias and nonzero_valid:
+            valid = nonzero_valid
+        elif (
+            prefer_nonzero
+            and previous_orientation is not None
+            and not math.isclose(float(previous_orientation), 0.0, abs_tol=flying_zeroish_epsilon)
+        ):
+            return float(previous_orientation), None, candidates
+
+        selected_offset, _raw_value, selected_orientation = valid[0]
+        return float(selected_orientation), int(selected_offset), candidates
+
+    def _log_flying_parse(
+        selected_offset: int | None,
+        parsed_x: float,
+        parsed_y: float,
+        parsed_z: float,
+        parsed_orientation: float,
+        candidates: list[tuple[int, float, float | None]],
+    ) -> None:
+        if opcode_name not in {
+            "MSG_MOVE_HEARTBEAT",
+            "MSG_MOVE_START_ASCEND",
+            "MSG_MOVE_STOP_ASCEND",
+        }:
+            return
+        candidate_parts = [
+            f"{offset}:{raw_value:.6f}->{normalized!r}"
+            for offset, raw_value, normalized in candidates
+        ]
+        Logger.debug(
+            "[FLY_PARSE] opcode=%s len=%s first3=(%.6f, %.6f, %.6f) candidates=[%s] accepted=%s parsed=(%.6f, %.6f, %.6f, %.6f)",
+            opcode_name,
+            len(payload),
+            float(first),
+            float(second),
+            float(third),
+            ", ".join(candidate_parts),
+            "None" if selected_offset is None else int(selected_offset),
+            float(parsed_x),
+            float(parsed_y),
+            float(parsed_z),
+            float(parsed_orientation),
+        )
+
+    if opcode_name == "MSG_MOVE_HEARTBEAT":
+        # SkyFire 5.4.8 MovementHeartBeat starts with PositionZ, PositionX, PositionY.
+        z, x, y = first, second, third
+        selected_offset = None
+        candidates: list[tuple[int, float, float | None]] = []
+        if is_flying_session and len(payload) == 30:
+            orientation, selected_offset, candidates = _select_orientation_from_offsets(
+                (23, 24, 20, 27, 28, 31),
+                prefer_nonzero=True,
+                avoid_tau_alias=True,
+            )
+        elif is_flying_session and len(payload) == 31:
+            orientation, selected_offset, candidates = _select_orientation_from_offsets(
+                (23, 24, 20, 27, 28, 31),
+                prefer_nonzero=True,
+                avoid_tau_alias=True,
+            )
+        elif is_flying_session and len(payload) >= 35:
+            orientation, selected_offset, candidates = _select_orientation_from_offsets(
+                (23, 24, 20, 27, 28, 31, 43),
+                prefer_nonzero=True,
+                avoid_tau_alias=True,
+            )
+        elif len(payload) >= 51:
+            orientation, selected_offset, candidates = _select_orientation_from_offsets((43,))
+        elif len(payload) >= 32:
+            orientation, selected_offset, candidates = _select_orientation_from_offsets((24,))
+        parsed = (float(x), float(y), float(z), float(orientation))
+        if is_flying_session:
+            _log_flying_parse(selected_offset, *parsed, candidates)
+        return parsed
 
     if opcode_name == "MSG_MOVE_START_FORWARD":
         # SkyFire 5.4.8 MovementStartForward starts with PositionZ, PositionX, PositionY.
@@ -1145,19 +2464,40 @@ def _extract_skyfire_movement_from_payload(
         return (float(x), float(y), float(z), float(orientation))
 
     if opcode_name == "MSG_MOVE_START_ASCEND":
-        # Pandaria 5.4.8 flying mount captures place START_ASCEND as
-        # PositionX, PositionY, PositionZ, with facing near the packet tail.
-        x, y, z = first, second, third
-        for offset in (25, 28):
-            try:
-                candidate = struct.unpack_from("<f", payload, offset)[0]
-            except struct.error:
-                continue
-            normalized = _normalize_orientation(candidate)
-            if normalized is not None:
-                orientation = float(normalized)
-                break
-        return (float(x), float(y), float(z), float(orientation))
+        layout_candidates = (
+            (float(first), float(second), float(third)),
+            (float(second), float(third), float(first)),
+            (float(second), float(first), float(third)),
+        )
+        best_layout = layout_candidates[0]
+        best_score = float("inf")
+        for candidate_x, candidate_y, candidate_z in layout_candidates:
+            score = _score_movement_candidate(
+                session,
+                candidate_x,
+                candidate_y,
+                candidate_z,
+                previous_orientation
+                if previous_orientation is not None
+                else float(orientation),
+            )
+            if score < best_score:
+                best_score = score
+                best_layout = (candidate_x, candidate_y, candidate_z)
+
+        orientation, selected_offset, candidates = _select_orientation_from_offsets(
+            (25, 28, 23, 24, 31, 20, 27),
+            prefer_nonzero=True,
+            avoid_tau_alias=True,
+        )
+        parsed = (
+            float(best_layout[0]),
+            float(best_layout[1]),
+            float(best_layout[2]),
+            float(orientation),
+        )
+        _log_flying_parse(selected_offset, *parsed, candidates)
+        return parsed
 
     if opcode_name == "MSG_MOVE_START_BACKWARD":
         # SkyFire 5.4.8 MovementStartBackward starts with PositionY, PositionZ, PositionX.
@@ -1167,6 +2507,13 @@ def _extract_skyfire_movement_from_payload(
     if opcode_name == "MSG_MOVE_STOP":
         # SkyFire 5.4.8 MovementStop starts with PositionX, PositionY, PositionZ.
         x, y, z = first, second, third
+        if is_flying_session:
+            orientation, _selected_offset, _candidates = _select_orientation_from_offsets(
+                (24, 20, 23, 27, 28, 31, 25),
+                prefer_nonzero=True,
+                avoid_tau_alias=True,
+            )
+            return (float(x), float(y), float(z), float(orientation))
         orientation_offsets = ()
         if len(payload) >= 51:
             # Jump/fall STOP variants carry extra control fields. The known
@@ -1191,16 +2538,21 @@ def _extract_skyfire_movement_from_payload(
         # Captured STOP_ASCEND packets match heartbeat order: PositionZ,
         # PositionX, PositionY. Keeping this exact avoids broad float scanning.
         z, x, y = first, second, third
-        for offset in (27, 23):
-            try:
-                candidate = struct.unpack_from("<f", payload, offset)[0]
-            except struct.error:
-                continue
-            normalized = _normalize_orientation(candidate)
-            if normalized is not None:
-                orientation = float(normalized)
-                break
-        return (float(x), float(y), float(z), float(orientation))
+        if len(payload) == 35:
+            orientation, selected_offset, candidates = _select_orientation_from_offsets(
+                (31, 23, 24, 28, 20, 27),
+                prefer_nonzero=True,
+                avoid_tau_alias=True,
+            )
+        else:
+            orientation, selected_offset, candidates = _select_orientation_from_offsets(
+                (27, 23),
+                prefer_nonzero=True,
+                avoid_tau_alias=True,
+            )
+        parsed = (float(x), float(y), float(z), float(orientation))
+        _log_flying_parse(selected_offset, *parsed, candidates)
+        return parsed
 
     if opcode_name == "MSG_MOVE_START_STRAFE_LEFT":
         # SkyFire 5.4.8 MovementStartStrafeLeft starts with PositionY, PositionZ, PositionX.
@@ -1258,7 +2610,13 @@ def _extract_skyfire_movement_from_payload(
     if opcode_name == "MSG_MOVE_START_TURN_RIGHT":
         # SkyFire 5.4.8 MovementStartTurnRight starts with PositionX, PositionZ, PositionY.
         x, z, y = first, second, third
-        if len(payload) >= 28:
+        if is_flying_session:
+            orientation, _selected_offset, _candidates = _select_orientation_from_offsets(
+                (24, 20, 23, 27, 28, 31, 25),
+                prefer_nonzero=True,
+                avoid_tau_alias=True,
+            )
+        elif len(payload) >= 28:
             try:
                 candidate = struct.unpack_from("<f", payload, 24)[0]
                 normalized = _normalize_orientation(candidate)
@@ -1271,7 +2629,13 @@ def _extract_skyfire_movement_from_payload(
     if opcode_name == "MSG_MOVE_START_TURN_LEFT":
         # SkyFire 5.4.8 MovementStartTurnLeft starts with PositionZ, PositionX, PositionY.
         z, x, y = first, second, third
-        if len(payload) >= 28:
+        if is_flying_session:
+            orientation, _selected_offset, _candidates = _select_orientation_from_offsets(
+                (24, 20, 23, 27, 28, 31, 25),
+                prefer_nonzero=True,
+                avoid_tau_alias=True,
+            )
+        elif len(payload) >= 28:
             try:
                 candidate = struct.unpack_from("<f", payload, 24)[0]
                 normalized = _normalize_orientation(candidate)
@@ -1285,6 +2649,13 @@ def _extract_skyfire_movement_from_payload(
         # SkyFire 5.4.8 MovementStopTurn starts with PositionX, PositionZ, PositionY.
         x, z, y = first, second, third
         orientation_offsets = ()
+        if is_flying_session:
+            orientation, _selected_offset, _candidates = _select_orientation_from_offsets(
+                (24, 20, 23, 27, 28, 31, 25),
+                prefer_nonzero=True,
+                avoid_tau_alias=True,
+            )
+            return (float(x), float(y), float(z), float(orientation))
         if len(payload) >= 32:
             orientation_offsets = (24, 20)
         elif len(payload) >= 24:
@@ -1418,7 +2789,35 @@ def parse_movement_info(
 
 def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> None:
     state = _movement_state(session)
-    _apply_movement_flags(state, opcode_name)
+    parsed_flying = _parse_skyfire_flying_movement_info(session, opcode_name, payload)
+    if parsed_flying is not None:
+        state.flags = int(parsed_flying["flags"])
+        state.flags2 = int(parsed_flying["flags2"])
+        state.pitch = float(parsed_flying["pitch"])
+        state.has_fall_data = bool(parsed_flying["has_fall_data"])
+        state.fall_time = int(parsed_flying["fall_time"])
+        state.fall_vertical_speed = float(parsed_flying["fall_vertical_speed"])
+        state.fall_horizontal_speed = float(parsed_flying["fall_horizontal_speed"])
+        state.fall_sin_angle = float(parsed_flying["fall_sin_angle"])
+        state.fall_cos_angle = float(parsed_flying["fall_cos_angle"])
+        state.is_ascending = bool(int(state.flags) & _MOVEMENTFLAG_ASCENDING)
+        state.is_descending = bool(int(state.flags) & _MOVEMENTFLAG_DESCENDING)
+        if parsed_flying["timestamp"] is not None:
+            state.timestamp_ms = int(parsed_flying["timestamp"]) & 0xFFFFFFFF
+        else:
+            state.timestamp_ms = _movement_timestamp_ms(session)
+        Logger.debug(
+            "[MOVE_FLAGS] opcode=%s parser=%s authoritative flags=0x%X flags2=0x%X "
+            "pitch=%.6f orientation=%.6f",
+            opcode_name,
+            parsed_flying["parser_path"],
+            int(state.flags),
+            int(state.flags2),
+            float(state.pitch),
+            float(parsed_flying["orientation"]),
+        )
+    else:
+        _apply_movement_flags(state, opcode_name)
     if opcode_name == "MSG_MOVE_JUMP":
         fall_data = _extract_jump_fall_data(payload)
         if fall_data is not None:
@@ -1430,11 +2829,12 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
             state.fall_cos_angle = float(fall_data["fall_cos_angle"])
     elif opcode_name == "MSG_MOVE_FALL_LAND":
         _clear_jump_fall_state(state)
-    timestamp = _extract_packet_timestamp(opcode_name, payload)
-    if timestamp is not None:
-        state.timestamp_ms = int(timestamp) & 0xFFFFFFFF
-    else:
-        state.timestamp_ms = _movement_timestamp_ms(session)
+    if parsed_flying is None:
+        timestamp = _extract_packet_timestamp(opcode_name, payload)
+        if timestamp is not None:
+            state.timestamp_ms = int(timestamp) & 0xFFFFFFFF
+        else:
+            state.timestamp_ms = _movement_timestamp_ms(session)
     # Keep the same-map teleport counter in step with accepted client movement.
     state.counter = (int(getattr(state, "counter", 0) or 0) + 1) & 0xFFFFFFFF
     return None
@@ -1443,7 +2843,8 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
 def _store_authoritative_movement(session, opcode_name: str, payload: bytes, movement: tuple[float, float, float, float] | None) -> None:
     state = _movement_state(session)
     _apply_early_movement_cleanup(session, opcode_name)
-    incoming_timestamp = _extract_packet_timestamp(opcode_name, payload)
+    parsed_flying = _parse_skyfire_flying_movement_info(session, opcode_name, payload)
+    incoming_timestamp = parsed_flying["timestamp"] if parsed_flying is not None else _extract_packet_timestamp(opcode_name, payload)
     if incoming_timestamp is not None and _is_stale_client_timestamp(state.timestamp_ms, incoming_timestamp):
         Logger.debug(
             "[Movement] ignoring stale %s timestamp current=%u incoming=%u "
@@ -1753,8 +3154,16 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     if not _store_authoritative_movement(session, opcode_name, ctx.payload, adjusted_movement):
         return 0, None
 
+    is_flying_movement = bool(getattr(session, "is_flying", False)) or bool(
+        getattr(session, "can_fly", False)
+    )
     normalized_orientation = _normalize_orientation(orientation)
     if normalized_orientation is None:
+        if is_flying_movement:
+            Logger.debug(
+                f"[Movement] ignoring invalid flying orientation from {opcode_name}: {orientation!r}"
+            )
+            return 0, None
         log = Logger.debug if opcode_name == "MSG_MOVE_HEARTBEAT" else Logger.warning
         log(
             f"[Movement] ignoring implausible orientation from {opcode_name}: {orientation!r}; "
@@ -1765,6 +3174,9 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             if previous_normalized_orientation is not None
             else 0.0
         )
+    orientation_accepted = True
+    if is_flying_movement:
+        orientation_accepted = True
     elif opcode_name == "MSG_MOVE_HEARTBEAT":
         if previous_normalized_orientation is not None:
             state = _movement_state(session)
@@ -1818,7 +3230,8 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                     float(previous_normalized_orientation),
                     float(normalized_orientation),
                 )
-            if not (is_turning or is_airborne):
+            orientation_accepted = bool(is_turning or is_airborne or is_flying_movement)
+            if not orientation_accepted:
                 previous_is_zero = math.isclose(
                     float(previous_normalized_orientation),
                     0.0,
@@ -1842,14 +3255,37 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                     normalized_orientation = float(recovered_orientation)
                 else:
                     normalized_orientation = float(previous_normalized_orientation)
-
     state = _movement_state(session)
+    movement_flags = int(getattr(state, "flags", 0) or 0)
+    is_turning = bool(movement_flags & (_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT))
+    is_airborne = bool(
+        movement_flags & _MOVEMENTFLAG_FALLING
+        or bool(getattr(state, "has_fall_data", False))
+    )
+    Logger.debug(
+        "[ORIENTATION_ACCEPT] opcode=%s is_flying=%s is_turning=%s old=%.6f new=%.6f accepted=%s",
+        opcode_name,
+        bool(is_flying_movement),
+        bool(is_turning),
+        float(previous_orientation),
+        float(normalized_orientation),
+        bool(orientation_accepted),
+    )
+
     state.x = float(x)
     state.y = float(y)
     state.z = float(z)
-    state.orientation = float(normalized_orientation)
-    _remember_valid_orientation(session, state.orientation)
-    _sync_session_from_movement_state(session)
+    if is_flying_movement:
+        state.orientation = float(normalized_orientation)
+        _remember_valid_orientation(session, state.orientation)
+        session.x = float(state.x)
+        session.y = float(state.y)
+        session.z = float(state.z)
+        session.orientation = float(state.orientation)
+    else:
+        state.orientation = float(normalized_orientation)
+        _remember_valid_orientation(session, state.orientation)
+        _sync_session_from_movement_state(session)
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
