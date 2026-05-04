@@ -487,16 +487,14 @@ def _resolve_player_team(ctx) -> str | None:
 
 
 def _patch_language_mask_bytes(payload: bytes, ctx) -> bytes:
-    """Mirror the old replay language-mask patch inside the new player create path."""
-    team = _resolve_player_team(ctx)
-    if team == "alliance":
-        target_bytes = _LANGUAGE_MASK_COMMON
-    elif team == "horde":
-        target_bytes = _LANGUAGE_MASK_ORCISH
-    else:
-        return bytes(payload)
+    """Keep server-built player-create payload bytes stable.
 
-    return bytes(payload).replace(_LANGUAGE_MASK_ORCISH, target_bytes)
+    The old replay path used a raw payload byte-replace for language masks, but
+    doing that here can mutate unrelated sections such as the update mask. The
+    server-built path already patches language/riding values through
+    _patch_language_skill_fields(), so the payload itself must remain untouched.
+    """
+    return bytes(payload)
 
 
 def _apply_legacy_language_riding_skill_block(

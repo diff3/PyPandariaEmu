@@ -1025,7 +1025,20 @@ def dismount(player) -> list[tuple[str, bytes]]:
     player.is_mounted = False
     player.mount_spell = None
     player.mount_display_id = 0
+    player.is_flying = False
     player.unit_flags = int(getattr(player, "unit_flags", 0) or 0) & ~_UNIT_FLAG_MOUNT
+    state = getattr(player, "movement_state", None)
+    if state is not None:
+        state.is_ascending = False
+        state.is_descending = False
+        flags = int(getattr(state, "flags", 0) or 0)
+        flags &= ~(
+            _MOVEMENTFLAG_CAN_FLY
+            | _MOVEMENTFLAG_FLYING
+            | _MOVEMENTFLAG_ASCENDING
+            | _MOVEMENTFLAG_DESCENDING
+        )
+        state.flags = int(flags)
     _restore_default_movement_speeds(player)
     return send_dismount_update(player)
 
@@ -1035,14 +1048,28 @@ def handle_cast_spell(session, ctx: PacketContext):
     Logger.debug(f"[SPELL] opcode={ctx.name}")
     packet_spell_id = _extract_packet_spell_id(ctx)
     if packet_spell_id and is_mount_spell(packet_spell_id):
+        is_mounted = bool(
+            getattr(session, "is_mounted", False)
+            or getattr(session, "mount_spell", None)
+            or getattr(session, "mount_display_id", 0)
+        )
         Logger.debug(f"[SPELL] packet mount spell_id={int(packet_spell_id)}")
+        if is_mounted:
+            return 0, dismount(session)
         return 0, handle_mount(session, int(packet_spell_id))
 
     spell_id = extract_mount_spell_id(session, ctx)
     if not spell_id:
         return 0, None
 
+    is_mounted = bool(
+        getattr(session, "is_mounted", False)
+        or getattr(session, "mount_spell", None)
+        or getattr(session, "mount_display_id", 0)
+    )
     Logger.debug(f"[SPELL] cast spell_id={int(spell_id)}")
+    if is_mounted:
+        return 0, dismount(session)
     responses = handle_mount(session, int(spell_id))
     return 0, responses
 

@@ -887,6 +887,16 @@ def _wrap_pitch(value: float) -> float:
     return wrapped - math.pi
 
 
+def _movement_is_flying(session) -> bool:
+    state = _movement_state(session)
+    state_flags = int(getattr(state, "flags", 0) or 0)
+    return bool(
+        getattr(session, "is_flying", False)
+        or getattr(session, "can_fly", False)
+        or state_flags & (_MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING)
+    )
+
+
 def _read_u32(payload: bytes, offset: int) -> tuple[int, int]:
     return struct.unpack_from("<I", payload, offset)[0], offset + 4
 
@@ -1033,7 +1043,7 @@ def _should_use_skyfire_flying_sequence(session, opcode_name: str) -> bool:
         return True
     if opcode_name != "MSG_MOVE_HEARTBEAT":
         return False
-    return bool(getattr(session, "is_flying", False)) or bool(getattr(session, "can_fly", False))
+    return _movement_is_flying(session)
 
 
 def _parse_skyfire_flying_movement_info(
@@ -1709,6 +1719,30 @@ def build_move_set_flight_speed_payload(session) -> bytes:
     )
 
 
+def _flying_speed_enter_response(session, was_flying: bool) -> tuple[str, bytes] | None:
+    is_flying = bool(getattr(session, "is_flying", False))
+    if was_flying or not is_flying:
+        return None
+    run_speed = float(getattr(session, "run_speed", 7.0) or 7.0)
+    session.fly_speed = float(run_speed) * 3.2
+    Logger.debug(
+        "[FLIGHT_SPEED] enter guid=0x%X run=%.3f fly=%.3f",
+        _player_guid(session),
+        float(run_speed),
+        float(session.fly_speed),
+    )
+    return ("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session))
+
+
+def _landing_speed_restore_response(session) -> tuple[str, bytes]:
+    Logger.debug(
+        "[FLIGHT_SPEED] land guid=0x%X run=%.3f",
+        _player_guid(session),
+        float(getattr(session, "run_speed", 7.0) or 7.0),
+    )
+    return ("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(session))
+
+
 def build_move_set_can_fly_payload(session, enabled: bool) -> bytes:
     guid_value = int(_movement_sync_guid(session) or 0)
     raw_guid = guid_value.to_bytes(8, "little", signed=False)
@@ -2329,9 +2363,7 @@ def _extract_skyfire_movement_from_payload(
     previous_orientation = _normalize_orientation(
         float(getattr(session, "orientation", 0.0) or 0.0)
     )
-    is_flying_session = bool(getattr(session, "is_flying", False)) or bool(
-        getattr(session, "can_fly", False)
-    )
+    is_flying_session = _movement_is_flying(session)
 
     def _orientation_debug_candidates(offsets: tuple[int, ...]) -> list[tuple[int, float, float | None]]:
         candidates: list[tuple[int, float, float | None]] = []
@@ -2861,6 +2893,14 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
     _record_movement_packet_state(session, opcode_name, payload)
     if opcode_name == "MSG_MOVE_FALL_LAND":
         setattr(session, "is_flying", False)
+        state.is_ascending = False
+        state.is_descending = False
+        state.flags &= ~(
+            _MOVEMENTFLAG_FLYING
+            | _MOVEMENTFLAG_ASCENDING
+            | _MOVEMENTFLAG_DESCENDING
+        )
+        state.pitch = 0.0
     elif opcode_name in {"MSG_MOVE_START_ASCEND", "MSG_MOVE_START_DESCEND"}:
         setattr(session, "is_flying", True)
     current_flags = int(getattr(state, "flags", 0) or 0)
@@ -3100,6 +3140,8 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     _consume_pending_teleport_on_movement(session, opcode_name)
     _clear_dance_emote_state_on_move(session)
     _apply_early_movement_cleanup(session, opcode_name)
+    movement_responses: list[tuple[str, bytes]] = []
+    was_flying = _movement_is_flying(session)
 
     movement = parse_movement_info(session, opcode_name, ctx.payload, ctx.decoded)
     if movement is None:
@@ -3132,7 +3174,13 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                 int(_movement_state(session).flags),
             )
             stream_responses = _maybe_stream_gameobjects(session)
-            return 0, (stream_responses or None)
+            responses = []
+            enter_response = _flying_speed_enter_response(session, was_flying)
+            if enter_response is not None:
+                responses.append(enter_response)
+            if stream_responses:
+                responses.extend(stream_responses)
+            return 0, (responses or None)
         Logger.warning(
             f"[Movement] failed to parse {opcode_name} guid=0x{_player_guid(session):X} "
             f"payload_len={len(ctx.payload)}"
@@ -3153,10 +3201,13 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
 
     if not _store_authoritative_movement(session, opcode_name, ctx.payload, adjusted_movement):
         return 0, None
+    enter_response = _flying_speed_enter_response(session, was_flying)
+    if enter_response is not None:
+        movement_responses.append(enter_response)
+    if opcode_name == "MSG_MOVE_FALL_LAND":
+        movement_responses.append(_landing_speed_restore_response(session))
 
-    is_flying_movement = bool(getattr(session, "is_flying", False)) or bool(
-        getattr(session, "can_fly", False)
-    )
+    is_flying_movement = _movement_is_flying(session)
     normalized_orientation = _normalize_orientation(orientation)
     if normalized_orientation is None:
         if is_flying_movement:
@@ -3276,12 +3327,19 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     state.y = float(y)
     state.z = float(z)
     if is_flying_movement:
+        session.pitch = float(getattr(state, "pitch", 0.0) or 0.0)
         state.orientation = float(normalized_orientation)
         _remember_valid_orientation(session, state.orientation)
         session.x = float(state.x)
         session.y = float(state.y)
         session.z = float(state.z)
         session.orientation = float(state.orientation)
+        Logger.debug(
+            "[FLY_PITCH] pitch=%.6f z=%.6f flags=0x%X",
+            float(session.pitch),
+            float(session.z),
+            int(getattr(state, "flags", 0) or 0),
+        )
     else:
         state.orientation = float(normalized_orientation)
         _remember_valid_orientation(session, state.orientation)
@@ -3297,6 +3355,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         "MSG_MOVE_STOP_ASCEND",
         "MSG_MOVE_START_DESCEND",
         "MSG_MOVE_STOP_DESCEND",
+        "MSG_MOVE_FALL_LAND",
     }
     if opcode_name == "MSG_MOVE_JUMP":
         Logger.debug(
@@ -3312,7 +3371,9 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         f"pos=({session.x:.3f}, {session.y:.3f}, {session.z:.3f}) facing={session.orientation:.3f}"
     )
     stream_responses = _maybe_stream_gameobjects(session)
-    return 0, (stream_responses or None)
+    if stream_responses:
+        movement_responses.extend(stream_responses)
+    return 0, (movement_responses or None)
 
 
 @register("MSG_MOVE_SET_FACING")

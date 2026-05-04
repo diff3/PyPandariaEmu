@@ -301,6 +301,78 @@ def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
     assert not session.movement_state.flags & spells_handlers._MOVEMENTFLAG_FLYING_CAPABILITY
 
 
+def test_handle_cast_spell_mount_button_toggles_to_dismount(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    monkeypatch.setattr(spells_handlers, "is_mount_spell", lambda spell_id: True)
+    monkeypatch.setattr(spells_handlers, "_extract_packet_spell_id", lambda _ctx: 59535)
+
+    calls: list[str] = []
+
+    def fake_handle_mount(session, spell_id):
+        calls.append(f"mount:{spell_id}")
+        return [("MOUNT", b"on")]
+
+    def fake_dismount(session):
+        calls.append("dismount")
+        session.is_mounted = False
+        session.mount_spell = None
+        session.mount_display_id = 0
+        return [("DISMOUNT", b"off")]
+
+    monkeypatch.setattr(spells_handlers, "handle_mount", fake_handle_mount)
+    monkeypatch.setattr(spells_handlers, "dismount", fake_dismount)
+
+    session = SimpleNamespace(
+        is_mounted=True,
+        mount_spell=59535,
+        mount_display_id=2404,
+    )
+
+    status, responses = spells_handlers.handle_cast_spell(
+        session,
+        SimpleNamespace(name="CMSG_CAST_SPELL", payload=b"", decoded={}),
+    )
+
+    assert status == 0
+    assert responses == [("DISMOUNT", b"off")]
+    assert calls == ["dismount"]
+
+
+def test_dismount_clears_flying_runtime_state(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    monkeypatch.setattr(spells_handlers, "_restore_default_movement_speeds", lambda _player: None)
+    monkeypatch.setattr(spells_handlers, "send_dismount_update", lambda _player: [("SMSG_DISMOUNT", b"off")])
+
+    session = SimpleNamespace(
+        is_mounted=True,
+        mount_spell=72286,
+        mount_display_id=31007,
+        is_flying=True,
+        unit_flags=spells_handlers._UNIT_FLAG_MOUNT,
+        movement_state=SimpleNamespace(
+            flags=(
+                spells_handlers._MOVEMENTFLAG_CAN_FLY
+                | spells_handlers._MOVEMENTFLAG_FLYING
+                | spells_handlers._MOVEMENTFLAG_ASCENDING
+                | spells_handlers._MOVEMENTFLAG_DESCENDING
+            ),
+            is_ascending=True,
+            is_descending=True,
+        ),
+    )
+
+    responses = spells_handlers.dismount(session)
+
+    assert responses == [("SMSG_DISMOUNT", b"off")]
+    assert session.is_mounted is False
+    assert session.mount_spell is None
+    assert session.mount_display_id == 0
+    assert session.is_flying is False
+    assert session.movement_state.is_ascending is False
+    assert session.movement_state.is_descending is False
+    assert session.movement_state.flags == 0
+
+
 def test_mount_and_dismount_broadcast_visual_update_to_visible_peers(monkeypatch):
     spells_handlers = _import_spells_handlers()
     runtime_module = sys.modules["server.modules.handlers.world.state.runtime"]

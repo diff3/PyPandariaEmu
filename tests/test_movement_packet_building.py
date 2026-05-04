@@ -1795,6 +1795,230 @@ def test_handle_msg_move_set_facing_updates_session_orientation(monkeypatch) -> 
     assert session.orientation == 1.25
 
 
+def test_handle_start_ascend_sets_flight_speed_once_on_flying_entry(monkeypatch) -> None:
+    session = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        realm_id=1,
+        run_speed=7.0,
+        fly_speed=7.0,
+        can_fly=True,
+        is_flying=False,
+    )
+    ctx = SimpleNamespace(
+        name="MSG_MOVE_START_ASCEND",
+        opcode=0,
+        payload=b"\x00" * 35,
+        decoded={},
+    )
+    movement_state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+    )
+
+    monkeypatch.setattr(movement, "_consume_pending_teleport_on_movement", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args, **kwargs: (10.0, 20.0, 31.0, 1.25))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args, **kwargs: True)
+
+    def _store(_session, _opcode_name, _payload, _movement_data):
+        _session.is_flying = True
+        return True
+
+    monkeypatch.setattr(movement, "_store_authoritative_movement", _store)
+    monkeypatch.setattr(movement, "_movement_state", lambda _session: movement_state)
+    monkeypatch.setattr(
+        movement,
+        "_sync_session_from_movement_state",
+        lambda target: (
+            setattr(target, "x", movement_state.x),
+            setattr(target, "y", movement_state.y),
+            setattr(target, "z", movement_state.z),
+            setattr(target, "orientation", movement_state.orientation),
+        ),
+    )
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda _session: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_periodic_position_save", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_stream_gameobjects", lambda _session: [])
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "build_move_set_flight_speed_payload", lambda _session: b"flight-speed")
+
+    status, responses = movement.handle_movement_packet(session, ctx)
+
+    assert status == 0
+    assert round(session.fly_speed, 3) == round(22.4, 3)
+    assert responses == [("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight-speed")]
+
+
+def test_handle_fall_land_clears_flying_state_and_restores_run_speed(monkeypatch) -> None:
+    broadcast_calls: list[bool] = []
+    session = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=35.0,
+        orientation=1.25,
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        realm_id=1,
+        run_speed=7.0,
+        fly_speed=22.4,
+        can_fly=True,
+        is_flying=True,
+    )
+    movement_state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=35.0,
+        orientation=1.25,
+        flags=(
+            movement._MOVEMENTFLAG_FLYING
+            | movement._MOVEMENTFLAG_ASCENDING
+            | movement._MOVEMENTFLAG_DESCENDING
+        ),
+        flags2=0,
+        timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+        is_ascending=True,
+        is_descending=True,
+        pitch=0.75,
+    )
+    ctx = SimpleNamespace(
+        name="MSG_MOVE_FALL_LAND",
+        opcode=0,
+        payload=b"\x00" * 40,
+        decoded={},
+    )
+
+    monkeypatch.setattr(movement, "_consume_pending_teleport_on_movement", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args, **kwargs: (10.0, 20.0, 30.0, 1.25))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_movement_state", lambda _session: movement_state)
+    monkeypatch.setattr(
+        movement,
+        "_sync_session_from_movement_state",
+        lambda target: (
+            setattr(target, "x", movement_state.x),
+            setattr(target, "y", movement_state.y),
+            setattr(target, "z", movement_state.z),
+            setattr(target, "orientation", movement_state.orientation),
+        ),
+    )
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda _session: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_periodic_position_save", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_stream_gameobjects", lambda _session: [])
+    monkeypatch.setattr(
+        movement,
+        "broadcast_player_state_update",
+        lambda _session, force=False: broadcast_calls.append(bool(force)),
+    )
+    monkeypatch.setattr(movement, "build_move_set_run_speed_payload", lambda _session: b"run-speed")
+
+    status, responses = movement.handle_movement_packet(session, ctx)
+
+    assert status == 0
+    assert responses == [("SMSG_MOVE_SET_RUN_SPEED", b"run-speed")]
+    assert session.is_flying is False
+    assert movement_state.is_ascending is False
+    assert movement_state.is_descending is False
+    assert movement_state.pitch == 0.0
+    assert not movement_state.flags & movement._MOVEMENTFLAG_FLYING
+    assert not movement_state.flags & movement._MOVEMENTFLAG_ASCENDING
+    assert not movement_state.flags & movement._MOVEMENTFLAG_DESCENDING
+    assert broadcast_calls == [True]
+
+
+def test_handle_flying_heartbeat_uses_flying_flags_to_keep_pitch_and_z(monkeypatch) -> None:
+    debug_messages: list[str] = []
+    session = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        pitch=0.0,
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        realm_id=1,
+        can_fly=False,
+        is_flying=False,
+    )
+    ctx = SimpleNamespace(
+        name="MSG_MOVE_HEARTBEAT",
+        opcode=0,
+        payload=b"\x00" * 31,
+        decoded={},
+    )
+    movement_state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        pitch=0.0,
+        flags=movement._MOVEMENTFLAG_FLYING,
+        flags2=0,
+        timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+    )
+
+    monkeypatch.setattr(movement, "_consume_pending_teleport_on_movement", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args, **kwargs: (10.0, 20.0, 36.5, 2.5))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args, **kwargs: True)
+
+    def _store(_session, _opcode_name, _payload, _movement_data):
+        movement_state.pitch = 0.75
+        movement_state.flags = movement._MOVEMENTFLAG_FLYING
+        return True
+
+    monkeypatch.setattr(movement, "_store_authoritative_movement", _store)
+    monkeypatch.setattr(movement, "_movement_state", lambda _session: movement_state)
+    monkeypatch.setattr(
+        movement,
+        "_sync_session_from_movement_state",
+        lambda target: (
+            setattr(target, "x", movement_state.x),
+            setattr(target, "y", movement_state.y),
+            setattr(target, "z", movement_state.z),
+            setattr(target, "orientation", movement_state.orientation),
+        ),
+    )
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda _session: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_periodic_position_save", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_stream_gameobjects", lambda _session: [])
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        movement.Logger,
+        "debug",
+        lambda message, *args: debug_messages.append(message % args if args else message),
+    )
+
+    movement.handle_movement_packet(session, ctx)
+
+    assert session.z == 36.5
+    assert session.orientation == 2.5
+    assert session.pitch == 0.75
+    assert any("[FLY_PITCH]" in message and "pitch=0.750000" in message for message in debug_messages)
+
+
 def test_post_teleport_resync_dismounts_active_mount(monkeypatch) -> None:
     calls = []
     spells_module = types.ModuleType("server.modules.handlers.world.opcodes.spells")

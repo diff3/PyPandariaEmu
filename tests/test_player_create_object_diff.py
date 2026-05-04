@@ -17,6 +17,9 @@ from server.modules.handlers.world.bootstrap.playerobjects import (
     build_update_mask,
     build_player_field_values,
     build_server_built_player_create,
+    locate_mask_region,
+    locate_field_region,
+    extract_field_indices,
 )
 
 
@@ -1257,3 +1260,54 @@ def test_server_built_create_runtime_path_is_single_source_of_truth() -> None:
     assert not hasattr(importlib.import_module("server.modules.handlers.world.bootstrap.playerobjects"), "_PLAYER_CREATE_TEMPLATE_PATH")
     assert not hasattr(importlib.import_module("server.modules.handlers.world.bootstrap.playerobjects"), "_load_player_create_template_payload")
     assert not hasattr(importlib.import_module("server.modules.handlers.world.bootstrap.playerobjects"), "build_server_built_player_create_from_template")
+
+
+@pytest.mark.parametrize(
+    "race,faction,faction_template",
+    [
+        (4, "alliance", 4),
+        (2, "horde", 2),
+    ],
+)
+def test_server_built_player_create_keeps_level_field_in_mask_for_login_bootstrap(
+    race,
+    faction,
+    faction_template,
+):
+    ctx = SimpleNamespace(
+        map_id=1,
+        char_guid=17,
+        player_guid=17,
+        world_guid=17,
+        exact_0002_low_guid=17,
+        race=race,
+        class_id=11,
+        gender=1,
+        faction=faction,
+        x=16212.216796875,
+        y=16253.169921875,
+        z=14.770503044128418,
+        orientation=1.6979784965515137,
+        health=102,
+        max_health=102,
+        power_primary=40,
+        max_power=40,
+        level=90,
+        faction_template=faction_template,
+        display_id=56,
+        player_bytes=393479,
+        player_bytes2=16777220,
+        player_bytes3=1,
+        max_level=90,
+    )
+
+    payload = build_server_built_player_create(ctx)
+
+    assert payload is not None
+    mask_start, mask_end, mask_blocks = locate_mask_region(payload)
+    field_indices = extract_field_indices(payload[mask_start:mask_end], mask_blocks)
+    field_start, field_end = locate_field_region(payload)
+
+    assert 55 in field_indices
+    level_offset = field_indices.index(55) * 4
+    assert struct.unpack_from("<I", payload[field_start:field_end], level_offset)[0] == 90
