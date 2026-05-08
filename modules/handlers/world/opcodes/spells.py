@@ -19,6 +19,8 @@ from server.modules.handlers.world.opcodes.movement import (
     build_move_set_can_fly_payload,
     build_move_set_flight_speed_payload,
     build_move_set_run_speed_payload,
+    build_move_set_speed_payload,
+    resync_movement,
 )
 from server.modules.handlers.world.mount.mount_service import (
     ALL_MOUNT_SPELLS,
@@ -621,6 +623,44 @@ def build_player_unit_field_update(
 def _build_run_speed_update_response(player) -> tuple[str, bytes]:
     return ("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(player))
 
+
+def _build_movement_speed_update_responses(player) -> list[tuple[str, bytes]]:
+    return [
+        (
+            "SMSG_MOVE_SET_WALK_SPEED",
+            build_move_set_speed_payload(
+                player,
+                "SMSG_MOVE_SET_WALK_SPEED",
+                float(getattr(player, "walk_speed", _DEFAULT_WALK_SPEED) or _DEFAULT_WALK_SPEED),
+            ),
+        ),
+        (
+            "SMSG_MOVE_SET_RUN_SPEED",
+            build_move_set_speed_payload(
+                player,
+                "SMSG_MOVE_SET_RUN_SPEED",
+                float(getattr(player, "run_speed", _DEFAULT_RUN_SPEED) or _DEFAULT_RUN_SPEED),
+            ),
+        ),
+        (
+            "SMSG_MOVE_SET_SWIM_SPEED",
+            build_move_set_speed_payload(
+                player,
+                "SMSG_MOVE_SET_SWIM_SPEED",
+                float(getattr(player, "swim_speed", _DEFAULT_SWIM_SPEED) or _DEFAULT_SWIM_SPEED),
+            ),
+        ),
+        (
+            "SMSG_MOVE_SET_FLIGHT_SPEED",
+            build_move_set_speed_payload(
+                player,
+                "SMSG_MOVE_SET_FLIGHT_SPEED",
+                float(getattr(player, "fly_speed", _DEFAULT_FLY_SPEED) or _DEFAULT_FLY_SPEED),
+            ),
+        ),
+    ]
+
+
 def _resolve_unit_field_value(session, field):
     if field == _UNIT_FIELD_FLAGS:
         return int(getattr(session, "unit_flags", 0))
@@ -867,9 +907,19 @@ def _set_flying_capability_state(session, enabled: bool) -> bool:
 
     state = getattr(session, "movement_state", None)
     if state is not None:
+        state.x = float(getattr(session, "x", getattr(state, "x", 0.0)) or 0.0)
+        state.y = float(getattr(session, "y", getattr(state, "y", 0.0)) or 0.0)
+        state.z = float(getattr(session, "z", getattr(state, "z", 0.0)) or 0.0)
+        state.orientation = float(getattr(session, "orientation", getattr(state, "orientation", 0.0)) or 0.0)
         flags = int(getattr(state, "flags", 0) or 0)
         if enabled:
             flags |= _MOVEMENTFLAG_FLYING_CAPABILITY
+            state.has_fall_data = False
+            state.fall_time = 0
+            state.fall_vertical_speed = 0.0
+            state.fall_horizontal_speed = 0.0
+            state.fall_sin_angle = 0.0
+            state.fall_cos_angle = 0.0
         else:
             flags &= ~(
                 _MOVEMENTFLAG_CAN_FLY
@@ -885,12 +935,16 @@ def _set_flying_capability_state(session, enabled: bool) -> bool:
 def build_mount_flying_capability_responses(player, spell_id: int) -> list[tuple[str, bytes]]:
     if not is_flying_mount_spell(int(spell_id)):
         return []
+    player.fly_speed = float(getattr(player, "run_speed", _DEFAULT_RUN_SPEED) or _DEFAULT_RUN_SPEED) * 3.2
     if not _set_flying_capability_state(player, True):
         return []
-    return [
+    responses: list[tuple[str, bytes]] = []
+    responses.extend(apply_fly_aura(player))
+    responses.extend([
         ("SMSG_SPLINE_MOVE_SET_FLYING", build_spline_move_flying_payload(player)),
         ("SMSG_MOVE_SET_CAN_FLY", build_move_set_can_fly_payload(player, True)),
-    ]
+    ])
+    return responses
 
 
 def build_dismount_flying_capability_responses(player) -> list[tuple[str, bytes]]:
@@ -980,9 +1034,102 @@ def send_dismount_update(player) -> list[tuple[str, bytes]]:
     responses.extend(build_dismount_flying_capability_responses(player))
     responses.extend(build_mount_visual_responses(player, 0))
     _broadcast_mount_visual_to_visible_peers(player, 0)
-    responses.append(_build_run_speed_update_response(player))
-    responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(player)))
+    responses.extend(_build_movement_speed_update_responses(player))
     responses.extend(_notification_response(f"Dismounted speed={float(player.run_speed):.2f}"))
+    return responses
+
+
+def _mount_owner_ids(session) -> tuple[int, int]:
+    char_guid = int(
+        getattr(session, "char_guid", 0)
+        or getattr(session, "player_guid", 0)
+        or getattr(session, "world_guid", 0)
+        or 0
+    )
+    realm_id = int(getattr(session, "realm_id", 0) or 0)
+    return char_guid, realm_id
+
+
+def _persist_current_mount_state(session) -> None:
+    char_guid, realm_id = _mount_owner_ids(session)
+    spell_id = int(getattr(session, "mount_spell", 0) or 0)
+    display_id = int(getattr(session, "mount_display_id", 0) or 0)
+    if char_guid <= 0 or spell_id <= 0 or display_id <= 0:
+        return
+
+    saver = getattr(DatabaseConnection, "save_character_mount_state", None)
+    if not callable(saver):
+        return
+
+    saver(
+        char_guid,
+        realm_id,
+        spell_id=spell_id,
+        display_id=display_id,
+    )
+
+
+def clear_persisted_mount_state(session) -> None:
+    """Clear DB mount state after dismount or teleport."""
+    char_guid, realm_id = _mount_owner_ids(session)
+    if char_guid <= 0:
+        return
+    clearer = getattr(DatabaseConnection, "clear_character_mount_state", None)
+    if callable(clearer):
+        clearer(char_guid, realm_id)
+
+
+def restore_persisted_mount_state(session, char_guid: int, realm_id: int) -> bool:
+    """Load mount state before login packets are built.
+
+    The login UPDATE_OBJECT can then describe the mounted model immediately.
+    Extra aura/speed/flying packets are sent later by build_login_mount_restore_responses.
+    """
+    loader = getattr(DatabaseConnection, "load_character_mount_state", None)
+    if not callable(loader):
+        return False
+
+    state = loader(int(char_guid), int(realm_id))
+    if not state:
+        return False
+
+    spell_id = int(state.get("spell") or 0)
+    display_id = int(state.get("display_id") or 0) or get_mount_display_id(spell_id)
+    if spell_id <= 0 or display_id <= 0 or not is_mount_spell(spell_id):
+        clearer = getattr(DatabaseConnection, "clear_character_mount_state", None)
+        if callable(clearer):
+            clearer(int(char_guid), int(realm_id))
+        return False
+
+    session.is_mounted = True
+    session.mount_spell = int(spell_id)
+    session.mount_display_id = int(display_id)
+    session.active_mount_aura_slot = int(getattr(session, "active_mount_aura_slot", 0) or 0)
+    session.unit_flags = int(getattr(session, "unit_flags", 0) or 0) | _UNIT_FLAG_MOUNT
+    _apply_mount_movement_speeds(session)
+    Logger.info(
+        "[Mount] restored guid=%s spell=%s display=%s",
+        int(char_guid),
+        int(spell_id),
+        int(display_id),
+    )
+    return True
+
+
+def build_login_mount_restore_responses(session) -> list[tuple[str, bytes]]:
+    """Send the active mount pieces that are not fully covered by login fields."""
+    spell_id = int(getattr(session, "mount_spell", 0) or 0)
+    display_id = int(getattr(session, "mount_display_id", 0) or 0)
+    if spell_id <= 0 or display_id <= 0 or not bool(getattr(session, "is_mounted", False)):
+        return []
+
+    responses: list[tuple[str, bytes]] = []
+    responses.extend(build_mount_visual_responses(session, display_id))
+    responses.extend(apply_mount_aura(session, spell_id))
+    responses.extend(build_mount_flying_capability_responses(session, spell_id))
+    responses.append(_build_run_speed_update_response(session))
+    responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session)))
+    responses.extend(resync_movement(session))
     return responses
 
 
@@ -1018,10 +1165,13 @@ def handle_mount(player, spell_id: int):
     player.mount_spell = int(spell_id)
     player.active_mount_aura_slot = int(getattr(player, "active_mount_aura_slot", 0) or 0)
     _apply_mount_movement_speeds(player)
-    return send_mount_update(player, int(spell_id))
+    responses = send_mount_update(player, int(spell_id))
+    _persist_current_mount_state(player)
+    return responses
 
 
 def dismount(player) -> list[tuple[str, bytes]]:
+    clear_persisted_mount_state(player)
     player.is_mounted = False
     player.mount_spell = None
     player.mount_display_id = 0

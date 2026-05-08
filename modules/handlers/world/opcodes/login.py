@@ -405,6 +405,7 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
             len(post_create_spell_packets),
         )
         responses.extend(post_create_spell_packets)
+
     inventory_packets = build_login_inventory_sync_responses(session)
     if inventory_packets:
         Logger.info(f"[WorldLogin] sending {len(inventory_packets)} inventory sync packets")
@@ -697,7 +698,7 @@ def handle_player_login(session, ctx: PacketContext):
     session.player_bytes2 = int(row.playerBytes2 or 0)
     session.player_flags = int(row.playerFlags or 0)
     session.unit_flags = int(getattr(session, "unit_flags", 0) or 0)
-    session.mount_display_id = int(getattr(session, "mount_display_id", 0) or 0)
+    session.mount_display_id = 0
 
     session.player_name = selected_name
 
@@ -713,6 +714,7 @@ def handle_player_login(session, ctx: PacketContext):
     attach_session_to_world_state(session, map_id=int(session.map_id))
 
     spells_handlers.initialize_session_spells(session, int(char_guid))
+    spells_handlers.restore_persisted_mount_state(session, int(char_guid), int(realm_id))
 
     session.action_buttons = DatabaseConnection.get_character_action_buttons(char_guid)
 
@@ -853,6 +855,13 @@ def handle_set_active_mover(session, ctx: PacketContext):
             Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; suppressing account settings packets")
 
     responses.extend(spells_handlers.build_active_mover_spell_sync_responses(session))
+    mount_restore_packets = spells_handlers.build_login_mount_restore_responses(session)
+    if mount_restore_packets:
+        Logger.info(
+            "[WorldLogin] ACTIVE_MOVER sending %s mount restore packets",
+            len(mount_restore_packets),
+        )
+        responses.extend(mount_restore_packets)
     Logger.debug("[LOGIN] active mover acknowledged")
 
     if responses:

@@ -138,6 +138,7 @@ class DatabaseConnection:
     _cache_gameobjects_loaded = False
     _account_data_tables_ready = False
     _addon_tables_ready = False
+    _mount_state_table_ready = False
     _db_signature = None
 
     @staticmethod
@@ -195,6 +196,7 @@ class DatabaseConnection:
         DatabaseConnection._cache_gameobjects_loaded = False
         DatabaseConnection._account_data_tables_ready = False
         DatabaseConnection._addon_tables_ready = False
+        DatabaseConnection._mount_state_table_ready = False
 
     @staticmethod
     def initialize():
@@ -699,6 +701,34 @@ class DatabaseConnection:
             Logger.warning(f"[DB] ensure addon tables failed: {exc}")
 
     @staticmethod
+    def _ensure_mount_state_table() -> bool:
+        if DatabaseConnection._mount_state_table_ready:
+            return True
+
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS character_mount_state (
+                    guid INT UNSIGNED NOT NULL,
+                    realm INT UNSIGNED NOT NULL DEFAULT 0,
+                    spell INT UNSIGNED NOT NULL DEFAULT 0,
+                    display_id INT UNSIGNED NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guid, realm)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
+                """
+            ))
+            session.commit()
+            DatabaseConnection._mount_state_table_ready = True
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] ensure mount-state table failed: {exc}")
+            return False
+
+    @staticmethod
     def load_known_addons() -> dict[str, int]:
         DatabaseConnection._ensure_addon_tables()
         session = DatabaseConnection.chars()
@@ -933,6 +963,104 @@ class DatabaseConnection:
             Logger.warning(
                 f"[DB] save_character_online_state failed guid={char_guid} realm={realm_id}: {exc}"
             )
+            return False
+
+    @staticmethod
+    def load_character_mount_state(char_guid: int, realm_id: int) -> dict | None:
+        """Return persisted mount state for a character, if one exists."""
+        if int(char_guid or 0) <= 0:
+            return None
+        if not DatabaseConnection._ensure_mount_state_table():
+            return None
+
+        session = DatabaseConnection.chars()
+        try:
+            row = session.execute(
+                text(
+                    """
+                    SELECT spell, display_id
+                    FROM character_mount_state
+                    WHERE guid = :guid AND realm = :realm
+                    LIMIT 1
+                    """
+                ),
+                {"guid": int(char_guid), "realm": int(realm_id or 0)},
+            ).mappings().first()
+        except Exception as exc:
+            Logger.warning(f"[DB] load_character_mount_state failed guid={char_guid}: {exc}")
+            return None
+
+        if row is None:
+            return None
+        return {
+            "spell": int(row.get("spell") or 0),
+            "display_id": int(row.get("display_id") or 0),
+        }
+
+    @staticmethod
+    def save_character_mount_state(
+        char_guid: int,
+        realm_id: int,
+        *,
+        spell_id: int,
+        display_id: int,
+    ) -> bool:
+        """Persist current mounted state. Invalid zero state is ignored."""
+        if int(char_guid or 0) <= 0 or int(spell_id or 0) <= 0 or int(display_id or 0) <= 0:
+            return False
+        if not DatabaseConnection._ensure_mount_state_table():
+            return False
+
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO character_mount_state (guid, realm, spell, display_id)
+                    VALUES (:guid, :realm, :spell, :display_id)
+                    ON DUPLICATE KEY UPDATE
+                        spell = VALUES(spell),
+                        display_id = VALUES(display_id)
+                    """
+                ),
+                {
+                    "guid": int(char_guid),
+                    "realm": int(realm_id or 0),
+                    "spell": int(spell_id),
+                    "display_id": int(display_id),
+                },
+            )
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] save_character_mount_state failed guid={char_guid}: {exc}")
+            return False
+
+    @staticmethod
+    def clear_character_mount_state(char_guid: int, realm_id: int) -> bool:
+        """Forget persisted mount state for explicit dismounts and teleports."""
+        if int(char_guid or 0) <= 0:
+            return True
+        if not DatabaseConnection._ensure_mount_state_table():
+            return False
+
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(
+                text(
+                    """
+                    DELETE FROM character_mount_state
+                    WHERE guid = :guid AND realm = :realm
+                    """
+                ),
+                {"guid": int(char_guid), "realm": int(realm_id or 0)},
+            )
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] clear_character_mount_state failed guid={char_guid}: {exc}")
             return False
 
     @staticmethod

@@ -35,8 +35,10 @@ def _import_spells_handlers():
             "build_move_set_can_fly_payload": lambda session, enabled: (
                 b"can-fly-on" if enabled else b"can-fly-off"
             ),
+            "build_move_set_speed_payload": lambda session, opcode_name, speed: str(opcode_name).encode(),
             "build_move_set_run_speed_payload": lambda session: b"",
             "build_move_set_flight_speed_payload": lambda session: b"",
+            "resync_movement": lambda session: [],
         },
         "server.modules.handlers.world.state.runtime": {
             "_visible_guid_set": lambda session: getattr(session, "visible_guids", set()),
@@ -209,6 +211,7 @@ def test_handle_mount_and_dismount_use_aura_visual_and_speed(monkeypatch):
         native_display_id=15475,
         active_mount_aura_spell_id=None,
         active_mount_aura_slot=0,
+        active_fly_aura_spell_id=None,
     )
 
     mount_responses = spells_handlers.handle_mount(session, 59535)
@@ -227,11 +230,201 @@ def test_handle_mount_and_dismount_use_aura_visual_and_speed(monkeypatch):
         "SMSG_AURA_UPDATE",
         "SMSG_DISMOUNT",
         "SMSG_UPDATE_OBJECT",
+        "SMSG_MOVE_SET_WALK_SPEED",
+    ]
+    assert [opcode for opcode, _payload in dismount_responses[3:7]] == [
+        "SMSG_MOVE_SET_WALK_SPEED",
         "SMSG_MOVE_SET_RUN_SPEED",
+        "SMSG_MOVE_SET_SWIM_SPEED",
+        "SMSG_MOVE_SET_FLIGHT_SPEED",
     ]
     assert session.is_mounted is False
     assert session.mount_spell is None
     assert session.active_mount_aura_spell_id is None
+
+
+def test_handle_mount_persists_restorable_mount_state(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    saved = []
+
+    monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda spell_id: 2404)
+    def fake_build_mount_visual_responses(session, display_id):
+        session.mount_display_id = int(display_id)
+        return [("SMSG_UPDATE_OBJECT", b"mount")]
+
+    monkeypatch.setattr(spells_handlers, "build_mount_visual_responses", fake_build_mount_visual_responses)
+    monkeypatch.setattr(spells_handlers, "_broadcast_mount_visual_to_visible_peers", lambda session, display_id: None)
+    monkeypatch.setattr(spells_handlers.DatabaseConnection, "save_character_mount_state", lambda *args, **kwargs: saved.append((args, kwargs)), raising=False)
+
+    session = SimpleNamespace(
+        char_guid=7,
+        realm_id=1,
+        mount_display_id=0,
+        mount_spell=None,
+        active_mount_aura_slot=0,
+        run_speed=7.0,
+        fly_speed=7.0,
+    )
+
+    spells_handlers.handle_mount(session, 59535)
+
+    assert saved == [((7, 1), {"spell_id": 59535, "display_id": 2404})]
+
+
+def test_dismount_clears_persisted_mount_state(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    cleared = []
+
+    monkeypatch.setattr(spells_handlers, "send_dismount_update", lambda session: [("SMSG_DISMOUNT", b"off")])
+    monkeypatch.setattr(spells_handlers.DatabaseConnection, "clear_character_mount_state", lambda *args: cleared.append(args), raising=False)
+
+    session = SimpleNamespace(
+        char_guid=7,
+        realm_id=1,
+        is_mounted=True,
+        mount_spell=59535,
+        mount_display_id=2404,
+        unit_flags=spells_handlers._UNIT_FLAG_MOUNT,
+        movement_state=None,
+    )
+
+    responses = spells_handlers.dismount(session)
+
+    assert responses == [("SMSG_DISMOUNT", b"off")]
+    assert cleared == [(7, 1)]
+
+
+def test_restore_persisted_mount_state_prepares_login_state(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+
+    monkeypatch.setattr(spells_handlers, "is_mount_spell", lambda spell_id: int(spell_id) == 59535)
+    monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda spell_id: 2404)
+    monkeypatch.setattr(
+        spells_handlers.DatabaseConnection,
+        "load_character_mount_state",
+        lambda guid, realm: {"spell": 59535, "display_id": 2404},
+        raising=False,
+    )
+
+    session = SimpleNamespace(
+        unit_flags=0,
+        mount_display_id=0,
+        mount_spell=None,
+        active_mount_aura_slot=0,
+    )
+
+    restored = spells_handlers.restore_persisted_mount_state(session, 7, 1)
+
+    assert restored is True
+    assert session.is_mounted is True
+    assert session.mount_spell == 59535
+    assert session.mount_display_id == 2404
+    assert session.unit_flags & spells_handlers._UNIT_FLAG_MOUNT
+    assert session.run_speed > 7.0
+
+
+def test_login_mount_restore_sends_self_visual_aura_and_speed(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+
+    monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda spell_id: False)
+    monkeypatch.setattr(spells_handlers, "build_mount_visual_responses", lambda session, display_id: [
+        ("SMSG_UPDATE_OBJECT", f"mount:{display_id}".encode("ascii"))
+    ])
+    monkeypatch.setattr(spells_handlers, "build_move_set_run_speed_payload", lambda session: b"run")
+    monkeypatch.setattr(spells_handlers, "build_move_set_flight_speed_payload", lambda session: b"flight")
+
+    session = SimpleNamespace(
+        is_mounted=True,
+        mount_spell=59535,
+        mount_display_id=2404,
+        active_mount_aura_slot=0,
+        run_speed=14.0,
+        fly_speed=14.0,
+    )
+
+    responses = spells_handlers.build_login_mount_restore_responses(session)
+
+    assert [opcode for opcode, _payload in responses] == [
+        "SMSG_UPDATE_OBJECT",
+        "SMSG_AURA_UPDATE",
+        "SMSG_MOVE_SET_RUN_SPEED",
+        "SMSG_MOVE_SET_FLIGHT_SPEED",
+    ]
+    assert responses[0][1] == b"mount:2404"
+    assert responses[2][1] == b"run"
+    assert responses[3][1] == b"flight"
+
+
+def test_login_flying_mount_restore_sends_flying_enable(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+
+    monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda spell_id: True)
+    monkeypatch.setattr(spells_handlers, "build_mount_visual_responses", lambda session, display_id: [
+        ("SMSG_UPDATE_OBJECT", f"mount:{display_id}".encode("ascii"))
+    ])
+    monkeypatch.setattr(spells_handlers, "build_spline_move_flying_payload", lambda session: b"spline-fly")
+    monkeypatch.setattr(spells_handlers, "build_move_set_can_fly_payload", lambda session, enabled: b"can-fly-on")
+    monkeypatch.setattr(spells_handlers, "build_move_set_run_speed_payload", lambda session: b"run")
+    monkeypatch.setattr(spells_handlers, "build_move_set_flight_speed_payload", lambda session: b"flight")
+    monkeypatch.setattr(spells_handlers, "resync_movement", lambda session: [("SMSG_PLAYER_MOVE", b"move")])
+
+    session = SimpleNamespace(
+        is_mounted=True,
+        mount_spell=72286,
+        mount_display_id=31007,
+        active_mount_aura_slot=0,
+        active_fly_aura_spell_id=None,
+        can_fly=False,
+        is_flying=False,
+        x=100.0,
+        y=200.0,
+        z=300.0,
+        orientation=1.5,
+        movement_state=SimpleNamespace(
+            x=0.0,
+            y=0.0,
+            z=0.0,
+            orientation=0.0,
+            flags=0,
+            is_ascending=False,
+            is_descending=False,
+            has_fall_data=True,
+            fall_time=123,
+            fall_vertical_speed=-1.0,
+            fall_horizontal_speed=2.0,
+            fall_sin_angle=0.5,
+            fall_cos_angle=0.5,
+        ),
+        run_speed=14.0,
+        fly_speed=14.0,
+    )
+
+    responses = spells_handlers.build_login_mount_restore_responses(session)
+
+    assert [opcode for opcode, _payload in responses] == [
+        "SMSG_UPDATE_OBJECT",
+        "SMSG_AURA_UPDATE",
+        "SMSG_AURA_UPDATE",
+        "SMSG_AURA_UPDATE",
+        "SMSG_SPLINE_MOVE_SET_FLYING",
+        "SMSG_MOVE_SET_CAN_FLY",
+        "SMSG_MOVE_SET_RUN_SPEED",
+        "SMSG_MOVE_SET_FLIGHT_SPEED",
+        "SMSG_PLAYER_MOVE",
+    ]
+    assert session.can_fly is True
+    assert session.is_flying is True
+    assert session.active_fly_aura_spell_id is not None
+    assert session.fly_speed == session.run_speed * 3.2
+    assert session.movement_state.x == 100.0
+    assert session.movement_state.y == 200.0
+    assert session.movement_state.z == 300.0
+    assert session.movement_state.orientation == 1.5
+    assert session.movement_state.has_fall_data is False
+    assert session.movement_state.fall_vertical_speed == 0.0
+    assert responses[4][1] == b"spline-fly"
+    assert responses[5][1] == b"can-fly-on"
+    assert responses[8][1] == b"move"
 
 
 def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
@@ -274,28 +467,33 @@ def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
     assert session.can_fly is True
     assert session.is_flying is True
     assert session.movement_state.flags & spells_handlers._MOVEMENTFLAG_FLYING_CAPABILITY
+    assert session.fly_speed == session.run_speed * 3.2
 
     dismount_responses = spells_handlers.dismount(session)
 
-    assert [opcode for opcode, _payload in mount_responses[:6]] == [
+    assert [opcode for opcode, _payload in mount_responses[:8]] == [
         "SMSG_AURA_UPDATE",
         "SMSG_UPDATE_OBJECT",
+        "SMSG_AURA_UPDATE",
+        "SMSG_AURA_UPDATE",
         "SMSG_SPLINE_MOVE_SET_FLYING",
         "SMSG_MOVE_SET_CAN_FLY",
         "SMSG_MOVE_SET_RUN_SPEED",
         "SMSG_MOVE_SET_FLIGHT_SPEED",
     ]
-    assert mount_responses[2][1] == bytes.fromhex("1002")
-    assert mount_responses[3][1] == b"can-fly-on"
+    assert mount_responses[4][1] == bytes.fromhex("1002")
+    assert mount_responses[5][1] == b"can-fly-on"
     assert "SMSG_MOVE_SET_CAN_FLY" not in [opcode for opcode, _payload in duplicate_responses]
-    assert [opcode for opcode, _payload in dismount_responses[:4]] == [
+    assert [opcode for opcode, _payload in dismount_responses[:6]] == [
+        "SMSG_AURA_UPDATE",
+        "SMSG_AURA_UPDATE",
         "SMSG_AURA_UPDATE",
         "SMSG_DISMOUNT",
         "SMSG_MOVE_UNSET_CAN_FLY",
         "SMSG_SPLINE_MOVE_UNSET_FLYING",
     ]
-    assert dismount_responses[2][1] == b"can-fly-off"
-    assert dismount_responses[3][1] == bytes.fromhex("0202")
+    assert dismount_responses[4][1] == b"can-fly-off"
+    assert dismount_responses[5][1] == bytes.fromhex("0202")
     assert session.can_fly is False
     assert session.is_flying is False
     assert not session.movement_state.flags & spells_handlers._MOVEMENTFLAG_FLYING_CAPABILITY

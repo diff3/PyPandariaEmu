@@ -763,8 +763,10 @@ def apply_player_state_change(
     Mutate session state first, then derive the packets from that state.
     """
     from server.modules.handlers.world.opcodes import movement as movement_handlers
+    from server.modules.handlers.world.opcodes import spells as spells_handlers
 
     field_updates: dict[int, int] = {}
+    pre_position_responses: list[tuple[str, bytes]] = []
 
     if display_id is not None:
         session.display_id = int(display_id)
@@ -791,6 +793,14 @@ def apply_player_state_change(
         target_map_id = old_map_id if map_id is None else int(map_id)
         same_map = old_map_id == target_map_id
         x, y, z, orientation = position
+
+        if (
+            bool(getattr(session, "is_mounted", False))
+            or int(getattr(session, "mount_spell", 0) or 0)
+            or int(getattr(session, "mount_display_id", 0) or 0)
+        ):
+            pre_position_responses.extend(spells_handlers.dismount(session))
+
         force_player_visibility_destroy(
             session,
             reason="teleport-start",
@@ -831,15 +841,16 @@ def apply_player_state_change(
                     "[Teleport] same-map position persist fallback failed destination=%s",
                     str(getattr(session, "teleport_destination", "") or "?"),
                 )
-            return apply_state_and_resync(
+            teleport_responses = apply_state_and_resync(
                 session,
                 [("SMSG_MOVE_TELEPORT", movement_handlers.build_same_map_teleport_payload(session))],
             )
+            return pre_position_responses + teleport_responses
 
         session.teleport_pending = True
         session.worldport_ack_pending = True
         session.near_teleport_pending = False
-        return [
+        return pre_position_responses + [
             (
                 "SMSG_TRANSFER_PENDING",
                 build_login_packet(

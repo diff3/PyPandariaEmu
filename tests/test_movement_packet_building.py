@@ -1463,6 +1463,50 @@ def test_stale_fall_land_still_clears_fall_state() -> None:
     assert not state.flags & movement._MOVEMENTFLAG_FALLING
 
 
+def test_fall_land_does_not_cancel_active_flying_mount() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=100.0,
+        orientation=0.0,
+        flags=(
+            movement._MOVEMENTFLAG_CAN_FLY
+            | movement._MOVEMENTFLAG_FLYING
+            | movement._MOVEMENTFLAG_FALLING
+        ),
+        flags2=0,
+        timestamp_ms=1000,
+        client_timestamp_ms=1000,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=True,
+        fall_time=123,
+        fall_vertical_speed=-7.9,
+        fall_horizontal_speed=2.0,
+        fall_sin_angle=0.47,
+        fall_cos_angle=-0.88,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        movement_state=state,
+        can_fly=True,
+        is_flying=True,
+        mount_spell=72286,
+    )
+    payload = (b"\x00" * 24) + (1001).to_bytes(4, "little")
+
+    ok = movement._store_authoritative_movement(session, "MSG_MOVE_FALL_LAND", payload, None)
+
+    assert ok is True
+    assert session.is_flying is True
+    assert state.flags & movement._MOVEMENTFLAG_CAN_FLY
+    assert state.flags & movement._MOVEMENTFLAG_FLYING
+    assert not state.flags & movement._MOVEMENTFLAG_FALLING
+    assert state.has_fall_data is False
+
+
 def test_stale_stop_strafe_still_clears_strafe_flags() -> None:
     state = SimpleNamespace(
         x=0.0,

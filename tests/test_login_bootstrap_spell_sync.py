@@ -168,6 +168,44 @@ def test_world_bootstrap_refreshes_weather_before_weather_packet(monkeypatch) ->
     assert responses == [("SMSG_WEATHER", b"weather")]
 
 
+def test_active_mover_sends_mount_restore_after_known_spells(monkeypatch) -> None:
+    session = SimpleNamespace(
+        login_state=LoginState.WORLD_BOOTSTRAP,
+        player_object_sent=True,
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        motd="",
+        chat_motd_sent=False,
+        account_settings_sent=False,
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(login_handlers, "sync_player_visibility", lambda _session: None)
+    monkeypatch.setattr(login_handlers, "sync_all_players_on_map", lambda _map_id: None)
+    monkeypatch.setattr(login_handlers, "_build_world_login_context", lambda _session: SimpleNamespace(motd=""))
+    monkeypatch.setattr(
+        login_handlers.spells_handlers,
+        "build_active_mover_spell_sync_responses",
+        lambda _session: calls.append("known") or [("SMSG_SEND_KNOWN_SPELLS", b"known")],
+    )
+    monkeypatch.setattr(
+        login_handlers.spells_handlers,
+        "build_login_mount_restore_responses",
+        lambda _session: calls.append("mount") or [("SMSG_MOVE_SET_CAN_FLY", b"fly")],
+    )
+
+    status, responses = login_handlers.handle_set_active_mover(session, SimpleNamespace())
+
+    assert status == 0
+    assert session.login_state == LoginState.IN_WORLD
+    assert calls == ["known", "mount"]
+    assert responses == [
+        ("SMSG_SEND_KNOWN_SPELLS", b"known"),
+        ("SMSG_MOVE_SET_CAN_FLY", b"fly"),
+    ]
+
+
 def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
     """Queue a post-teleport spell sync so language/mount state survives world transfers."""
     session = SimpleNamespace(

@@ -2315,6 +2315,69 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     assert responses[1] == ("SMSG_PLAYER_MOVE", b"move")
 
 
+def test_apply_player_state_change_dismounts_before_teleport(monkeypatch):
+    movement_module = _install_movement_stub(monkeypatch)
+    spells_module = sys.modules["server.modules.handlers.world.opcodes.spells"]
+
+    def fake_dismount(session):
+        session.is_mounted = False
+        session.mount_spell = None
+        session.mount_display_id = 0
+        session.run_speed = 7.0
+        session.fly_speed = 7.0
+        return [
+            ("SMSG_DISMOUNT", b"off"),
+            ("SMSG_MOVE_SET_RUN_SPEED", b"run-normal"),
+        ]
+
+    monkeypatch.setattr(spells_module, "dismount", fake_dismount, raising=False)
+    monkeypatch.setattr(
+        movement_module,
+        "_movement_state",
+        lambda session: SimpleNamespace(x=0.0, y=0.0, z=0.0, orientation=0.0, flags=1, flags2=2),
+        raising=False,
+    )
+    monkeypatch.setattr(movement_module, "_capture_persist_position_from_session", lambda session: None, raising=False)
+    monkeypatch.setattr(movement_module, "_mark_position_dirty", lambda session: None, raising=False)
+    monkeypatch.setattr(movement_module, "_save_session_position", lambda *args, **kwargs: True, raising=False)
+    monkeypatch.setattr(movement_module, "build_same_map_teleport_payload", lambda session: b"teleport", raising=False)
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_field_update_responses",
+        lambda session, field_updates: [],
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [("SMSG_PLAYER_MOVE", b"move")],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.is_mounted = True
+    alice.mount_spell = 59535
+    alice.mount_display_id = 2404
+    alice.run_speed = 14.0
+
+    responses = chat_handlers.apply_player_state_change(
+        alice,
+        position=(10.0, 20.0, 30.0, 1.5),
+        map_id=1,
+    )
+
+    assert alice.is_mounted is False
+    assert alice.mount_spell is None
+    assert alice.mount_display_id == 0
+    assert alice.run_speed == 7.0
+    assert responses == [
+        ("SMSG_DISMOUNT", b"off"),
+        ("SMSG_MOVE_SET_RUN_SPEED", b"run-normal"),
+        ("SMSG_MOVE_TELEPORT", b"teleport"),
+        ("SMSG_PLAYER_MOVE", b"move"),
+    ]
+
+
 def test_apply_player_state_change_cross_map_position_returns_transfer_packets(monkeypatch):
     movement_module = _install_movement_stub(monkeypatch)
     monkeypatch.setattr(
