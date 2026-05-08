@@ -23,6 +23,10 @@ def _import_database_connection():
     )
     sys.modules["server.modules.auth.AuthConnection"] = auth_module
 
+    auth_model = types.ModuleType("server.modules.database.AuthModel")
+    auth_model.Account = type("Account", (), {})
+    sys.modules["server.modules.database.AuthModel"] = auth_model
+
     config_module = types.ModuleType("shared.ConfigLoader")
     config_module.ConfigLoader = type(
         "ConfigLoader",
@@ -101,6 +105,36 @@ def test_get_gameobjects_near_uses_preloaded_cache_without_db():
     results = DatabaseConnection.get_gameobjects_near(1, 100.0, 100.0, radius=120.0, limit=10)
 
     assert [entry["guid"] for entry in results] == [1]
+
+
+def test_fill_sparse_action_buttons_respects_saved_empty_slots():
+    DatabaseConnection = _import_database_connection()
+
+    buttons = [0] * 132
+    buttons[0] = 44614
+    filled = DatabaseConnection._fill_sparse_action_buttons(
+        buttons,
+        default_actions=[(0, 44614, 0), (9, 28730, 0)],
+        spells=[44614, 6603, 28730, 668, 813],
+        saved_slots={1},
+    )
+
+    assert filled[0] == 44614
+    assert filled[1] == 0
+    assert filled[2] == 6603
+    assert filled[3] == 28730
+
+
+def test_fallback_action_spells_only_prioritizes_available_spells():
+    DatabaseConnection = _import_database_connection()
+
+    spells = DatabaseConnection._fallback_action_spell_ids(
+        default_actions=[],
+        spells=[6603, 668, 813, 139196],
+    )
+
+    assert 44614 not in spells
+    assert spells[:2] == [6603, 139196]
 
 
 def test_get_gameobjects_near_cache_respects_limit():

@@ -42,6 +42,74 @@ from server.modules.database.WorldModel import (
 
 from server.modules.database.AuthModel import Account
 
+
+ACTION_BUTTON_COUNT = 132
+PRIMARY_ACTION_BAR_SLOTS = 12
+ACTION_BUTTON_TYPE_SPELL = 0
+
+_ACTION_BUTTON_LANGUAGE_SPELLS = {
+    668,
+    669,
+    670,
+    671,
+    672,
+    7340,
+    7341,
+    813,
+    17737,
+    29932,
+    108127,
+    108130,
+    108131,
+}
+_ACTION_BUTTON_PASSIVE_OR_SYSTEM_SPELLS = {
+    81,
+    201,
+    203,
+    204,
+    227,
+    522,
+    2382,
+    3050,
+    3365,
+    5009,
+    5019,
+    6233,
+    6246,
+    6247,
+    6477,
+    6478,
+    7355,
+    8386,
+    9078,
+    9125,
+    21651,
+    21652,
+    22027,
+    22810,
+    28877,
+    45927,
+    61437,
+    68398,
+    71761,
+    76276,
+    76298,
+    79684,
+    79748,
+    85801,
+    92315,
+    96220,
+    111621,
+    113873,
+}
+_ACTION_BUTTON_EXCLUDED_SPELLS = _ACTION_BUTTON_LANGUAGE_SPELLS | _ACTION_BUTTON_PASSIVE_OR_SYSTEM_SPELLS
+_ACTION_BUTTON_PRIORITY_SPELLS = (
+    44614,  # Frostfire Bolt
+    6603,   # Attack
+    28730,  # Arcane Torrent
+)
+
+
 class DatabaseConnection:
     """Handles DB connections for characters-db and world-db."""
 
@@ -1535,6 +1603,75 @@ class DatabaseConnection:
     # CHARACTER ACTION BUTTONS
     # --------------------------------------------------
     @staticmethod
+    def _pack_action_button(action: int, type_: int = ACTION_BUTTON_TYPE_SPELL) -> int:
+        return (int(action) & 0x00FFFFFF) | ((int(type_) & 0xFF) << 24)
+
+    @staticmethod
+    def _fallback_action_spell_ids(default_actions: list[tuple[int, int, int]], spells: list[int]) -> list[int]:
+        ordered: list[int] = []
+        seen: set[int] = set()
+        available_spells = {
+            int(action)
+            for _button, action, type_ in default_actions
+            if int(type_ or 0) == ACTION_BUTTON_TYPE_SPELL and int(action or 0) > 0
+        }
+        available_spells.update(int(spell_id) for spell_id in spells if int(spell_id or 0) > 0)
+
+        def add_spell(spell_id: int) -> None:
+            try:
+                spell_id = int(spell_id)
+            except Exception:
+                return
+            if spell_id <= 0 or spell_id in seen or spell_id in _ACTION_BUTTON_EXCLUDED_SPELLS:
+                return
+            ordered.append(spell_id)
+            seen.add(spell_id)
+
+        for spell_id in _ACTION_BUTTON_PRIORITY_SPELLS:
+            if int(spell_id) in available_spells:
+                add_spell(spell_id)
+        for _button, action, type_ in default_actions:
+            if int(type_ or 0) == ACTION_BUTTON_TYPE_SPELL:
+                add_spell(int(action))
+        for spell_id in spells:
+            add_spell(int(spell_id))
+
+        return ordered
+
+    @staticmethod
+    def _fill_sparse_action_buttons(
+        buttons: list[int],
+        *,
+        default_actions: list[tuple[int, int, int]],
+        spells: list[int],
+        saved_slots: set[int],
+    ) -> list[int]:
+        if len(buttons) < ACTION_BUTTON_COUNT:
+            buttons = list(buttons) + [0] * (ACTION_BUTTON_COUNT - len(buttons))
+        else:
+            buttons = list(buttons[:ACTION_BUTTON_COUNT])
+
+        used_actions = {int(value) & 0x00FFFFFF for value in buttons if int(value or 0) > 0}
+        candidate_spells = [
+            spell_id
+            for spell_id in DatabaseConnection._fallback_action_spell_ids(default_actions, spells)
+            if spell_id not in used_actions
+        ]
+        if not candidate_spells:
+            return buttons
+
+        for slot in range(PRIMARY_ACTION_BAR_SLOTS):
+            if not candidate_spells:
+                break
+            if slot in saved_slots or int(buttons[slot] or 0) != 0:
+                continue
+            spell_id = candidate_spells.pop(0)
+            buttons[slot] = DatabaseConnection._pack_action_button(spell_id, ACTION_BUTTON_TYPE_SPELL)
+            used_actions.add(spell_id)
+
+        return buttons
+
+    @staticmethod
     def get_character_action_buttons(char_guid: int) -> list[int]:
         """
         Return action buttons merged from createinfo defaults and saved rows.
@@ -1551,7 +1688,7 @@ class DatabaseConnection:
             Logger.error(f"[DB] get_character_action_buttons: character {char_guid} not found")
             return [0] * 132
 
-        buttons = [0] * 132
+        buttons = [0] * ACTION_BUTTON_COUNT
         actions = DatabaseConnection.get_player_createinfo_actions(
             race=int(char.race),
             class_=int(char.class_),
@@ -1566,11 +1703,12 @@ class DatabaseConnection:
 
         for button, action, type_ in actions:
             try:
-                if 0 <= button < 132:
-                    buttons[int(button)] = (int(action) & 0x00FFFFFF) | ((int(type_) & 0xFF) << 24)
+                if 0 <= button < ACTION_BUTTON_COUNT:
+                    buttons[int(button)] = DatabaseConnection._pack_action_button(action, type_)
             except Exception:
                 continue
 
+        saved_slots: set[int] = set()
         try:
             saved_rows = (
                 session.query(CharacterAction.button, CharacterAction.action, CharacterAction.type_)
@@ -1587,13 +1725,35 @@ class DatabaseConnection:
         for button, action, type_ in saved_rows:
             try:
                 button_index = int(button)
-                if not (0 <= button_index < 132):
+                if not (0 <= button_index < ACTION_BUTTON_COUNT):
                     continue
+                saved_slots.add(button_index)
                 buttons[button_index] = (
-                    (int(action) & 0x00FFFFFF) | ((int(type_) & 0xFF) << 24)
+                    DatabaseConnection._pack_action_button(action, type_)
                 ) if int(action) > 0 else 0
             except Exception:
                 continue
+
+        spells = []
+        try:
+            spells = list(DatabaseConnection.get_character_spells(int(char_guid)))
+        except Exception as exc:
+            Logger.warning(f"[DB] character spell lookup for action fallback failed guid={char_guid}: {exc}")
+
+        buttons = DatabaseConnection._fill_sparse_action_buttons(
+            buttons,
+            default_actions=actions,
+            spells=spells,
+            saved_slots=saved_slots,
+        )
+
+        filled_count = sum(1 for value in buttons[:PRIMARY_ACTION_BAR_SLOTS] if int(value or 0) > 0)
+        Logger.info(
+            "[ACTION_BUTTON] resolved action bar guid=%s primary_filled=%s saved_slots=%s",
+            int(char_guid),
+            int(filled_count),
+            len(saved_slots),
+        )
 
         return buttons
 
@@ -1655,26 +1815,16 @@ class DatabaseConnection:
     @staticmethod
     def get_character_spells(char_guid: int) -> list[int]:
         """
-        Return learned spells for character.
-        Falls back to createinfo spells if none exist.
+        Return learned spells for character merged with createinfo spells.
         """
         session = DatabaseConnection.chars()
 
         rows = (
-            session.query(CharacterSpell.spell)
-            .filter(
-                CharacterSpell.guid == char_guid,
-                CharacterSpell.disabled == 0,
-            )
+            session.query(CharacterSpell.spell, CharacterSpell.disabled)
+            .filter(CharacterSpell.guid == char_guid)
             .all()
         )
 
-        if rows:
-            return [int(r.spell) for r in rows]
-
-        # --------------------------------------------------
-        # New character → use createinfo spells
-        # --------------------------------------------------
         char = (
             session.query(Characters.race, Characters.class_)
             .filter(Characters.guid == char_guid)
@@ -1685,10 +1835,26 @@ class DatabaseConnection:
             Logger.error(f"[DB] get_character_spells: character {char_guid} not found")
             return []
 
-        return DatabaseConnection.get_player_createinfo_spells(
-            race=int(char.race),
-            class_=int(char.class_),
+        disabled_spells = {
+            int(r.spell)
+            for r in rows
+            if int(getattr(r, "disabled", 0) or 0) != 0 and int(getattr(r, "spell", 0) or 0) > 0
+        }
+        spells = {
+            int(spell_id)
+            for spell_id in DatabaseConnection.get_player_createinfo_spells(
+                race=int(char.race),
+                class_=int(char.class_),
+            )
+            if int(spell_id) > 0 and int(spell_id) not in disabled_spells
+        }
+        spells.update(
+            int(r.spell)
+            for r in rows
+            if int(r.spell) > 0 and int(r.disabled or 0) == 0
         )
+
+        return sorted(spells)
 
     @staticmethod
     def apply_playercreateinfo_to_character(guid: int, race: int, class_: int) -> None:
@@ -1763,8 +1929,18 @@ class DatabaseConnection:
             )
 
             if action <= 0:
-                if row is not None:
-                    session.delete(row)
+                if row is None:
+                    row = CharacterAction(
+                        guid=guid,
+                        spec=spec,
+                        button=button,
+                        action=0,
+                        type_=0,
+                    )
+                    session.add(row)
+                else:
+                    row.action = 0
+                    row.type_ = 0
             else:
                 if row is None:
                     row = CharacterAction(

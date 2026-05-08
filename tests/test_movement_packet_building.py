@@ -670,6 +670,111 @@ def test_msg_move_jump_records_horizontal_fall_direction() -> None:
     assert round(state.fall_cos_angle, 6) == round(-0.126840, 6)
 
 
+def test_airborne_heartbeat_after_normal_jump_refreshes_fall_time() -> None:
+    jump_payload = bytes.fromhex(
+        "00FB7D46C1A27D46BF5B5E4108000000494000080040040C"
+        "D893FEC0433FC7BEF6D16BBF0000000000000000C3A4624021A32C05"
+    )
+    heartbeat_payload = bytes.fromhex(
+        "A96B7741C1A27D4600FB7D46000000904540000800800C433FC7BE"
+        "F6D16BBF00000000D893FEC0F4010000C3A4624015A52C05"
+    )
+    state = SimpleNamespace(
+        x=16232.6884765625,
+        y=16254.75,
+        z=13.8973989487,
+        orientation=3.5413062572,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        pitch=0.0,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+        fall_horizontal_speed=0.0,
+        fall_sin_angle=0.0,
+        fall_cos_angle=0.0,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        x=state.x,
+        y=state.y,
+        z=state.z,
+        orientation=state.orientation,
+        movement_state=state,
+        can_fly=False,
+        is_flying=False,
+    )
+
+    movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_JUMP",
+        jump_payload,
+        movement.parse_movement_info(session, "MSG_MOVE_JUMP", jump_payload, decoded={}),
+    )
+    assert state.flags & movement._MOVEMENTFLAG_FALLING
+    assert state.fall_time == 0
+
+    parsed = movement.parse_movement_info(session, "MSG_MOVE_HEARTBEAT", heartbeat_payload, decoded={})
+    stored = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_HEARTBEAT",
+        heartbeat_payload,
+        parsed,
+    )
+
+    assert stored is True
+    assert parsed is not None
+    assert state.flags & movement._MOVEMENTFLAG_FALLING
+    assert state.fall_time == 500
+    assert round(state.fall_vertical_speed, 6) == round(-7.9555473328, 6)
+    assert round(state.fall_sin_angle, 6) == round(-0.3891545236, 6)
+    assert round(state.fall_cos_angle, 6) == round(-0.9211724997, 6)
+
+
+def test_stop_forward_during_jump_keeps_falling_state() -> None:
+    state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        flags=movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_FALLING,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        pitch=0.0,
+        has_fall_data=True,
+        fall_time=250,
+        fall_vertical_speed=-7.955547,
+        fall_horizontal_speed=7.0,
+        fall_sin_angle=0.1,
+        fall_cos_angle=0.9,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        x=state.x,
+        y=state.y,
+        z=state.z,
+        orientation=state.orientation,
+        movement_state=state,
+        can_fly=False,
+        is_flying=False,
+    )
+
+    stored = movement._store_authoritative_movement(session, "MSG_MOVE_STOP", b"", None)
+
+    assert stored is True
+    assert state.flags & movement._MOVEMENTFLAG_FALLING
+    assert not state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert state.has_fall_data is True
+
+
 def test_strafe_packets_use_separate_flags_from_turn() -> None:
     state = SimpleNamespace(
         x=0.0,

@@ -562,7 +562,8 @@ def build_SMSG_UPDATE_ACTION_BUTTONS(ctx) -> bytes:
     for byte_index in (0, 1, 4, 6, 7, 2, 5, 3):
         for index in range(button_count):
             value = button_bytes[index][byte_index]
-            payload.append(value ^ 0x01)
+            if value:
+                payload.append(value ^ 0x01)
 
     payload.append(packet_type)
 

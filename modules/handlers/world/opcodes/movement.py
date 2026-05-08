@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 import struct
+import threading
 import time
+from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
 from DSL.modules.EncoderHandler import EncoderHandler
@@ -33,6 +35,7 @@ from server.modules.handlers.world.position.area_service import resolve_zone_fro
 from server.modules.handlers.world.state.runtime import (
     broadcast_player_state_update,
     build_same_map_teleport_self_resync_responses,
+    dispatch_responses_to_sessions,
     force_bilateral_visibility_resync,
 )
 
@@ -65,6 +68,7 @@ _SKYFIRE_FLYING_MOVEMENT_OPCODES = frozenset({
     "MSG_MOVE_STOP_ASCEND",
     "MSG_MOVE_START_DESCEND",
     "MSG_MOVE_STOP_DESCEND",
+    "MSG_MOVE_SET_PITCH",
 })
 
 _SKYFIRE_MOVEMENT_HEARTBEAT_SEQUENCE = (
@@ -897,6 +901,12 @@ def _movement_is_flying(session) -> bool:
     )
 
 
+def _movement_is_airborne(session) -> bool:
+    state = _movement_state(session)
+    state_flags = int(getattr(state, "flags", 0) or 0)
+    return bool(state_flags & _MOVEMENTFLAG_FALLING or getattr(state, "has_fall_data", False))
+
+
 def _read_u32(payload: bytes, offset: int) -> tuple[int, int]:
     return struct.unpack_from("<I", payload, offset)[0], offset + 4
 
@@ -1043,7 +1053,7 @@ def _should_use_skyfire_flying_sequence(session, opcode_name: str) -> bool:
         return True
     if opcode_name != "MSG_MOVE_HEARTBEAT":
         return False
-    return _movement_is_flying(session)
+    return _movement_is_flying(session) or _movement_is_airborne(session)
 
 
 def _parse_skyfire_flying_movement_info(
@@ -1826,6 +1836,16 @@ _SIM_TURN_RATE_RAD_PER_SEC = math.pi
 _GAMEOBJECT_STREAM_LOAD_RADIUS = 120.0
 _GAMEOBJECT_STREAM_UNLOAD_RADIUS = 150.0
 _GAMEOBJECT_STREAM_INTERVAL_SECONDS = 0.5
+_JUMP_PEER_INTERPOLATION_ENABLED = True
+_JUMP_PEER_INTERPOLATION_INTERVAL_SECONDS = 0.016
+_JUMP_PEER_INTERPOLATION_MAX_SECONDS = 1.25
+_JUMP_GRAVITY = 19.291105
+_DEFAULT_JUMP_VERTICAL_SPEED = 7.955547
+_FLY_PEER_INTERPOLATION_ENABLED = True
+_FLY_PEER_INTERPOLATION_INTERVAL_SECONDS = 0.016
+_FLY_PEER_INTERPOLATION_MAX_SECONDS = 60.0
+_FLY_PITCH_PEER_INTERPOLATION_MAX_SECONDS = 0.75
+_FLY_PITCH_EPSILON = 0.02
 
 # TODO:
 # - Move replay_movement_focus_sequence* and related UPDATE_OBJECT replay helpers
@@ -1836,6 +1856,427 @@ _GAMEOBJECT_STREAM_INTERVAL_SECONDS = 0.5
 
 def _player_guid(session) -> int:
     return int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
+
+
+def _visible_peer_targets(session) -> list:
+    state = getattr(session, "global_state", None)
+    if state is None:
+        return []
+
+    source_guid = int(getattr(session, "char_guid", 0) or 0)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    targets = []
+    for target in list(getattr(state, "sessions", set()) or ()):
+        if target is session:
+            continue
+        if int(getattr(target, "map_id", 0) or 0) != map_id:
+            continue
+        if not callable(getattr(target, "send_response", None)):
+            continue
+        visible_guids = getattr(target, "visible_guids", set()) or set()
+        if source_guid not in visible_guids:
+            continue
+        targets.append(target)
+    return targets
+
+
+def _send_jump_interpolation_snapshot(
+    session,
+    *,
+    x: float,
+    y: float,
+    z: float,
+    orientation: float,
+    fall_time_ms: int,
+    counter: int,
+) -> None:
+    state = _movement_state(session)
+    synthetic_state = SimpleNamespace(
+        x=float(x),
+        y=float(y),
+        z=float(z),
+        orientation=float(orientation),
+        flags=(int(getattr(state, "flags", 0) or 0) | _MOVEMENTFLAG_FALLING),
+        flags2=int(getattr(state, "flags2", 0) or 0),
+        timestamp_ms=int(getattr(state, "timestamp_ms", 0) or 0),
+        client_timestamp_ms=int(getattr(state, "client_timestamp_ms", 0) or 0),
+        server_movement_timestamp_ms=int(getattr(state, "server_movement_timestamp_ms", 0) or 0),
+        last_valid_orientation=float(getattr(state, "last_valid_orientation", orientation) or orientation),
+        counter=int(counter) & 0xFFFFFFFF,
+        pitch=float(getattr(state, "pitch", 0.0) or 0.0),
+        has_fall_data=True,
+        fall_time=int(fall_time_ms) & 0xFFFFFFFF,
+        fall_vertical_speed=float(getattr(state, "fall_vertical_speed", 0.0) or 0.0),
+        fall_horizontal_speed=float(getattr(state, "fall_horizontal_speed", 0.0) or 0.0),
+        fall_sin_angle=float(getattr(state, "fall_sin_angle", 0.0) or 0.0),
+        fall_cos_angle=float(getattr(state, "fall_cos_angle", 0.0) or 0.0),
+        is_ascending=False,
+        is_descending=False,
+    )
+    synthetic_session = SimpleNamespace(
+        char_guid=int(getattr(session, "char_guid", 0) or 0),
+        world_guid=int(getattr(session, "world_guid", 0) or 0),
+        player_guid=int(getattr(session, "player_guid", 0) or 0),
+        can_fly=False,
+        is_flying=False,
+        movement_state=synthetic_state,
+    )
+    payload = build_smsg_player_move_payload(synthetic_session)
+    if not payload:
+        return
+
+    targets = _visible_peer_targets(session)
+    if not targets:
+        return
+
+    dispatch_responses_to_sessions(targets, [("SMSG_PLAYER_MOVE", payload)])
+
+    Logger.debug(
+        "[JUMP_INTERP] player=%s peers=%s t=%sms pos=(%.3f, %.3f, %.3f)",
+        int(getattr(session, "char_guid", 0) or 0),
+        len(targets),
+        int(fall_time_ms),
+        float(x),
+        float(y),
+        float(z),
+    )
+
+
+def _start_jump_peer_interpolation(session) -> None:
+    if not _JUMP_PEER_INTERPOLATION_ENABLED:
+        return
+    if not _visible_peer_targets(session):
+        return
+
+    state = _movement_state(session)
+    start_x = float(getattr(state, "x", getattr(session, "x", 0.0)) or 0.0)
+    start_y = float(getattr(state, "y", getattr(session, "y", 0.0)) or 0.0)
+    start_z = float(getattr(state, "z", getattr(session, "z", 0.0)) or 0.0)
+    orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
+    vertical_speed = abs(float(getattr(state, "fall_vertical_speed", 0.0) or 0.0))
+    if vertical_speed <= 0.01:
+        vertical_speed = _DEFAULT_JUMP_VERTICAL_SPEED
+
+    horizontal_speed = abs(float(getattr(state, "fall_horizontal_speed", 0.0) or 0.0))
+    flags = int(getattr(state, "flags", 0) or 0)
+    if horizontal_speed <= 0.01 and flags & (
+        _MOVEMENTFLAG_FORWARD
+        | _MOVEMENTFLAG_BACKWARD
+        | _MOVEMENTFLAG_STRAFE_LEFT
+        | _MOVEMENTFLAG_STRAFE_RIGHT
+    ):
+        horizontal_speed = float(getattr(session, "run_speed", 7.0) or 7.0)
+
+    direction = orientation
+    if flags & _MOVEMENTFLAG_BACKWARD:
+        direction = _normalize_orientation(direction + math.pi) or direction
+    elif flags & _MOVEMENTFLAG_STRAFE_LEFT:
+        direction = _normalize_orientation(direction + (math.pi / 2.0)) or direction
+    elif flags & _MOVEMENTFLAG_STRAFE_RIGHT:
+        direction = _normalize_orientation(direction - (math.pi / 2.0)) or direction
+
+    generation = int(getattr(session, "_jump_interpolation_generation", 0) or 0) + 1
+    session._jump_interpolation_generation = generation
+    base_counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
+    start_monotonic = time.monotonic()
+
+    def _worker() -> None:
+        step = 0
+        while True:
+            next_tick = start_monotonic + ((step + 1) * _JUMP_PEER_INTERPOLATION_INTERVAL_SECONDS)
+            sleep_seconds = next_tick - time.monotonic()
+            if sleep_seconds > 0.0:
+                time.sleep(sleep_seconds)
+            if int(getattr(session, "_jump_interpolation_generation", 0) or 0) != generation:
+                return
+
+            live_state = _movement_state(session)
+            if not _movement_is_airborne(session):
+                return
+
+            elapsed = time.monotonic() - start_monotonic
+            if elapsed <= 0.0:
+                continue
+            if elapsed > _JUMP_PEER_INTERPOLATION_MAX_SECONDS:
+                return
+
+            z = start_z + (vertical_speed * elapsed) - (0.5 * _JUMP_GRAVITY * elapsed * elapsed)
+            if z <= start_z and elapsed > 0.25:
+                return
+
+            x = start_x + (math.cos(direction) * horizontal_speed * elapsed)
+            y = start_y + (math.sin(direction) * horizontal_speed * elapsed)
+            _send_jump_interpolation_snapshot(
+                session,
+                x=x,
+                y=y,
+                z=z,
+                orientation=float(getattr(live_state, "orientation", orientation) or orientation),
+                fall_time_ms=int(elapsed * 1000.0),
+                counter=(base_counter + step + 1) & 0xFFFFFFFF,
+            )
+            step += 1
+
+    threading.Thread(
+        target=_worker,
+        name=f"jump-interp-{int(getattr(session, 'char_guid', 0) or 0)}",
+        daemon=True,
+    ).start()
+
+
+def _stop_jump_peer_interpolation(session) -> None:
+    session._jump_interpolation_generation = int(getattr(session, "_jump_interpolation_generation", 0) or 0) + 1
+
+
+def _send_fly_interpolation_snapshot(
+    session,
+    *,
+    x: float,
+    y: float,
+    z: float,
+    orientation: float,
+    pitch: float,
+    counter: int,
+    ascending: bool,
+    descending: bool,
+) -> None:
+    state = _movement_state(session)
+    flags = int(getattr(state, "flags", 0) or 0)
+    flags |= _MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING
+    flags &= ~(_MOVEMENTFLAG_ASCENDING | _MOVEMENTFLAG_DESCENDING)
+    if ascending:
+        flags |= _MOVEMENTFLAG_ASCENDING
+    elif descending:
+        flags |= _MOVEMENTFLAG_DESCENDING
+
+    synthetic_state = SimpleNamespace(
+        x=float(x),
+        y=float(y),
+        z=float(z),
+        orientation=float(orientation),
+        flags=int(flags),
+        flags2=int(getattr(state, "flags2", 0) or 0),
+        timestamp_ms=int(getattr(state, "timestamp_ms", 0) or 0),
+        client_timestamp_ms=int(getattr(state, "client_timestamp_ms", 0) or 0),
+        server_movement_timestamp_ms=int(getattr(state, "server_movement_timestamp_ms", 0) or 0),
+        last_valid_orientation=float(getattr(state, "last_valid_orientation", orientation) or orientation),
+        counter=int(counter) & 0xFFFFFFFF,
+        pitch=float(pitch),
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+        fall_horizontal_speed=0.0,
+        fall_sin_angle=0.0,
+        fall_cos_angle=0.0,
+        is_ascending=bool(ascending),
+        is_descending=bool(descending),
+    )
+    synthetic_session = SimpleNamespace(
+        char_guid=int(getattr(session, "char_guid", 0) or 0),
+        world_guid=int(getattr(session, "world_guid", 0) or 0),
+        player_guid=int(getattr(session, "player_guid", 0) or 0),
+        can_fly=True,
+        is_flying=True,
+        movement_state=synthetic_state,
+    )
+    payload = build_smsg_player_move_payload(synthetic_session)
+    if not payload:
+        return
+
+    targets = _visible_peer_targets(session)
+    if not targets:
+        return
+
+    dispatch_responses_to_sessions(targets, [("SMSG_PLAYER_MOVE", payload)])
+
+    Logger.debug(
+        "[FLY_INTERP] player=%s peers=%s pos=(%.3f, %.3f, %.3f) pitch=%.3f asc=%s desc=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        len(targets),
+        float(x),
+        float(y),
+        float(z),
+        float(pitch),
+        bool(ascending),
+        bool(descending),
+    )
+
+
+def _start_fly_peer_interpolation(session, vertical_sign: int) -> None:
+    if not _FLY_PEER_INTERPOLATION_ENABLED:
+        return
+    if int(vertical_sign) == 0:
+        return
+    if not _visible_peer_targets(session):
+        return
+
+    state = _movement_state(session)
+    start_x = float(getattr(state, "x", getattr(session, "x", 0.0)) or 0.0)
+    start_y = float(getattr(state, "y", getattr(session, "y", 0.0)) or 0.0)
+    start_z = float(getattr(state, "z", getattr(session, "z", 0.0)) or 0.0)
+    orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
+    vertical_speed = abs(float(getattr(session, "fly_speed", 0.0) or 0.0))
+    if vertical_speed <= 0.01:
+        vertical_speed = abs(float(getattr(session, "run_speed", 7.0) or 7.0)) * 3.2
+    if vertical_speed <= 0.01:
+        vertical_speed = 14.0
+
+    generation = int(getattr(session, "_fly_interpolation_generation", 0) or 0) + 1
+    session._fly_interpolation_generation = generation
+    base_counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
+    start_monotonic = time.monotonic()
+
+    def _worker() -> None:
+        step = 0
+        while True:
+            next_tick = start_monotonic + ((step + 1) * _FLY_PEER_INTERPOLATION_INTERVAL_SECONDS)
+            sleep_seconds = next_tick - time.monotonic()
+            if sleep_seconds > 0.0:
+                time.sleep(sleep_seconds)
+            if int(getattr(session, "_fly_interpolation_generation", 0) or 0) != generation:
+                return
+
+            live_state = _movement_state(session)
+            if not _movement_is_flying(session):
+                return
+
+            ascending = bool(getattr(live_state, "is_ascending", False))
+            descending = bool(getattr(live_state, "is_descending", False))
+            if vertical_sign > 0 and not ascending:
+                return
+            if vertical_sign < 0 and not descending:
+                return
+
+            elapsed = time.monotonic() - start_monotonic
+            if elapsed <= 0.0:
+                continue
+            if elapsed > _FLY_PEER_INTERPOLATION_MAX_SECONDS:
+                return
+
+            z = start_z + (float(vertical_sign) * vertical_speed * elapsed)
+            _send_fly_interpolation_snapshot(
+                session,
+                x=float(getattr(live_state, "x", start_x) or start_x),
+                y=float(getattr(live_state, "y", start_y) or start_y),
+                z=z,
+                orientation=float(getattr(live_state, "orientation", orientation) or orientation),
+                pitch=float(getattr(live_state, "pitch", 0.0) or 0.0),
+                counter=(base_counter + step + 1) & 0xFFFFFFFF,
+                ascending=ascending,
+                descending=descending,
+            )
+            step += 1
+
+    threading.Thread(
+        target=_worker,
+        name=f"fly-interp-{int(getattr(session, 'char_guid', 0) or 0)}",
+        daemon=True,
+    ).start()
+
+
+def _stop_fly_peer_interpolation(session) -> None:
+    session._fly_interpolation_generation = int(getattr(session, "_fly_interpolation_generation", 0) or 0) + 1
+
+
+def _start_fly_pitch_peer_interpolation(session) -> None:
+    if not _FLY_PEER_INTERPOLATION_ENABLED:
+        return
+    if not _visible_peer_targets(session):
+        return
+
+    state = _movement_state(session)
+    flags = int(getattr(state, "flags", 0) or 0)
+    if flags & (_MOVEMENTFLAG_ASCENDING | _MOVEMENTFLAG_DESCENDING):
+        return
+    moving_forward = bool(flags & _MOVEMENTFLAG_FORWARD)
+    moving_backward = bool(flags & _MOVEMENTFLAG_BACKWARD)
+    if not (moving_forward or moving_backward):
+        return
+
+    pitch = float(getattr(state, "pitch", 0.0) or 0.0)
+    if abs(pitch) < _FLY_PITCH_EPSILON:
+        return
+
+    fly_speed = abs(float(getattr(session, "fly_speed", 0.0) or 0.0))
+    if fly_speed <= 0.01:
+        fly_speed = abs(float(getattr(session, "run_speed", 7.0) or 7.0)) * 3.2
+    if fly_speed <= 0.01:
+        fly_speed = 14.0
+
+    start_x = float(getattr(state, "x", getattr(session, "x", 0.0)) or 0.0)
+    start_y = float(getattr(state, "y", getattr(session, "y", 0.0)) or 0.0)
+    start_z = float(getattr(state, "z", getattr(session, "z", 0.0)) or 0.0)
+    orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
+    direction = orientation
+    if moving_backward:
+        direction = _normalize_orientation(direction + math.pi) or direction
+
+    horizontal_speed = fly_speed * max(0.0, math.cos(pitch))
+    vertical_speed = -fly_speed * math.sin(pitch)
+    if moving_backward:
+        vertical_speed = -vertical_speed
+
+    generation = int(getattr(session, "_fly_interpolation_generation", 0) or 0) + 1
+    session._fly_interpolation_generation = generation
+    base_counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
+    start_monotonic = time.monotonic()
+
+    Logger.debug(
+        "[FLY_PITCH_INTERP_START] player=%s pos=(%.3f, %.3f, %.3f) pitch=%.3f vertical_speed=%.3f",
+        int(getattr(session, "char_guid", 0) or 0),
+        float(start_x),
+        float(start_y),
+        float(start_z),
+        float(pitch),
+        float(vertical_speed),
+    )
+
+    def _worker() -> None:
+        step = 0
+        while True:
+            next_tick = start_monotonic + ((step + 1) * _FLY_PEER_INTERPOLATION_INTERVAL_SECONDS)
+            sleep_seconds = next_tick - time.monotonic()
+            if sleep_seconds > 0.0:
+                time.sleep(sleep_seconds)
+            if int(getattr(session, "_fly_interpolation_generation", 0) or 0) != generation:
+                return
+
+            live_state = _movement_state(session)
+            if not _movement_is_flying(session):
+                return
+            live_flags = int(getattr(live_state, "flags", 0) or 0)
+            if live_flags & (_MOVEMENTFLAG_ASCENDING | _MOVEMENTFLAG_DESCENDING):
+                return
+            if not (live_flags & (_MOVEMENTFLAG_FORWARD | _MOVEMENTFLAG_BACKWARD)):
+                return
+
+            elapsed = time.monotonic() - start_monotonic
+            if elapsed <= 0.0:
+                continue
+            if elapsed > _FLY_PITCH_PEER_INTERPOLATION_MAX_SECONDS:
+                return
+
+            x = start_x + (math.cos(direction) * horizontal_speed * elapsed)
+            y = start_y + (math.sin(direction) * horizontal_speed * elapsed)
+            z = start_z + (vertical_speed * elapsed)
+            _send_fly_interpolation_snapshot(
+                session,
+                x=x,
+                y=y,
+                z=z,
+                orientation=float(getattr(live_state, "orientation", orientation) or orientation),
+                pitch=float(getattr(live_state, "pitch", pitch) or pitch),
+                counter=(base_counter + step + 1) & 0xFFFFFFFF,
+                ascending=False,
+                descending=False,
+            )
+            step += 1
+
+    threading.Thread(
+        target=_worker,
+        name=f"fly-pitch-interp-{int(getattr(session, 'char_guid', 0) or 0)}",
+        daemon=True,
+    ).start()
 
 
 def _broadcast_same_map(session, responses) -> None:
@@ -2234,7 +2675,6 @@ def _apply_early_movement_cleanup(session, opcode_name: str) -> None:
     if opcode_name not in {
         "MSG_MOVE_FALL_LAND",
         "MSG_MOVE_START_FORWARD",
-        "MSG_MOVE_STOP",
         "MSG_MOVE_STOP_STRAFE",
     }:
         return
@@ -2243,7 +2683,7 @@ def _apply_early_movement_cleanup(session, opcode_name: str) -> None:
     if opcode_name == "MSG_MOVE_FALL_LAND":
         if _clear_jump_fall_state(state):
             Logger.debug("[LAND_RESET] cleared fall state")
-    elif opcode_name in {"MSG_MOVE_START_FORWARD", "MSG_MOVE_STOP"}:
+    elif opcode_name == "MSG_MOVE_START_FORWARD":
         has_fall_state = (
             bool(getattr(state, "has_fall_data", False))
             or bool(int(getattr(state, "flags", 0) or 0) & _MOVEMENTFLAG_FALLING)
@@ -2302,6 +2742,18 @@ def _extract_jump_fall_data(payload: bytes) -> dict[str, float | int] | None:
         "fall_sin_angle": float(sin_angle),
         "fall_cos_angle": float(cos_angle),
     }
+
+
+def _extract_pitch_from_payload(payload: bytes) -> float | None:
+    if len(payload) < 4:
+        return None
+    try:
+        pitch = struct.unpack_from("<f", payload, len(payload) - 4)[0]
+    except struct.error:
+        return None
+    if not math.isfinite(pitch):
+        return None
+    return _wrap_pitch(float(pitch))
 
 
 def _is_stale_client_timestamp(current_timestamp_ms: int, incoming_timestamp_ms: int) -> bool:
@@ -2429,6 +2881,7 @@ def _extract_skyfire_movement_from_payload(
             "MSG_MOVE_HEARTBEAT",
             "MSG_MOVE_START_ASCEND",
             "MSG_MOVE_STOP_ASCEND",
+            "MSG_MOVE_SET_PITCH",
         }:
             return
         candidate_parts = [
@@ -2480,6 +2933,18 @@ def _extract_skyfire_movement_from_payload(
         parsed = (float(x), float(y), float(z), float(orientation))
         if is_flying_session:
             _log_flying_parse(selected_offset, *parsed, candidates)
+        return parsed
+
+    if opcode_name == "MSG_MOVE_SET_PITCH":
+        # SkyFire 5.4.8 MovementSetPitch starts with PositionZ, PositionX, PositionY.
+        z, x, y = first, second, third
+        orientation, selected_offset, candidates = _select_orientation_from_offsets(
+            (24, 20, 23, 27, 28, 31, 25),
+            prefer_nonzero=True,
+            avoid_tau_alias=True,
+        )
+        parsed = (float(x), float(y), float(z), float(orientation))
+        _log_flying_parse(selected_offset, *parsed, candidates)
         return parsed
 
     if opcode_name == "MSG_MOVE_START_FORWARD":
@@ -2861,6 +3326,15 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
             state.fall_cos_angle = float(fall_data["fall_cos_angle"])
     elif opcode_name == "MSG_MOVE_FALL_LAND":
         _clear_jump_fall_state(state)
+    elif opcode_name == "MSG_MOVE_SET_PITCH":
+        pitch = _extract_pitch_from_payload(payload)
+        if pitch is not None:
+            state.pitch = float(pitch)
+            Logger.debug(
+                "[MOVE_PITCH] opcode=%s pitch=%.6f",
+                opcode_name,
+                float(state.pitch),
+            )
     if parsed_flying is None:
         timestamp = _extract_packet_timestamp(opcode_name, payload)
         if timestamp is not None:
@@ -3130,6 +3604,7 @@ def _maybe_periodic_position_save(
 @register("MSG_MOVE_STOP_ASCEND")
 @register("MSG_MOVE_START_DESCEND")
 @register("MSG_MOVE_STOP_DESCEND")
+@register("MSG_MOVE_SET_PITCH")
 @register("MSG_MOVE_START_TURN_LEFT")
 @register("MSG_MOVE_START_TURN_RIGHT")
 @register("MSG_MOVE_STOP_TURN")
@@ -3162,7 +3637,13 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         }:
             if not _store_authoritative_movement(session, opcode_name, ctx.payload, None):
                 return 0, None
+            if opcode_name in {"MSG_MOVE_STOP", "MSG_MOVE_STOP_ASCEND", "MSG_MOVE_STOP_DESCEND"}:
+                _stop_fly_peer_interpolation(session)
             broadcast_player_state_update(session, force=True)
+            if opcode_name == "MSG_MOVE_START_ASCEND":
+                _start_fly_peer_interpolation(session, 1)
+            elif opcode_name == "MSG_MOVE_START_DESCEND":
+                _start_fly_peer_interpolation(session, -1)
             Logger.debug(
                 "[Movement] state-only %s guid=0x%X pos=(%.3f, %.3f, %.3f) facing=%.3f flags=0x%X",
                 opcode_name,
@@ -3355,6 +3836,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         "MSG_MOVE_STOP_ASCEND",
         "MSG_MOVE_START_DESCEND",
         "MSG_MOVE_STOP_DESCEND",
+        "MSG_MOVE_SET_PITCH",
         "MSG_MOVE_FALL_LAND",
     }
     if opcode_name == "MSG_MOVE_JUMP":
@@ -3364,7 +3846,18 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             int(getattr(state, "fall_time", 0) or 0),
             bool(force_broadcast),
         )
+    if opcode_name == "MSG_MOVE_FALL_LAND":
+        _stop_jump_peer_interpolation(session)
+        _stop_fly_peer_interpolation(session)
+    elif opcode_name in {"MSG_MOVE_STOP", "MSG_MOVE_SET_PITCH", "MSG_MOVE_STOP_ASCEND", "MSG_MOVE_STOP_DESCEND"}:
+        _stop_fly_peer_interpolation(session)
     broadcast_player_state_update(session, force=force_broadcast)
+    if opcode_name == "MSG_MOVE_JUMP":
+        _start_jump_peer_interpolation(session)
+    elif opcode_name == "MSG_MOVE_START_ASCEND":
+        _start_fly_peer_interpolation(session, 1)
+    elif opcode_name == "MSG_MOVE_START_DESCEND":
+        _start_fly_peer_interpolation(session, -1)
 
     Logger.debug(
         f"[MOVE] guid=0x{_player_guid(session):X} "
@@ -3409,6 +3902,7 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
         f"[MOVE] opcode=MSG_MOVE_SET_FACING guid=0x{_player_guid(session):X} "
         f"facing={session.orientation:.3f}"
     )
+    _stop_fly_peer_interpolation(session)
     broadcast_player_state_update(session, force=True)
     stream_responses = _maybe_stream_gameobjects(session)
     return 0, (stream_responses or None)

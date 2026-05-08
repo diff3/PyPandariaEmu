@@ -43,6 +43,9 @@ def _import_misc_handlers():
         "server.modules.handlers.world.opcodes.login": {
             "_build_world_login_context": lambda session: SimpleNamespace(motd=""),
         },
+        "server.modules.game.inventory": {
+            "persist_session_inventory": lambda *args, **kwargs: None,
+        },
         "server.modules.handlers.world.opcodes.movement": {
             "_save_current_position_like_command": lambda *args, **kwargs: True,
         },
@@ -139,6 +142,38 @@ def test_handle_set_action_button_updates_session_and_saves(monkeypatch):
         "button": 7,
         "action": 116,
         "type_": 0,
+        "spec": 0,
+    }
+
+
+def test_handle_set_action_button_preserves_mount_type(monkeypatch):
+    saved = {}
+
+    monkeypatch.setattr(
+        misc_handlers.DatabaseConnection,
+        "save_character_action_button",
+        lambda guid, button, action, type_, spec=0: saved.update(
+            guid=guid,
+            button=button,
+            action=action,
+            type_=type_,
+            spec=spec,
+        ) or True,
+    )
+
+    session = SimpleNamespace(char_guid=42, action_buttons=[0] * 132)
+    ctx = SimpleNamespace(payload=_build_set_action_button_payload(10, 32235, 0x60))
+
+    code, responses = misc_handlers.handle_set_action_button(session, ctx)
+
+    assert code == 0
+    assert responses is None
+    assert session.action_buttons[10] == ((0x60 << 24) | 32235)
+    assert saved == {
+        "guid": 42,
+        "button": 10,
+        "action": 32235,
+        "type_": 0x60,
         "spec": 0,
     }
 

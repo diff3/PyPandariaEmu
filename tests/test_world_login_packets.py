@@ -71,8 +71,32 @@ def test_action_buttons_packet_uses_pandaria_button_count():
 
     payload = login_packets.build_SMSG_UPDATE_ACTION_BUTTONS(ctx)
 
-    assert len(payload) == 1189
+    assert len(payload) == 133
     assert payload[-1] == 0
+
+
+def _decode_action_button_payload(payload: bytes) -> list[int]:
+    buttons = [bytearray(8) for _ in range(132)]
+    byte_pos = 0
+    bit_pos = 0
+    present = [{index: False for index in range(8)} for _ in range(132)]
+
+    for byte_index in (4, 5, 3, 1, 6, 7, 0, 2):
+        for button_index in range(132):
+            bit_value, byte_pos, bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 1)
+            present[button_index][byte_index] = bool(bit_value)
+
+    if bit_pos != 0:
+        byte_pos += 1
+
+    for byte_index in (0, 1, 4, 6, 7, 2, 5, 3):
+        for button_index in range(132):
+            if not present[button_index][byte_index]:
+                continue
+            buttons[button_index][byte_index] = payload[byte_pos] ^ 0x01
+            byte_pos += 1
+
+    return [struct.unpack_from("<I", bytes(button), 0)[0] | struct.unpack_from("<I", bytes(button), 4)[0] for button in buttons]
 
 
 def test_action_buttons_packet_writes_type_in_second_dword():
@@ -81,17 +105,20 @@ def test_action_buttons_packet_writes_type_in_second_dword():
     )
 
     payload = login_packets.build_SMSG_UPDATE_ACTION_BUTTONS(ctx)
+    buttons = _decode_action_button_payload(payload)
 
-    first_button = bytearray(8)
-    group_start = 132
-    for byte_index in (0, 1, 4, 6, 7, 2, 5, 3):
-        first_button[byte_index] = payload[group_start] ^ 0x01
-        group_start += 132
+    assert buttons[0] == ((0x80 << 24) | 6948)
 
-    action_id = struct.unpack_from("<I", bytes(first_button), 0)[0]
-    action_type_word = struct.unpack_from("<I", bytes(first_button), 4)[0]
-    assert action_id == 6948
-    assert action_type_word == (0x80 << 24)
+
+def test_action_buttons_packet_preserves_mount_type():
+    ctx = SimpleNamespace(
+        action_buttons=[((0x60 << 24) | 32235)] + ([0] * 131),
+    )
+
+    payload = login_packets.build_SMSG_UPDATE_ACTION_BUTTONS(ctx)
+    buttons = _decode_action_button_payload(payload)
+
+    assert buttons[0] == ((0x60 << 24) | 32235)
 
 
 def test_pre_update_object_packets_include_action_buttons_again():
