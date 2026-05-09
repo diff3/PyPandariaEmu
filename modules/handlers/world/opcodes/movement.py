@@ -901,6 +901,15 @@ def _movement_is_flying(session) -> bool:
     )
 
 
+def _has_active_flying_mount(session) -> bool:
+    """Return true while a restored mount should own flying state.
+
+    Login restore can race with stale client fall packets.  Keep this check
+    small and explicit so landing handling cannot accidentally confirm those.
+    """
+    return bool(getattr(session, "can_fly", False)) and int(getattr(session, "mount_spell", 0) or 0) > 0
+
+
 def _movement_is_airborne(session) -> bool:
     state = _movement_state(session)
     state_flags = int(getattr(state, "flags", 0) or 0)
@@ -3365,8 +3374,9 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
         )
         return False
     _record_movement_packet_state(session, opcode_name, payload)
+    active_flying_mount = _has_active_flying_mount(session)
     if opcode_name == "MSG_MOVE_FALL_LAND":
-        if bool(getattr(session, "can_fly", False)) and int(getattr(session, "mount_spell", 0) or 0):
+        if active_flying_mount:
             Logger.info(
                 "[Movement] ignoring fall-land while flying mount is active guid=0x%X spell=%s",
                 _player_guid(session),
@@ -3392,6 +3402,23 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
         )
         state.pitch = 0.0
     elif opcode_name in {"MSG_MOVE_START_ASCEND", "MSG_MOVE_START_DESCEND"}:
+        setattr(session, "is_flying", True)
+    elif active_flying_mount:
+        if int(getattr(state, "flags", 0) or 0) & _MOVEMENTFLAG_FALLING or bool(getattr(state, "has_fall_data", False)):
+            Logger.info(
+                "[Movement] converting fall-state to flying mount state opcode=%s guid=0x%X flags=0x%X",
+                opcode_name,
+                _player_guid(session),
+                int(getattr(state, "flags", 0) or 0),
+            )
+        state.has_fall_data = False
+        state.fall_time = 0
+        state.fall_vertical_speed = 0.0
+        state.fall_horizontal_speed = 0.0
+        state.fall_sin_angle = 0.0
+        state.fall_cos_angle = 0.0
+        state.flags |= _MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING
+        state.flags &= ~_MOVEMENTFLAG_FALLING
         setattr(session, "is_flying", True)
     current_flags = int(getattr(state, "flags", 0) or 0)
     if opcode_name == "MSG_MOVE_STOP" and current_flags & (
@@ -3701,7 +3728,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     enter_response = _flying_speed_enter_response(session, was_flying)
     if enter_response is not None:
         movement_responses.append(enter_response)
-    if opcode_name == "MSG_MOVE_FALL_LAND":
+    if opcode_name == "MSG_MOVE_FALL_LAND" and not _has_active_flying_mount(session):
         movement_responses.append(_landing_speed_restore_response(session))
 
     is_flying_movement = _movement_is_flying(session)

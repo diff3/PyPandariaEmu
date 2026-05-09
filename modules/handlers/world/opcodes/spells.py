@@ -1161,11 +1161,21 @@ def mount_direct(player, display_id: int, run_speed: float | None = None) -> lis
     return responses
 
 def handle_mount(player, spell_id: int):
+    spell_id = int(spell_id)
+    active_mount_spell = int(getattr(player, "mount_spell", 0) or 0)
+    if active_mount_spell == spell_id and bool(getattr(player, "is_mounted", False)):
+        Logger.info(
+            "[Mount] toggling active mount off guid=%s spell=%s",
+            int(getattr(player, "char_guid", 0) or 0),
+            spell_id,
+        )
+        return dismount(player)
+
     player.is_mounted = True
-    player.mount_spell = int(spell_id)
+    player.mount_spell = spell_id
     player.active_mount_aura_slot = int(getattr(player, "active_mount_aura_slot", 0) or 0)
     _apply_mount_movement_speeds(player)
-    responses = send_mount_update(player, int(spell_id))
+    responses = send_mount_update(player, spell_id)
     _persist_current_mount_state(player)
     return responses
 
@@ -1198,13 +1208,15 @@ def handle_cast_spell(session, ctx: PacketContext):
     Logger.debug(f"[SPELL] opcode={ctx.name}")
     packet_spell_id = _extract_packet_spell_id(ctx)
     if packet_spell_id and is_mount_spell(packet_spell_id):
-        is_mounted = bool(
-            getattr(session, "is_mounted", False)
-            or getattr(session, "mount_spell", None)
-            or getattr(session, "mount_display_id", 0)
-        )
         Logger.debug(f"[SPELL] packet mount spell_id={int(packet_spell_id)}")
-        if is_mounted:
+        pending_cancel_spell = int(getattr(session, "pending_mount_cancel_spell", 0) or 0)
+        if pending_cancel_spell:
+            session.pending_mount_cancel_spell = None
+            if pending_cancel_spell == int(packet_spell_id) and not bool(getattr(session, "is_mounted", False)):
+                Logger.debug("[SPELL] ignored duplicate mount cast after cancel spell_id=%s", int(packet_spell_id))
+                return 0, None
+        active_mount = int(getattr(session, "mount_spell", 0) or 0)
+        if active_mount == int(packet_spell_id) and bool(getattr(session, "is_mounted", False)):
             return 0, dismount(session)
         return 0, handle_mount(session, int(packet_spell_id))
 
@@ -1212,13 +1224,15 @@ def handle_cast_spell(session, ctx: PacketContext):
     if not spell_id:
         return 0, None
 
-    is_mounted = bool(
-        getattr(session, "is_mounted", False)
-        or getattr(session, "mount_spell", None)
-        or getattr(session, "mount_display_id", 0)
-    )
     Logger.debug(f"[SPELL] cast spell_id={int(spell_id)}")
-    if is_mounted:
+    pending_cancel_spell = int(getattr(session, "pending_mount_cancel_spell", 0) or 0)
+    if pending_cancel_spell:
+        session.pending_mount_cancel_spell = None
+        if pending_cancel_spell == int(spell_id) and not bool(getattr(session, "is_mounted", False)):
+            Logger.debug("[SPELL] ignored duplicate mount cast after cancel spell_id=%s", int(spell_id))
+            return 0, None
+    active_mount = int(getattr(session, "mount_spell", 0) or 0)
+    if active_mount == int(spell_id) and bool(getattr(session, "is_mounted", False)):
         return 0, dismount(session)
     responses = handle_mount(session, int(spell_id))
     return 0, responses
@@ -1241,8 +1255,11 @@ def handle_cancel_aura(session, ctx: PacketContext):
 @register("CMSG_CANCEL_MOUNT_AURA")
 def handle_cancel_mount_aura(session, ctx: PacketContext):
     Logger.debug(f"[SPELL] opcode={ctx.name}")
-    if not bool(getattr(session, "is_mounted", False)) and not int(getattr(session, "mount_spell", 0) or 0):
+    active_mount = int(getattr(session, "mount_spell", 0) or 0)
+    if not bool(getattr(session, "is_mounted", False)) and not active_mount:
         return 0, None
 
+    if active_mount:
+        session.pending_mount_cancel_spell = active_mount
     responses = dismount(session)
     return 0, responses

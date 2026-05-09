@@ -367,29 +367,14 @@ def build_SMSG_WORLD_SERVER_INFO(_ctx=None) -> bytes:
 
     return bytes(payload)
 
-_EXPERIMENTAL_JOURNAL_MOUNT_SPELLS = (
-    458,   # Brown Horse
-    470,   # Black Stallion
-    580,   # Timber Wolf
-    6648,  # Chestnut Mare
-    68978, # White Kodo
-    68992, # Green Kodo
-    72286, # Invincible
-    32235, # Golden Gryphon
-    34769, # Thalassian Warhorse
-    61425, # Traveler's Tundra Mammoth
-    89832, # Drake of the West Wind
-)
-
-
 def _legacy_known_mount_spells() -> list[int]:
     return sorted(int(spell_id) for spell_id in granted_mount_spells())
 
 
 def _journal_test_mount_spells() -> list[int]:
-    spell_set = {int(spell_id) for spell_id in MOUNT_SUPPORT_SPELLS}
-    spell_set.update(int(spell_id) for spell_id in _EXPERIMENTAL_JOURNAL_MOUNT_SPELLS)
-    return sorted(spell_set)
+    # Keep the login spell list driven by mount_service so new validated mounts
+    # are added in one place.
+    return _legacy_known_mount_spells()
 
 
 def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:

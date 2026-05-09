@@ -12,8 +12,40 @@ except ImportError:
         return sql
 
 from shared.Logger import Logger
+from shared.PathUtils import get_dbc_root
+from server.modules.dbc import read_dbc
 
 ALL_MOUNT_SPELLS: set[int] = set()
+_DBC_SPELL_EFFECT_FMT = "i" * 30
+_DBC_MOUNT_TYPE_FMT = "i" * 25
+_DBC_MOUNT_CAPABILITY_FMT = "i" * 8
+_SPELL_EFFECT_EFFECT_INDEX = 2
+_SPELL_EFFECT_AURA_INDEX = 4
+_SPELL_EFFECT_MISC_VALUE_INDEX = 13
+_SPELL_EFFECT_MISC_VALUE_B_INDEX = 14
+_SPELL_EFFECT_SPELL_ID_INDEX = 27
+_SPELL_EFFECT_APPLY_AURA = 6
+_SPELL_AURA_MOUNTED = 78
+_MOUNT_CAPABILITY_FLAGS_INDEX = 1
+_MOUNT_CAPABILITY_FLYING_FLAGS = {7, 15}
+_FLYING_MOUNT_NAME_MARKERS = (
+    "al'ar",
+    "broom",
+    "carpet",
+    "cloud serpent",
+    "dragonhawk",
+    "drake",
+    "flying",
+    "flying cloud",
+    "frostbrood",
+    "frost wyrm",
+    "gryphon",
+    "hippogryph",
+    "nether ray",
+    "rocket",
+    "wind rider",
+    "winged steed",
+)
 MOUNT_RIDING_SKILL_ID = 762
 MOUNT_RIDING_SKILL_VALUE = 375
 MOUNT_SUPPORT_SPELLS: tuple[int, ...] = (
@@ -22,99 +54,24 @@ MOUNT_SUPPORT_SPELLS: tuple[int, ...] = (
     34090,   # Expert Riding
     34091,   # Artisan Riding
     54197,   # Cold Weather Flying
+    90265,   # Master Riding
+    90267,   # Flight Master's License
     115913,  # Wisdom of the Four Winds
+    130487,  # Cloud Serpent Riding
 )
 FALLBACK_MOUNT_SPELLS: tuple[int, ...] = (
+    # Minimal no-DBC/no-world-DB fallback. The normal path loads every mount
+    # and display ID from SpellEffect.dbc + creature_template.
     458,    # Brown Horse
-    470,    # Black Stallion
-    580,    # Timber Wolf
-    6648,   # Chestnut Mare
-    59535,  # Black Polar Bear
-    59542,  # Black War Mammoth
-    61437,  # Grand Ice Mammoth
-    61455,  # Grand Black War Mammoth
-    63644,  # Argent Hippogryph
-    63645,  # White Skeletal Warhorse
-    68398,  # Big Love Rocket
-    68975,  # Wooly White Rhino
-    68976,  # X-53 Touring Rocket
-    68978,  # White Kodo
-    68992,  # Green Kodo
-    68996,  # Brown Kodo
-    76271,  # X-53 Touring Rocket
-    76282,  # X-53 Touring Rocket
-    76292,  # X-53 Touring Rocket
-    76294,  # X-53 Touring Rocket
-    79741,  # Vicious War Steed
-    79742,  # Vicious War Wolf
-    82246,  # Vicious War Steed
-    87840,  # Azure Water Strider
-    89832,  # Drake of the West Wind
-    89964,  # Vicious War Wolf
-    94293,  # Vicious War Steed
-    96220,  # Swift Red Hawkstrider
-    111621, # Yak
-    113873, # Pandaren Kite
-    134735, # Grand Expedition Yak
     72286,  # Invincible
-    32235,  # Golden Gryphon
-    61425,  # Traveler's Tundra Mammoth
-    34769,  # Summon Warhorse
-    578,    # Summon Felsteed
 )
 MOUNT_DISPLAY_BY_SPELL: dict[int, int] = {
     458: 2404,       # Brown Horse
-    470: 2402,       # Black Stallion
-    578: 2346,       # Felsteed
-    580: 247,        # Timber Wolf
-    6648: 2405,      # Chestnut Mare
-    32235: 17697,    # Golden Gryphon
-    34769: 19296,    # Thalassian Warhorse
-    59535: 27659,    # Black Polar Bear Mount
-    59542: 27247,    # Black War Mammoth
-    61425: 27237,    # Traveler's Tundra Mammoth
-    61437: 27239,    # Grand Ice Mammoth
-    61455: 27240,    # Grand Black War Mammoth
-    63644: 22471,    # Argent Hippogryph
-    63645: 28605,    # White Skeletal Warhorse
-    68398: 30989,    # Big Love Rocket
-    68975: 31721,    # Wooly White Rhino
-    68976: 31992,    # X-53 Touring Rocket
-    68978: 12241,    # White Kodo
-    68992: 12245,    # Green Kodo
-    68996: 11641,    # Brown Kodo
-    76271: 31992,    # X-53 Touring Rocket
-    76282: 31992,    # X-53 Touring Rocket
-    76292: 31992,    # X-53 Touring Rocket
-    76294: 31992,    # X-53 Touring Rocket
-    79741: 38668,    # Vicious War Steed
-    79742: 38607,    # Vicious War Wolf
-    82246: 38668,    # Vicious War Steed
-    87840: 41711,    # Azure Water Strider
-    89832: 35754,    # Drake of the West Wind
-    89964: 38607,    # Vicious War Wolf
-    94293: 38668,    # Vicious War Steed
-    96220: 28607,    # Swift Red Hawkstrider
-    111621: 41089,   # White Riding Yak
-    113873: 41903,   # Pandaren Kite
-    134735: 42703,   # Grand Expedition Yak
     72286: 31007,    # Invincible
 }
-FLYING_MOUNT_SPELLS: frozenset[int] = frozenset(
-    {
-        32235,  # Golden Gryphon
-        63644,  # Argent Hippogryph
-        68398,  # Big Love Rocket
-        68976,  # X-53 Touring Rocket
-        72286,  # Invincible
-        76271,  # X-53 Touring Rocket
-        76282,  # X-53 Touring Rocket
-        76292,  # X-53 Touring Rocket
-        76294,  # X-53 Touring Rocket
-        89832,  # Drake of the West Wind
-        113873, # Pandaren Kite
-    }
-)
+FLYING_MOUNT_SPELLS: set[int] = {
+    72286,  # Invincible
+}
 DEFAULT_TEST_MOUNT_DISPLAY_ID = 31007
 
 
@@ -137,6 +94,119 @@ def _table_exists(db, table_name: str) -> bool:
     return row is not None
 
 
+def _is_flying_mount_name(name: str) -> bool:
+    lowered = str(name or "").lower()
+    return any(marker in lowered for marker in _FLYING_MOUNT_NAME_MARKERS)
+
+
+def _load_flying_mount_type_ids_from_dbc(dbc_root) -> set[int]:
+    mount_type_path = dbc_root / "MountType.dbc"
+    mount_capability_path = dbc_root / "MountCapability.dbc"
+    if not mount_type_path.is_file() or not mount_capability_path.is_file():
+        return set()
+
+    flying_capability_ids: set[int] = set()
+    try:
+        for record in read_dbc(mount_capability_path, _DBC_MOUNT_CAPABILITY_FMT):
+            capability_id = int(record[0] or 0)
+            flags = int(record[_MOUNT_CAPABILITY_FLAGS_INDEX] or 0)
+            if capability_id > 0 and flags in _MOUNT_CAPABILITY_FLYING_FLAGS:
+                flying_capability_ids.add(capability_id)
+    except Exception as exc:
+        Logger.warning("[Mount] Failed to read MountCapability.dbc: %s", exc)
+        return set()
+
+    if not flying_capability_ids:
+        return set()
+
+    flying_mount_type_ids: set[int] = set()
+    try:
+        for record in read_dbc(mount_type_path, _DBC_MOUNT_TYPE_FMT):
+            mount_type_id = int(record[0] or 0)
+            if mount_type_id <= 0:
+                continue
+            capability_ids = {int(value or 0) for value in record[1:] if int(value or 0) > 0}
+            if capability_ids & flying_capability_ids:
+                flying_mount_type_ids.add(mount_type_id)
+    except Exception as exc:
+        Logger.warning("[Mount] Failed to read MountType.dbc: %s", exc)
+        return set()
+
+    return flying_mount_type_ids
+
+
+def _load_mount_spell_rows_from_dbc(db) -> tuple[list[tuple[int, int, bool]], str | None]:
+    if not _table_exists(db, "creature_template"):
+        return [], None
+
+    dbc_root = get_dbc_root()
+    if not dbc_root:
+        return [], None
+    spell_effect_path = dbc_root / "SpellEffect.dbc"
+    if not spell_effect_path.is_file():
+        return [], None
+
+    creature_by_spell: dict[int, int] = {}
+    mount_type_by_spell: dict[int, int] = {}
+    try:
+        for record in read_dbc(spell_effect_path, _DBC_SPELL_EFFECT_FMT):
+            if int(record[_SPELL_EFFECT_EFFECT_INDEX] or 0) != _SPELL_EFFECT_APPLY_AURA:
+                continue
+            if int(record[_SPELL_EFFECT_AURA_INDEX] or 0) != _SPELL_AURA_MOUNTED:
+                continue
+            spell_id = int(record[_SPELL_EFFECT_SPELL_ID_INDEX] or 0)
+            creature_id = int(record[_SPELL_EFFECT_MISC_VALUE_INDEX] or 0)
+            mount_type_id = int(record[_SPELL_EFFECT_MISC_VALUE_B_INDEX] or 0)
+            if spell_id > 0 and creature_id > 0:
+                creature_by_spell.setdefault(spell_id, creature_id)
+                if mount_type_id > 0:
+                    mount_type_by_spell.setdefault(spell_id, mount_type_id)
+    except Exception as exc:
+        Logger.warning("[Mount] Failed to read SpellEffect.dbc: %s", exc)
+        return [], None
+
+    if not creature_by_spell:
+        return [], None
+
+    creature_ids = sorted(set(creature_by_spell.values()))
+    creature_sql = ",".join(str(int(creature_id)) for creature_id in creature_ids)
+    rows = db.execute(
+        text(
+            f"""
+            SELECT entry, name, modelid1
+            FROM creature_template
+            WHERE entry IN ({creature_sql}) AND modelid1 > 0
+            """
+        )
+    ).fetchall()
+
+    creature_info: dict[int, tuple[str, int]] = {}
+    for row in rows:
+        try:
+            entry = int(_row_value(row, "entry", 0) or 0)
+            name = str(_row_value(row, "name", 1) or "")
+            display_id = int(_row_value(row, "modelid1", 2) or 0)
+        except Exception:
+            continue
+        if entry > 0 and display_id > 0:
+            creature_info[entry] = (name, display_id)
+
+    flying_mount_type_ids = _load_flying_mount_type_ids_from_dbc(dbc_root)
+    mount_rows: list[tuple[int, int, bool]] = []
+    for spell_id, creature_id in creature_by_spell.items():
+        info = creature_info.get(int(creature_id))
+        if not info:
+            continue
+        name, display_id = info
+        mount_type_id = int(mount_type_by_spell.get(int(spell_id), 0) or 0)
+        is_flying = (
+            bool(mount_type_id and mount_type_id in flying_mount_type_ids)
+            or _is_flying_mount_name(name)
+        )
+        mount_rows.append((int(spell_id), int(display_id), bool(is_flying)))
+    return mount_rows, "SpellEffect.dbc+creature_template"
+
+
 def _load_mount_spell_rows(db):
     if _table_exists(db, "spell_effect"):
         return db.execute(
@@ -148,6 +218,10 @@ def _load_mount_spell_rows(db):
                 """
             )
         ).fetchall(), "spell_effect"
+
+    dbc_rows, source = _load_mount_spell_rows_from_dbc(db)
+    if dbc_rows:
+        return dbc_rows, source
 
     return [], None
 
@@ -166,12 +240,23 @@ def load_mount_spells(db) -> None:
             continue
         if spell_id > 0:
             ALL_MOUNT_SPELLS.add(spell_id)
+            try:
+                display_id = int(_row_value(row, "display_id", 1) or 0)
+                if display_id > 0:
+                    MOUNT_DISPLAY_BY_SPELL[spell_id] = display_id
+            except Exception:
+                pass
+            try:
+                if bool(_row_value(row, "is_flying", 2)):
+                    FLYING_MOUNT_SPELLS.add(spell_id)
+            except Exception:
+                pass
 
     if not ALL_MOUNT_SPELLS:
         _load_fallback_mount_spells()
         return
 
-    Logger.info("[Mount] Loaded %s mounts", len(ALL_MOUNT_SPELLS))
+    Logger.info("[Mount] Loaded %s mounts source=%s", len(ALL_MOUNT_SPELLS), source or "unknown")
 
 
 def is_mount_spell(spell_id: int) -> bool:
