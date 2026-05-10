@@ -1387,6 +1387,28 @@ def _load_motd_from_config() -> str:
     return motd or _DEFAULT_MOTD
 
 
+def _load_motd_from_database() -> str:
+    try:
+        from server.modules.database.DatabaseConnection import DatabaseConnection
+
+        return str(DatabaseConnection.get_server_motd() or "").strip()
+    except Exception:
+        return ""
+
+
+def _persist_motd_to_database(message: str) -> str:
+    normalized = str(message or "").strip() or _DEFAULT_MOTD
+    try:
+        from server.modules.database.DatabaseConnection import DatabaseConnection
+
+        if DatabaseConnection.set_server_motd(normalized):
+            return normalized
+    except Exception:
+        pass
+
+    return _persist_motd_to_default_config(normalized)
+
+
 def _persist_motd_to_default_config(message: str) -> str:
     """Persist MOTD to default.yaml so it survives restart."""
     normalized = str(message or "").strip() or _DEFAULT_MOTD
@@ -1411,12 +1433,7 @@ def _persist_motd_to_default_config(message: str) -> str:
 
 def get_motd() -> str:
     """Return current MOTD."""
-    from server.session.world_session import WorldSession
-
-    motd = str(getattr(WorldSession, "motd", "") or "").strip()
-    if motd:
-        return motd
-    motd = str(_MOTD or "").strip()
+    motd = _load_motd_from_database()
     if motd:
         return motd
     return _load_motd_from_config()
@@ -1428,7 +1445,7 @@ def _set_runtime_motd(session, message: str) -> str:
 
     from server.session.world_session import WorldSession
 
-    normalized = _persist_motd_to_default_config(message)
+    normalized = _persist_motd_to_database(message)
 
     _MOTD = normalized
     WorldSession.motd = normalized

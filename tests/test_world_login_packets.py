@@ -121,6 +121,13 @@ def test_action_buttons_packet_preserves_mount_type():
     assert buttons[0] == ((0x60 << 24) | 32235)
 
 
+def test_pandaren_display_ids_do_not_fallback_to_blood_elf():
+    assert login_packets._resolve_player_display_id(24, 0) == 38551
+    assert login_packets._resolve_player_display_id(24, 1) == 38552
+    assert login_packets._resolve_player_display_id(25, 0) == 38551
+    assert login_packets._resolve_player_display_id(26, 1) == 38552
+
+
 def test_pre_update_object_packets_include_action_buttons_again():
     assert "SMSG_UPDATE_TALENT_DATA" in login_flow.PRE_UPDATE_OBJECT_PACKETS
     assert "SMSG_UPDATE_ACTION_BUTTONS" in login_flow.PRE_UPDATE_OBJECT_PACKETS

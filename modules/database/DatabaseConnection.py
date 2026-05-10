@@ -1182,6 +1182,60 @@ class DatabaseConnection:
         return result
 
     @staticmethod
+    def get_server_motd() -> str:
+        """Read MOTD directly from DB. This intentionally does not cache the value."""
+        try:
+            session = DatabaseConnection.chars()
+            session.rollback()
+            DatabaseConnection._ensure_server_motd_table(session)
+            row = session.execute(
+                text("SELECT message FROM server_motd WHERE id = 1 LIMIT 1")
+            ).mappings().first()
+            motd = str((row or {}).get("message", "") or "").strip()
+            session.rollback()
+            return motd
+        except Exception as exc:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            Logger.warning(f"[DB] get_server_motd failed: {exc}")
+
+        return ""
+
+    @staticmethod
+    def set_server_motd(message: str) -> bool:
+        normalized = str(message or "").strip()
+        session = DatabaseConnection.chars()
+        try:
+            DatabaseConnection._ensure_server_motd_table(session)
+            session.execute(
+                text(
+                    "INSERT INTO server_motd (id, message) VALUES (1, :message) "
+                    "ON DUPLICATE KEY UPDATE message = VALUES(message)"
+                ),
+                {"message": normalized},
+            )
+            session.commit()
+            session.expire_all()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] set_server_motd failed: {exc}")
+            return False
+
+    @staticmethod
+    def _ensure_server_motd_table(session) -> None:
+        session.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS server_motd ("
+                "id TINYINT UNSIGNED NOT NULL PRIMARY KEY, "
+                "message TEXT NOT NULL"
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            )
+        )
+
+    @staticmethod
     def save_character_equipment_cache(char_guid: int, realm_id: int, equipment_cache: str) -> bool:
         session = DatabaseConnection.chars()
         try:

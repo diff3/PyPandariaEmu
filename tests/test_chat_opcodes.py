@@ -2811,7 +2811,7 @@ def test_server_info_and_status_use_runtime_state(monkeypatch):
     assert worldserver._shutdown_calls == []
 
 
-def test_server_motd_set_updates_runtime_sessions_and_login_context():
+def test_server_motd_set_updates_runtime_sessions():
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
     bob = _make_session(state, "Bob", 1002)
@@ -2828,10 +2828,6 @@ def test_server_motd_set_updates_runtime_sessions_and_login_context():
     assert message == "MOTD updated"
     assert alice.motd == "Hello World"
     assert bob.motd == "Hello World"
-
-    login_context = importlib.import_module("server.modules.handlers.world.login.context")
-    ctx = login_context.WorldLoginContext.from_session(alice)
-    assert ctx.motd == "Hello World"
     monkeypatch.undo()
 
 
@@ -2856,17 +2852,7 @@ def test_server_motd_set_persists_to_default_yaml(tmp_path):
     monkeypatch.undo()
 
 
-def test_world_login_context_uses_config_motd_when_session_missing(tmp_path):
-    config_module = importlib.import_module("shared.ConfigLoader")
-    config_path = tmp_path / "default.yaml"
-    config_path.write_text("worldserver:\n  motd: Config MOTD\n", encoding="utf-8")
-
-    monkeypatch = __import__("pytest").MonkeyPatch()
-    monkeypatch.setattr(config_module, "_DEFAULT_CONFIG_PATH", Path(config_path))
-    monkeypatch.setattr(config_module, "_CONFIG_DIR", tmp_path)
-    config_module._config = None
-    config_module._runtime_config = None
-
+def test_world_login_context_ignores_config_motd_when_database_missing(tmp_path):
     login_context = importlib.import_module("server.modules.handlers.world.login.context")
     session = WorldSession()
     session.account_data_times = {}
@@ -2879,8 +2865,29 @@ def test_world_login_context_uses_config_motd_when_session_missing(tmp_path):
 
     ctx = login_context.WorldLoginContext.from_session(session)
 
-    assert ctx.motd == "Config MOTD"
-    monkeypatch.undo()
+    assert ctx.motd == "Welcome to PyPandaria"
+
+
+def test_world_login_context_reloads_motd_for_each_login(monkeypatch):
+    login_context = importlib.import_module("server.modules.handlers.world.login.context")
+    values = iter(("Database MOTD 1", "Database MOTD 2"))
+    monkeypatch.setattr(login_context, "_load_motd_from_database", lambda: next(values))
+
+    session = WorldSession()
+    session.account_data_times = {}
+    session.account_data_mask = 0
+    session.addons = []
+    session.banned_addons = []
+    session.known_spells = []
+    session.action_buttons = []
+    session.weather = {}
+    session.motd = "Cached Runtime MOTD"
+
+    first = login_context.WorldLoginContext.from_session(session)
+    second = login_context.WorldLoginContext.from_session(session)
+
+    assert first.motd == "Database MOTD 1"
+    assert second.motd == "Database MOTD 2"
 
 
 def test_world_login_context_preserves_mount_runtime_fields():

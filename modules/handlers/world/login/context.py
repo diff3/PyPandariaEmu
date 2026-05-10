@@ -5,7 +5,20 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 import time
 
-from shared.ConfigLoader import ConfigLoader
+def _load_motd_from_database() -> str:
+    try:
+        from server.modules.database.DatabaseConnection import DatabaseConnection
+    except Exception:
+        return ""
+
+    getter = getattr(DatabaseConnection, "get_server_motd", None)
+    if getter is None:
+        return ""
+
+    try:
+        return str(getter() or "").strip()
+    except Exception:
+        return ""
 
 
 @dataclass
@@ -142,8 +155,8 @@ class WorldLoginContext:
     # --------------------------------------------------
     @classmethod
     def from_session(cls, session):
-        config_motd = str((ConfigLoader.get_config() or {}).get("worldserver", {}).get("motd", "") or "").strip()
-        resolved_motd = str(getattr(session, "motd", "") or "").strip() or config_motd or cls.motd
+        database_motd = _load_motd_from_database()
+        resolved_motd = database_motd or cls.motd
         account_data_times = [0] * 8
         for index in range(8):
             account_data_times[index] = int(
