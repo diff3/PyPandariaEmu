@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 import json
@@ -28,6 +31,11 @@ from server.modules.handlers.world.mount.mount_service import (
     granted_mount_spells,
     is_flying_mount_spell,
     is_mount_spell,
+)
+from server.modules.handlers.world.pet.pet_service import (
+    battle_pet_by_spell,
+    battle_pet_summon_spells,
+    granted_battle_pet_spells,
 )
 from DSL.modules.bitsHandler import BitWriter
 
@@ -61,15 +69,8 @@ _RACE_LANGUAGE_SPELL_BY_RACE = {
 _ALL_LANGUAGE_SPELL_IDS = frozenset(
     set(_BASE_LANGUAGE_SPELL_BY_RACE.values()) | set(_RACE_LANGUAGE_SPELL_BY_RACE.values())
 )
-_SANDBOX_COMPANION_PET_SPELL_IDS = (
-    139196,  # Pierre
-    143714,  # Rascal-Bot
-)
-_SANDBOX_BATTLE_PET_SUPPORT_SPELL_IDS = (
-    119467,  # Battle Pet Training
-    122026,  # Track Pets
-    125439,  # Revive Battle Pets
-)
+_SANDBOX_COMPANION_PET_SPELL_IDS = ()
+_SANDBOX_BATTLE_PET_SUPPORT_SPELL_IDS = ()
 _DEFAULT_WALK_SPEED = 2.5
 _DEFAULT_RUN_SPEED = 7.0
 _DEFAULT_RUN_BACK_SPEED = 4.5
@@ -305,7 +306,11 @@ def initialize_session_language_state(session) -> None:
     Logger.info(f"[LANG ACTIVE] {int(getattr(session, 'current_language', 0) or 0)}")
 
 def granted_companion_pet_spells() -> list[int]:
-    return sorted(int(spell_id) for spell_id in _SANDBOX_COMPANION_PET_SPELL_IDS if int(spell_id) > 0)
+    return sorted(
+        int(spell_id)
+        for spell_id in granted_battle_pet_spells()
+        if int(spell_id) > 0 and int(spell_id) not in _SANDBOX_BATTLE_PET_SUPPORT_SPELL_IDS
+    )
 
 
 def granted_battle_pet_support_spells() -> list[int]:
@@ -315,6 +320,16 @@ def granted_battle_pet_support_spells() -> list[int]:
 def ensure_companion_pet_spells_known(session) -> None:
     spells = [int(spell) for spell in (getattr(session, "known_spells", []) or [])]
     changed = False
+    blocked_summon_ids = battle_pet_summon_spells()
+    if blocked_summon_ids:
+        filtered_spells = [spell_id for spell_id in spells if spell_id not in blocked_summon_ids]
+        if len(filtered_spells) != len(spells):
+            Logger.info(
+                "[SPELL] filtered persisted companion pet summon spells removed=%s",
+                len(spells) - len(filtered_spells),
+            )
+            spells = filtered_spells
+            changed = True
     for spell_id in granted_battle_pet_support_spells() + granted_companion_pet_spells():
         if spell_id not in spells:
             spells.append(spell_id)
@@ -523,7 +538,7 @@ def _extract_mount_spell_id_from_payload(payload: bytes) -> Optional[int]:
     return int(unique_matches[0])
 
 
-def extract_mount_spell_id(session, ctx: PacketContext) -> Optional[int]:
+def extract_mount_spell_id(session, ctx: PacketContext, *, include_active_fallback: bool = True) -> Optional[int]:
     spell_id = _extract_mount_spell_id_from_decoded(ctx.decoded)
     if spell_id:
         return spell_id
@@ -531,6 +546,9 @@ def extract_mount_spell_id(session, ctx: PacketContext) -> Optional[int]:
     spell_id = _extract_mount_spell_id_from_payload(ctx.payload)
     if spell_id:
         return spell_id
+
+    if not include_active_fallback:
+        return None
 
     current_mount = int(getattr(session, "mount_spell", 0) or 0)
     if current_mount and is_mount_spell(current_mount):
@@ -1220,11 +1238,25 @@ def handle_cast_spell(session, ctx: PacketContext):
             return 0, dismount(session)
         return 0, handle_mount(session, int(packet_spell_id))
 
-    spell_id = extract_mount_spell_id(session, ctx)
+    if packet_spell_id and battle_pet_by_spell(int(packet_spell_id)) is not None:
+        from server.modules.handlers.world.opcodes import pets as pet_handlers
+
+        Logger.debug("[SPELL] packet companion pet spell_id=%s", int(packet_spell_id))
+        return 0, pet_handlers.summon_companion_pet_by_spell(session, int(packet_spell_id))
+
+    spell_id = extract_mount_spell_id(session, ctx, include_active_fallback=False)
     if not spell_id:
         return 0, None
 
     Logger.debug(f"[SPELL] cast spell_id={int(spell_id)}")
+    if not is_mount_spell(int(spell_id)):
+        if battle_pet_by_spell(int(spell_id)) is not None:
+            from server.modules.handlers.world.opcodes import pets as pet_handlers
+
+            Logger.debug("[SPELL] companion pet spell_id=%s", int(spell_id))
+            return 0, pet_handlers.summon_companion_pet_by_spell(session, int(spell_id))
+        return 0, None
+
     pending_cancel_spell = int(getattr(session, "pending_mount_cancel_spell", 0) or 0)
     if pending_cancel_spell:
         session.pending_mount_cancel_spell = None

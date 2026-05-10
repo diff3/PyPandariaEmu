@@ -28,6 +28,7 @@ from server.modules.crypto.ARC4Crypto import Arc4CryptoHandler as WorldCryptoHan
 from server.session.world_session import WorldSession
 from server.session.runtime import bind_world_session, clear_world_session
 from server.modules.handlers.world.mount.mount_service import load_mount_spells
+from server.modules.handlers.world.pet.pet_service import load_battle_pets
 from server.modules.handlers.world.teleport.teleport_service import load_teleports
 from server.modules.handlers.world.state.global_state import global_state
 from server.modules.handlers.world.runtime.lifecycle import handle_disconnect_session
@@ -596,6 +597,10 @@ def run_world() -> None:
         load_mount_spells(DatabaseConnection.world())
     except Exception as exc:
         Logger.warning(f"[Mount] preload failed: {exc}")
+    try:
+        load_battle_pets(DatabaseConnection.world())
+    except Exception as exc:
+        Logger.warning(f"[BattlePet] preload failed: {exc}")
     try:
         load_teleports(DatabaseConnection.world())
     except Exception as exc:

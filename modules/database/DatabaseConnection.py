@@ -110,6 +110,14 @@ _ACTION_BUTTON_PRIORITY_SPELLS = (
 )
 
 
+def _battle_pet_action_excluded_spells() -> set[int]:
+    try:
+        from server.modules.handlers.world.pet.pet_service import battle_pet_summon_spells
+    except Exception:
+        return set()
+    return set(int(spell_id) for spell_id in battle_pet_summon_spells())
+
+
 class DatabaseConnection:
     """Handles DB connections for characters-db and world-db."""
 
@@ -1792,6 +1800,7 @@ class DatabaseConnection:
     def _fallback_action_spell_ids(default_actions: list[tuple[int, int, int]], spells: list[int]) -> list[int]:
         ordered: list[int] = []
         seen: set[int] = set()
+        excluded_spells = _ACTION_BUTTON_EXCLUDED_SPELLS | _battle_pet_action_excluded_spells()
         available_spells = {
             int(action)
             for _button, action, type_ in default_actions
@@ -1804,7 +1813,7 @@ class DatabaseConnection:
                 spell_id = int(spell_id)
             except Exception:
                 return
-            if spell_id <= 0 or spell_id in seen or spell_id in _ACTION_BUTTON_EXCLUDED_SPELLS:
+            if spell_id <= 0 or spell_id in seen or spell_id in excluded_spells:
                 return
             ordered.append(spell_id)
             seen.add(spell_id)
@@ -1904,12 +1913,19 @@ class DatabaseConnection:
             Logger.warning(f"[DB] character_action lookup failed guid={char_guid}: {exc}")
             saved_rows = []
 
+        excluded_action_spells = _battle_pet_action_excluded_spells()
         for button, action, type_ in saved_rows:
             try:
                 button_index = int(button)
                 if not (0 <= button_index < ACTION_BUTTON_COUNT):
                     continue
                 saved_slots.add(button_index)
+                if (
+                    int(type_ or 0) == ACTION_BUTTON_TYPE_SPELL
+                    and int(action or 0) in excluded_action_spells
+                ):
+                    buttons[button_index] = 0
+                    continue
                 buttons[button_index] = (
                     DatabaseConnection._pack_action_button(action, type_)
                 ) if int(action) > 0 else 0

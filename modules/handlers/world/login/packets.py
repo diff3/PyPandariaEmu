@@ -40,6 +40,11 @@ from server.modules.handlers.world.mount.mount_service import (
     MOUNT_RIDING_SKILL_VALUE,
     granted_mount_spells,
 )
+from server.modules.handlers.world.pet.pet_service import (
+    build_battle_pet_journal_lock_payload,
+    build_battle_pet_journal_payload,
+    granted_battle_pet_spells,
+)
 from server.modules.handlers.world.bootstrap.playerobjects import (
     USE_SERVER_BUILT_PLAYER_CREATE,
     build_server_built_player_create,
@@ -432,6 +437,8 @@ def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
     journal_test_mount_spells = _journal_test_mount_spells()
     for spell_id in journal_test_mount_spells:
         spell_set.add(int(spell_id))
+    for spell_id in granted_battle_pet_spells():
+        spell_set.add(int(spell_id))
 
     # ----------------------------------------
     # BUILD LANGUAGE MASK (CRITICAL FIX)
@@ -503,6 +510,14 @@ def build_SMSG_SEND_UNLEARN_SPELLS(ctx) -> bytes:
     bits = BitWriter()
     bits.write_bits(0, 22)
     return bits.getvalue()
+
+
+def build_SMSG_BATTLE_PET_JOURNAL(_ctx=None) -> bytes:
+    return build_battle_pet_journal_payload()
+
+
+def build_SMSG_BATTLE_PET_JOURNAL_LOCK_ACQUIRED(_ctx=None) -> bytes:
+    return build_battle_pet_journal_lock_payload()
 
 
 def build_SMSG_UPDATE_ACTION_BUTTONS(ctx) -> bytes:
