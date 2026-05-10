@@ -34,11 +34,11 @@ from DSL.modules.bitsHandler import BitWriter
 from server.modules.game import player
 
 _ALLIANCE_RACES = {1, 3, 4, 7, 11, 22, 25}
-_HORDE_RACES = {2, 5, 6, 8, 9, 10, 26}
+_HORDE_RACES = {2, 5, 6, 8, 9, 10, 24, 26}
 _BASE_LANGUAGE_SPELL_BY_RACE = {
     1: 668,       # Human -> Common
     2: 669,       # Orc -> Orcish
-    24: 108127,   # Pandaren Neutral
+    24: 669,      # Pandaren Neutral -> Orcish fallback
     25: 668,      # Pandaren Alliance -> Common
     26: 669,      # Pandaren Horde -> Orcish
 }
@@ -54,7 +54,7 @@ _RACE_LANGUAGE_SPELL_BY_RACE = {
     10: 813,
     11: 29932,
     22: 69269,
-    24: 108127,
+    24: 669,
     25: 108130,
     26: 108131,
 }

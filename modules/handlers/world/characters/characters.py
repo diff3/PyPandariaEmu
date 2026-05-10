@@ -54,6 +54,10 @@ _DEFAULT_EQUIPMENT_CACHE: Optional[str] = None
 _DEFAULT_EXPLORED_ZONES: Optional[str] = None
 _DEFAULT_KNOWN_TITLES: Optional[str] = None
 _MAX_CHARACTERS_PER_REALM = 30
+_SANDBOX_RACE_REMAP = {
+    24: 26,  # Neutral Pandaren -> Horde Pandaren until neutral faction choice exists.
+}
+_CINEMATIC_PENDING = 2
 
 from server.modules.handlers.world.login.packets import (
     build_ENUM_CHARACTERS_RESULT,
@@ -1040,9 +1044,16 @@ def handle_CMSG_CHAR_CREATE(ctx: PacketContext):
 
     db = DatabaseConnection.chars()
     try:
-        race_id = int(data.get("race", 0))
+        requested_race_id = int(data.get("race", 0))
+        race_id = int(_SANDBOX_RACE_REMAP.get(requested_race_id, requested_race_id))
         class_id = int(data.get("class", 0))
         gender = int(data.get("gender", 0))
+        if race_id != requested_race_id:
+            Logger.info(
+                "[CHAR CREATE] sandbox race remap requested=%s stored=%s",
+                int(requested_race_id),
+                int(race_id),
+            )
         if gender not in (0, 1):
             payload = EncoderHandler.encode_packet(
                 "SMSG_CHAR_CREATE", {"result": CHAR_CREATE_ERROR}
@@ -1099,6 +1110,7 @@ def handle_CMSG_CHAR_CREATE(ctx: PacketContext):
             level=1,
             playerBytes=playerBytes,
             playerBytes2=playerBytes2,
+            cinematic=_CINEMATIC_PENDING,
             map=start_map,
             zone=start_zone,
             position_x=start_x,

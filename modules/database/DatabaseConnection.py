@@ -2148,6 +2148,34 @@ class DatabaseConnection:
             return False
 
     @staticmethod
+    def save_character_cinematic_state(guid: int, realm_id: int, cinematic: int) -> bool:
+        session = DatabaseConnection.chars()
+        try:
+            row = (
+                session.query(Characters)
+                .filter(
+                    Characters.guid == int(guid),
+                    Characters.realm == int(realm_id),
+                )
+                .one_or_none()
+            )
+            if row is None:
+                return False
+            row.cinematic = int(cinematic)
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(
+                "[DB] save_character_cinematic_state failed guid=%s realm=%s cinematic=%s: %s",
+                int(guid),
+                int(realm_id),
+                int(cinematic),
+                exc,
+            )
+            return False
+
+    @staticmethod
     def ensure_character_spells(guid: int, spell_ids: list[int] | tuple[int, ...] | set[int]) -> list[int]:
         session = DatabaseConnection.chars()
         guid = int(guid)

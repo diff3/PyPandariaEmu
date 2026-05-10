@@ -778,6 +778,25 @@ def test_initialize_session_language_state_keeps_horde_on_orcish():
     assert session.known_languages_mask == (1 << 1)
 
 
+def test_initialize_session_language_state_uses_orcish_for_neutral_pandaren():
+    spells_handlers = _import_spells_handlers()
+    session = SimpleNamespace(
+        race=24,
+        player_name="Pandaren",
+        char_guid=24,
+        language=0,
+        known_languages_mask=0,
+    )
+
+    spells_handlers.initialize_session_language_state(session)
+
+    assert session.language == 1
+    assert session.current_language == 1
+    assert session.known_languages_mask & (1 << 1)
+    assert 669 in session.known_spells
+    assert 108127 not in session.known_spells
+
+
 def test_raw_known_spells_payload_loads():
     spells_handlers = _import_spells_handlers()
 

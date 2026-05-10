@@ -168,6 +168,47 @@ def test_world_bootstrap_refreshes_weather_before_weather_packet(monkeypatch) ->
     assert responses == [("SMSG_WEATHER", b"weather")]
 
 
+def test_cinematic_only_triggers_for_pending_state() -> None:
+    assert login_handlers._resolve_pending_cinematic_id(1, 0) == 0
+    assert login_handlers._resolve_pending_cinematic_id(1, 1) == 0
+    assert login_handlers._resolve_pending_cinematic_id(1, 2) == 81
+
+
+def test_pending_cinematic_response_marks_character_played(monkeypatch) -> None:
+    saved = {}
+    encoded = {}
+    session = SimpleNamespace(
+        pending_cinematic_id=259,
+        char_guid=24,
+        realm_id=1,
+        race=26,
+    )
+
+    monkeypatch.setattr(
+        login_handlers.EncoderHandler,
+        "encode_packet",
+        lambda name, fields: encoded.update(packet=(name, fields)) or b"cinematic",
+    )
+    monkeypatch.setattr(
+        login_handlers.DatabaseConnection,
+        "save_character_cinematic_state",
+        lambda guid, realm_id, cinematic: saved.update(
+            guid=guid,
+            realm_id=realm_id,
+            cinematic=cinematic,
+        ) or True,
+        raising=False,
+    )
+
+    responses = login_handlers._build_pending_cinematic_response(session)
+
+    assert responses == [("SMSG_TRIGGER_CINEMATIC", b"cinematic")]
+    assert encoded["packet"] == ("SMSG_TRIGGER_CINEMATIC", {"cinematic_id": 259})
+    assert saved == {"guid": 24, "realm_id": 1, "cinematic": 1}
+    assert session.pending_cinematic_id == 0
+    assert session.cinematic_played == 1
+
+
 def test_active_mover_sends_mount_restore_after_known_spells(monkeypatch) -> None:
     session = SimpleNamespace(
         login_state=LoginState.WORLD_BOOTSTRAP,

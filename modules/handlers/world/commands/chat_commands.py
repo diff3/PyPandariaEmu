@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import random
 import time
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 import yaml
@@ -85,6 +86,37 @@ MORPH_NAME_TO_DISPLAY = {
     "wisp": 10045,
 }
 UNIT_FIELD_DISPLAYID = 69
+CHEAT_BAG_ENTRY = 82446
+CHEAT_BAG_COUNT = 4
+CHEAT_TARGET_LEVEL = 90
+CHEAT_EQUIPMENT_SLOTS = tuple(range(19))
+CHEAT_BAG_SLOTS = tuple(range(19, 23))
+CHEAT_CLASS_NAMES = {
+    1: "warrior",
+    2: "paladin",
+    3: "hunter",
+    4: "rogue",
+    5: "priest",
+    6: "deathknight",
+    7: "shaman",
+    8: "mage",
+    9: "warlock",
+    10: "monk",
+    11: "druid",
+}
+CHEAT_MOUNT_ACTION_BUTTONS = (
+    ("Ancient Frostsaber", 16056),
+    ("Purple Skeletal Warhorse", 23246),
+    ("Shado-Pan Riding Tiger", 129932),
+    ("Ashes of Al'ar", 40192),
+    ("Big Love Rocket", 71342),
+    ("Heavenly Onyx Cloud Serpent", 127158),
+    ("Icebound Frostbrood Vanquisher", 72807),
+    ("Invincible", 72286),
+    ("Mimiron's Head", 63796),
+    ("Red Flying Cloud", 130092),
+)
+CHEAT_ACTION_BUTTON_TYPE_MOUNT = 0
 
 
 def configure(**helpers: Any) -> None:
@@ -190,6 +222,41 @@ def _is_explicit_command(message: str) -> bool:
 def _call_command(name: str, session, args: list[str]) -> list[tuple[str, bytes]]:
     """Call a command from the runtime lookup map."""
     return COMMANDS[name].handler(session, args)
+
+
+def _client_bag_for_item(session, item) -> int | None:
+    """Resolve inventory internal bag ids to client bag ids for move/equip commands."""
+    bag = int(getattr(item, "bag", 0) or 0)
+    if bag == 0:
+        return 0
+
+    state = getattr(session, "inventory_state", None)
+    if state is None:
+        return None
+    for bag_slot in CHEAT_BAG_SLOTS:
+        bag_item = state.get(0, int(bag_slot))
+        if bag_item and int(getattr(bag_item, "item_guid", 0) or 0) == bag:
+            return int(bag_slot) - 18
+    return None
+
+
+def _build_action_button_update(session) -> list[tuple[str, bytes]]:
+    try:
+        from server.modules.handlers.world.login.packets import build_login_packet
+    except Exception as exc:
+        Logger.warning("[Cheat] action button update unavailable: %s", exc)
+        return []
+
+    payload = build_login_packet(
+        "SMSG_UPDATE_ACTION_BUTTONS",
+        SimpleNamespace(
+            action_buttons=list(getattr(session, "action_buttons", []) or []),
+            action_button_state=1,
+        ),
+    )
+    if payload is None:
+        return []
+    return [("SMSG_UPDATE_ACTION_BUTTONS", payload)]
 
 
 def _gps_strings(session) -> tuple[str, str]:
@@ -1069,6 +1136,141 @@ def cmd_addtier(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
+@register_command("cheat", ".cheat")
+def cmd_cheat(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Boost the current character with map reveal, bags, tier gear and mount buttons."""
+    if args:
+        return _notification_response("Usage: .cheat")
+
+    from server.modules.game import inventory as inventory_game
+
+    responses: list[tuple[str, bytes]] = []
+    char_guid = int(getattr(session, "char_guid", 0) or 0)
+
+    level_command = COMMANDS.get("level")
+    if level_command:
+        responses.extend(level_command.handler(session, ["set", str(CHEAT_TARGET_LEVEL)]))
+
+    if bool(getattr(session, "inventory_dirty", False)):
+        persist_session_inventory(session)
+
+    inventory_game.refresh_session_inventory(session)
+
+    map_command = COMMANDS.get("map")
+    if map_command:
+        responses.extend(map_command.handler(session, ["on"]))
+
+    removed_items = 0
+    for slot in CHEAT_EQUIPMENT_SLOTS:
+        result = inventory_game.destroy_character_item(session, 0, int(slot))
+        if result.ok:
+            removed_items += 1
+    if removed_items:
+        inventory_game.persist_session_inventory(session)
+        inventory_game.refresh_session_inventory(session)
+
+    mounted_bags = 0
+    stored_bags = 0
+    for _index in range(CHEAT_BAG_COUNT):
+        result = add_item_to_character(session, CHEAT_BAG_ENTRY, 1)
+        if not result.ok or result.item is None:
+            Logger.warning("[Cheat] bag add failed: %s", result.message)
+            continue
+
+        state = getattr(session, "inventory_state", None)
+        free_bag_slot = None
+        if state is not None:
+            for bag_slot in CHEAT_BAG_SLOTS:
+                if state.get(0, int(bag_slot)) is None:
+                    free_bag_slot = int(bag_slot)
+                    break
+
+        if free_bag_slot is None:
+            stored_bags += 1
+            continue
+
+        move_result = inventory_game.move_item_to_root_slot_by_guid(
+            session,
+            int(result.item.item_guid),
+            int(free_bag_slot),
+        )
+        if move_result.ok:
+            mounted_bags += 1
+            inventory_game.persist_session_inventory(session)
+            inventory_game.refresh_session_inventory(session)
+        else:
+            stored_bags += 1
+            Logger.warning("[Cheat] bag equip failed slot=%s: %s", free_bag_slot, move_result.message)
+
+    class_name = CHEAT_CLASS_NAMES.get(int(getattr(session, "class_id", 0) or 0))
+    if class_name == "paladin":
+        tier = 2
+    elif class_name == "monk":
+        tier = 14
+    else:
+        tier = 1
+    equipped_tier_items = 0
+    added_tier_items = 0
+    tier_set_items = _helper("tier_set_items")
+    item_entries = tuple(tier_set_items.get(class_name or "", {}).get(tier, ()))
+    for item_entry in item_entries:
+        result = add_item_to_character(session, int(item_entry), 1)
+        if not result.ok or result.item is None:
+            Logger.warning("[Cheat] tier add failed entry=%s: %s", item_entry, result.message)
+            continue
+        added_tier_items += 1
+
+        src_bag = _client_bag_for_item(session, result.item)
+        if src_bag is None:
+            continue
+        equip_result = inventory_game.auto_equip_item(session, int(src_bag), int(result.item.slot))
+        if equip_result.ok:
+            equipped_tier_items += 1
+            inventory_game.persist_session_inventory(session)
+            inventory_game.refresh_session_inventory(session)
+        else:
+            Logger.warning("[Cheat] tier equip failed entry=%s: %s", item_entry, equip_result.message)
+
+    spell_ids = [int(spell_id) for _name, spell_id in CHEAT_MOUNT_ACTION_BUTTONS]
+    try:
+        learned_spells = DatabaseConnection.ensure_character_spells(char_guid, spell_ids) if char_guid > 0 else []
+        known_spells = set(int(spell_id) for spell_id in getattr(session, "known_spells", set()) or set())
+        known_spells.update(int(spell_id) for spell_id in learned_spells)
+        known_spells.update(spell_ids)
+        session.known_spells = sorted(known_spells)
+    except Exception as exc:
+        Logger.warning("[Cheat] mount spell learn failed: %s", exc)
+
+    buttons = list(getattr(session, "action_buttons", []) or [])
+    if len(buttons) < 132:
+        buttons.extend([0] * (132 - len(buttons)))
+    for slot, (_name, spell_id) in enumerate(CHEAT_MOUNT_ACTION_BUTTONS):
+        buttons[int(slot)] = ((CHEAT_ACTION_BUTTON_TYPE_MOUNT & 0xFF) << 24) | (int(spell_id) & 0x00FFFFFF)
+        if char_guid > 0:
+            DatabaseConnection.save_character_action_button(
+                char_guid,
+                int(slot),
+                int(spell_id),
+                CHEAT_ACTION_BUTTON_TYPE_MOUNT,
+                spec=0,
+            )
+    session.action_buttons = buttons
+
+    inventory_game.persist_session_inventory(session)
+    inventory_game.refresh_session_inventory(session, persist=True)
+    responses.append(spells_handlers.build_known_spells_response(session))
+    responses.extend(_build_login_inventory_sync(session))
+    responses.extend(_build_action_button_update(session))
+    responses.extend(
+        _notification_response(
+            f"[Cheat] level={CHEAT_TARGET_LEVEL} bags={mounted_bags} mounted/{stored_bags} stored "
+            f"gear_removed={removed_items} tier={class_name or 'unknown'} T{tier} "
+            f"equipped={equipped_tier_items}/{added_tier_items} actionbar={len(CHEAT_MOUNT_ACTION_BUTTONS)}"
+        )
+    )
+    return responses
+
+
 @register_command("fixplayer", ".fixplayer [teleport]")
 def cmd_fixplayer(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Resend player state, optionally from a teleport destination."""
@@ -1586,6 +1788,7 @@ PRIMARY_COMMANDS = {
     "addmoney": Command(handler=cmd_addmoney, usage=".addmoney <copper | 10g10s10c>", require_args=False),
     "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>"),
     "castspell": Command(handler=cmd_castspell, usage=".castspell <spell_id>", require_args=True),
+    "cheat": Command(handler=cmd_cheat, usage=".cheat", allow_args=False),
     "demorph": Command(handler=cmd_demorph, usage=".demorph", allow_args=False),
     "dismount": Command(handler=cmd_dismount, usage=".dismount", allow_args=False),
     "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", require_args=True),

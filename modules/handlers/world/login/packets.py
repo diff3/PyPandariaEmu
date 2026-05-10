@@ -383,7 +383,7 @@ def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
     race = int(getattr(ctx, "race", 0) or 0)
 
     alliance_races = {1, 3, 4, 7, 11, 22, 25}
-    horde_races = {2, 5, 6, 8, 9, 10, 26}
+    horde_races = {2, 5, 6, 8, 9, 10, 24, 26}
 
     _LANG_COMMON = 7
     _LANG_ORCISH = 1
@@ -419,7 +419,6 @@ def build_SMSG_SEND_KNOWN_SPELLS(ctx) -> bytes:
         10: 813,
         11: 29932,
         22: 69269,
-        24: 108127,
         26: 108131,
     }.get(race, 0)
 
@@ -1488,6 +1487,7 @@ def _patch_mount_skill_block_1773613176_0002_fields(
         6: 114,  # Tauren -> Taurahe
         8: 116,  # Troll -> Troll
         10: 139, # Blood Elf -> Thalassian
+        24: 109, # Neutral Pandaren -> Orcish fallback
     }
 
     racial = RACIAL_LANG.get(race)

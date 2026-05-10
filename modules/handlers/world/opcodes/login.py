@@ -38,6 +38,7 @@ from server.modules.handlers.world.account_data import (
 )
 from server.modules.handlers.world.bootstrap import replay as bootstrap_replay
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
+from DSL.modules.EncoderHandler import EncoderHandler
 from server.modules.handlers.world.constants.character_data import (
     DEFAULT_MAX_PRIMARY_POWER_BY_DISPLAY,
     PLAYER_DISPLAY_POWER_BY_CLASS,
@@ -62,6 +63,31 @@ from server.modules.handlers.world.position.position_service import (
     normalize_position,
     position_from_row,
 )
+
+_CINEMATIC_SEQUENCE_BY_RACE = {
+    # ChrRaces.dbc cinematic sequence ids.
+    1: 81,
+    2: 21,
+    3: 41,
+    4: 61,
+    5: 2,
+    6: 141,
+    7: 101,
+    8: 121,
+    9: 172,
+    10: 162,
+    11: 163,
+    22: 170,
+    24: 259,
+    25: 259,
+    26: 259,
+}
+_SANDBOX_RACE_REMAP = {
+    24: 26,  # Neutral Pandaren -> Horde Pandaren until neutral faction choice exists.
+}
+_CINEMATIC_OFF = 0
+_CINEMATIC_PLAYED = 1
+_CINEMATIC_PENDING = 2
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.handlers.world.state.runtime import (
     attach_session_to_world_state,
@@ -351,6 +377,41 @@ def _build_world_login_context(session) -> WorldLoginContext:
     return ctx
 
 
+def _resolve_opening_cinematic_id(race: int) -> int:
+    return int(_CINEMATIC_SEQUENCE_BY_RACE.get(int(race), 0) or 0)
+
+
+def _resolve_pending_cinematic_id(race: int, cinematic_state: int) -> int:
+    if int(cinematic_state or 0) != _CINEMATIC_PENDING:
+        return 0
+    return _resolve_opening_cinematic_id(int(race))
+
+
+def _build_pending_cinematic_response(session) -> list[tuple[str, bytes]]:
+    cinematic_id = int(getattr(session, "pending_cinematic_id", 0) or 0)
+    if cinematic_id <= 0:
+        return []
+
+    payload = EncoderHandler.encode_packet(
+        "SMSG_TRIGGER_CINEMATIC",
+        {"cinematic_id": int(cinematic_id)},
+    )
+    session.pending_cinematic_id = 0
+    session.cinematic_played = _CINEMATIC_PLAYED
+    DatabaseConnection.save_character_cinematic_state(
+        int(getattr(session, "char_guid", 0) or 0),
+        int(getattr(session, "realm_id", 0) or 0),
+        _CINEMATIC_PLAYED,
+    )
+    Logger.info(
+        "[CINEMATIC] trigger guid=%s race=%s cinematic=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        int(getattr(session, "race", 0) or 0),
+        int(cinematic_id),
+    )
+    return [("SMSG_TRIGGER_CINEMATIC", payload)]
+
+
 def _is_pre_player_login_state(state: Optional[LoginState]) -> bool:
     return state in {None, LoginState.AUTHED, LoginState.CHAR_SCREEN}
 
@@ -611,6 +672,29 @@ def handle_player_login(session, ctx: PacketContext):
         Logger.error(f"[WorldHandlers] Character not found guid={char_guid} realm={realm_id}")
         return 1, None
 
+    stored_race = int(getattr(row, "race", 0) or 0)
+    remapped_race = int(_SANDBOX_RACE_REMAP.get(stored_race, stored_race))
+    if remapped_race != stored_race:
+        try:
+            row.race = remapped_race
+            DatabaseConnection.chars().commit()
+            Logger.info(
+                "[LOGIN] sandbox race remap guid=%s stored=%s active=%s",
+                int(char_guid),
+                int(stored_race),
+                int(remapped_race),
+            )
+        except Exception as exc:
+            DatabaseConnection.chars().rollback()
+            Logger.warning(
+                "[LOGIN] sandbox race remap failed guid=%s stored=%s active=%s: %s",
+                int(char_guid),
+                int(stored_race),
+                int(remapped_race),
+                exc,
+            )
+            row.race = remapped_race
+
     session._character_row = row
     selected_name = str(getattr(row, "name", "") or f"Player{char_guid}")
 
@@ -677,6 +761,8 @@ def handle_player_login(session, ctx: PacketContext):
     session.class_id = int(row.class_ or 0)
     session.race = int(row.race or 0)
     session.gender = int(row.gender or 0)
+    session.cinematic_played = int(getattr(row, "cinematic", _CINEMATIC_OFF) or _CINEMATIC_OFF)
+    session.pending_cinematic_id = _resolve_pending_cinematic_id(session.race, session.cinematic_played)
 
     spells_handlers._restore_default_movement_speeds(session)
 
@@ -855,6 +941,26 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
     return 0, responses
 
 
+@register("CMSG_OPENING_CINEMATIC")
+def handle_opening_cinematic(session, ctx: PacketContext):
+    Logger.info("[CINEMATIC] CMSG_OPENING_CINEMATIC")
+    responses = _build_pending_cinematic_response(session)
+    return 0, responses or None
+
+
+@register("CMSG_COMPLETE_CINEMATIC")
+def handle_complete_cinematic(session, ctx: PacketContext):
+    Logger.info("[CINEMATIC] CMSG_COMPLETE_CINEMATIC")
+    session.pending_cinematic_id = 0
+    session.cinematic_played = _CINEMATIC_PLAYED
+    DatabaseConnection.save_character_cinematic_state(
+        int(getattr(session, "char_guid", 0) or 0),
+        int(getattr(session, "realm_id", 0) or 0),
+        _CINEMATIC_PLAYED,
+    )
+    return 0, None
+
+
 @register("CMSG_SET_ACTIVE_MOVER")
 def handle_set_active_mover(session, ctx: PacketContext):
     Logger.info(
@@ -873,6 +979,7 @@ def handle_set_active_mover(session, ctx: PacketContext):
     sync_player_visibility(session)
     sync_all_players_on_map(int(getattr(session, "map_id", 0) or 0))
     responses: list[tuple[str, bytes]] = []
+    responses.extend(_build_pending_cinematic_response(session))
     motd = str(getattr(_build_world_login_context(session), "motd", "") or "").strip()
     if motd and not session.chat_motd_sent:
         session.chat_motd_sent = True

@@ -876,6 +876,13 @@ _TIER_SET_ITEMS: dict[str, dict[int, tuple[int, ...]]] = {
         ),
     },
 
+    "monk": {
+        # Tier 14 - Red Crane Battlegear
+        14: (
+            85384, 85385, 85386, 85387, 85388,
+        ),
+    },
+
     "deathknight": {
         # Starter gear
         0: (
@@ -2001,6 +2008,11 @@ def _handle_chat_message(session, ctx: PacketContext):
         or getattr(session, "language", 0)
         or 0
     )
+    if int(getattr(session, "race", 0) or 0) == 24 and active_language <= 0:
+        active_language = 1
+        session.language = 1
+        session.current_language = 1
+        session.known_languages_mask = int(getattr(session, "known_languages_mask", 0) or 0) | (1 << 1)
 
     mask = int(getattr(session, "known_languages_mask", 0) or 0)
 
