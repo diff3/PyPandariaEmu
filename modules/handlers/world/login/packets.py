@@ -510,7 +510,7 @@ def build_SMSG_UPDATE_ACTION_BUTTONS(ctx) -> bytes:
     button_count = 132
     packet_type = int(getattr(ctx, "action_button_state", 0) or 0) & 0xFF
     source_buttons = list(getattr(ctx, "action_buttons", []) or [])
-    button_bytes: list[bytearray] = []
+    button_bytes: list[bytes] = []
 
     for index in range(button_count):
         try:
@@ -520,50 +520,31 @@ def build_SMSG_UPDATE_ACTION_BUTTONS(ctx) -> bytes:
 
         action_id = int(packed_value & 0x00FFFFFF)
         action_type_word = int(packed_value & 0xFF000000)
-        button_bytes.append(bytearray(struct.pack("<II", action_id, action_type_word)))
+        button_bytes.append(struct.pack("<II", action_id, action_type_word))
 
-    payload = bytearray()
-    bits = BitWriter()
+    fields: dict[str, Any] = {"state": packet_type}
+    for byte_index in range(8):
+        fields[f"mask_byte{byte_index}"] = [
+            {"value": 1 if button_bytes[index][byte_index] else 0}
+            for index in range(button_count)
+        ]
+        fields[f"byte{byte_index}"] = [
+            {"value": button_bytes[index][byte_index]}
+            for index in range(button_count)
+        ]
 
-    for index in range(button_count):
-        bits.write_bits(1 if button_bytes[index][4] else 0, 1)
-    for index in range(button_count):
-        bits.write_bits(1 if button_bytes[index][5] else 0, 1)
-    for index in range(button_count):
-        bits.write_bits(1 if button_bytes[index][3] else 0, 1)
-    for index in range(button_count):
-        bits.write_bits(1 if button_bytes[index][1] else 0, 1)
-    for index in range(button_count):
-        bits.write_bits(1 if button_bytes[index][6] else 0, 1)
-    for index in range(button_count):
-        bits.write_bits(1 if button_bytes[index][7] else 0, 1)
-    for index in range(button_count):
-        bits.write_bits(1 if button_bytes[index][0] else 0, 1)
-    for index in range(button_count):
-        bits.write_bits(1 if button_bytes[index][2] else 0, 1)
-
-    payload.extend(bits.getvalue())
-
-    for byte_index in (0, 1, 4, 6, 7, 2, 5, 3):
-        for index in range(button_count):
-            value = button_bytes[index][byte_index]
-            if value:
-                payload.append(value ^ 0x01)
-
-    payload.append(packet_type)
-
-    return bytes(payload)
+    return _encode("SMSG_UPDATE_ACTION_BUTTONS", fields)
 
 
 def build_SMSG_ACTION_BUTTONS(session) -> bytes:
-    buttons = getattr(session, "action_buttons", [0] * 132)
-
-    payload = bytearray()
-
-    for value in buttons:
-        payload += int(value).to_bytes(4, "little")
-
-    return bytes(payload)
+    buttons = list(getattr(session, "action_buttons", [0] * 132) or [])[:132]
+    buttons.extend([0] * max(0, 132 - len(buttons)))
+    return _encode("SMSG_ACTION_BUTTONS", {
+        "buttons": [
+            {"value": int(value) & 0xFFFFFFFF}
+            for value in buttons
+        ],
+    })
 
 def build_SMSG_INITIALIZE_FACTIONS(ctx) -> bytes:
     factions = list(getattr(ctx, "factions", []) or [])

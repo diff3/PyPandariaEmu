@@ -1,9 +1,11 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
-import struct
 from typing import Optional, Tuple
 
-from DSL.modules.bitsHandler import BitInterPreter, BitWriter
+from DSL.modules.EncoderHandler import EncoderHandler
 from shared.Logger import Logger
 from server.modules.game.inventory import (
     auto_equip_item,
@@ -12,7 +14,11 @@ from server.modules.game.inventory import (
     move_item_to_root_slot_by_guid,
     swap_character_item,
 )
-from server.modules.game.guid import GuidHelper
+try:
+    from server.modules.game.inventory import persist_session_inventory
+except ImportError:
+    def persist_session_inventory(_session) -> bool:
+        return True
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.inventory_sync import (
@@ -23,6 +29,7 @@ from server.modules.handlers.world.inventory_sync import (
     trigger_inventory_activation,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
+from server.modules.interpretation.utils import dsl_decode
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.handlers.world.state.runtime import (
     broadcast_visible_equipment_update,
@@ -32,6 +39,17 @@ from server.modules.handlers.world.state.runtime import (
 
 def _system_message(message: str) -> list[tuple[str, bytes]]:
     return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(message))]
+
+
+def _decoded_cmsg(ctx: PacketContext) -> dict:
+    decoded = log_cmsg(ctx) or {}
+    if decoded:
+        return decoded
+    payload = bytes(getattr(ctx, "payload", b"") or b"")
+    name = str(getattr(ctx, "name", "") or "")
+    if not payload or not name:
+        return {}
+    return dsl_decode(name, payload, silent=True)
 
 
 def _coerce_guid_int(value) -> int:
@@ -79,6 +97,13 @@ def _decoded_first_int(decoded: dict, *keys: str) -> int | None:
     return None
 
 
+def _decoded_int_or_alt(decoded: dict, field_key: str, alt_key: str) -> int | None:
+    value = _decoded_first_int(decoded, field_key)
+    if value is not None:
+        return value
+    return _decoded_first_int(decoded, alt_key)
+
+
 _ITEM_HIGHGUID = 0x400
 _EQUIP_ERR_OK = 0
 _EQUIP_ERR_WRONG_SLOT = 3
@@ -102,16 +127,16 @@ def _make_item_world_guid(item_low_guid: int) -> int:
     return _make_skyfire_guid(int(item_low_guid), 0, _ITEM_HIGHGUID)
 
 
-def _write_guid_mask_bits(bits: BitWriter, raw_guid: bytes, order: tuple[int, ...]) -> None:
-    for index in order:
-        bits.write_bits(1 if raw_guid[index] else 0, 1)
-
-
-def _append_guid_byte_seq(payload: bytearray, raw_guid: bytes, order: tuple[int, ...]) -> None:
-    for index in order:
-        value = raw_guid[index]
+def _inventory_change_failure_guid_fields(prefix: str, guid: int) -> dict[str, int]:
+    raw_guid = int(guid or 0).to_bytes(8, "little", signed=False)
+    fields: dict[str, int] = {}
+    for index, value in enumerate(raw_guid):
+        mask_key = f"{prefix}_{index}_mask"
+        value_key = f"{prefix}_{index}"
+        fields[mask_key] = 1 if value else 0
         if value:
-            payload.append((value ^ 1) & 0xFF)
+            fields[value_key] = (int(value) ^ 1) & 0xFF
+    return fields
 
 
 def build_inventory_change_failure_payload(
@@ -121,78 +146,30 @@ def build_inventory_change_failure_payload(
     item_guid2: int = 0,
     bag_type_subclass: int = 0,
 ) -> bytes:
-    raw_guid = int(item_guid or 0).to_bytes(8, "little", signed=False)
-    raw_guid2 = int(item_guid2 or 0).to_bytes(8, "little", signed=False)
-
-    bits = BitWriter()
-    _write_guid_mask_bits(bits, raw_guid2, (4,))
-    _write_guid_mask_bits(bits, raw_guid, (3,))
-    _write_guid_mask_bits(bits, raw_guid2, (6, 2))
-    _write_guid_mask_bits(bits, raw_guid, (4,))
-    _write_guid_mask_bits(bits, raw_guid2, (5,))
-    _write_guid_mask_bits(bits, raw_guid, (1, 6))
-    _write_guid_mask_bits(bits, raw_guid2, (0, 3, 1))
-    _write_guid_mask_bits(bits, raw_guid, (0, 2, 7, 5))
-    _write_guid_mask_bits(bits, raw_guid2, (7,))
-    bits.flush_to_byte()
-
-    payload = bytearray(bits.buffer)
-    _append_guid_byte_seq(payload, raw_guid2, (0,))
-    payload.extend(struct.pack("<B", int(bag_type_subclass) & 0xFF))
-    _append_guid_byte_seq(payload, raw_guid2, (6,))
-    _append_guid_byte_seq(payload, raw_guid, (4, 0, 7, 3))
-    _append_guid_byte_seq(payload, raw_guid2, (1, 5))
-    _append_guid_byte_seq(payload, raw_guid, (5,))
-    _append_guid_byte_seq(payload, raw_guid2, (7, 2))
-    _append_guid_byte_seq(payload, raw_guid, (1, 6, 2))
-    _append_guid_byte_seq(payload, raw_guid2, (3, 4))
-    payload.extend(struct.pack("<B", int(error_code) & 0xFF))
-    return bytes(payload)
-
-
-def _decode_swap_item_payload(raw: bytes) -> tuple[int, int, int, int] | None:
-    if len(raw) < 9:
-        return None
-
-    src_slot_alt = int(raw[0])
-    src_bag_alt = int(raw[1])
-    dst_bag_alt = int(raw[2])
-    dst_slot_alt = int(raw[3])
-
-    byte_pos = 4
-    bit_pos = 0
-    count, byte_pos, bit_pos = BitInterPreter.read_bits(raw, byte_pos, bit_pos, 2)
-    if int(count) != 2:
-        return None
-
-    has_slot: list[bool] = []
-    has_bag: list[bool] = []
-    for _ in range(2):
-        slot_bit, byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
-        bag_bit, byte_pos, bit_pos = BitInterPreter.read_bit(raw, byte_pos, bit_pos)
-        has_slot.append(not bool(slot_bit))
-        has_bag.append(not bool(bag_bit))
-
-    if bit_pos != 0:
-        byte_pos += 1
-        bit_pos = 0
-
-    def _read_u8() -> int | None:
-        nonlocal byte_pos
-        if byte_pos >= len(raw):
-            return None
-        value = int(raw[byte_pos])
-        byte_pos += 1
-        return value
-
-    dst_bag = _read_u8() if has_bag[0] else dst_bag_alt
-    dst_slot = _read_u8() if has_slot[0] else dst_slot_alt
-    src_bag = _read_u8() if has_bag[1] else src_bag_alt
-    src_slot = _read_u8() if has_slot[1] else src_slot_alt
-
-    if None in (src_bag, src_slot, dst_bag, dst_slot):
-        return None
-    return int(src_bag), int(src_slot), int(dst_bag), int(dst_slot)
+    mask_keys = [
+        "item2_guid_4_mask",
+        "item_guid_3_mask",
+        "item2_guid_6_mask",
+        "item2_guid_2_mask",
+        "item_guid_4_mask",
+        "item2_guid_5_mask",
+        "item_guid_1_mask",
+        "item_guid_6_mask",
+        "item2_guid_0_mask",
+        "item2_guid_3_mask",
+        "item2_guid_1_mask",
+        "item_guid_0_mask",
+        "item_guid_2_mask",
+        "item_guid_7_mask",
+        "item_guid_5_mask",
+        "item2_guid_7_mask",
+    ]
+    fields = {key: 0 for key in mask_keys}
+    fields.update(_inventory_change_failure_guid_fields("item_guid", int(item_guid or 0)))
+    fields.update(_inventory_change_failure_guid_fields("item2_guid", int(item_guid2 or 0)))
+    fields["bag_type_subclass"] = int(bag_type_subclass) & 0xFF
+    fields["error_code"] = int(error_code) & 0xFF
+    return EncoderHandler.encode_packet("SMSG_INVENTORY_CHANGE_FAILURE", fields)
 
 
 def _inventory_error_code_for_message(message: str) -> int:
@@ -244,6 +221,8 @@ def _result_to_response(
     level = "info" if result.ok else "warning"
     getattr(Logger, level)(f"[Inventory] {prefix} -> {result.message}")
     if result.ok:
+        if not persist_session_inventory(session):
+            Logger.warning(f"[Inventory] {prefix} persist failed after successful mutation")
         responses = build_inventory_delta_responses(session, result)
         if inventory_result_affects_equipment(result):
             broadcast_visible_equipment_update(session)
@@ -266,7 +245,7 @@ def _result_to_response(
 
 @register("CMSG_AUTOEQUIP_ITEM")
 def handle_autoequip_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    decoded = log_cmsg(ctx) or {}
+    decoded = _decoded_cmsg(ctx)
     src_slot = _decoded_first_int(decoded, "src_slot", "srcSlot", "source_slot", "slot")
     src_bag = _decoded_first_int(decoded, "src_bag", "srcBag", "source_bag", "bag")
 
@@ -279,7 +258,7 @@ def handle_autoequip_item(session, ctx: PacketContext) -> Tuple[int, Optional[li
 
 @register("CMSG_AUTOEQUIP_ITEM_SLOT")
 def handle_autoequip_item_slot(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    decoded = log_cmsg(ctx) or {}
+    decoded = _decoded_cmsg(ctx)
 
     slot = _decoded_first_int(decoded, "slot", "dst_slot", "equipment_slot")
     item_guid = _coerce_guid_int(
@@ -298,19 +277,10 @@ def handle_autoequip_item_slot(session, ctx: PacketContext) -> Tuple[int, Option
 
 @register("CMSG_AUTOSTORE_BAG_ITEM")
 def handle_autostore_bag_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    log_cmsg(ctx)
-    decoded = ctx.decoded or {}
-    raw = bytes(ctx.payload or b"")
+    decoded = _decoded_cmsg(ctx)
     src_slot = _decoded_first_int(decoded, "src_slot", "srcSlot", "source_slot", "slot")
     src_bag = _decoded_first_int(decoded, "src_bag", "srcBag", "source_bag", "bag")
     dst_bag = _decoded_first_int(decoded, "dst_bag", "dstBag", "dest_bag", "target_bag")
-
-    if src_slot is None and len(raw) >= 1:
-        src_slot = int(raw[0])
-    if src_bag is None and len(raw) >= 2:
-        src_bag = int(raw[1])
-    if dst_bag is None and len(raw) >= 3:
-        dst_bag = int(raw[2])
 
     if src_slot is None or src_bag is None or dst_bag is None:
         return 0, _system_message("[Inventory] malformed autostore packet")
@@ -334,7 +304,7 @@ def handle_autostore_bag_item(session, ctx: PacketContext) -> Tuple[int, Optiona
 
 @register("CMSG_SWAP_INV_ITEM")
 def handle_swap_inv_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    decoded = log_cmsg(ctx) or {}
+    decoded = _decoded_cmsg(ctx)
     src_slot = _decoded_first_int(decoded, "src_slot", "srcSlot", "source_slot", "slot")
     dst_slot = _decoded_first_int(decoded, "dst_slot", "dstSlot", "dest_slot", "target_slot")
 
@@ -362,35 +332,11 @@ def handle_swap_inv_item(session, ctx: PacketContext) -> Tuple[int, Optional[lis
 
 @register("CMSG_SWAP_ITEM")
 def handle_swap_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    log_cmsg(ctx)
-    decoded = ctx.decoded or {}
-    raw = bytes(ctx.payload or b"")
-    src_slot = _decoded_first_int(decoded, "src_slot", "srcSlot", "source_slot")
-    src_bag = _decoded_first_int(decoded, "src_bag", "srcBag", "source_bag")
-    dst_bag = _decoded_first_int(decoded, "dst_bag", "dstBag", "dest_bag", "target_bag")
-    dst_slot = _decoded_first_int(decoded, "dst_slot", "dstSlot", "dest_slot", "target_slot")
-
-    if None in (src_slot, src_bag, dst_bag, dst_slot):
-        parsed = _decode_swap_item_payload(raw)
-        if parsed is not None:
-            parsed_src_bag, parsed_src_slot, parsed_dst_bag, parsed_dst_slot = parsed
-            if src_bag is None:
-                src_bag = parsed_src_bag
-            if src_slot is None:
-                src_slot = parsed_src_slot
-            if dst_bag is None:
-                dst_bag = parsed_dst_bag
-            if dst_slot is None:
-                dst_slot = parsed_dst_slot
-
-    if src_slot is None and len(raw) >= 1:
-        src_slot = int(raw[0])
-    if src_bag is None and len(raw) >= 2:
-        src_bag = int(raw[1])
-    if dst_bag is None and len(raw) >= 3:
-        dst_bag = int(raw[2])
-    if dst_slot is None and len(raw) >= 4:
-        dst_slot = int(raw[3])
+    decoded = _decoded_cmsg(ctx)
+    src_slot = _decoded_int_or_alt(decoded, "src_slot", "src_slot_alt")
+    src_bag = _decoded_int_or_alt(decoded, "src_bag", "src_bag_alt")
+    dst_bag = _decoded_int_or_alt(decoded, "dst_bag", "dst_bag_alt")
+    dst_slot = _decoded_int_or_alt(decoded, "dst_slot", "dst_slot_alt")
 
     if src_slot is None or src_bag is None or dst_bag is None or dst_slot is None:
         return 0, _system_message("[Inventory] malformed swap packet")
@@ -416,19 +362,10 @@ def handle_swap_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tu
 
 @register("CMSG_DESTROY_ITEM")
 def handle_destroy_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    log_cmsg(ctx)
-    decoded = ctx.decoded or {}
-    raw = bytes(ctx.payload or b"")
+    decoded = _decoded_cmsg(ctx)
     slot = _decoded_first_int(decoded, "slot", "src_slot", "srcSlot")
     bag = _decoded_first_int(decoded, "bag", "bag_index", "bagIndex", "src_bag")
     count = _decoded_first_int(decoded, "count", "destroy_count", "stack_count")
-
-    if slot is None and len(raw) >= 5:
-        slot = int(raw[4])
-    if bag is None and len(raw) >= 6:
-        bag = int(raw[5])
-    if count is None and len(raw) >= 4:
-        count = int(struct.unpack_from("<I", raw, 0)[0])
 
     if slot is None or bag is None:
         return 0, _system_message("[Inventory] malformed destroy-item packet")
@@ -440,16 +377,9 @@ def handle_destroy_item(session, ctx: PacketContext) -> Tuple[int, Optional[list
 
 @register("CMSG_OPEN_ITEM")
 def handle_open_item(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    log_cmsg(ctx)
-    decoded = ctx.decoded or {}
-    raw = bytes(ctx.payload or b"")
+    decoded = _decoded_cmsg(ctx)
     bag_index = _decoded_first_int(decoded, "bag", "bag_index", "bagIndex", "src_bag")
     slot = _decoded_first_int(decoded, "slot", "src_slot", "srcSlot")
-
-    if bag_index is None and len(raw) >= 1:
-        bag_index = int(raw[0])
-    if slot is None and len(raw) >= 2:
-        slot = int(raw[1])
 
     if bag_index is None or slot is None:
         return 0, _system_message("[Inventory] malformed open-item packet")

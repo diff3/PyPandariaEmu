@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import struct
 import time
 from typing import Optional, Tuple
 
 from DSL.modules.EncoderHandler import EncoderHandler
-from DSL.modules.bitsHandler import BitInterPreter
 from shared.Logger import Logger
 from server.modules.handlers.world.login.packets import (
     handle_CMSG_REQUEST_HOTFIX as handle_request_hotfix_packet,
@@ -40,6 +38,7 @@ from server.modules.handlers.world.opcodes.movement import (
     _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
+from server.modules.interpretation.utils import dsl_decode
 from server.modules.handlers.world.state.runtime import (
     advance_global_time,
     broadcast_player_remove,
@@ -48,34 +47,22 @@ from server.modules.handlers.world.state.runtime import (
 
 
 def _decode_set_action_button_payload(payload: bytes) -> tuple[int, int, int]:
-    raw = bytes(payload or b"")
-    if len(raw) < 2:
+    if len(bytes(payload or b"")) < 2:
         raise ValueError("payload too short")
 
-    slot_id = int(raw[0])
+    decoded = dsl_decode("CMSG_SET_ACTION_BUTTON", bytes(payload or b""), silent=True)
+    if not decoded:
+        raise ValueError("DSL decode failed")
+
+    slot_id = int(decoded.get("slot_id", 0) or 0)
     button_bytes = [0] * 8
-    byte_pos = 1
-    bit_pos = 0
-    present: dict[int, bool] = {}
+    for index in range(8):
+        if int(decoded.get(f"action_{index}_mask", 0) or 0):
+            button_bytes[index] = int(decoded.get(f"action_{index}", 0) or 0) & 0xFF
 
-    for index in (7, 0, 5, 2, 1, 6, 3, 4):
-        bit_value, byte_pos, bit_pos = BitInterPreter.read_bits(raw, byte_pos, bit_pos, 1)
-        present[index] = bool(bit_value)
-
-    if bit_pos != 0:
-        byte_pos += 1
-
-    for index in (6, 7, 3, 5, 2, 1, 4, 0):
-        if not present.get(index, False):
-            continue
-        if byte_pos >= len(raw):
-            raise ValueError("payload truncated")
-        button_bytes[index] = raw[byte_pos] ^ 0x01
-        byte_pos += 1
-
-    action_id = int(struct.unpack_from("<I", bytes(button_bytes), 0)[0] & 0x00FFFFFF)
-    type_word = int(struct.unpack_from("<I", bytes(button_bytes), 4)[0])
-    action_type = int((type_word >> 24) & 0xFF)
+    raw_button = bytes(button_bytes)
+    action_id = int(int.from_bytes(raw_button[0:4], "little") & 0x00FFFFFF)
+    action_type = int((int.from_bytes(raw_button[4:8], "little") >> 24) & 0xFF)
     return slot_id, action_id, action_type
 
 def _build_request_cemetery_list_response_payload(

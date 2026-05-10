@@ -26,6 +26,7 @@ from server.modules.game.inventory import (
     InventoryItem,
     InventoryState,
     ItemTemplateInfo,
+    _first_free_storage_slot,
     _save_equipment_cache_after_mutation,
     auto_store_item,
     swap_character_item,
@@ -178,6 +179,61 @@ def test_auto_store_item_accepts_logical_bag_index_for_fourth_bag():
     session = _FakeSession(state)
 
     result = auto_store_item(session, 0, 23, 4)
+
+    assert result.ok is True
+    assert state.get(0, 23) is None
+    assert state.get(1000, 0).item_guid == 2000
+
+
+def test_first_free_storage_slot_uses_equipped_bag_when_backpack_is_full():
+    bag_template = _template(
+        entry=100,
+        display_id=2000,
+        inventory_type=18,
+        container_slots=6,
+        bag_family=1,
+    )
+    item_template = _template(entry=201, display_id=3100, inventory_type=0)
+    filler_template = _template(entry=202, display_id=3101, inventory_type=0)
+
+    state = InventoryState()
+    state.put(_item(guid=1000, bag=0, slot=19, template=bag_template))
+    for offset, slot in enumerate(range(23, 39)):
+        state.put(_item(guid=2000 + offset, bag=0, slot=slot, template=filler_template))
+
+    probe = _item(guid=0, bag=0, slot=0, template=item_template)
+
+    assert _first_free_storage_slot(state, probe) == (1000, 0)
+
+
+def test_first_free_storage_slot_allows_empty_bag_item_in_equipped_bag_when_backpack_is_full():
+    equipped_bag_template = _template(entry=100, display_id=2000, inventory_type=18, container_slots=6)
+    added_bag_template = _template(entry=51809, display_id=9100, inventory_type=18, container_slots=24)
+    filler_template = _template(entry=202, display_id=3101, inventory_type=0)
+
+    state = InventoryState()
+    state.put(_item(guid=1000, bag=0, slot=19, template=equipped_bag_template))
+    for offset, slot in enumerate(range(23, 39)):
+        state.put(_item(guid=2000 + offset, bag=0, slot=slot, template=filler_template))
+
+    probe = _item(guid=0, bag=0, slot=0, template=added_bag_template)
+
+    assert _first_free_storage_slot(state, probe) == (1000, 0)
+
+
+def test_auto_store_item_allows_empty_bag_item_in_equipped_bag():
+    equipped_bag_template = _template(entry=100, display_id=2000, inventory_type=18, container_slots=6)
+    stored_bag_template = _template(entry=51809, display_id=9100, inventory_type=18, container_slots=24)
+
+    equipped_bag = _item(guid=1000, bag=0, slot=19, template=equipped_bag_template)
+    backpack_bag = _item(guid=2000, bag=0, slot=23, template=stored_bag_template)
+
+    state = InventoryState()
+    for item in (equipped_bag, backpack_bag):
+        state.put(item)
+    session = _FakeSession(state)
+
+    result = auto_store_item(session, 0, 23, 19)
 
     assert result.ok is True
     assert state.get(0, 23) is None

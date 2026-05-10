@@ -710,7 +710,43 @@ def handle_player_login(session, ctx: PacketContext):
 
     session.explored_zones_raw = str(getattr(row, "exploredZones", "") or "")
 
-    refresh_session_inventory(session)
+    inventory_state = refresh_session_inventory(session)
+    has_equipped_items = any(
+        int(getattr(item, "bag", -1)) == 0 and 0 <= int(getattr(item, "slot", -1)) < 19
+        for item in getattr(inventory_state, "items_by_guid", {}).values()
+    )
+    if not has_equipped_items:
+        chars_db = None
+        try:
+            from server.modules.handlers.world.characters.characters import _seed_character_starting_inventory
+
+            chars_db = DatabaseConnection.chars()
+            seeded_items = _seed_character_starting_inventory(
+                chars_db,
+                int(char_guid),
+                int(session.race),
+                int(session.class_id),
+                int(session.gender),
+            )
+            if seeded_items:
+                chars_db.commit()
+                Logger.info(
+                    "[WorldLogin] backfilled %s starting inventory items guid=%s",
+                    int(seeded_items),
+                    int(char_guid),
+                )
+                refresh_session_inventory(session)
+        except Exception as exc:
+            if chars_db is not None:
+                try:
+                    chars_db.rollback()
+                except Exception:
+                    pass
+            Logger.warning(
+                "[WorldLogin] starting inventory backfill failed guid=%s: %s",
+                int(char_guid),
+                exc,
+            )
     attach_session_to_world_state(session, map_id=int(session.map_id))
 
     spells_handlers.initialize_session_spells(session, int(char_guid))

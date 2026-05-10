@@ -12,19 +12,15 @@ from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.login.packets import build_login_packet
 from server.modules.game.guid import GuidHelper
-from server.modules.game.inventory import (
-    add_item_to_character,
-    auto_equip_item,
-    swap_character_item,
-)
 from server.modules.handlers.world.bootstrap.replay import (
     build_multi_u32_update_object_payload,
     build_single_u32_update_object_payload,
 )
 from server.modules.handlers.world.inventory_sync import (
+    _inventory_slot_field_index,
+    _make_item_world_guid,
+    build_values_update,
     build_login_inventory_sync_responses,
-    build_inventory_delta_responses,
-    build_item_snapshot_responses,
     build_self_visible_item_update_responses,
     inventory_result_affects_equipment,
     trigger_inventory_activation,
@@ -181,14 +177,8 @@ _TEXT_EMOTE_TO_STAND_STATE = {
     87: _STAND_STATE_SLEEPING,
     141: _STAND_STATE_STANDING,
 }
-_ITEM_HIGHGUID = 0x400
-_ITEM_FIELD_STACK_COUNT = 0x10
-_PLAYER_FIELD_INV_SLOTS = (0x8 + 0x98) + 0x325
-_PLAYER_FIELD_PACK_SLOTS = (0x8 + 0x98) + 0x353
 _PLAYER_FIELD_EXPLORED_ZONES = (0x8 + 0x98) + 0x5BB
 _PLAYER_EXPLORED_ZONES_SIZE = 200
-_ITEM_CREATE_FLAGS = b"\x00\x00\x00\x00\x00\x00"
-_ITEM_CREATE_MASK = bytes.fromhex("f30581000000000000000000")
 
 
 def _notification_response(message: str) -> list[tuple[str, bytes]]:
@@ -204,93 +194,6 @@ def _append_feedback_response(
     merged = list(responses or [])
     merged.extend(_notification_response(message))
     return merged
-
-
-def _make_skyfire_guid(low: int, entry: int, high: int) -> int:
-    shift = 48 if int(high) in {0xF101, 0xF102} else 52
-    return (
-        (int(low) & 0xFFFFFFFF)
-        | ((int(entry) & 0xFFFFF) << 32)
-        | ((int(high) & 0xFFFFF) << shift)
-    )
-
-
-def _make_item_world_guid(item_low_guid: int) -> int:
-    return _make_skyfire_guid(int(item_low_guid), 0, _ITEM_HIGHGUID)
-
-
-def _build_item_create_update_payload(session, item) -> bytes:
-    item_guid = _make_item_world_guid(int(item.item_guid))
-    field_values = (
-        int(item_guid & 0xFFFFFFFF),
-        int((item_guid >> 32) & 0xFFFFFFFF),
-        3,
-        int(item.entry),
-        0,
-        0x3F800000,
-        int(getattr(session, "char_guid", 0) or 0),
-        int(getattr(session, "char_guid", 0) or 0),
-        int(item.count),
-        1,
-    )
-
-    entry = bytearray()
-    entry += struct.pack("<B", 1)
-    entry += GuidHelper.pack(int(item_guid))
-    entry += struct.pack("<B", 1)
-    entry += _ITEM_CREATE_FLAGS
-    entry += struct.pack("<B", len(_ITEM_CREATE_MASK) // 4)
-    entry += _ITEM_CREATE_MASK
-    for value in field_values:
-        entry += struct.pack("<I", int(value) & 0xFFFFFFFF)
-    entry += struct.pack("<B", 0)
-
-    payload = bytearray()
-    payload += struct.pack("<HI", int(getattr(session, "map_id", 0) or 0) & 0xFFFF, 1)
-    payload += entry
-    return bytes(payload)
-
-
-def _inventory_slot_field_index(bag: int, slot: int) -> Optional[int]:
-    bag = int(bag)
-    slot = int(slot)
-    if bag != 0:
-        return None
-    if 0 <= slot < 23:
-        return _PLAYER_FIELD_INV_SLOTS + (slot * 2)
-    if 23 <= slot < 39:
-        return _PLAYER_FIELD_PACK_SLOTS + ((slot - 23) * 2)
-    return None
-
-
-def _build_inventory_slot_update_responses(session, item) -> list[tuple[str, bytes]]:
-    field_index = _inventory_slot_field_index(int(item.bag), int(item.slot))
-    if field_index is None:
-        return []
-
-    item_guid = _make_item_world_guid(int(item.item_guid))
-    player_guid = int(getattr(session, "char_guid", 0) or 0)
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    return [
-        (
-            "SMSG_UPDATE_OBJECT",
-            build_single_u32_update_object_payload(
-                map_id=map_id,
-                guid=player_guid,
-                field_index=field_index,
-                value=int(item_guid & 0xFFFFFFFF),
-            ),
-        ),
-        (
-            "SMSG_UPDATE_OBJECT",
-            build_single_u32_update_object_payload(
-                map_id=map_id,
-                guid=player_guid,
-                field_index=field_index + 1,
-                value=int((item_guid >> 32) & 0xFFFFFFFF),
-            ),
-        ),
-    ]
 
 
 def _build_forced_inventory_slot_resend_responses(session) -> list[tuple[str, bytes]]:
@@ -323,28 +226,16 @@ def _build_forced_inventory_slot_resend_responses(session) -> list[tuple[str, by
     return [
         (
             "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
-                map_id=int(getattr(session, "map_id", 0) or 0),
-                guid=int(getattr(session, "char_guid", 0) or 0),
-                field_updates=[
+            build_values_update(
+                session,
+                int(getattr(session, "char_guid", 0) or 0),
+                [
                     (field_index, int(item_world_guid & 0xFFFFFFFF)),
                     (field_index + 1, int((item_world_guid >> 32) & 0xFFFFFFFF)),
                 ],
             ),
         )
     ]
-
-
-def _build_inventory_count_update_response(session, item) -> tuple[str, bytes]:
-    return (
-        "SMSG_UPDATE_OBJECT",
-        build_single_u32_update_object_payload(
-            map_id=int(getattr(session, "map_id", 0) or 0),
-            guid=_make_item_world_guid(int(item.item_guid)),
-            field_index=_ITEM_FIELD_STACK_COUNT,
-            value=int(item.count),
-        ),
-    )
 
 
 def _build_map_exploration_update_response(session, reveal_all: bool) -> tuple[str, bytes]:
@@ -374,95 +265,6 @@ def _build_map_exploration_update_response(session, reveal_all: bool) -> tuple[s
             ],
         ),
     )
-
-
-def _build_additem_sync_responses(session, result) -> list[tuple[str, bytes]]:
-    responses: list[tuple[str, bytes]] = []
-    created_item_guids = {int(item_guid) for item_guid in getattr(result, "created_item_guids", ())}
-    changed_items = list(getattr(result, "changed_items", ()) or ())
-    if not changed_items and getattr(result, "item", None) is not None:
-        changed_items = [result.item]
-
-    for item in changed_items:
-        if int(getattr(item, "bag", -1)) != 0:
-            continue
-        if int(getattr(item, "item_guid", 0) or 0) in created_item_guids:
-            responses.extend(build_item_snapshot_responses(session, item))
-        responses.extend(_build_inventory_slot_update_responses(session, item))
-        if int(getattr(item, "item_guid", 0) or 0) not in created_item_guids:
-            responses.append(_build_inventory_count_update_response(session, item))
-    return responses
-
-
-def _build_inventory_mutation_sync_responses(session, result) -> list[tuple[str, bytes]]:
-    return build_inventory_delta_responses(session, result)
-
-
-def _handle_additem(session, entry: int, count: int) -> list[tuple[str, bytes]]:
-    result = add_item_to_character(session, entry, count)
-
-    responses: list[tuple[str, bytes]] = []
-
-    if result.ok:
-        # Use the same sync path as .additem
-        responses.extend(_build_inventory_mutation_sync_responses(session, result))
-
-    responses.extend(
-        _notification_response(f"[Inventory] {result.message}")
-    )
-
-    return responses
-
-
-def handle_addtier_command(session, args: list[str]) -> list[tuple[str, bytes]]:
-    if len(args) < 1:
-        return _notification_response("Usage: .addtier <class> [tier]")
-
-    class_name = str(args[0]).strip().lower()
-
-    class_data = _TIER_SET_ITEMS.get(class_name)
-    if not class_data:
-        return _notification_response(f"[AddTier] unknown class: {class_name}")
-
-    # If only class is provided → list available tiers
-    if len(args) == 1:
-        tiers = sorted(class_data.keys())
-        tiers_str = ", ".join(str(t) for t in tiers)
-        return _notification_response(f"[AddTier] {class_name} tiers: {tiers_str}")
-
-    # Parse tier
-    try:
-        tier = int(args[1], 0)
-    except ValueError:
-        return _notification_response("Usage: .addtier <class> <tier>")
-
-    item_entries = class_data.get(tier)
-    if not item_entries:
-        return _notification_response(f"[AddTier] unsupported tier: {class_name} {tier}")
-
-    Logger.info(
-        "[ADDTIER] class=%s tier=%s items=%s",
-        class_name,
-        tier,
-        len(item_entries),
-    )
-
-    responses: list[tuple[str, bytes]] = []
-
-    # Add items
-    for item_entry in item_entries:
-        responses.extend(_handle_additem(session, int(item_entry), 1))
-
-    # Inventory resync
-    responses.extend(build_login_inventory_sync_responses(session))
-
-    responses.extend(
-        _notification_response(
-            f"[AddTier] {class_name} T{tier} items={len(item_entries)}"
-        )
-    )
-
-    return responses
 
 
 def send_run_speed(player, speed: float) -> tuple[str, bytes]:

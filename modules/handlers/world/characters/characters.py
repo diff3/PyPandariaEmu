@@ -25,7 +25,9 @@ from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.database.CharactersModel import (
     Characters,
     CharacterAction,
+    CharacterInventory,
     CharacterSpell,
+    ItemInstance,
 )
 from server.modules.handlers.world.account_data import (
     account_data_text_for_type,
@@ -103,6 +105,9 @@ _GUILD_MASK_KEYS = [
     "guildguid_6_mask",
     "guildguid_7_mask",
 ]
+STARTING_ITEM_HEARTHSTONE = 6948
+STARTING_HEARTHSTONE_SLOT = 23
+EQUIPMENT_SLOT_END = 19
 
 def load_expected(case_name: str) -> dict:
     path = get_json_root() / f"{case_name}.json"
@@ -304,18 +309,34 @@ def _get_outfit_items(race: int, class_: int, gender: int | None = None) -> list
             return items
     return []
 
-def _build_equipment_cache_from_starting_items(race: int, class_: int, gender: int | None = None) -> Optional[str]:
+
+def _get_starting_equipment_entries(race: int, class_: int, gender: int | None = None) -> list[int]:
     dbc_entries = _get_outfit_items(race, class_, gender)
+    if dbc_entries:
+        return list(dbc_entries)
+
     db_entries = DatabaseConnection.get_starting_item_entries(race, class_, gender)
-    if not dbc_entries and not db_entries:
+    if db_entries:
+        Logger.info(
+            "[CHAR CREATE] using playercreateinfo_item as equipment fallback "
+            "race=%s class=%s gender=%s",
+            int(race),
+            int(class_),
+            gender,
+        )
+    return list(db_entries)
+
+
+def _build_equipment_cache_from_starting_items(race: int, class_: int, gender: int | None = None) -> Optional[str]:
+    equipment_entries = _get_starting_equipment_entries(race, class_, gender)
+    if not equipment_entries:
         Logger.warning(
-            "[WorldHandlers] No starting items found for equipmentCache (DBC or DB) "
+            "[WorldHandlers] No starting equipment found for equipmentCache "
             f"(race={race}, class={class_}, gender={gender})"
         )
         return None
 
-    merged_entries = list(dict.fromkeys(dbc_entries + db_entries))
-    items = DatabaseConnection.get_item_template_map(merged_entries)
+    items = DatabaseConnection.get_item_template_map(equipment_entries)
     if not items:
         return None
 
@@ -336,15 +357,16 @@ def _build_equipment_cache_from_starting_items(race: int, class_: int, gender: i
             if not slots:
                 continue
             for slot in slots:
+                if int(slot) >= EQUIPMENT_SLOT_END:
+                    continue
                 if not allow_override and slot in used_slots:
                     continue
-                pairs[slot * 2] = entry
-                pairs[slot * 2 + 1] = 0
+                pairs[slot * 2] = int(_display_id)
+                pairs[slot * 2 + 1] = int(inv_type)
                 used_slots.add(slot)
                 break
 
-    _apply_entries(dbc_entries, allow_override=False)
-    _apply_entries(db_entries, allow_override=True)
+    _apply_entries(equipment_entries, allow_override=False)
 
     if all(val == 0 for val in pairs):
         inv_summary = ", ".join(
@@ -378,10 +400,29 @@ def _default_taximask() -> str:
     return " ".join(["0"] * 16)
 
 def _next_character_guid(session) -> int:
-    row = session.query(Characters.guid).order_by(Characters.guid.desc()).first()
-    if row and row[0]:
-        return int(row[0]) + 1
-    return 1
+    max_guid = 0
+    for model, column_name in (
+        (Characters, "guid"),
+        (CharacterInventory, "guid"),
+        (ItemInstance, "owner_guid"),
+        (CharacterAction, "guid"),
+        (CharacterSpell, "guid"),
+    ):
+        try:
+            column = getattr(model, column_name)
+            row = session.query(column).order_by(column.desc()).first()
+        except Exception:
+            continue
+        if not row:
+            continue
+        try:
+            value = getattr(row, column_name, None)
+            if value is None:
+                value = row[0]
+            max_guid = max(max_guid, int(value or 0))
+        except Exception:
+            continue
+    return max_guid + 1
 
 
 def _normalize_character_slots(session, account_id: int, realm_id: int) -> list[Characters]:
@@ -420,13 +461,11 @@ def _next_character_slot(session, account_id: int, realm_id: int) -> int:
     return account_id, realm_id
 
 def _build_equipment_from_starting_items(race: int, class_: int, gender: int | None = None) -> Optional[list[dict]]:
-    dbc_entries = _get_outfit_items(race, class_, gender)
-    db_entries = DatabaseConnection.get_starting_item_entries(race, class_, gender)
-    if not dbc_entries and not db_entries:
+    equipment_entries = _get_starting_equipment_entries(race, class_, gender)
+    if not equipment_entries:
         return None
 
-    merged_entries = list(dict.fromkeys(dbc_entries + db_entries))
-    items = DatabaseConnection.get_item_template_map(merged_entries)
+    items = DatabaseConnection.get_item_template_map(equipment_entries)
     if not items:
         return None
 
@@ -445,6 +484,8 @@ def _build_equipment_from_starting_items(race: int, class_: int, gender: int | N
             if not slots:
                 continue
             for slot in slots:
+                if int(slot) >= EQUIPMENT_SLOT_END:
+                    continue
                 if not allow_override and slot in used_slots:
                     continue
                 equipment[slot] = {
@@ -455,12 +496,121 @@ def _build_equipment_from_starting_items(race: int, class_: int, gender: int | N
                 used_slots.add(slot)
                 break
 
-    _apply_entries(dbc_entries, allow_override=False)
-    _apply_entries(db_entries, allow_override=True)
+    _apply_entries(equipment_entries, allow_override=False)
 
     if _equipment_is_empty(equipment):
         return None
     return equipment
+
+
+def _starting_equipment_slots(race: int, class_: int, gender: int | None = None) -> list[tuple[int, int]]:
+    equipment_entries = _get_starting_equipment_entries(race, class_, gender)
+    if not equipment_entries:
+        return []
+
+    templates = DatabaseConnection.get_item_template_details(equipment_entries)
+    planned_by_slot: dict[int, int] = {}
+    used_slots: set[int] = set()
+
+    for entry in equipment_entries:
+        template = templates.get(int(entry))
+        if not template:
+            continue
+
+        inv_type = int(template.get("inventory_type", 0) or 0)
+        for candidate in _INVTYPE_SLOT_MAP.get(inv_type, []):
+            slot = int(candidate)
+            if slot >= EQUIPMENT_SLOT_END or slot in used_slots:
+                continue
+            used_slots.add(slot)
+            planned_by_slot[slot] = int(entry)
+            break
+
+    return [(entry, slot) for slot, entry in sorted(planned_by_slot.items())]
+
+
+def _starting_inventory_slots(race: int, class_: int, gender: int | None = None) -> list[tuple[int, int]]:
+    planned = _starting_equipment_slots(race, class_, gender)
+    planned.append((STARTING_ITEM_HEARTHSTONE, STARTING_HEARTHSTONE_SLOT))
+    return planned
+
+
+def _existing_inventory_positions(db, guid: int) -> set[tuple[int, int]]:
+    rows = (
+        db.query(CharacterInventory)
+        .filter(CharacterInventory.guid == int(guid))
+        .all()
+    )
+    positions: set[tuple[int, int]] = set()
+    for row in rows:
+        try:
+            positions.add((int(row.bag or 0), int(row.slot or 0)))
+        except Exception:
+            continue
+    return positions
+
+
+def _seed_character_starting_inventory(db, guid: int, race: int, class_: int, gender: int | None = None) -> int:
+    planned_items = _starting_inventory_slots(race, class_, gender)
+    if not planned_items:
+        return 0
+
+    existing_positions = _existing_inventory_positions(db, int(guid))
+    missing_items = [
+        (int(entry), int(slot))
+        for entry, slot in planned_items
+        if (0, int(slot)) not in existing_positions
+    ]
+    if not missing_items:
+        return 0
+
+    max_guid_row = db.query(ItemInstance.guid).order_by(ItemInstance.guid.desc()).first()
+    try:
+        if max_guid_row is None:
+            current_max_guid = 0
+        elif hasattr(max_guid_row, "guid"):
+            current_max_guid = int(max_guid_row.guid or 0)
+        else:
+            current_max_guid = int(max_guid_row[0] or 0)
+        next_item_guid = current_max_guid + 1
+    except Exception:
+        next_item_guid = 1
+
+    created = 0
+    for entry, slot in missing_items:
+        item_guid = int(next_item_guid)
+        next_item_guid += 1
+        db.add(
+            ItemInstance(
+                guid=item_guid,
+                itemEntry=int(entry),
+                owner_guid=int(guid),
+                creatorGuid=0,
+                giftCreatorGuid=0,
+                count=1,
+                duration=0,
+                charges="",
+                flags=0,
+                enchantments="",
+                randomPropertyId=0,
+                reforgeID=0,
+                durability=0,
+                playedTime=0,
+                text=None,
+            )
+        )
+        db.add(
+            CharacterInventory(
+                guid=int(guid),
+                bag=0,
+                slot=int(slot),
+                item=item_guid,
+            )
+        )
+        created += 1
+
+    return created
+
 
 def _resolve_session_ids() -> tuple[Optional[int], Optional[int]]:
     # --- Account ID ---
@@ -993,6 +1143,25 @@ def handle_CMSG_CHAR_CREATE(ctx: PacketContext):
             )
         except Exception as exc:
             Logger.warning(f"[WorldHandlers] Apply playercreateinfo failed: {exc}")
+
+        try:
+            seeded_items = _seed_character_starting_inventory(
+                db,
+                guid,
+                race_id,
+                class_id,
+                gender,
+            )
+            if seeded_items:
+                db.commit()
+                Logger.info(
+                    "[CHAR CREATE] Seeded %s starting inventory items GUID=%s",
+                    int(seeded_items),
+                    int(guid),
+                )
+        except Exception as exc:
+            db.rollback()
+            Logger.warning(f"[WorldHandlers] Seed starting inventory failed: {exc}")
 
     except Exception as exc:
         db.rollback()

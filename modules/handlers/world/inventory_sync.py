@@ -1,13 +1,10 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
-import struct
-
+from DSL.modules.EncoderHandler import EncoderHandler
 from shared.Logger import Logger
-from server.modules.game.guid import GuidHelper
-from server.modules.handlers.world.bootstrap.replay import (
-    build_multi_u32_update_object_payload,
-    build_single_u32_update_object_payload,
-)
 
 _ITEM_HIGHGUID = 0x400
 _ITEM_FIELD_OWNER = 0x8
@@ -19,7 +16,86 @@ _PLAYER_FIELD_VISIBLE_ITEMS = (0x8 + 0x98) + 0x2F9
 _PLAYER_FIELD_INV_SLOTS = (0x8 + 0x98) + 0x325
 _PLAYER_FIELD_PACK_SLOTS = (0x8 + 0x98) + 0x353
 _PLAYER_VISIBLE_ITEM_SLOT_COUNT = 19
-_ITEM_CREATE_FLAGS = b"\x00\x00\x00\x00\x00\x00"
+
+
+def _encode_update_object_payload(map_id: int, updates: list[dict]) -> bytes:
+    return EncoderHandler.encode_packet(
+        "SMSG_UPDATE_OBJECT",
+        {
+            "map_id": int(map_id) & 0xFFFF,
+            "update_count": len(updates),
+            "updates": updates,
+        },
+    )
+
+
+def _default_create_bits() -> dict[str, int]:
+    return {
+        "bit676": 0,
+        "has_anim_kits": 0,
+        "is_living": 0,
+        "bit810": 0,
+        "bit_fake0": 0,
+        "transport_frames": 0,
+        "has_vehicle_data": 0,
+        "bit1044": 0,
+        "bit_fake1": 0,
+        "bit476": 0,
+        "has_gameobject_rotation": 0,
+        "bit_fake2": 0,
+        "bit680": 0,
+        "has_attacking_target": 0,
+        "has_scene_object_data": 0,
+        "bit1064": 0,
+        "bit_fake3": 0,
+        "bit668": 0,
+        "has_transport_position": 0,
+        "bit681": 0,
+        "has_stationary_position": 0,
+    }
+
+
+def _build_values_update_payload(
+    *,
+    map_id: int,
+    guid: int,
+    field_updates: list[tuple[int, int]],
+) -> bytes:
+    normalized_updates = sorted(
+        ((int(field_index), int(value) & 0xFFFFFFFF) for field_index, value in field_updates),
+        key=lambda item: item[0],
+    )
+    mask_blocks = _update_mask_block_count([field_index for field_index, _value in normalized_updates])
+    return _encode_update_object_payload(
+        int(map_id),
+        [
+            {
+                "update_type": 0,
+                "guid": int(guid),
+                "mask_blocks": int(mask_blocks),
+                "mask": {
+                    "set_bits": [field_index for field_index, _value in normalized_updates],
+                    "block_count": int(mask_blocks),
+                },
+                "fields": {"u32": [value for _field_index, value in normalized_updates]},
+                "dynamic_mask_blocks": 0,
+            }
+        ],
+    )
+
+
+def _build_out_of_range_update_payload(*, map_id: int, guids: list[int]) -> bytes:
+    out_of_range = [{"guid": int(guid)} for guid in guids if int(guid) > 0]
+    return _encode_update_object_payload(
+        int(map_id),
+        [
+            {
+                "update_type": 3,
+                "out_of_range_count": len(out_of_range),
+                "out_of_range": out_of_range,
+            }
+        ],
+    )
 
 
 def _make_skyfire_guid(low: int, entry: int, high: int) -> int:
@@ -36,11 +112,30 @@ def _make_item_world_guid(item_low_guid: int) -> int:
 
 
 def _pack_update_mask(field_indices: list[int], *, min_blocks: int = 3) -> bytes:
-    block_count = max(int(min_blocks), ((max(field_indices, default=-1) // 32) + 1))
+    block_count = _update_mask_block_count(field_indices, min_blocks=min_blocks)
     mask = bytearray(block_count * 4)
     for field_index in sorted({int(index) for index in field_indices if int(index) >= 0}):
         mask[field_index // 8] |= 1 << (field_index % 8)
     return bytes(mask)
+
+
+def _update_mask_block_count(field_indices: list[int], *, min_blocks: int = 3) -> int:
+    return max(int(min_blocks), ((max(field_indices, default=-1) // 32) + 1))
+
+
+def _update_mask_fields(field_values: dict[int, int]) -> tuple[int, dict, dict]:
+    sorted_fields = sorted(int(field_index) for field_index in field_values)
+    mask_blocks = _update_mask_block_count(sorted_fields)
+    return (
+        int(mask_blocks),
+        {
+            "set_bits": sorted_fields,
+            "block_count": int(mask_blocks),
+        },
+        {
+            "u32": [int(field_values[field_index]) & 0xFFFFFFFF for field_index in sorted_fields],
+        },
+    )
 
 
 def _known_inventory_guids(session) -> set[int]:
@@ -73,11 +168,6 @@ def _equipped_bag_items(state) -> list:
         bags.append(item)
     bags.sort(key=lambda item: (int(getattr(item, "slot", 0) or 0), int(getattr(item, "item_guid", 0) or 0)))
     return bags
-
-
-def _find_inventory_activation_bag(session) -> tuple[int, int] | None:
-    activation_bags = _find_inventory_activation_bags(session)
-    return activation_bags[0] if activation_bags else None
 
 
 def _find_inventory_activation_bags(session) -> list[tuple[int, int]]:
@@ -132,7 +222,7 @@ def trigger_inventory_activation(session) -> list[tuple[str, bytes]]:
             [
                 (
                     "SMSG_UPDATE_OBJECT",
-                    build_multi_u32_update_object_payload(
+                    _build_values_update_payload(
                         map_id=map_id,
                         guid=player_guid,
                         field_updates=[
@@ -143,7 +233,7 @@ def trigger_inventory_activation(session) -> list[tuple[str, bytes]]:
                 ),
                 (
                     "SMSG_UPDATE_OBJECT",
-                    build_multi_u32_update_object_payload(
+                    _build_values_update_payload(
                         map_id=map_id,
                         guid=player_guid,
                         field_updates=[
@@ -192,7 +282,7 @@ def _append_bag_container_field_values(field_values: dict[int, int], session, ba
         field_values[field_index + 1] = int((contained_item_guid >> 32) & 0xFFFFFFFF)
 
 
-def _build_item_create_update_payload_old(session, item) -> bytes:
+def _build_item_create_update_payload(session, item) -> bytes:
     item_guid = _make_item_world_guid(int(item.item_guid))
     object_type_mask = 7 if bool(getattr(item, "is_bag", False)) else 3
     object_type_id = 2 if bool(getattr(item, "is_bag", False)) else 1
@@ -224,27 +314,25 @@ def _build_item_create_update_payload_old(session, item) -> bytes:
     if bool(getattr(item, "is_bag", False)):
         _append_bag_container_field_values(field_values, session, item)
 
-    item_create_mask = _pack_update_mask(list(field_values.keys()))
-
-    entry = bytearray()
-    entry += struct.pack("<B", 1)
-    entry += GuidHelper.pack(int(item_guid))
-    entry += struct.pack("<B", object_type_id)
-    entry += _ITEM_CREATE_FLAGS
-    entry += struct.pack("<B", len(item_create_mask) // 4)
-    entry += item_create_mask
-    for field_index in sorted(field_values):
-        value = field_values[field_index]
-        entry += struct.pack("<I", int(value) & 0xFFFFFFFF)
-    entry += struct.pack("<B", 0)
-
-    payload = bytearray()
-    payload += struct.pack("<HI", int(getattr(session, "map_id", 0) or 0) & 0xFFFF, 1)
-    payload += entry
-    return bytes(payload)
+    mask_blocks, mask_fields, update_fields = _update_mask_fields(field_values)
+    update = {
+        "update_type": 1,
+        "guid": int(item_guid),
+        "object_type": int(object_type_id),
+        "mask_blocks": int(mask_blocks),
+        "mask": mask_fields,
+        "fields": update_fields,
+        "dynamic_mask_blocks": 0,
+    }
+    update.update(_default_create_bits())
+    return _encode_update_object_payload(int(getattr(session, "map_id", 0) or 0), [update])
 
 
-def _build_item_release_update_payload_old(session, item) -> bytes:
+def build_create_object(session, obj) -> bytes:
+    return _build_item_create_update_payload(session, obj)
+
+
+def _build_item_snapshot_without_container_link_payload(session, item) -> bytes:
     item_guid = _make_item_world_guid(int(item.item_guid))
     object_type_mask = 7 if bool(getattr(item, "is_bag", False)) else 3
     object_type_id = 2 if bool(getattr(item, "is_bag", False)) else 1
@@ -269,31 +357,22 @@ def _build_item_release_update_payload_old(session, item) -> bytes:
     if bool(getattr(item, "is_bag", False)):
         _append_bag_container_field_values(field_values, session, item)
 
-    item_create_mask = _pack_update_mask(list(field_values.keys()))
-
-    entry = bytearray()
-    entry += struct.pack("<B", 1)
-    entry += GuidHelper.pack(int(item_guid))
-    entry += struct.pack("<B", object_type_id)
-    entry += _ITEM_CREATE_FLAGS
-    entry += struct.pack("<B", len(item_create_mask) // 4)
-    entry += item_create_mask
-    for field_index in sorted(field_values):
-        entry += struct.pack("<I", int(field_values[field_index]) & 0xFFFFFFFF)
-    entry += struct.pack("<B", 0)
-
-    payload = bytearray()
-    payload += struct.pack("<HI", int(getattr(session, "map_id", 0) or 0) & 0xFFFF, 1)
-    payload += entry
-    return bytes(payload)
-
-
-def build_create_object(session, obj) -> bytes:
-    return _build_item_create_update_payload_old(session, obj)
+    mask_blocks, mask_fields, update_fields = _update_mask_fields(field_values)
+    update = {
+        "update_type": 1,
+        "guid": int(item_guid),
+        "object_type": int(object_type_id),
+        "mask_blocks": int(mask_blocks),
+        "mask": mask_fields,
+        "fields": update_fields,
+        "dynamic_mask_blocks": 0,
+    }
+    update.update(_default_create_bits())
+    return _encode_update_object_payload(int(getattr(session, "map_id", 0) or 0), [update])
 
 
 def build_values_update(session, guid: int, changed_fields: list[tuple[int, int]]) -> bytes:
-    return build_multi_u32_update_object_payload(
+    return _build_values_update_payload(
         map_id=int(getattr(session, "map_id", 0) or 0),
         guid=int(guid),
         field_updates=[(int(field_index), int(value)) for field_index, value in (changed_fields or [])],
@@ -322,30 +401,16 @@ def send_update_batch(_session, batch: list[tuple[str, bytes]]) -> list[tuple[st
     if not batch:
         return []
 
-    map_id: int | None = None
-    update_count = 0
-    payload_entries = bytearray()
     update_types: list[str] = []
+    responses: list[tuple[str, bytes]] = []
     for update_type, payload in batch:
-        if len(payload) < 6:
+        if not payload:
             continue
-        current_map_id = int(struct.unpack_from("<H", payload, 0)[0])
-        current_count = int(struct.unpack_from("<I", payload, 2)[0])
-        if current_count <= 0:
-            continue
-        if map_id is None:
-            map_id = current_map_id
-        elif map_id != current_map_id:
-            raise ValueError("cannot batch SMSG_UPDATE_OBJECT payloads from different maps")
-        update_count += current_count
-        payload_entries.extend(payload[6:])
+        responses.append(("SMSG_UPDATE_OBJECT", bytes(payload)))
         update_types.append(str(update_type))
 
-    if update_count <= 0 or map_id is None:
-        return []
-
-    Logger.debug("[BATCH] updates=%s includes=%s", int(update_count), update_types)
-    return [("SMSG_UPDATE_OBJECT", struct.pack("<HI", int(map_id) & 0xFFFF, int(update_count)) + bytes(payload_entries))]
+    Logger.debug("[BATCH] updates=%s includes=%s", len(responses), update_types)
+    return responses
 
 
 def _contained_guid_for_item(session, item) -> int:
@@ -600,7 +665,7 @@ def build_self_visible_item_update_responses(session) -> list[tuple[str, bytes]]
     return [
         (
             "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
+            _build_values_update_payload(
                 map_id=map_id,
                 guid=player_guid,
                 field_updates=field_updates,
@@ -632,7 +697,7 @@ def _build_self_visible_item_slot_update_responses(session, slot: int, display_i
     return [
         (
             "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
+            _build_values_update_payload(
                 map_id=int(getattr(session, "map_id", 0) or 0),
                 guid=int(getattr(session, "char_guid", 0) or 0),
                 field_updates=[
@@ -664,7 +729,7 @@ def _build_inventory_position_update_responses(session, bag: int, slot: int) -> 
     return [
         (
             "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
+            _build_values_update_payload(
                 map_id=map_id,
                 guid=player_guid,
                 field_updates=[
@@ -684,7 +749,7 @@ def _build_player_slot_values_responses(session, slot: int, item_world_guid: int
     return [
         (
             "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
+            _build_values_update_payload(
                 map_id=int(getattr(session, "map_id", 0) or 0),
                 guid=int(getattr(session, "char_guid", 0) or 0),
                 field_updates=[
@@ -723,7 +788,7 @@ def _build_player_equip_values_responses(
     return [
         (
             "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
+            _build_values_update_payload(
                 map_id=int(getattr(session, "map_id", 0) or 0),
                 guid=int(getattr(session, "char_guid", 0) or 0),
                 field_updates=field_updates,
@@ -769,83 +834,12 @@ def _build_storage_slot_update_responses(session, bag: int, slot: int, item_worl
     return sync_container(session, bag_item, [int(slot)])
 
 
-def _build_container_slot_update_responses(session, bag_guid: int, slot: int) -> list[tuple[str, bytes]]:
-    state = getattr(session, "inventory_state", None)
-    if state is None:
-        return []
-
-    bag_guid = int(bag_guid)
-    slot = int(slot)
-    contained = state.get(bag_guid, slot)
-    contained_guid = _make_item_world_guid(int(contained.item_guid)) if contained else 0
-    field_index = _CONTAINER_FIELD_SLOTS + (slot * 2)
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    item_world_guid = _make_item_world_guid(bag_guid)
-    return [
-        (
-            "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
-                map_id=map_id,
-                guid=item_world_guid,
-                field_updates=[
-                    (field_index, int(contained_guid & 0xFFFFFFFF)),
-                    (field_index + 1, int((contained_guid >> 32) & 0xFFFFFFFF)),
-                ],
-            ),
-        ),
-    ]
-
-
-def _build_inventory_count_update_response(session, item) -> tuple[str, bytes]:
-    return (
-        "SMSG_UPDATE_OBJECT",
-        build_single_u32_update_object_payload(
-            map_id=int(getattr(session, "map_id", 0) or 0),
-            guid=_make_item_world_guid(int(item.item_guid)),
-            field_index=_ITEM_FIELD_STACK_COUNT,
-            value=int(item.count),
-        ),
-    )
-
-
 def build_item_snapshot_responses(session, item) -> list[tuple[str, bytes]]:
     return [("SMSG_UPDATE_OBJECT", build_create_object(session, item))]
 
 
-def build_item_release_responses(session, item) -> list[tuple[str, bytes]]:
-    return [("SMSG_UPDATE_OBJECT", _build_item_release_update_payload_old(session, item))]
-
-
-def _build_container_field_update_responses(session, bag_item) -> list[tuple[str, bytes]]:
-    if not bool(getattr(bag_item, "is_bag", False)):
-        return []
-
-    state = getattr(session, "inventory_state", None)
-    if state is None:
-        return []
-
-    bag_guid = _make_item_world_guid(int(bag_item.item_guid))
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    field_updates: list[tuple[int, int]] = [
-        (_CONTAINER_FIELD_NUM_SLOTS, int(getattr(bag_item, "container_slots", 0) or 0)),
-    ]
-
-    for slot in range(int(getattr(bag_item, "container_slots", 0) or 0)):
-        contained = state.get(int(bag_item.item_guid), slot)
-        contained_guid = _make_item_world_guid(int(contained.item_guid)) if contained else 0
-        field_index = _CONTAINER_FIELD_SLOTS + (slot * 2)
-        field_updates.append((field_index, int(contained_guid & 0xFFFFFFFF)))
-        field_updates.append((field_index + 1, int((contained_guid >> 32) & 0xFFFFFFFF)))
-    return [
-        (
-            "SMSG_UPDATE_OBJECT",
-            build_multi_u32_update_object_payload(
-                map_id=map_id,
-                guid=bag_guid,
-                field_updates=field_updates,
-            ),
-        )
-    ]
+def build_item_snapshot_without_container_link_responses(session, item) -> list[tuple[str, bytes]]:
+    return [("SMSG_UPDATE_OBJECT", _build_item_snapshot_without_container_link_payload(session, item))]
 
 
 def _position_snapshot(item, *, bag: int, slot: int):
@@ -1078,67 +1072,22 @@ def build_root_inventory_slot_sync_responses(session) -> list[tuple[str, bytes]]
         responses.append(
             (
                 "SMSG_UPDATE_OBJECT",
-                build_single_u32_update_object_payload(
+                _build_values_update_payload(
                     map_id=map_id,
                     guid=player_guid,
-                    field_index=field_index,
-                    value=int(item_guid & 0xFFFFFFFF),
+                    field_updates=[(field_index, int(item_guid & 0xFFFFFFFF))],
                 ),
             )
         )
         responses.append(
             (
                 "SMSG_UPDATE_OBJECT",
-                build_single_u32_update_object_payload(
+                _build_values_update_payload(
                     map_id=map_id,
                     guid=player_guid,
-                    field_index=field_index + 1,
-                    value=int((item_guid >> 32) & 0xFFFFFFFF),
+                    field_updates=[(field_index + 1, int((item_guid >> 32) & 0xFFFFFFFF))],
                 ),
             )
-        )
-    return responses
-
-
-def _build_root_slot_range_sync_responses(session, start_slot: int, end_slot: int) -> list[tuple[str, bytes]]:
-    state = getattr(session, "inventory_state", None)
-    if state is None:
-        return []
-
-    responses: list[tuple[str, bytes]] = []
-    sent_item_guids: set[int] = set()
-    field_updates: list[tuple[int, int]] = []
-    for slot in range(int(start_slot), int(end_slot)):
-        field_index = _inventory_slot_field_index(0, slot)
-        if field_index is None:
-            continue
-
-        item = state.get(0, slot)
-        item_guid = _make_item_world_guid(int(item.item_guid)) if item else 0
-        player_guid = int(getattr(session, "char_guid", 0) or 0)
-        map_id = int(getattr(session, "map_id", 0) or 0)
-
-        field_updates.append((field_index, int(item_guid & 0xFFFFFFFF)))
-        field_updates.append((field_index + 1, int((item_guid >> 32) & 0xFFFFFFFF)))
-
-        if item is None:
-            continue
-        low_guid = int(item.item_guid)
-        if low_guid in sent_item_guids:
-            continue
-        sent_item_guids.add(low_guid)
-        responses.extend(build_item_snapshot_responses(session, item))
-    if field_updates:
-        responses.insert(
-            0,
-            (
-                "SMSG_UPDATE_OBJECT",
-                build_multi_u32_update_object_payload(
-                    map_id=map_id,
-                    guid=player_guid,
-                    field_updates=field_updates,
-                ),
-            ),
         )
     return responses
 
@@ -1188,14 +1137,7 @@ def inventory_result_affects_equipment(result) -> bool:
     return False
 
 
-def inventory_result_equips_item(result) -> bool:
-    return int(getattr(result, "equip_dst_slot", -1) or -1) >= 0
-
-
 def _build_item_remove_responses(session, item_low_guids: list[int]) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.login.context import WorldLoginContext
-    from server.modules.handlers.world.login.packets import build_login_packet
-
     world_guids = [_make_item_world_guid(int(item_guid)) for item_guid in item_low_guids if int(item_guid) > 0]
     if not world_guids:
         return []
@@ -1203,12 +1145,10 @@ def _build_item_remove_responses(session, item_low_guids: list[int]) -> list[tup
     for world_guid in world_guids:
         known_guids.discard(int(world_guid))
 
-    ctx = WorldLoginContext.from_session(session)
-    ctx.exact_0007_map_id = int(getattr(session, "map_id", 0) or 0)
-    ctx.exact_0007_out_of_range_guids = world_guids
-    payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613205_0007", ctx)
-    if payload is None:
-        return []
+    payload = _build_out_of_range_update_payload(
+        map_id=int(getattr(session, "map_id", 0) or 0),
+        guids=world_guids,
+    )
     return [("SMSG_UPDATE_OBJECT", payload)]
 
 

@@ -6,9 +6,56 @@ import types
 from types import SimpleNamespace
 from pathlib import Path
 
+from DSL.modules.EncoderHandler import EncoderHandler
 from DSL.modules.bitsHandler import BitInterPreter, BitWriter
+from server.modules.interpretation.utils import dsl_decode
 from server.modules.handlers.world.state.global_state import GlobalState
 from server.session.world_session import WorldSession
+
+
+def _test_pack_update_mask(field_indices: list[int]) -> bytes:
+    block_count = max(3, ((max(field_indices, default=-1) // 32) + 1))
+    mask = bytearray(block_count * 4)
+    for field_index in sorted({int(index) for index in field_indices if int(index) >= 0}):
+        mask[field_index // 8] |= 1 << (field_index % 8)
+    return bytes(mask)
+
+
+def _test_build_values_update(session, guid: int, changed_fields: list[tuple[int, int]]) -> bytes:
+    normalized_fields = sorted((int(index), int(value) & 0xFFFFFFFF) for index, value in changed_fields)
+    mask = _test_pack_update_mask([index for index, _value in normalized_fields])
+    fields = b"".join(int(value).to_bytes(4, "little") for _index, value in normalized_fields)
+    return EncoderHandler.encode_packet(
+        "SMSG_UPDATE_OBJECT",
+        {
+            "map_id": int(getattr(session, "map_id", 0) or 0) & 0xFFFF,
+            "update_count": 1,
+            "updates": [
+                {
+                    "update_type": 0,
+                    "guid": int(guid),
+                    "mask_blocks": len(mask) // 4,
+                    "mask": mask,
+                    "fields": fields,
+                    "dynamic_mask_blocks": 0,
+                }
+            ],
+        },
+    )
+
+
+def _test_inventory_slot_field_index(bag: int, slot: int) -> int | None:
+    if int(bag) != 0:
+        return None
+    if 0 <= int(slot) < 23:
+        return ((0x8 + 0x98) + 0x325) + (int(slot) * 2)
+    if 23 <= int(slot) < 39:
+        return ((0x8 + 0x98) + 0x353) + ((int(slot) - 23) * 2)
+    return None
+
+
+def _test_make_item_world_guid(item_low_guid: int) -> int:
+    return (int(item_low_guid) & 0xFFFFFFFF) | (0x400 << 52)
 
 
 def _import_chat_handlers():
@@ -103,6 +150,9 @@ def _import_chat_handlers():
             "_save_session_position": lambda *args, **kwargs: True,
         },
         "server.modules.handlers.world.inventory_sync": {
+            "_inventory_slot_field_index": _test_inventory_slot_field_index,
+            "_make_item_world_guid": _test_make_item_world_guid,
+            "build_values_update": _test_build_values_update,
             "build_login_inventory_sync_responses": lambda session: [],
             "build_inventory_delta_responses": lambda session, result: [],
             "build_item_snapshot_responses": lambda session, item: [],
@@ -955,12 +1005,11 @@ def test_speed_command_updates_run_speed_and_returns_speed_packet(monkeypatch):
     ]
 
 
-def test_fly_on_sends_aura_state_speed_and_move(monkeypatch):
-    _install_movement_stub(monkeypatch)
+def test_fly_command_is_removed(monkeypatch):
     monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_notification_response",
-        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+        chat_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
     )
 
     state = GlobalState()
@@ -968,40 +1017,8 @@ def test_fly_on_sends_aura_state_speed_and_move(monkeypatch):
 
     responses = chat_handlers._handle_chat_command(alice, ".fly on")
 
-    assert alice.can_fly is True
-    assert alice.is_flying is True
     assert responses == [
-        ("SMSG_MOVE_SET_RUN_SPEED", b"run-speed-packet"),
-        ("SMSG_MOVE_SET_CAN_FLY", b"can-fly|1"),
-        ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight-speed-packet"),
-        ("SMSG_PLAYER_MOVE", b"move-resync"),
-        ("SMSG_MESSAGECHAT", b"system|[Fly] on"),
-    ]
-
-
-def test_fly_off_sends_aura_remove_state_speed_and_move(monkeypatch):
-    _install_movement_stub(monkeypatch)
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_notification_response",
-        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
-    )
-
-    state = GlobalState()
-    alice = _make_session(state, "Alice", 1001)
-    alice.can_fly = True
-    alice.is_flying = True
-
-    responses = chat_handlers._handle_chat_command(alice, ".fly off")
-
-    assert alice.can_fly is False
-    assert alice.is_flying is False
-    assert responses == [
-        ("SMSG_MOVE_SET_RUN_SPEED", b"run-speed-packet"),
-        ("SMSG_MOVE_UNSET_CAN_FLY", b"can-fly|0"),
-        ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight-speed-packet"),
-        ("SMSG_PLAYER_MOVE", b"move-resync"),
-        ("SMSG_MESSAGECHAT", b"system|[Fly] off"),
+        ("SMSG_MESSAGECHAT", b"system|Unknown command: .fly on"),
     ]
 
 
@@ -1495,20 +1512,7 @@ def test_player_value_updates_include_persisted_map_exploration(monkeypatch):
     ]
 
 
-def test_invfix_returns_full_inventory_sync_via_login_pipeline(monkeypatch):
-    captured = {}
-
-    monkeypatch.setattr(
-        chat_handlers,
-        "build_login_inventory_sync_responses",
-        lambda session: captured.update(
-            {
-                "known_inventory_guids": set(getattr(session, "known_inventory_guids", set())),
-                "inventory_activated": bool(getattr(session, "inventory_activated", True)),
-            }
-        )
-        or [("SMSG_UPDATE_OBJECT", b"invfix")],
-    )
+def test_invfix_command_is_removed(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
         "encode_skyfire_messagechat_system_payload",
@@ -1517,19 +1521,12 @@ def test_invfix_returns_full_inventory_sync_via_login_pipeline(monkeypatch):
 
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
-    alice.known_inventory_guids = {111, 222}
-    alice.inventory_activated = True
 
     responses = chat_handlers._handle_chat_command(alice, ".invfix")
 
     assert responses == [
-        ("SMSG_UPDATE_OBJECT", b"invfix"),
-        ("SMSG_MESSAGECHAT", b"system|[InvFix] full inventory resync sent"),
+        ("SMSG_MESSAGECHAT", b"system|Unknown command: .invfix"),
     ]
-    assert captured["known_inventory_guids"] == set()
-    assert captured["inventory_activated"] is False
-    assert alice.known_inventory_guids == set()
-    assert alice.inventory_activated is False
 
 
 def test_mount_command_updates_visuals_and_speed_without_movement_resync(monkeypatch):
@@ -2432,22 +2429,11 @@ def test_morph_unknown_name_returns_feedback(monkeypatch):
     ]
 
 
-def test_forced_inventory_slot_resend_uses_minimal_player_values_update(monkeypatch):
+def test_forced_inventory_slot_resend_uses_dsl_player_values_update():
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
     alice.inventory_state = SimpleNamespace(
         get=lambda bag, slot: SimpleNamespace(item_guid=2000) if (bag, slot) == (0, 23) else None
-    )
-    captured = {}
-
-    def fake_build_multi_u32_update_object_payload(**fields):
-        captured.update(fields)
-        return b"slot-resend"
-
-    monkeypatch.setattr(
-        chat_handlers,
-        "build_multi_u32_update_object_payload",
-        fake_build_multi_u32_update_object_payload,
     )
 
     responses = chat_handlers._build_forced_inventory_slot_resend_responses(alice)
@@ -2457,12 +2443,14 @@ def test_forced_inventory_slot_resend_uses_minimal_player_values_update(monkeypa
     assert opcode == "SMSG_UPDATE_OBJECT"
     field_index = chat_handlers._inventory_slot_field_index(0, 23)
     item_guid = chat_handlers._make_item_world_guid(2000)
-    assert payload == b"slot-resend"
-    assert captured["map_id"] == 1
-    assert captured["guid"] == 1001
-    assert captured["field_updates"] == [
-        (field_index, int(item_guid & 0xFFFFFFFF)),
-        (field_index + 1, int((item_guid >> 32) & 0xFFFFFFFF)),
+    decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)
+    update = decoded["updates"][0]
+    assert decoded["map_id"] == 1
+    assert update["guid"] == 1001
+    assert update["mask"]["set_bits"] == [field_index, field_index + 1]
+    assert update["fields"]["u32"] == [
+        int(item_guid & 0xFFFFFFFF),
+        int((item_guid >> 32) & 0xFFFFFFFF),
     ]
 
 

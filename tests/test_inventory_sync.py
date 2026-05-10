@@ -339,7 +339,7 @@ def test_bag_snapshot_create_includes_contained_item_guids():
     assert 72 not in update["mask"]["set_bits"]
 
 
-def test_item_release_omits_contained_in_field():
+def test_item_snapshot_without_container_link_omits_contained_in_field():
     session = _FakeSession()
     state = _InventoryState()
     session.inventory_state = state
@@ -353,7 +353,7 @@ def test_item_release_omits_contained_in_field():
     )
     state.put(contained)
 
-    responses = inventory_sync.build_item_release_responses(session, contained)
+    responses = inventory_sync.build_item_snapshot_without_container_link_responses(session, contained)
     payload = responses[0][1]
     decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)
     update = decoded["updates"][0]
@@ -361,7 +361,7 @@ def test_item_release_omits_contained_in_field():
     assert update["mask"]["set_bits"] == [0, 1, 4, 5, 6, 7, 8, 16, 23]
 
 
-def test_bag_release_keeps_only_used_container_slot_fields():
+def test_bag_snapshot_without_container_link_keeps_only_used_container_slot_fields():
     session = _FakeSession()
     state = _InventoryState()
     session.inventory_state = state
@@ -383,7 +383,7 @@ def test_bag_release_keeps_only_used_container_slot_fields():
     state.put(bag)
     state.put(contained)
 
-    responses = inventory_sync.build_item_release_responses(session, bag)
+    responses = inventory_sync.build_item_snapshot_without_container_link_responses(session, bag)
     payload = responses[0][1]
     decoded = dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True)
     update = decoded["updates"][0]
@@ -1008,7 +1008,7 @@ def test_inventory_delta_unequip_known_item_clears_equip_slot_and_sets_destinati
     )
 
     responses = inventory_sync.build_inventory_delta_responses(session, result)
-    assert len([opcode for opcode, _payload in responses if opcode == "SMSG_UPDATE_OBJECT"]) == 1
+    assert len([opcode for opcode, _payload in responses if opcode == "SMSG_UPDATE_OBJECT"]) == 4
     updates = []
     for opcode, payload in responses:
         if opcode != "SMSG_UPDATE_OBJECT":

@@ -16,6 +16,11 @@ from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.game.inventory import (
     add_item_to_character,
 )
+try:
+    from server.modules.game.inventory import persist_session_inventory
+except ImportError:
+    def persist_session_inventory(_session) -> bool:
+        return True
 from server.modules.handlers.world.chat.codec import (
     encode_skyfire_messagechat_system_payload,
 )
@@ -631,49 +636,6 @@ def cmd_speed(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
-@register_command("fly", ".fly <on|off>")
-def cmd_fly(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Toggle self flying in the sandbox."""
-    from server.modules.handlers.world.opcodes.movement import (
-        build_move_set_can_fly_payload,
-        build_move_set_run_speed_payload,
-        build_move_set_flight_speed_payload,
-        resync_movement,
-    )
-
-    if len(args) != 1:
-        return _notification_response("Usage: .fly <on|off>")
-
-    enabled = str(args[0]).strip().lower()
-    if enabled not in {"on", "off"}:
-        return _notification_response("Usage: .fly <on|off>")
-
-    fly_enabled = enabled == "on"
-    session.can_fly = fly_enabled
-    session.is_flying = fly_enabled
-    Logger.info(
-        "[FLY] enabled=%s guid=0x%X",
-        fly_enabled,
-        int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or getattr(session, "world_guid", 0) or 0),
-    )
-
-    responses: list[tuple[str, bytes]] = []
-    responses.append(("SMSG_MOVE_SET_RUN_SPEED", build_move_set_run_speed_payload(session)))
-    responses.append(
-        (
-            "SMSG_MOVE_SET_CAN_FLY" if fly_enabled else "SMSG_MOVE_UNSET_CAN_FLY",
-            build_move_set_can_fly_payload(session, fly_enabled),
-        )
-    )
-    responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session)))
-    movement_responses = list(resync_movement(session))
-    if movement_responses:
-        responses.extend(movement_responses)
-        Logger.info("[FLY] movement resync sent guid=0x%X", int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or getattr(session, "world_guid", 0) or 0))
-    responses.extend(_notification_response(f"[Fly] {'on' if fly_enabled else 'off'}"))
-    return responses
-
-
 @register_command("weather", ".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
 def cmd_weather(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Broadcast region weather to nearby players."""
@@ -1038,6 +1000,9 @@ def cmd_additem(session, args: list[str]) -> list[tuple[str, bytes]]:
     except ValueError:
         return _notification_response("Usage: .additem <itemEntry> [count]")
 
+    if bool(getattr(session, "inventory_dirty", False)):
+        persist_session_inventory(session)
+
     result = add_item_to_character(session, item_entry, item_count)
     level = "info" if result.ok else "warning"
     getattr(Logger, level)(
@@ -1102,22 +1067,6 @@ def cmd_addtier(session, args: list[str]) -> list[tuple[str, bytes]]:
     )
 
     return responses
-
-
-@register_command("invfix", ".invfix", allow_args=False)
-def cmd_invfix(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Force a full inventory resync."""
-    Logger.info("[INVFIX] start")
-    known_guids = getattr(session, "known_inventory_guids", None)
-    if isinstance(known_guids, set):
-        known_guids.clear()
-    else:
-        session.known_inventory_guids = set()
-    Logger.info("[INVFIX] cleared known guids")
-    session.inventory_activated = False
-    responses = _build_login_inventory_sync(session)
-    Logger.info("[INVFIX] responses=%s", len(responses))
-    return _append_feedback_response(responses, "[InvFix] full inventory resync sent")
 
 
 @register_command("fixplayer", ".fixplayer [teleport]")
@@ -1623,7 +1572,6 @@ PRIMARY_COMMANDS = {
     "demorph": Command(handler=cmd_demorph, usage=".demorph", allow_args=False),
     "dismount": Command(handler=cmd_dismount, usage=".dismount", allow_args=False),
     "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", require_args=True),
-    "fly": Command(handler=cmd_fly, usage=".fly <on|off>"),
     # "fixplayer": Command(handler=cmd_fixplayer, usage=".fixplayer [teleport]"),
     # "fixspeed": Command(handler=cmd_fixspeed, usage=".fixspeed", allow_args=False),
     "goto": Command(handler=cmd_goto, usage=".goto <player>", require_args=True),
@@ -1634,7 +1582,6 @@ PRIMARY_COMMANDS = {
     "map": Command(handler=cmd_map, usage=".map <on|0>"),
     "morph": Command(handler=cmd_morph, usage=".morph <displayId|namel|list>", require_args=True),
     "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
-    "reload": Command(handler=cmd_invfix, usage=".reload", allow_args=False),
     "roll": Command(handler=cmd_roll, usage=".roll"),
     "save": Command(handler=cmd_save, usage=".save", allow_args=False),
     "server": Command(

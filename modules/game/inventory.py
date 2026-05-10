@@ -322,7 +322,7 @@ def _can_item_use_bag(item: InventoryItem, container: InventoryItem) -> bool:
     if container.template.bag_family == 0:
         return True
     if item.template.bag_family == 0:
-        return False
+        return True
     return bool(item.template.bag_family & container.template.bag_family)
 
 
@@ -343,7 +343,9 @@ def _slot_allows_item(state: InventoryState, item: InventoryItem, bag: int, slot
     container = _bag_item_for_container(state, bag)
     if not container:
         return False
-    if item.is_bag:
+    if int(getattr(item, "item_guid", 0) or 0) == int(bag):
+        return False
+    if item.is_bag and _bag_has_contents(state, int(item.item_guid)):
         return False
     if slot < 0 or slot >= int(container.container_slots):
         return False
@@ -362,6 +364,22 @@ def _first_free_storage_slot(state: InventoryState, item: InventoryItem) -> Opti
             if state.get(bag_item.item_guid, slot) is None and _slot_allows_item(state, item, bag_item.item_guid, slot):
                 return (bag_item.item_guid, slot)
     return None
+
+
+def _inventory_space_summary(state: InventoryState) -> str:
+    backpack_free = sum(
+        1
+        for slot in range(INVENTORY_SLOT_ITEM_START, INVENTORY_SLOT_ITEM_END)
+        if state.get(0, slot) is None
+    )
+    bag_parts = []
+    for bag_item in _equipped_bag_items(state):
+        bag_size = int(getattr(bag_item, "container_slots", 0) or 0)
+        bag_free = sum(1 for slot in range(bag_size) if state.get(int(bag_item.item_guid), slot) is None)
+        bag_parts.append(
+            f"{int(bag_item.item_guid)}@{int(bag_item.slot)} size={bag_size} free={bag_free}"
+        )
+    return f"backpack_free={backpack_free} bags=[{', '.join(bag_parts)}]"
 
 
 def _find_merge_target(state: InventoryState, entry: int, stackable: int) -> Optional[InventoryItem]:
@@ -531,15 +549,14 @@ def add_item_to_character(session, item_entry: int, count: int = 1) -> Inventory
     if char_guid <= 0:
         return InventoryResult(False, "no active character")
 
-    state = getattr(session, "inventory_state", None)
-    if not isinstance(state, InventoryState):
-        state = refresh_session_inventory(session)
+    state = refresh_session_inventory(session)
 
     db_session = DatabaseConnection.chars()
     added = 0
     first_item: Optional[InventoryItem] = None
     changed_items: list[InventoryItem] = []
     created_item_guids: list[int] = []
+    refreshed_for_space = False
 
     def _track_changed(item: InventoryItem, *, created: bool = False) -> None:
         if all(int(existing.item_guid) != int(item.item_guid) for existing in changed_items):
@@ -581,6 +598,10 @@ def add_item_to_character(session, item_entry: int, count: int = 1) -> Inventory
             )
             destination = _first_free_storage_slot(state, placement_probe)
             if destination is None:
+                if added == 0 and not refreshed_for_space:
+                    refreshed_for_space = True
+                    state = refresh_session_inventory(session)
+                    continue
                 break
 
             chunk_count = min(remaining, int(template.stackable))
@@ -628,6 +649,13 @@ def add_item_to_character(session, item_entry: int, count: int = 1) -> Inventory
 
         if added <= 0:
             db_session.rollback()
+            Logger.warning(
+                "[Inventory] add_item_to_character no space char=%s entry=%s count=%s %s",
+                char_guid,
+                item_entry,
+                count,
+                _inventory_space_summary(state),
+            )
             return InventoryResult(False, "inventory full")
 
         db_session.commit()
@@ -682,15 +710,10 @@ def swap_character_item(session, src_bag: int, src_slot: int, dst_bag: int, dst_
     if not _slot_allows_item(state, src_item, dst_bag, dst_slot):
         return InventoryResult(False, "destination slot does not fit item")
 
-    if src_item.is_bag and dst_bag != 0:
-        return InventoryResult(False, "cannot place bag inside another bag")
-
     if _bag_has_contents(state, src_item.item_guid) and not _is_bag_slot(dst_slot) and dst_bag == 0:
         return InventoryResult(False, "cannot move non-empty equipped bag there yet")
 
     if dst_item:
-        if dst_item.is_bag and src_bag != 0:
-            return InventoryResult(False, "cannot place bag inside another bag")
         if not _slot_allows_item(state, dst_item, src_bag, src_slot):
             return InventoryResult(False, "swap target cannot move to source slot")
         if _bag_has_contents(state, dst_item.item_guid) and not _is_bag_slot(src_slot) and src_bag == 0:
