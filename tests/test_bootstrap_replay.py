@@ -399,18 +399,82 @@ def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
 
     captured = {}
 
-    def _fake_build(*, map_id, entry):
+    def _fake_build(*, map_id, entry, realm_id):
         captured["map_id"] = map_id
         captured["entry"] = dict(entry)
+        captured["realm_id"] = realm_id
         return b"npc"
 
-    monkeypatch.setattr(replay, "_build_creature_barncastle_payload", _fake_build)
+    monkeypatch.setattr(replay, "_build_creature_update_payload", _fake_build)
     monkeypatch.setattr(replay, "make_update_object_response", lambda payload: ("SMSG_UPDATE_OBJECT", payload))
 
     responses = replay.build_database_creature_responses(session)
 
     assert responses == [("SMSG_UPDATE_OBJECT", b"npc")]
     assert captured["map_id"] == 1
-    assert captured["entry"]["x"] == 106.0
-    assert captured["entry"]["y"] == 200.0
-    assert captured["entry"]["z"] == 30.0
+    assert captured["realm_id"] == 1
+    assert captured["entry"]["guid"] == 68
+    assert captured["entry"]["entry"] == 2457
+    assert captured["entry"]["template"] == {"modelid1": 1437}
+    assert captured["entry"]["x"] == 1000.0
+    assert captured["entry"]["y"] == 2000.0
+    assert captured["entry"]["z"] == 99.0
+
+
+def test_build_database_creature_responses_tracks_loaded_world_guid(monkeypatch):
+    replay = _import_replay()
+    session = SimpleNamespace(
+        npcs_visible=True,
+        map_id=1,
+        x=100.0,
+        y=200.0,
+        z=30.0,
+        orientation=0.0,
+        realm_id=1,
+    )
+
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creatures_near",
+        staticmethod(
+            lambda map_id, x, y, radius, limit: [
+                {"guid": 68, "entry": 2457, "x": 1000.0, "y": 2000.0, "z": 99.0, "orientation": 1.0}
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creature_template",
+        staticmethod(lambda entry: {"modelid1": 1437}),
+    )
+    monkeypatch.setattr(replay, "_build_creature_update_payload", lambda **kwargs: b"npc")
+    monkeypatch.setattr(replay, "make_update_object_response", lambda payload: ("SMSG_UPDATE_OBJECT", payload))
+
+    loaded_guids = set()
+    first = replay.build_database_creature_responses(session, loaded_guids=loaded_guids)
+    second = replay.build_database_creature_responses(session, loaded_guids=loaded_guids)
+
+    assert first == [("SMSG_UPDATE_OBJECT", b"npc")]
+    assert second == []
+    assert replay.CreatureGuid.from_spawn_guid(68, 1) in loaded_guids
+
+
+def test_build_creature_update_payload_uses_create_object2():
+    replay = _import_replay()
+    entry = {
+        "guid": 68,
+        "entry": 2457,
+        "x": -8903.01,
+        "y": 641.83,
+        "z": 99.62,
+        "orientation": 1.25,
+        "modelid": 1437,
+        "template": {"modelid1": 1437},
+    }
+
+    payload = replay._build_creature_update_payload(map_id=0, entry=entry, realm_id=1)
+
+    assert payload[0:2] == b"\x00\x00"
+    assert payload[2:6] == b"\x01\x00\x00\x00"
+    assert payload[6] == 2

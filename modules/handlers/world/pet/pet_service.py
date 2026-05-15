@@ -31,8 +31,8 @@ BATTLE_PET_FALLBACK_SPECIES: tuple[tuple[int, int, int], ...] = (
     # species, creature, spell
     (1204, 70082, 138824),  # Pierre
 )
-BATTLE_PET_DEBUG_WHITELIST_ENABLED = True
-BATTLE_PET_FILTER_VALID_ENABLED = True
+BATTLE_PET_DEBUG_WHITELIST_ENABLED = False
+BATTLE_PET_FILTER_VALID_ENABLED = False
 BATTLE_PET_SPECIES_WHITELIST: tuple[int, ...] = ()
 BATTLE_PET_DEBUG_WHITELIST_SPECIES: tuple[int, ...] = (
     39,  # Mechanical Squirrel

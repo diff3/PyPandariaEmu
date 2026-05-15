@@ -200,9 +200,16 @@ def _u32_from_float(value: float) -> int:
     return struct.unpack("<I", struct.pack("<f", float(value)))[0]
 
 
-def _build_create_update_object_entry(*, guid: int, object_type: int, create_flags: bytes, body: bytes) -> bytes:
+def _build_create_update_object_entry(
+    *,
+    guid: int,
+    object_type: int,
+    create_flags: bytes,
+    body: bytes,
+    update_type: int = 1,
+) -> bytes:
     payload = bytearray()
-    payload += struct.pack("<B", 1)
+    payload += struct.pack("<B", int(update_type) & 0xFF)
     payload += GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)
     payload += struct.pack("<B", int(object_type) & 0xFF)
     payload += bytes(create_flags)
@@ -226,10 +233,9 @@ def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1
 
 
 def _build_creature_create_flags() -> bytes:
-    # Exact 12-byte flag block from a valid sniffed living-creature create.
-    # The previous synthetic bit layout caused the client to misparse the
-    # movement block and ignore the entire NPC create.
-    return bytes.fromhex("200000000029CC0000080000")
+    # Living-unit create flags for the 5.4.8 UPDATE_OBJECT layout.
+    # Keep this byte-aligned; otherwise the movement block starts mid-bit.
+    return bytes.fromhex("200000000029CC00000800004F")
 
 
 def _resolve_creature_display_id(entry: dict) -> int:
@@ -313,7 +319,6 @@ def _build_creature_update_payload(*, map_id: int, entry: dict, realm_id: int) -
     body += struct.pack("<B", raw_guid[5])
     body += struct.pack("<B", raw_guid[6])
     body += struct.pack("<B", raw_guid[0])
-    body += struct.pack("<f", 4.5)
     body += struct.pack("<f", 2.5)
     body += struct.pack("<f", 8.000020027160645)
     body += struct.pack("<f", 4.722221851348877)
@@ -330,6 +335,7 @@ def _build_creature_update_payload(*, map_id: int, entry: dict, realm_id: int) -
         object_type=3,
         create_flags=_build_creature_create_flags(),
         body=bytes(body),
+        update_type=2,
     )
     return bytes(payload)
 
@@ -623,18 +629,26 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
         return []
 
     seen = loaded_guids if isinstance(loaded_guids, set) else None
-    spawns = []
+    responses = []
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
 
     for entry in entries:
         entry_id = int(entry.get("entry", 1))
+        spawn_guid = int(entry.get("guid", 0) or 0)
+        world_guid = CreatureGuid.from_spawn_guid(spawn_guid, realm_id)
 
         if seen is not None:
-            if entry_id in seen:
+            if world_guid in seen:
                 continue
-            seen.add(entry_id)
+            seen.add(world_guid)
+
+        template = DatabaseConnection.get_creature_template(entry_id) or {}
 
         spawn = {
+            "guid": spawn_guid,
             "entry": entry_id,
+            "modelid": int(entry.get("modelid", 0) or 0),
+            "template": template,
             "x": float(entry.get("x", 0.0) or 0.0),
             "y": float(entry.get("y", 0.0) or 0.0),
             "z": float(entry.get("z", 0.0) or 0.0),
@@ -642,23 +656,25 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
         }
 
         Logger.info(
-            "[SPAWN_NPC] entry=%s pos=(%.2f %.2f %.2f)",
+            "[SPAWN_NPC] guid=%s world_guid=0x%016X entry=%s name=%s display=%s pos=(%.2f %.2f %.2f)",
+            spawn["guid"],
+            world_guid & 0xFFFFFFFFFFFFFFFF,
             spawn["entry"],
+            str(template.get("name", "") or ""),
+            _resolve_creature_display_id(spawn),
             spawn["x"],
             spawn["y"],
             spawn["z"],
         )
 
-        spawns.append(spawn)
+        payload = _build_creature_update_payload(
+            map_id=map_id,
+            entry=spawn,
+            realm_id=realm_id,
+        )
+        responses.append(make_update_object_response(payload))
 
-    if not spawns:
-        return []
-
-    payload = build_npc_update_object_payload(map_id, spawns)
-
-    return [
-        make_update_object_response(payload)
-    ]
+    return responses
 
 
 
