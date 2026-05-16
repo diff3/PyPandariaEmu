@@ -254,6 +254,9 @@ def _resolve_creature_display_id(entry: dict) -> int:
 
 def _build_creature_field_values(entry: dict, *, world_guid: int) -> dict[int, int]:
     display_id = _resolve_creature_display_id(entry)
+    template = entry.get("template")
+    template_flags = int(template.get("npcflag", 0) or 0) if isinstance(template, dict) else 0
+    npc_flags = int(entry.get("npcflag", 0) or template_flags or 0)
     return {
         0: int(world_guid) & 0xFFFFFFFF,
         1: (int(world_guid) >> 32) & 0xFFFFFFFF,
@@ -279,7 +282,7 @@ def _build_creature_field_values(entry: dict, *, world_guid: int) -> dict[int, i
         71: 0,
         81: _u32_from_float(1.0),
         82: _u32_from_float(1.0),
-        87: _u32_from_float(2.0),
+        87: npc_flags,
         128: 1,
         154: _u32_from_float(1.0),
         157: 1,
@@ -643,25 +646,36 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
             seen.add(world_guid)
 
         template = DatabaseConnection.get_creature_template(entry_id) or {}
+        template_name = str(template.get("name", "") or "").lower()
+        if template_name.startswith("[dnd]") or "trigger" in template_name:
+            continue
 
         spawn = {
             "guid": spawn_guid,
             "entry": entry_id,
             "modelid": int(entry.get("modelid", 0) or 0),
+            "npcflag": int(entry.get("npcflag", 0) or template.get("npcflag", 0) or 0),
             "template": template,
             "x": float(entry.get("x", 0.0) or 0.0),
             "y": float(entry.get("y", 0.0) or 0.0),
             "z": float(entry.get("z", 0.0) or 0.0),
             "orientation": float(entry.get("orientation", 0.0) or 0.0),
         }
+        npc_flags_by_guid = getattr(session, "npc_flags_by_guid", None)
+        if not isinstance(npc_flags_by_guid, dict):
+            npc_flags_by_guid = {}
+            session.npc_flags_by_guid = npc_flags_by_guid
+        npc_flags_by_guid[int(world_guid)] = int(spawn["npcflag"])
+        npc_flags_by_guid[int(spawn_guid)] = int(spawn["npcflag"])
 
         Logger.info(
-            "[SPAWN_NPC] guid=%s world_guid=0x%016X entry=%s name=%s display=%s pos=(%.2f %.2f %.2f)",
+            "[SPAWN_NPC] guid=%s world_guid=0x%016X entry=%s name=%s display=%s npcflag=0x%X pos=(%.2f %.2f %.2f)",
             spawn["guid"],
             world_guid & 0xFFFFFFFFFFFFFFFF,
             spawn["entry"],
             str(template.get("name", "") or ""),
             _resolve_creature_display_id(spawn),
+            int(spawn["npcflag"]),
             spawn["x"],
             spawn["y"],
             spawn["z"],

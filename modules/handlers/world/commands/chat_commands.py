@@ -64,6 +64,9 @@ PRIMARY_COMMANDS: dict[str, Command] = {}
 ALIASES: dict[str, str] = {}
 COMMANDS: dict[str, Command] = {}
 HELPERS: dict[str, Any] = {}
+_OBJECT_END = 0x8
+_UNIT_END = _OBJECT_END + 0x98
+_PLAYER_FIELD_COINAGE = _UNIT_END + 0x3DD
 MORPH_NAME_TO_DISPLAY = {
     # Boss / heroes
     "sylvanas": 28213,
@@ -524,7 +527,24 @@ def _show_nearby_npcs(session) -> list[tuple[str, bytes]]:
         loaded_npcs = set()
         session.loaded_npcs = loaded_npcs
 
-    return list(build_database_creature_responses(session, loaded_guids=loaded_npcs))
+    responses = list(build_database_creature_responses(session, loaded_guids=loaded_npcs))
+    Logger.info(
+        "[WorldNPC] show map=%s x=%.3f y=%.3f z=%.3f loaded=%s responses=%s",
+        int(getattr(session, "map_id", 0) or 0),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        int(len(loaded_npcs)),
+        int(len(responses)),
+    )
+    return responses
+
+
+def _refresh_nearby_npcs(session) -> tuple[list[tuple[str, bytes]], int]:
+    """Force a client-side NPC refresh, then return all packets and create count."""
+    clear_responses = _hide_loaded_npcs(session)
+    show_responses = _show_nearby_npcs(session)
+    return clear_responses + show_responses, len(show_responses)
 
 
 def _npc_cache_status() -> dict[str, int | bool]:
@@ -572,9 +592,10 @@ def world_go_show(session, _args):
 def world_npc_status(session, _args):
     status = _npc_cache_status()
     visible = bool(getattr(session, "npcs_visible", False))
+    auto = bool(getattr(session, "npc_auto_stream", False))
     loaded_now = len(getattr(session, "loaded_npcs", set()) or ())
     return _notification_response(
-        f"[WorldNPC] visible={int(visible)} loaded_now={int(loaded_now)} "
+        f"[WorldNPC] visible={int(visible)} auto={int(auto)} loaded_now={int(loaded_now)} "
         f"cache_loaded={int(status['cache_loaded'])} preload={int(status['preload_enabled'])} "
         f"cached_total={int(status['total'])} templates={int(status['templates'])} maps={int(status['maps'])}"
     )
@@ -582,7 +603,11 @@ def world_npc_status(session, _args):
 
 def world_npc_hide(session, _args):
     session.npcs_visible = False
+    session.npc_auto_stream = False
     responses = _hide_loaded_npcs(session)
+    npc_flags_by_guid = getattr(session, "npc_flags_by_guid", None)
+    if isinstance(npc_flags_by_guid, dict):
+        npc_flags_by_guid.clear()
     responses.extend(_notification_response("[WorldNPC] hidden"))
     return responses
 
@@ -590,15 +615,48 @@ def world_npc_hide(session, _args):
 def world_npc_show(session, _args):
     session.npcs_visible = True
     session.last_npc_stream_at = 0.0
-    responses = _show_nearby_npcs(session)
-    responses.extend(_notification_response(f"[WorldNPC] shown {len(responses)} updates"))
+    responses, shown_count = _refresh_nearby_npcs(session)
+    responses.extend(_notification_response(f"[WorldNPC] shown {shown_count} updates"))
     return responses
 
 
-@register_command("world", ".world <go|npc> <hide|show|status>")
+def world_npc_on(session, _args):
+    session.npcs_visible = True
+    session.npc_auto_stream = True
+    session.last_npc_stream_at = 0.0
+    responses, shown_count = _refresh_nearby_npcs(session)
+    responses.extend(_notification_response(f"[WorldNPC] auto on {shown_count} updates"))
+    return responses
+
+
+def world_npc_off(session, _args):
+    session.npc_auto_stream = False
+    return _notification_response("[WorldNPC] auto off")
+
+
+@register_command("taxi", ".taxi <on|off|status>")
+def cmd_taxi(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args:
+        enabled = bool(getattr(session, "taxi_cheat_enabled", False))
+        return _notification_response(f"[Taxi] cheat={int(enabled)}")
+
+    sub = str(args[0]).lower()
+    if sub == "on":
+        session.taxi_cheat_enabled = True
+        return _notification_response("[Taxi] cheat on")
+    if sub == "off":
+        session.taxi_cheat_enabled = False
+        return _notification_response("[Taxi] cheat off")
+    if sub == "status":
+        enabled = bool(getattr(session, "taxi_cheat_enabled", False))
+        return _notification_response(f"[Taxi] cheat={int(enabled)}")
+    return _notification_response("Usage: .taxi <on|off|status>")
+
+
+@register_command("world", ".world <go|npc> <hide|show|status|on|off>")
 def cmd_world(session, args: list[str]) -> list[tuple[str, bytes]]:
     if len(args) < 2:
-        return _notification_response("Usage: .world <go|npc> <hide|show|status>")
+        return _notification_response("Usage: .world <go|npc> <hide|show|status|on|off>")
 
     kind = args[0].lower()
     sub = args[1].lower()
@@ -616,7 +674,11 @@ def cmd_world(session, args: list[str]) -> list[tuple[str, bytes]]:
             return world_npc_show(session, args[2:])
         if sub == "status":
             return world_npc_status(session, args[2:])
-    return _notification_response("Usage: .world <go|npc> <hide|show|status>")
+        if sub == "on":
+            return world_npc_on(session, args[2:])
+        if sub == "off":
+            return world_npc_off(session, args[2:])
+    return _notification_response("Usage: .world <go|npc> <hide|show|status|on|off>")
 
 
 @register_command("level", ".level [delta]|set <level>")
@@ -946,7 +1008,7 @@ import re
 
 @register_command("addmoney", ".addmoney", allow_args=True)
 def cmd_addmoney(session, args: list[str]):
-    from server.modules.handlers.world.opcodes.spells import build_raw_update_object
+    from server.modules.handlers.world.bootstrap.replay import build_multi_u32_update_object_payload
     from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 
     def msg(text: str):
@@ -981,15 +1043,42 @@ def cmd_addmoney(session, args: list[str]):
     new_amount = max(0, current + copper)
     session.money = new_amount
 
-    ok = DatabaseConnection.update_character_money(
-        int(session.char_guid),
-        int(session.realm_id),
-        int(new_amount),
-    )
+    try:
+        DatabaseConnection.update_character_money(
+            int(session.char_guid),
+            int(session.realm_id),
+            int(new_amount),
+        )
+    except Exception as exc:
+        Logger.warning(
+            "[Money] DB update failed guid=%s realm=%s amount=%s error=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            int(getattr(session, "realm_id", 0) or 0),
+            int(new_amount),
+            exc,
+        )
+
+    money_value = int(new_amount) & 0xFFFFFFFFFFFFFFFF
+    money_fields = [
+        (_PLAYER_FIELD_COINAGE, money_value & 0xFFFFFFFF),
+        (_PLAYER_FIELD_COINAGE + 1, (money_value >> 32) & 0xFFFFFFFF),
+    ]
 
     return [
         ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(f"+{copper} copper")),
-        build_raw_update_object(session, [(0x117, new_amount)]),
+        (
+            "SMSG_UPDATE_OBJECT",
+            build_multi_u32_update_object_payload(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                guid=int(
+                    getattr(session, "world_guid", 0)
+                    or getattr(session, "player_guid", 0)
+                    or getattr(session, "char_guid", 0)
+                    or 0
+                ),
+                field_updates=money_fields,
+            ),
+        ),
     ]
 
 
@@ -1811,7 +1900,8 @@ PRIMARY_COMMANDS = {
     # "spawngo": Command(handler=cmd_spawngo, usage=".spawngo", allow_args=False),
     "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
     "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),
-    "world": Command(handler=cmd_world, usage=".world <go|npc> <hide|show|status>"),
+    "taxi": Command(handler=cmd_taxi, usage=".taxi <on|off|status>"),
+    "world": Command(handler=cmd_world, usage=".world <go|npc> <hide|show|status|on|off>"),
     # "telxyz": Command(handler=cmd_telxyz, usage=".telxyz <map> <x> <y> <z> <orientation>"),
     "tel": Command(
         handler=cmd_tel,

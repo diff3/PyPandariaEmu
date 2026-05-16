@@ -718,6 +718,15 @@ def test_build_player_field_values_sets_horde_primary_language_skill() -> None:
     assert fields[1411] == 0
 
 
+def test_build_player_field_values_sets_coinage_from_login_context() -> None:
+    """Login player create fields must include current copper for the bag UI."""
+    ctx = SimpleNamespace(race=2, char_guid=14, world_guid=14, money=29959292)
+    fields = build_player_field_values(ctx)
+
+    assert fields[1149] == 29959292
+    assert fields[1150] == 0
+
+
 def test_identify_language_related_fields_from_alliance_horde_create_diff() -> None:
     """Diff Alliance vs Horde create fields and lock the language-related field indices."""
     alliance_payload = build_create_payload(

@@ -11,7 +11,7 @@ from DSL.modules.EncoderHandler import EncoderHandler
 from DSL.modules.bitsHandler import BitInterPreter, BitWriter
 # from modules.handlers.world.opcodes.chat import _append_feedback_response
 from shared.Logger import Logger
-from server.modules.game.guid import GameObjectGuid, GuidHelper
+from server.modules.game.guid import CreatureGuid, GameObjectGuid, GuidHelper
 from server.modules.handlers.world.bootstrap.replay import (
     build_database_gameobject_responses,
     build_single_u32_update_object_payload,
@@ -1845,6 +1845,8 @@ _SIM_TURN_RATE_RAD_PER_SEC = math.pi
 _GAMEOBJECT_STREAM_LOAD_RADIUS = 120.0
 _GAMEOBJECT_STREAM_UNLOAD_RADIUS = 150.0
 _GAMEOBJECT_STREAM_INTERVAL_SECONDS = 0.5
+_NPC_STREAM_UNLOAD_RADIUS = 150.0
+_NPC_STREAM_INTERVAL_SECONDS = 0.5
 _JUMP_PEER_INTERPOLATION_ENABLED = True
 _JUMP_PEER_INTERPOLATION_INTERVAL_SECONDS = 0.016
 _JUMP_PEER_INTERPOLATION_MAX_SECONDS = 1.25
@@ -2365,6 +2367,103 @@ def _maybe_stream_gameobjects(session) -> list[tuple[str, bytes]]:
     if responses:
         Logger.debug("[GO_STREAM] responses=%s", len(responses))
     return responses
+
+
+def _stream_nearby_npcs(session) -> list[tuple[str, bytes]]:
+    if not bool(getattr(session, "npcs_visible", False)):
+        return []
+    if not bool(getattr(session, "npc_auto_stream", False)):
+        return []
+
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    if map_id < 0:
+        return []
+
+    loaded_npcs = getattr(session, "loaded_npcs", None)
+    if not isinstance(loaded_npcs, set):
+        loaded_npcs = set()
+        session.loaded_npcs = loaded_npcs
+
+    from server.modules.handlers.world.bootstrap.replay import build_database_creature_responses
+
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
+    x = float(getattr(session, "x", 0.0) or 0.0)
+    y = float(getattr(session, "y", 0.0) or 0.0)
+    responses = list(build_database_creature_responses(session, loaded_guids=loaded_npcs))
+
+    keep_entries = DatabaseConnection.get_creatures_near(
+        map_id,
+        x,
+        y,
+        radius=_NPC_STREAM_UNLOAD_RADIUS,
+        limit=400,
+    )
+    keep_guids = {
+        int(CreatureGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), realm_id))
+        for entry in keep_entries
+    }
+
+    stale_guids = sorted(int(guid) for guid in loaded_npcs if int(guid) not in keep_guids)
+    for guid in stale_guids:
+        Logger.debug("[NPC_STREAM] despawn guid=0x%X", int(guid))
+        responses.append(
+            (
+                "SMSG_UPDATE_OBJECT",
+                _build_out_of_range_update_object_payload(map_id=map_id, guid=int(guid)),
+            )
+        )
+        loaded_npcs.discard(int(guid))
+
+    return responses
+
+
+def _maybe_stream_npcs(session) -> list[tuple[str, bytes]]:
+    if not bool(getattr(session, "npc_auto_stream", False)):
+        return []
+
+    now = float(time.monotonic())
+    last_stream_at = float(getattr(session, "last_npc_stream_at", 0.0) or 0.0)
+    if now - last_stream_at < _NPC_STREAM_INTERVAL_SECONDS:
+        return []
+    session.last_npc_stream_at = now
+    responses = _stream_nearby_npcs(session)
+    if responses:
+        Logger.debug("[NPC_STREAM] responses=%s", len(responses))
+    return responses
+
+
+def _maybe_stream_world_objects(session) -> list[tuple[str, bytes]]:
+    responses = []
+    responses.extend(_maybe_stream_gameobjects(session))
+    responses.extend(_maybe_stream_npcs(session))
+    return responses
+
+
+def _maybe_move_companion_pet(session) -> list[tuple[str, bytes]]:
+    if int(getattr(session, "summoned_companion_world_guid", 0) or 0) <= 0:
+        return []
+    from server.modules.handlers.world.opcodes.pets import build_companion_follow_responses
+
+    return build_companion_follow_responses(session)
+
+
+_COMPANION_FOLLOW_TRIGGER_OPCODES = {
+    "MSG_MOVE_HEARTBEAT",
+    "MSG_MOVE_START_FORWARD",
+    "MSG_MOVE_START_BACKWARD",
+    "MSG_MOVE_START_STRAFE_LEFT",
+    "MSG_MOVE_START_STRAFE_RIGHT",
+    "MSG_MOVE_STOP_STRAFE",
+    "MSG_MOVE_STOP",
+    "MSG_MOVE_JUMP",
+    "MSG_MOVE_FALL_LAND",
+}
+
+
+def _maybe_move_companion_pet_for_opcode(session, opcode_name: str) -> list[tuple[str, bytes]]:
+    if str(opcode_name) not in _COMPANION_FOLLOW_TRIGGER_OPCODES:
+        return []
+    return _maybe_move_companion_pet(session)
 
 
 def _clear_dance_emote_state_on_move(session) -> None:
@@ -3697,13 +3796,16 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                 float(getattr(session, "orientation", 0.0) or 0.0),
                 int(_movement_state(session).flags),
             )
-            stream_responses = _maybe_stream_gameobjects(session)
+            stream_responses = _maybe_stream_world_objects(session)
+            companion_responses = _maybe_move_companion_pet_for_opcode(session, opcode_name)
             responses = []
             enter_response = _flying_speed_enter_response(session, was_flying)
             if enter_response is not None:
                 responses.append(enter_response)
             if stream_responses:
                 responses.extend(stream_responses)
+            if companion_responses:
+                responses.extend(companion_responses)
             return 0, (responses or None)
         Logger.warning(
             f"[Movement] failed to parse {opcode_name} guid=0x{_player_guid(session):X} "
@@ -3906,9 +4008,12 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         f"[MOVE] guid=0x{_player_guid(session):X} "
         f"pos=({session.x:.3f}, {session.y:.3f}, {session.z:.3f}) facing={session.orientation:.3f}"
     )
-    stream_responses = _maybe_stream_gameobjects(session)
+    stream_responses = _maybe_stream_world_objects(session)
     if stream_responses:
         movement_responses.extend(stream_responses)
+    companion_responses = _maybe_move_companion_pet_for_opcode(session, opcode_name)
+    if companion_responses:
+        movement_responses.extend(companion_responses)
     return 0, (movement_responses or None)
 
 
@@ -3947,8 +4052,10 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
     )
     _stop_fly_peer_interpolation(session)
     broadcast_player_state_update(session, force=True)
-    stream_responses = _maybe_stream_gameobjects(session)
-    return 0, (stream_responses or None)
+    stream_responses = _maybe_stream_world_objects(session)
+    responses = []
+    responses.extend(stream_responses)
+    return 0, (responses or None)
 
 
 def _post_teleport_multiplayer_resync(

@@ -371,6 +371,17 @@ def _reset_morph_state(session, race: int, gender: int) -> None:
     session.native_display_id = native_display_id
 
 
+def _reset_loaded_world_object_state(session) -> None:
+    """Drop client-visible world object bookkeeping for a fresh login."""
+    session.loaded_gameobjects = set()
+    session.loaded_npcs = set()
+    session.npc_flags_by_guid = {}
+    session.npcs_visible = False
+    session.npc_auto_stream = False
+    session.last_gameobject_stream_at = 0.0
+    session.last_npc_stream_at = 0.0
+
+
 def _build_world_login_context(session) -> WorldLoginContext:
     ctx = WorldLoginContext.from_session(session)
     ctx.exact_0002_mode = str(bootstrap_replay.UPDATE_OBJECT_1773613176_0002_MODE or "barncastle")
@@ -769,6 +780,7 @@ def handle_player_login(session, ctx: PacketContext):
     session.is_mounted = False
     session.mount_spell = None
     _reset_morph_state(session, session.race, session.gender)
+    _reset_loaded_world_object_state(session)
 
     session.money = int(row.money or 0)
     session.health = int(row.health or 1)

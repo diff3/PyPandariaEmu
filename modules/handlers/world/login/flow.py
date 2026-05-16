@@ -88,6 +88,7 @@ PRE_UPDATE_OBJECT_PACKETS = (
 POST_UPDATE_OBJECT_PACKETS = (
     # Reserved for world-enter acknowledgements that must be sent
     # after the spawn batch and before ACTIVE_MOVER/TIME_SYNC.
+    "SMSG_ALL_ACHIEVEMENT_DATA",
     # "SMSG_LOGIN_COMPLETE",
 )
 

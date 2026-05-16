@@ -387,14 +387,22 @@ def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
         "get_creatures_near",
         staticmethod(
             lambda map_id, x, y, radius, limit: [
-                {"guid": 68, "entry": 2457, "x": 1000.0, "y": 2000.0, "z": 99.0, "orientation": 1.0}
+                {
+                    "guid": 68,
+                    "entry": 2457,
+                    "npcflag": 0x2000,
+                    "x": 1000.0,
+                    "y": 2000.0,
+                    "z": 99.0,
+                    "orientation": 1.0,
+                }
             ]
         ),
     )
     monkeypatch.setattr(
         db_module.DatabaseConnection,
         "get_creature_template",
-        staticmethod(lambda entry: {"modelid1": 1437}),
+        staticmethod(lambda entry: {"modelid1": 1437, "npcflag": 0x4}),
     )
 
     captured = {}
@@ -415,7 +423,8 @@ def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
     assert captured["realm_id"] == 1
     assert captured["entry"]["guid"] == 68
     assert captured["entry"]["entry"] == 2457
-    assert captured["entry"]["template"] == {"modelid1": 1437}
+    assert captured["entry"]["npcflag"] == 0x2000
+    assert captured["entry"]["template"] == {"modelid1": 1437, "npcflag": 0x4}
     assert captured["entry"]["x"] == 1000.0
     assert captured["entry"]["y"] == 2000.0
     assert captured["entry"]["z"] == 99.0
@@ -478,3 +487,64 @@ def test_build_creature_update_payload_uses_create_object2():
     assert payload[0:2] == b"\x00\x00"
     assert payload[2:6] == b"\x01\x00\x00\x00"
     assert payload[6] == 2
+
+
+def test_build_creature_field_values_uses_spawn_npc_flags():
+    replay = _import_replay()
+    world_guid = replay.CreatureGuid.from_spawn_guid(68, 1)
+    entry = {
+        "guid": 68,
+        "entry": 3310,
+        "npcflag": 0x00002000,
+        "template": {"modelid1": 1437},
+    }
+
+    fields = replay._build_creature_field_values(entry, world_guid=world_guid)
+
+    assert fields[87] == 0x00002000
+
+
+def test_build_creature_field_values_uses_template_npc_flags():
+    replay = _import_replay()
+    world_guid = replay.CreatureGuid.from_spawn_guid(68, 1)
+    entry = {
+        "guid": 68,
+        "entry": 3310,
+        "npcflag": 0,
+        "template": {"modelid1": 1437, "npcflag": 0x00002003},
+    }
+
+    fields = replay._build_creature_field_values(entry, world_guid=world_guid)
+
+    assert fields[87] == 0x00002003
+
+
+def test_build_database_creature_responses_skips_dnd_triggers(monkeypatch):
+    replay = _import_replay()
+    session = SimpleNamespace(
+        npcs_visible=True,
+        map_id=1,
+        x=100.0,
+        y=200.0,
+        z=30.0,
+        orientation=0.0,
+        realm_id=1,
+    )
+
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creatures_near",
+        staticmethod(
+            lambda map_id, x, y, radius, limit: [
+                {"guid": 68, "entry": 37574, "x": 1000.0, "y": 2000.0, "z": 99.0, "orientation": 1.0}
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creature_template",
+        staticmethod(lambda entry: {"name": "[DND] Shaker - Small", "modelid1": 21955}),
+    )
+
+    assert replay.build_database_creature_responses(session) == []

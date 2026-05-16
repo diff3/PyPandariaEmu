@@ -24,6 +24,7 @@ replay_module = types.ModuleType("server.modules.handlers.world.bootstrap.replay
 replay_module.build_single_u32_update_object_payload = lambda **kwargs: b""
 replay_module.build_multi_u32_update_object_payload = lambda **kwargs: b""
 replay_module.build_database_gameobject_responses = lambda session, loaded_guids=None: []
+replay_module.build_database_creature_responses = lambda session, loaded_guids=None: []
 sys.modules["server.modules.handlers.world.bootstrap.replay"] = replay_module
 
 sys.modules.pop("server.modules.handlers.world.opcodes.movement", None)
@@ -603,6 +604,50 @@ def test_stream_nearby_gameobjects_allows_map_zero(monkeypatch):
     responses = movement._stream_nearby_gameobjects(session)
 
     assert responses == [("SMSG_UPDATE_OBJECT", b"spawn-go")]
+
+
+def test_stream_nearby_npcs_spawns_new_and_despawns_far(monkeypatch):
+    session = _FakeSession()
+    session.realm_id = 1
+    session.npcs_visible = True
+    session.npc_auto_stream = True
+    session.loaded_npcs = {movement.CreatureGuid.from_spawn_guid(9, 1)}
+
+    new_world_guid = movement.CreatureGuid.from_spawn_guid(4, 1)
+
+    monkeypatch.setattr(
+        replay_module,
+        "build_database_creature_responses",
+        lambda target, loaded_guids=None: (
+            loaded_guids.add(new_world_guid) if isinstance(loaded_guids, set) else None
+        ) or [("SMSG_UPDATE_OBJECT", b"spawn-npc")],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        movement.DatabaseConnection,
+        "get_creatures_near",
+        lambda map_id, x, y, radius, limit=400: [{"guid": 4}],
+        raising=False,
+    )
+
+    responses = movement._stream_nearby_npcs(session)
+
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"spawn-npc")
+    assert responses[1][0] == "SMSG_UPDATE_OBJECT"
+    assert session.loaded_npcs == {new_world_guid}
+
+
+def test_companion_follow_ignores_turn_only_opcodes(monkeypatch):
+    session = _FakeSession()
+    session.summoned_companion_world_guid = 123
+
+    monkeypatch.setattr(movement, "_maybe_move_companion_pet", lambda target: [("SMSG_PLAYER_MOVE", b"pet")])
+
+    assert movement._maybe_move_companion_pet_for_opcode(session, "MSG_MOVE_START_TURN_LEFT") == []
+    assert movement._maybe_move_companion_pet_for_opcode(session, "MSG_MOVE_SET_FACING") == []
+    assert movement._maybe_move_companion_pet_for_opcode(session, "MSG_MOVE_START_FORWARD") == [
+        ("SMSG_PLAYER_MOVE", b"pet")
+    ]
 
 
 def test_handle_movement_packet_returns_stream_responses(monkeypatch):

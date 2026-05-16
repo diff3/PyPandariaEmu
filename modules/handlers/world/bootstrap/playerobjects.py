@@ -221,6 +221,7 @@ _UNIT_FIELD_MOUNT_DISPLAY_ID = 71
 _PLAYER_BYTES = 166
 _PLAYER_BYTES_2 = 167
 _PLAYER_BYTES_3 = 168
+_PLAYER_FIELD_COINAGE = 1149
 _PLAYER_FIELD_MAX_LEVEL = 1943
 _LANG_SKILL_ID_FIELD = 1154
 _LANG_SKILL_VALUE_FIELD = 1282
@@ -754,6 +755,7 @@ def build_player_field_values(ctx) -> dict[int, int]:
     player_bytes_2 = _pack_u8x4(facial_hair, 0, 0, gender)
     player_bytes_3 = _pack_u8x4(gender, 0, 0, 0)
     max_level = int(getattr(ctx, "max_level", _PLAYER_MAX_LEVEL_DEFAULT) or _PLAYER_MAX_LEVEL_DEFAULT)
+    money = int(getattr(ctx, "money", 0) or 0) & 0xFFFFFFFFFFFFFFFF
 
     field_values = dict(_VERIFIED_PLAYER_REFERENCE_FIELDS)
     field_values.update(
@@ -778,6 +780,8 @@ def build_player_field_values(ctx) -> dict[int, int]:
             _PLAYER_BYTES: player_bytes,
             _PLAYER_BYTES_2: player_bytes_2,
             _PLAYER_BYTES_3: player_bytes_3,
+            _PLAYER_FIELD_COINAGE: money & 0xFFFFFFFF,
+            _PLAYER_FIELD_COINAGE + 1: (money >> 32) & 0xFFFFFFFF,
             _PLAYER_FIELD_MAX_LEVEL: max_level,
         }
     )

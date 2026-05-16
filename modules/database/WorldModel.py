@@ -99,6 +99,7 @@ class WorldCreatureTemplate(Base):
     subname = Column(String(100))
     IconName = Column(String(100))
     exp = Column(SMALLINT(), nullable=False, default=0)
+    npcflag = Column(Integer, nullable=False, default=0)
     npc_rank = Column(TINYINT(unsigned=True), nullable=False, default=0)
     type = Column(TINYINT(unsigned=True), nullable=False, default=0)
     type_flags = Column(Integer, nullable=False, default=0)

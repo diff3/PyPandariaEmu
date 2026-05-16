@@ -24,6 +24,7 @@ from server.modules.handlers.world.runtime.lifecycle import (
 )
 
 from server.modules.handlers.world.opcodes import chat as _chat  # noqa: F401
+from server.modules.handlers.world.opcodes import achievements as _achievements  # noqa: F401
 from server.modules.handlers.world.opcodes import entities as _entities  # noqa: F401
 from server.modules.handlers.world.opcodes import inventory as _inventory  # noqa: F401
 from server.modules.handlers.world.opcodes import login as _login  # noqa: F401
@@ -31,6 +32,7 @@ from server.modules.handlers.world.opcodes import misc as _misc  # noqa: F401
 from server.modules.handlers.world.opcodes import movement as _movement  # noqa: F401
 from server.modules.handlers.world.opcodes import pets as _pets  # noqa: F401
 from server.modules.handlers.world.opcodes import spells as _spells  # noqa: F401
+from server.modules.handlers.world.opcodes import taxi as _taxi  # noqa: F401
 from server.modules.handlers.world.opcodes import chat as chat_handlers
 from server.modules.handlers.world.opcodes import entities as entities_handlers
 from server.modules.handlers.world.opcodes import login as login_handlers

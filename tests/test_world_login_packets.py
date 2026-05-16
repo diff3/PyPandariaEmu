@@ -133,6 +133,20 @@ def test_pre_update_object_packets_include_action_buttons_again():
     assert "SMSG_UPDATE_ACTION_BUTTONS" in login_flow.PRE_UPDATE_OBJECT_PACKETS
 
 
+def test_post_update_object_packets_include_empty_achievement_state():
+    assert "SMSG_ALL_ACHIEVEMENT_DATA" in login_flow.POST_UPDATE_OBJECT_PACKETS
+
+
+def test_all_achievement_data_packet_is_minimal_empty_state():
+    payload = login_packets.build_SMSG_ALL_ACHIEVEMENT_DATA(SimpleNamespace())
+
+    criteria_count, byte_pos, bit_pos = BitInterPreter.read_bits(payload, 0, 0, 19)
+    achievement_count, _byte_pos, _bit_pos = BitInterPreter.read_bits(payload, byte_pos, bit_pos, 20)
+
+    assert criteria_count == 0
+    assert achievement_count == 0
+
+
 def test_known_spells_packet_includes_common_for_alliance_race():
     ctx = SimpleNamespace(
         known_spells=[133, 116],

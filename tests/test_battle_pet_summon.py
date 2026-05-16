@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import struct
+import sys
+import types
 from types import SimpleNamespace
 
 from server.modules.handlers.world.opcodes.pets import (
+    build_companion_follow_responses,
     _build_companion_create_response,
     summon_companion_pet,
 )
@@ -126,3 +129,40 @@ def test_battle_pet_summon_sends_player_feedback_before_pet_packets():
         "SMSG_UPDATE_OBJECT",
     ]
     assert all(payload for _opcode, payload in responses)
+
+
+def test_battle_pet_follow_moves_companion_toward_player(monkeypatch):
+    movement_module = types.ModuleType("server.modules.handlers.world.opcodes.movement")
+    movement_module.build_smsg_player_move_payload = lambda session: b"pet-move"
+    monkeypatch.setitem(sys.modules, "server.modules.handlers.world.opcodes.movement", movement_module)
+
+    session = SimpleNamespace(
+        char_guid=0x10,
+        world_guid=0x3000100000010,
+        realm_id=1,
+        map_id=1,
+        x=2030.434,
+        y=-6710.1,
+        z=5.594,
+        orientation=0.0,
+        race=1,
+        faction_template=35,
+        region=None,
+    )
+    pet = BattlePetJournalEntry(
+        species_id=83,
+        creature_id=8376,
+        spell_id=12243,
+        display_id=7920,
+    )
+    _build_companion_create_response(session, pet)
+
+    session.x = 2035.434
+    responses = build_companion_follow_responses(session)
+
+    assert [opcode for opcode, _payload in responses] == ["SMSG_PLAYER_MOVE"]
+    assert responses[0][1]
+    assert session.summoned_companion_world_guid == 0xF130000000100053
+    assert abs(session.summoned_companion_x - 2031.434) < 0.0001
+    assert abs(session.summoned_companion_y - -6710.1) < 0.0001
+    assert abs(session.summoned_companion_z - 5.594) < 0.0001

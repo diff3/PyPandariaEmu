@@ -3,6 +3,8 @@
 
 import math
 import struct
+import time
+from types import SimpleNamespace
 
 from DSL.modules.EncoderHandler import EncoderHandler
 from DSL.modules.bitsHandler import BitInterPreter
@@ -26,6 +28,12 @@ _COMPANION_FIELD_MASK_BLOCKS = 5
 _COMPANION_DYNAMIC_MASK_BLOCKS = 0
 _COMPANION_VISIBILITY_RADIUS = 120.0
 _COMPANION_FEEDBACK_EMOTE_ID = 16
+_COMPANION_FOLLOW_DISTANCE = 1.8
+_COMPANION_FOLLOW_INTERVAL_SECONDS = 0.25
+_COMPANION_FOLLOW_MIN_DISTANCE = 0.25
+_COMPANION_FOLLOW_MAX_STEP = 1.0
+_COMPANION_FOLLOW_SNAP_DISTANCE = 20.0
+_COMPANION_FOLLOW_MOVEMENT_FLAGS = 0x00000001
 
 _OBJECT_FIELD_GUID = 0
 _OBJECT_FIELD_TYPE = 4
@@ -375,6 +383,124 @@ def _forget_companion_spawn(session, world_guid: int) -> None:
     )
 
 
+def _update_companion_spawn_position(session, *, x: float, y: float, z: float, orientation: float) -> None:
+    world_guid = _summoned_companion_world_guid(session)
+    if world_guid <= 0:
+        return
+
+    session.summoned_companion_x = float(x)
+    session.summoned_companion_y = float(y)
+    session.summoned_companion_z = float(z)
+    session.summoned_companion_orientation = float(orientation)
+
+    companions = _region_companions(session)
+    entry = companions.get(int(world_guid)) if companions else None
+    if isinstance(entry, dict):
+        entry["x"] = float(x)
+        entry["y"] = float(y)
+        entry["z"] = float(z)
+        entry["orientation"] = float(orientation)
+
+
+def _companion_current_position(session) -> tuple[float, float, float]:
+    return (
+        float(getattr(session, "summoned_companion_x", getattr(session, "x", 0.0)) or 0.0),
+        float(getattr(session, "summoned_companion_y", getattr(session, "y", 0.0)) or 0.0),
+        float(getattr(session, "summoned_companion_z", getattr(session, "z", 0.0)) or 0.0),
+    )
+
+
+def _companion_next_follow_position(session) -> tuple[float, float, float, float, float]:
+    current_x, current_y, current_z = _companion_current_position(session)
+    player_x = float(getattr(session, "x", 0.0) or 0.0)
+    player_y = float(getattr(session, "y", 0.0) or 0.0)
+    player_z = float(getattr(session, "z", 0.0) or 0.0)
+
+    dx = player_x - current_x
+    dy = player_y - current_y
+    dz = player_z - current_z
+    distance = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+    orientation = math.atan2(dy, dx) if abs(dx) > 0.000001 or abs(dy) > 0.000001 else float(
+        getattr(session, "summoned_companion_orientation", getattr(session, "orientation", 0.0)) or 0.0
+    )
+    remaining = max(0.0, distance - _COMPANION_FOLLOW_DISTANCE)
+    if remaining <= _COMPANION_FOLLOW_MIN_DISTANCE:
+        return current_x, current_y, current_z, orientation, remaining
+
+    if distance >= _COMPANION_FOLLOW_SNAP_DISTANCE:
+        scale = _COMPANION_FOLLOW_DISTANCE / distance
+        target_x = player_x - (dx * scale)
+        target_y = player_y - (dy * scale)
+        target_z = player_z - (dz * scale)
+        return target_x, target_y, target_z, orientation, remaining
+
+    step = min(float(remaining), _COMPANION_FOLLOW_MAX_STEP)
+    scale = step / distance
+    next_x = current_x + (dx * scale)
+    next_y = current_y + (dy * scale)
+    next_z = current_z + (dz * scale)
+    return next_x, next_y, next_z, orientation, remaining
+
+
+def _should_send_companion_follow(session, *, remaining_distance: float) -> bool:
+    if float(remaining_distance) <= _COMPANION_FOLLOW_MIN_DISTANCE:
+        return False
+
+    now = float(time.monotonic())
+    last_at = float(getattr(session, "summoned_companion_last_follow_at", 0.0) or 0.0)
+    if now - last_at < _COMPANION_FOLLOW_INTERVAL_SECONDS:
+        return False
+
+    session.summoned_companion_last_follow_at = now
+    return True
+
+
+def build_companion_follow_responses(session) -> list[tuple[str, bytes]]:
+    world_guid = _summoned_companion_world_guid(session)
+    if world_guid <= 0:
+        return []
+
+    x, y, z, orientation, remaining_distance = _companion_next_follow_position(session)
+    if not _should_send_companion_follow(session, remaining_distance=remaining_distance):
+        return []
+
+    from server.modules.handlers.world.opcodes.movement import build_smsg_player_move_payload
+
+    move_state = SimpleNamespace(
+        x=float(x),
+        y=float(y),
+        z=float(z),
+        orientation=float(orientation),
+        flags=_COMPANION_FOLLOW_MOVEMENT_FLAGS,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        counter=int(getattr(session, "summoned_companion_follow_counter", 0) or 0),
+    )
+    companion_session = SimpleNamespace(
+        char_guid=int(world_guid),
+        movement_state=move_state,
+        can_fly=False,
+        is_flying=False,
+    )
+    payload = build_smsg_player_move_payload(companion_session)
+    if not payload:
+        return []
+
+    session.summoned_companion_follow_counter = int(getattr(move_state, "counter", 0) or 0)
+    _update_companion_spawn_position(session, x=x, y=y, z=z, orientation=orientation)
+    Logger.debug(
+        "[BattlePet][Follow] guid=0x%016X pos=(%.3f, %.3f, %.3f, %.3f)",
+        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+        float(x),
+        float(y),
+        float(z),
+        float(orientation),
+    )
+    return [("SMSG_PLAYER_MOVE", payload)]
+
+
 def _nearby_observers(session, *, x: float, y: float) -> list:
     region = getattr(session, "region", None)
     players = list(getattr(region, "players", ()) or ())
@@ -462,6 +588,9 @@ def _build_companion_create_response(session, pet) -> tuple[str, bytes]:
     payload = _build_companion_update_payload(session, pet, entry)
     session.summoned_companion_world_guid = int(world_guid)
     session.summoned_companion_pet_guid = int(getattr(pet, "species_id", 0) or 0)
+    session.summoned_companion_last_follow_at = 0.0
+    session.summoned_companion_follow_counter = 0
+    _update_companion_spawn_position(session, x=pet_x, y=pet_y, z=z, orientation=orientation)
     _remember_companion_spawn(session, entry)
     response = ("SMSG_UPDATE_OBJECT", payload)
     _broadcast_companion_create(session, response, entry)

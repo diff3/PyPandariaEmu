@@ -1894,9 +1894,46 @@ def test_spawngo_loads_nearby_gameobjects_and_tracks_loaded_guids(monkeypatch):
     assert responses[1] == ("SMSG_MESSAGECHAT", b"system|[SpawnGO] loaded 1 gameobjects")
     assert len(alice.loaded_gameobjects) == 1
 
-    responses = chat_handlers.chat_commands.cmd_spawngo(alice, [])
 
-    assert responses == [("SMSG_MESSAGECHAT", b"system|[SpawnGO] loaded 0 gameobjects")]
+def test_addmoney_updates_player_coinage_fields(monkeypatch):
+    captured = {}
+    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+
+    def _fake_build_multi_u32_update_object_payload(*, map_id, guid, field_updates):
+        captured["map_id"] = int(map_id)
+        captured["guid"] = int(guid)
+        captured["field_updates"] = list(field_updates)
+        return b"money-update"
+
+    monkeypatch.setattr(
+        replay_module,
+        "build_multi_u32_update_object_payload",
+        _fake_build_multi_u32_update_object_payload,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.DatabaseConnection,
+        "update_character_money",
+        lambda guid, realm_id, money: True,
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.world_guid = 0x30001000003E9
+    alice.money = 10
+
+    responses = chat_handlers.chat_commands.cmd_addmoney(alice, ["1g2s3c"])
+
+    assert alice.money == 10213
+    assert responses[1] == ("SMSG_UPDATE_OBJECT", b"money-update")
+    assert captured["map_id"] == 1
+    assert captured["guid"] == alice.world_guid
+    assert captured["field_updates"] == [
+        (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE, 10213),
+        (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE + 1, 0),
+    ]
 
 
 def test_world_go_status_reports_visibility_and_cache(monkeypatch):
@@ -2015,7 +2052,7 @@ def test_world_npc_status_reports_visibility_and_cache(monkeypatch):
     assert responses == [
         (
             "SMSG_MESSAGECHAT",
-            b"system|[WorldNPC] visible=0 loaded_now=0 cache_loaded=0 preload=0 cached_total=0 templates=0 maps=0",
+            b"system|[WorldNPC] visible=0 auto=0 loaded_now=0 cache_loaded=0 preload=0 cached_total=0 templates=0 maps=0",
         )
     ]
 
@@ -2050,6 +2087,48 @@ def test_world_npc_show_enables_visibility(monkeypatch):
     ]
 
 
+def test_world_npc_show_refreshes_stale_loaded_npcs(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    movement_module = sys.modules["server.modules.handlers.world.opcodes.movement"]
+    monkeypatch.setattr(
+        movement_module,
+        "_build_out_of_range_update_object_payload",
+        lambda *, map_id, guid: f"oor|map={map_id}|guid={guid}".encode(),
+        raising=False,
+    )
+    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+
+    def _fake_build_database_creature_responses(session, loaded_guids=None):
+        assert loaded_guids == set()
+        loaded_guids.add(303)
+        return [("SMSG_UPDATE_OBJECT", b"npc-303")]
+
+    monkeypatch.setattr(
+        replay_module,
+        "build_database_creature_responses",
+        _fake_build_database_creature_responses,
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.loaded_npcs = {101, 102}
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["npc", "show"])
+
+    assert alice.loaded_npcs == {303}
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"oor|map=1|guid=101"),
+        ("SMSG_UPDATE_OBJECT", b"oor|map=1|guid=102"),
+        ("SMSG_UPDATE_OBJECT", b"npc-303"),
+        ("SMSG_MESSAGECHAT", b"system|[WorldNPC] shown 1 updates"),
+    ]
+
+
 def test_world_npc_hide_disables_visibility_and_clears_loaded(monkeypatch):
     monkeypatch.setattr(
         chat_handlers.chat_commands,
@@ -2072,12 +2151,65 @@ def test_world_npc_hide_disables_visibility_and_clears_loaded(monkeypatch):
     responses = chat_handlers.chat_commands.cmd_world(alice, ["npc", "hide"])
 
     assert alice.npcs_visible is False
+    assert alice.npc_auto_stream is False
     assert alice.loaded_npcs == set()
     assert responses == [
         ("SMSG_UPDATE_OBJECT", b"oor|map=1|guid=101"),
         ("SMSG_UPDATE_OBJECT", b"oor|map=1|guid=102"),
         ("SMSG_MESSAGECHAT", b"system|[WorldNPC] hidden"),
     ]
+
+
+def test_world_npc_on_enables_auto_streaming(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    monkeypatch.setattr(
+        replay_module,
+        "build_database_creature_responses",
+        lambda session, loaded_guids=None: [("SMSG_UPDATE_OBJECT", b"npc-1")],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.npcs_visible = False
+    alice.npc_auto_stream = False
+    alice.last_npc_stream_at = 55.0
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["npc", "on"])
+
+    assert alice.npcs_visible is True
+    assert alice.npc_auto_stream is True
+    assert alice.last_npc_stream_at == 0.0
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"npc-1"),
+        ("SMSG_MESSAGECHAT", b"system|[WorldNPC] auto on 1 updates"),
+    ]
+
+
+def test_world_npc_off_disables_auto_without_hiding(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.npcs_visible = True
+    alice.npc_auto_stream = True
+    alice.loaded_npcs = {101}
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["npc", "off"])
+
+    assert alice.npc_auto_stream is False
+    assert alice.npcs_visible is True
+    assert alice.loaded_npcs == {101}
+    assert responses == [("SMSG_MESSAGECHAT", b"system|[WorldNPC] auto off")]
 
 
 def test_build_state_responses_duplicates_display_id_into_native_display(monkeypatch):
@@ -2310,6 +2442,40 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     assert len(responses) == 2
     assert responses[0][0] == "SMSG_MOVE_TELEPORT"
     assert responses[1] == ("SMSG_PLAYER_MOVE", b"move")
+
+
+def test_apply_player_state_change_clears_loaded_world_objects_before_teleport(monkeypatch):
+    movement_module = _install_movement_stub(
+        monkeypatch,
+        _build_out_of_range_update_object_payload=lambda *, map_id, guid: f"clear|{map_id}|{guid}".encode(),
+    )
+    monkeypatch.setattr(movement_module, "build_same_map_teleport_payload", lambda session: b"teleport", raising=False)
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [("SMSG_PLAYER_MOVE", b"move")],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.loaded_gameobjects = {11}
+    alice.loaded_npcs = {22}
+    alice.last_gameobject_stream_at = 123.0
+    alice.last_npc_stream_at = 456.0
+
+    responses = chat_handlers.apply_player_state_change(
+        alice,
+        position=(10.0, 20.0, 30.0, 1.5),
+        map_id=1,
+    )
+
+    assert ("SMSG_UPDATE_OBJECT", b"clear|1|11") in responses
+    assert ("SMSG_UPDATE_OBJECT", b"clear|1|22") in responses
+    assert alice.loaded_gameobjects == set()
+    assert alice.loaded_npcs == set()
+    assert alice.last_gameobject_stream_at == 0.0
+    assert alice.last_npc_stream_at == 0.0
 
 
 def test_apply_player_state_change_dismounts_before_teleport(monkeypatch):

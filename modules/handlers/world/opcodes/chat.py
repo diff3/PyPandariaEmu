@@ -1269,6 +1269,34 @@ def _build_field_update_responses(session, field_updates: dict[int, int]) -> lis
     return []
 
 
+def _clear_loaded_world_objects_for_teleport(session, movement_handlers, *, map_id: int) -> list[tuple[str, bytes]]:
+    responses: list[tuple[str, bytes]] = []
+    builder = getattr(movement_handlers, "_build_out_of_range_update_object_payload", None)
+    loaded_sets = (
+        getattr(session, "loaded_gameobjects", None),
+        getattr(session, "loaded_npcs", None),
+    )
+
+    for loaded_guids in loaded_sets:
+        if not isinstance(loaded_guids, set):
+            continue
+        if builder is not None:
+            for guid in sorted(int(value) for value in loaded_guids):
+                if int(guid) <= 0:
+                    continue
+                responses.append(
+                    (
+                        "SMSG_UPDATE_OBJECT",
+                        builder(map_id=int(map_id), guid=int(guid)),
+                    )
+                )
+        loaded_guids.clear()
+
+    session.last_gameobject_stream_at = 0.0
+    session.last_npc_stream_at = 0.0
+    return responses
+
+
 def build_display_id_responses(session, display_id: int) -> list[tuple[str, bytes]]:
     from server.modules.handlers.world.state.runtime import (
         _visible_guid_set,
@@ -1373,6 +1401,13 @@ def apply_player_state_change(
         ):
             pre_position_responses.extend(spells_handlers.dismount(session))
 
+        pre_position_responses.extend(
+            _clear_loaded_world_objects_for_teleport(
+                session,
+                movement_handlers,
+                map_id=old_map_id,
+            )
+        )
         force_player_visibility_destroy(
             session,
             reason="teleport-start",
