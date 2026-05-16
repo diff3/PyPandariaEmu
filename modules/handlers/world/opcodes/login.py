@@ -807,6 +807,8 @@ def handle_player_login(session, ctx: PacketContext):
     ]
 
     session.explored_zones_raw = str(getattr(row, "exploredZones", "") or "")
+    session.chosen_title = int(getattr(row, "chosenTitle", 0) or 0)
+    session.known_titles_raw = str(getattr(row, "knownTitles", "") or "")
 
     inventory_state = refresh_session_inventory(session)
     has_equipped_items = any(

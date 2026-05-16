@@ -1426,10 +1426,9 @@ def test_map_on_reveals_all_explored_zones(monkeypatch):
     assert len(captured["saved_explored_zones"].split()) == 200
     assert set(captured["saved_explored_zones"].split()) == {"4294967295"}
     assert captured["explored_zones_raw"] == captured["saved_explored_zones"]
-    assert responses == [
-        ("SMSG_UPDATE_OBJECT", b"map-update"),
-        ("SMSG_MESSAGECHAT", b"system|[Map] all explored"),
-    ]
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"map-update")
+    assert responses[-1] == ("SMSG_MESSAGECHAT", b"system|[Map] all explored")
+    assert ("SMSG_TITLE_EARNED", struct.pack("<I", 47)) in responses
 
 
 def test_map_zero_clears_all_explored_zones(monkeypatch):
@@ -1934,6 +1933,53 @@ def test_addmoney_updates_player_coinage_fields(monkeypatch):
         (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE, 10213),
         (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE + 1, 0),
     ]
+
+
+def test_title_command_grants_and_activates_title_bit(monkeypatch):
+    import server.modules.handlers.world.title_service as title_service
+
+    captured = {}
+    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+
+    def _fake_build_multi_u32_update_object_payload(*, map_id, guid, field_updates):
+        captured["map_id"] = int(map_id)
+        captured["guid"] = int(guid)
+        captured["field_updates"] = list(field_updates)
+        return b"title-update"
+
+    monkeypatch.setattr(
+        replay_module,
+        "build_multi_u32_update_object_payload",
+        _fake_build_multi_u32_update_object_payload,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        title_service.DatabaseConnection,
+        "update_character_title_state",
+        lambda guid, realm_id, chosen_title, known_titles: True,
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.world_guid = 0x30001000003E9
+    alice.known_titles_raw = "0 0 0 0 0 0 0 0 0 0"
+    alice.chosen_title = 0
+
+    responses = chat_handlers.chat_commands.cmd_title(alice, ["explorer"])
+
+    assert alice.chosen_title == 47
+    assert title_service.title_is_known(alice.known_titles_raw, 47)
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"title-update")
+    assert ("SMSG_TITLE_EARNED", struct.pack("<I", 47)) in responses[1:]
+    assert captured["map_id"] == 1
+    assert captured["guid"] == alice.world_guid
+    assert captured["field_updates"][0] == (title_service.PLAYER_FIELD_PLAYER_TITLE, 47)
+    assert captured["field_updates"][1 + (47 // 32)] == (
+        title_service.PLAYER_FIELD_KNOWN_TITLES + (47 // 32),
+        1 << (47 % 32),
+    )
 
 
 def test_world_go_status_reports_visibility_and_cache(monkeypatch):

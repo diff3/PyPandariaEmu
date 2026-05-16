@@ -48,6 +48,12 @@ from server.modules.handlers.world.teleport.teleport_service import (
     remove_teleport as remove_named_teleport,
     search_teleports,
 )
+from server.modules.handlers.world.title_service import (
+    apply_title,
+    build_title_earned_payload,
+    resolve_title_bit,
+    title_is_known,
+)
 
 CommandHandler = Callable[[Any, list[str]], list[tuple[str, bytes]]]
 
@@ -129,6 +135,10 @@ def configure(**helpers: Any) -> None:
 
 def _helper(name: str) -> Any:
     """Return a configured helper or fail fast."""
+    if name == "build_map_exploration_update_responses":
+        legacy_helper = HELPERS.get("build_map_exploration_update_response")
+        if callable(legacy_helper):
+            return lambda session, reveal_all: [legacy_helper(session, reveal_all)]
     if name not in HELPERS:
         raise RuntimeError(f"chat command helper not configured: {name}")
     return HELPERS[name]
@@ -1082,6 +1092,32 @@ def cmd_addmoney(session, args: list[str]):
     ]
 
 
+@register_command("title", ".title <bitIndex|explorer|off>", require_args=True)
+def cmd_title(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Grant and activate a player title by title bit index."""
+    raw = str(args[0] if args else "").strip().lower()
+    if raw in {"off", "none", "clear", "0"}:
+        responses = apply_title(session, 0, grant_if_missing=False)
+        return _append_feedback_response(responses, "[Title] cleared")
+
+    try:
+        bit_index = resolve_title_bit(raw)
+    except ValueError:
+        return _notification_response("Usage: .title <bitIndex|explorer|off>")
+
+    try:
+        was_known = False
+        known_titles = getattr(session, "known_titles_raw", "")
+        was_known = title_is_known(known_titles, bit_index)
+        responses = apply_title(session, bit_index, grant_if_missing=True)
+    except ValueError as exc:
+        return _notification_response(f"[Title] {exc}")
+
+    if bit_index > 0 and not was_known:
+        responses.append(("SMSG_TITLE_EARNED", build_title_earned_payload(bit_index)))
+    return _append_feedback_response(responses, f"[Title] active bit={bit_index}")
+
+
 @register_command("morph", ".morph <displayId|name|list>", require_args=True)
 def cmd_morph(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Morph the player into a target display id or list available morphs."""
@@ -1575,15 +1611,13 @@ def cmd_map(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Toggle explored zones for the current player."""
     argument = str(args[0]).strip().lower() if args else ""
     if argument in {"on", "1", "all"}:
-        return [
-            _helper("build_map_exploration_update_response")(session, True),
-            _notification_response("[Map] all explored")[0],
-        ]
+        responses = list(_helper("build_map_exploration_update_responses")(session, True))
+        responses.append(_notification_response("[Map] all explored")[0])
+        return responses
     if argument in {"0", "off", "reset", "none"}:
-        return [
-            _helper("build_map_exploration_update_response")(session, False),
-            _notification_response("[Map] exploration reset")[0],
-        ]
+        responses = list(_helper("build_map_exploration_update_responses")(session, False))
+        responses.append(_notification_response("[Map] exploration reset")[0])
+        return responses
     return _notification_response("Usage: map <on|0>")
 
 
@@ -1901,6 +1935,7 @@ PRIMARY_COMMANDS = {
     "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
     "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),
     "taxi": Command(handler=cmd_taxi, usage=".taxi <on|off|status>"),
+    "title": Command(handler=cmd_title, usage=".title <bitIndex|explorer|off>", require_args=True),
     "world": Command(handler=cmd_world, usage=".world <go|npc> <hide|show|status|on|off>"),
     # "telxyz": Command(handler=cmd_telxyz, usage=".telxyz <map> <x> <y> <z> <orientation>"),
     "tel": Command(

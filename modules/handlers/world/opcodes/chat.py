@@ -1037,6 +1037,18 @@ def _build_map_exploration_update_response(session, reveal_all: bool) -> tuple[s
     )
 
 
+def _build_map_exploration_update_responses(session, reveal_all: bool) -> list[tuple[str, bytes]]:
+    responses = [_build_map_exploration_update_response(session, reveal_all)]
+    if bool(reveal_all):
+        try:
+            from server.modules.handlers.world.title_service import grant_explorer_title_if_missing
+
+            responses.extend(grant_explorer_title_if_missing(session))
+        except Exception as exc:
+            Logger.warning("[Title] explorer auto-grant failed: %s", exc)
+    return responses
+
+
 def send_run_speed(player, speed: float) -> tuple[str, bytes]:
     guid = int(getattr(player, "char_guid", 0) or getattr(player, "player_guid", 0) or 0)
     run_speed = float(speed)
@@ -1524,7 +1536,7 @@ def _configure_chat_commands() -> None:
         ),
         build_login_inventory_sync_responses=lambda session: build_login_inventory_sync_responses(session),
         build_level_command_responses=lambda session: _build_level_command_responses(session),
-        build_map_exploration_update_response=lambda session, reveal_all: _build_map_exploration_update_response(
+        build_map_exploration_update_responses=lambda session, reveal_all: _build_map_exploration_update_responses(
             session,
             reveal_all,
         ),

@@ -1762,6 +1762,35 @@ class DatabaseConnection:
             session.close()
 
     @staticmethod
+    def update_character_title_state(
+        guid: int,
+        realm_id: int,
+        chosen_title: int,
+        known_titles: str,
+    ) -> None:
+        session = DatabaseConnection.chars()
+
+        try:
+            char = session.query(Characters).filter_by(
+                guid=int(guid),
+                realm=int(realm_id),
+            ).first()
+
+            if not char:
+                return
+
+            char.chosenTitle = int(chosen_title)
+            char.knownTitles = str(known_titles or "")
+            session.commit()
+
+        except Exception:
+            session.rollback()
+            raise
+
+        finally:
+            session.close()
+
+    @staticmethod
     def get_player_createinfo_actions(race: int, class_: int) -> list[tuple[int, int, int]]:
         if DatabaseConnection._world_cache_loaded:
             return DatabaseConnection._cache_playercreateinfo_actions.get((int(race), int(class_)), [])

@@ -132,6 +132,8 @@ class WorldLoginContext:
     unit_flags: int = 0
     mount_display_id: int = 0
     equipment_cache_raw: list[int] = field(default_factory=list)
+    chosen_title: int = 0
+    known_titles_raw: str = ""
 
     known_spells: list = field(default_factory=list)
     action_buttons: list = field(default_factory=lambda: [0] * 132)
@@ -223,6 +225,8 @@ class WorldLoginContext:
             unit_flags=int(getattr(session, "unit_flags", 0) or 0),
             mount_display_id=int(getattr(session, "mount_display_id", 0) or 0),
             equipment_cache_raw=list(getattr(session, "equipment_cache_raw", []) or []),
+            chosen_title=int(getattr(session, "chosen_title", 0) or 0),
+            known_titles_raw=str(getattr(session, "known_titles_raw", "") or ""),
 
             known_spells=session.known_spells,
             action_buttons=session.action_buttons,

@@ -221,6 +221,9 @@ _UNIT_FIELD_MOUNT_DISPLAY_ID = 71
 _PLAYER_BYTES = 166
 _PLAYER_BYTES_2 = 167
 _PLAYER_BYTES_3 = 168
+_UNIT_END = 0x8 + 0x98
+_PLAYER_FIELD_PLAYER_TITLE = _UNIT_END + 0x31F
+_PLAYER_FIELD_KNOWN_TITLES = _UNIT_END + 0x3D3
 _PLAYER_FIELD_COINAGE = 1149
 _PLAYER_FIELD_MAX_LEVEL = 1943
 _LANG_SKILL_ID_FIELD = 1154
@@ -756,6 +759,7 @@ def build_player_field_values(ctx) -> dict[int, int]:
     player_bytes_3 = _pack_u8x4(gender, 0, 0, 0)
     max_level = int(getattr(ctx, "max_level", _PLAYER_MAX_LEVEL_DEFAULT) or _PLAYER_MAX_LEVEL_DEFAULT)
     money = int(getattr(ctx, "money", 0) or 0) & 0xFFFFFFFFFFFFFFFF
+    chosen_title = int(getattr(ctx, "chosen_title", 0) or 0)
 
     field_values = dict(_VERIFIED_PLAYER_REFERENCE_FIELDS)
     field_values.update(
@@ -780,11 +784,20 @@ def build_player_field_values(ctx) -> dict[int, int]:
             _PLAYER_BYTES: player_bytes,
             _PLAYER_BYTES_2: player_bytes_2,
             _PLAYER_BYTES_3: player_bytes_3,
+            _PLAYER_FIELD_PLAYER_TITLE: chosen_title,
             _PLAYER_FIELD_COINAGE: money & 0xFFFFFFFF,
             _PLAYER_FIELD_COINAGE + 1: (money >> 32) & 0xFFFFFFFF,
             _PLAYER_FIELD_MAX_LEVEL: max_level,
         }
     )
+    try:
+        from server.modules.handlers.world.title_service import normalize_known_titles
+
+        for offset, value in enumerate(normalize_known_titles(getattr(ctx, "known_titles_raw", ""))):
+            field_values[_PLAYER_FIELD_KNOWN_TITLES + offset] = int(value)
+    except Exception as exc:
+        Logger.warning("[Title] failed to add known title fields to player create: %s", exc)
+
     _patch_language_skill_fields(field_values, ctx)
     for field_index in _BIAS_SENSITIVE_PLAYER_FIELDS:
         assert field_index in field_values

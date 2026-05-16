@@ -33,6 +33,7 @@ from server.modules.handlers.world.opcodes import movement as _movement  # noqa:
 from server.modules.handlers.world.opcodes import pets as _pets  # noqa: F401
 from server.modules.handlers.world.opcodes import spells as _spells  # noqa: F401
 from server.modules.handlers.world.opcodes import taxi as _taxi  # noqa: F401
+from server.modules.handlers.world.opcodes import titles as _titles  # noqa: F401
 from server.modules.handlers.world.opcodes import chat as chat_handlers
 from server.modules.handlers.world.opcodes import entities as entities_handlers
 from server.modules.handlers.world.opcodes import login as login_handlers

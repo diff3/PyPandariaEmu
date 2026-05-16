@@ -572,9 +572,27 @@ def build_SMSG_INITIALIZE_FACTIONS(ctx) -> bytes:
 
 def build_SMSG_ALL_ACHIEVEMENT_DATA(ctx) -> bytes:
     return _encode("SMSG_ALL_ACHIEVEMENT_DATA", {
-        "criteria_count": 0,
-        "achievement_count": 0,
+        "earned_count": 0,
+        "progress_count": 0,
     })
+
+
+def build_SMSG_ALL_ACCOUNT_CRITERIA(ctx) -> bytes:
+    return _encode("SMSG_ALL_ACCOUNT_CRITERIA", {
+        "progress_count": 0,
+    })
+
+
+def build_SMSG_LEVELUP_INFO(ctx) -> bytes:
+    level = int(getattr(ctx, "level", 1) or 1)
+    payload = bytearray()
+    payload.extend(struct.pack("<I", 0))
+    payload.extend(struct.pack("<" + ("I" * 5), *([0] * 5)))
+    payload.extend(struct.pack("<B", 0))
+    payload.extend(struct.pack("<I", level))
+    payload.extend(struct.pack("<I", 0))
+    payload.extend(struct.pack("<" + ("I" * 4), *([0] * 4)))
+    return bytes(payload)
 
 
 def build_SMSG_LOAD_EQUIPMENT_SET(ctx) -> bytes:
