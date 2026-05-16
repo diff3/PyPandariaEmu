@@ -32,5 +32,14 @@ def dispatch(session, opcode: str, data):
         Logger.warning(f"Unhandled opcode: {opcode}")
         return 0, None
 
+    if str(opcode).startswith("MSG_MOVE") or str(opcode).startswith("CMSG_MOVE"):
+        try:
+            from server.modules.handlers.world.taxi_runtime import is_taxi_active
+        except Exception:
+            is_taxi_active = None
+        if callable(is_taxi_active) and is_taxi_active(session):
+            Logger.debug("[TAXI] ignored movement opcode=%s while controls locked", str(opcode))
+            return 0, None
+
     Logger.debug(f"[DISPATCH] opcode={opcode} handler={handler.__name__}")
     return handler(session, data)

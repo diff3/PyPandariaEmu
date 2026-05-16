@@ -203,6 +203,8 @@ class WorldSession:
     loaded_npcs: set[int] = field(default_factory=set)
     npc_flags_by_guid: Dict[int, int] = field(default_factory=dict)
     taxi_cheat_enabled: bool = False
+    taxi_state: Any = None
+    taxi_controls_locked: bool = False
     last_gameobject_stream_at: float = 0.0
     last_npc_stream_at: float = 0.0
     last_position_save_at: float = 0.0
