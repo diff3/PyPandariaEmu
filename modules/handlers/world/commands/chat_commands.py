@@ -556,6 +556,7 @@ def _hide_loaded_lifts(session) -> list[tuple[str, bytes]]:
 
     loaded_lifts = _loaded_lifts(session)
     loaded_lift_entries = _loaded_lift_entries(session)
+    loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
     loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
     if not isinstance(loaded_gameobjects, set):
         loaded_gameobjects = set()
@@ -573,16 +574,23 @@ def _hide_loaded_lifts(session) -> list[tuple[str, bytes]]:
             )
         )
         loaded_lift_entries.pop(int(guid), None)
+        if isinstance(loaded_transport_entries, dict):
+            loaded_transport_entries.pop(int(guid), None)
     loaded_lifts.clear()
     return responses
 
 
 def _show_nearby_lifts(session) -> list[tuple[str, bytes]]:
-    from server.modules.game.guid import GameObjectGuid
+    from server.modules.game.guid import GameObjectGuid, MoTransportGuid
     from server.modules.handlers.world.bootstrap.gameobjects import _effective_gameobject_state
     from server.modules.handlers.world.bootstrap.replay import (
         _build_gameobject_update_payload,
         make_update_object_response,
+    )
+    from server.modules.handlers.world.transport_runtime import (
+        apply_transport_runtime_position,
+        prepare_runtime_transport_entry,
+        register_loaded_transport_entry,
     )
     try:
         from server.modules.handlers.world.bootstrap.replay import register_loaded_lift_entry
@@ -607,10 +615,20 @@ def _show_nearby_lifts(session) -> list[tuple[str, bytes]]:
 
     responses: list[tuple[str, bytes]] = []
     for entry in entries:
-        world_guid = GameObjectGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), realm_id)
+        entry = prepare_runtime_transport_entry(entry)
+        if int(entry.get("type", 0) or 0) == 15 or bool(entry.get("use_transport_guid")):
+            world_guid = MoTransportGuid.from_spawn_guid(int(entry.get("guid", 0) or 0))
+        else:
+            world_guid = GameObjectGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), realm_id)
         if world_guid in loaded_lifts or world_guid in loaded_gameobjects:
             entry["world_guid"] = world_guid
             register_loaded_lift_entry(
+                session,
+                entry,
+                world_guid=world_guid,
+                map_id=map_id,
+            )
+            register_loaded_transport_entry(
                 session,
                 entry,
                 world_guid=world_guid,
@@ -631,7 +649,14 @@ def _show_nearby_lifts(session) -> list[tuple[str, bytes]]:
             world_guid=world_guid,
             map_id=map_id,
         )
+        register_loaded_transport_entry(
+            session,
+            entry,
+            world_guid=world_guid,
+            map_id=map_id,
+        )
         loaded_gameobjects.add(world_guid)
+        entry = apply_transport_runtime_position(session, entry)
         payload = _build_gameobject_update_payload(map_id=map_id, entry=entry, realm_id=realm_id)
         responses.append(make_update_object_response(payload))
         effective_flags = int(entry.get("flags", 0) or 0) | 0x00000008

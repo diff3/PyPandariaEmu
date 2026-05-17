@@ -73,6 +73,12 @@ _MOVEMENTFLAG_CAN_FLY = 0x00800000
 _MOVEMENTFLAG_FLYING = 0x01000000
 _MOVEMENTFLAG2_CIRCLE_RUN_SYNC = 0x00000800
 
+_MANUAL_RATCHET_BOAT_GUID = int(MoTransportGuid.from_spawn_guid(9_501_001))
+_MANUAL_RATCHET_BOAT_TRANSFER_TIME = 115_000
+_MANUAL_RATCHET_BOAT_TRANSFER_X = -1030.0
+_MANUAL_RATCHET_BOAT_TRANSFER_Y = -4050.0
+_MANUAL_RATCHET_TO_BOOTY_BAY = (0, -14297.2, 531.0, 8.8, 1.0)
+
 _LIFT_STATE_FREE = "FREE"
 _LIFT_STATE_MAGNET = "MAGNET"
 _LIFT_STATE_ATTACHED = "ATTACHED"
@@ -106,6 +112,7 @@ _ELEVATOR_RELEASE_RADIUS_YARDS = 58.0
 _ELEVATOR_ATTACH_Z_THRESHOLD = 3.5
 _ELEVATOR_FALL_ATTACH_Z_THRESHOLD = 10.0
 _ELEVATOR_STEP_HEIGHT_THRESHOLD = 2.75
+_ELEVATOR_JUMP_LOCAL_Z_THRESHOLD = 14.0
 _ELEVATOR_NO_RELOCK_SECONDS = 1.0
 _LIFT_SUPPORT_APPLY_OPCODES = frozenset({
     "MSG_MOVE_FALL_LAND",
@@ -1488,6 +1495,7 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
 
     if not bool(parsed.get("has_transport_data")):
         if previous_guid:
+            _log_transport_passenger_detach(session, previous_guid, opcode_name)
             Logger.info(
                 "[TRANSPORT_STATE] clear opcode=%s previous_tguid=0x%016X",
                 opcode_name,
@@ -1521,6 +1529,8 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
 
     loaded_lifts = getattr(session, "loaded_lift_entries", None)
     lift = loaded_lifts.get(transport_guid) if isinstance(loaded_lifts, dict) else None
+    if previous_guid != transport_guid:
+        _log_transport_passenger_attach(session, transport_guid, opcode_name)
     Logger.info(
         "[TRANSPORT_STATE] set opcode=%s tguid=0x%016X lift=%s "
         "offset=(%.3f %.3f %.3f) torient=%.3f time=%u seat=%s",
@@ -1534,6 +1544,202 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
         int(state.transport_time),
         int(state.transport_seat),
     )
+
+
+def _transport_entry_for_guid(session, transport_guid: int) -> dict[str, Any] | None:
+    loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
+    if isinstance(loaded_transport_entries, dict):
+        entry = loaded_transport_entries.get(int(transport_guid))
+        if isinstance(entry, dict):
+            return entry
+
+    loaded_lifts = getattr(session, "loaded_lift_entries", None)
+    if isinstance(loaded_lifts, dict):
+        entry = loaded_lifts.get(int(transport_guid))
+        if isinstance(entry, dict):
+            return entry
+    return None
+
+
+def _is_real_runtime_elevator_entry(entry: dict[str, Any] | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    try:
+        from server.modules.handlers.world.transport_runtime import is_thunder_bluff_elevator_entry
+    except Exception:
+        return False
+    return bool(is_thunder_bluff_elevator_entry(entry))
+
+
+def _has_loaded_real_runtime_elevator(session) -> bool:
+    loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
+    if isinstance(loaded_transport_entries, dict) and any(
+        _is_real_runtime_elevator_entry(entry)
+        for entry in loaded_transport_entries.values()
+        if isinstance(entry, dict)
+    ):
+        return True
+
+    loaded_lifts = getattr(session, "loaded_lift_entries", None)
+    return bool(
+        isinstance(loaded_lifts, dict)
+        and any(
+            isinstance(entry, dict) and _is_thunder_bluff_lift(entry)
+            for entry in loaded_lifts.values()
+        )
+    )
+
+
+def _log_transport_passenger_attach(session, transport_guid: int, opcode_name: str) -> None:
+    entry = _transport_entry_for_guid(session, int(transport_guid))
+    if not _is_real_runtime_elevator_entry(entry):
+        return
+    Logger.info(
+        "[WorldElevator] passenger attached opcode=%s char=%s tguid=0x%016X "
+        "entry=%s local=(%.3f %.3f %.3f)",
+        str(opcode_name),
+        int(getattr(session, "char_guid", 0) or 0),
+        int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(entry.get("entry", 0) or 0),
+        float(getattr(_movement_state(session), "transport_x", 0.0) or 0.0),
+        float(getattr(_movement_state(session), "transport_y", 0.0) or 0.0),
+        float(getattr(_movement_state(session), "transport_z", 0.0) or 0.0),
+    )
+
+
+def _log_transport_passenger_detach(session, transport_guid: int, opcode_name: str) -> None:
+    entry = _transport_entry_for_guid(session, int(transport_guid))
+    if not _is_real_runtime_elevator_entry(entry):
+        return
+    Logger.info(
+        "[WorldElevator] passenger detached opcode=%s char=%s tguid=0x%016X entry=%s",
+        str(opcode_name),
+        int(getattr(session, "char_guid", 0) or 0),
+        int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(entry.get("entry", 0) or 0),
+    )
+
+
+def _clear_transport_state(session) -> None:
+    state = _movement_state(session)
+    state.has_transport_data = False
+    state.transport_guid = 0
+    state.transport_x = 0.0
+    state.transport_y = 0.0
+    state.transport_z = 0.0
+    state.transport_orientation = 0.0
+    state.transport_time = 0
+    state.transport_time2 = 0
+    state.transport_time3 = 0
+    state.transport_seat = -1
+    state.transport_vehicle_id = 0
+
+
+def _clear_loaded_world_objects_for_transfer(session) -> list[tuple[str, bytes]]:
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    responses: list[tuple[str, bytes]] = []
+    loaded_sets = (
+        getattr(session, "loaded_gameobjects", None),
+        getattr(session, "loaded_npcs", None),
+    )
+    for loaded_guids in loaded_sets:
+        if not isinstance(loaded_guids, set):
+            continue
+        for guid in sorted(int(value) for value in loaded_guids):
+            if int(guid) <= 0:
+                continue
+            responses.append(
+                (
+                    "SMSG_UPDATE_OBJECT",
+                    _build_out_of_range_update_object_payload(map_id=map_id, guid=int(guid)),
+                )
+            )
+        loaded_guids.clear()
+    loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
+    if isinstance(loaded_transport_entries, dict):
+        loaded_transport_entries.clear()
+    return responses
+
+
+def _maybe_start_manual_boat_transfer(session, opcode_name: str) -> list[tuple[str, bytes]]:
+    state = _movement_state(session)
+    transport_guid = int(getattr(state, "transport_guid", 0) or 0)
+    if transport_guid != _MANUAL_RATCHET_BOAT_GUID:
+        return []
+    if int(getattr(session, "map_id", 0) or 0) != 1:
+        return []
+    if bool(getattr(session, "manual_boat_transfer_pending", False)):
+        return []
+    if _is_teleporting(session):
+        return []
+
+    transport_time = int(getattr(state, "transport_time", 0) or 0)
+    x = float(getattr(session, "x", 0.0) or 0.0)
+    y = float(getattr(session, "y", 0.0) or 0.0)
+    if transport_time < _MANUAL_RATCHET_BOAT_TRANSFER_TIME:
+        return []
+    if x > _MANUAL_RATCHET_BOAT_TRANSFER_X or y > _MANUAL_RATCHET_BOAT_TRANSFER_Y:
+        return []
+
+    from server.modules.handlers.world.login.packets import build_login_packet
+
+    map_id, dest_x, dest_y, dest_z, orientation = _MANUAL_RATCHET_TO_BOOTY_BAY
+    session.manual_boat_transfer_pending = True
+    session.teleport_pending = True
+    session.worldport_ack_pending = True
+    session.near_teleport_pending = False
+    session.teleport_destination = "manual-boat:ratchet-to-booty-bay"
+    session.map_id = int(map_id)
+    session.x = float(dest_x)
+    session.y = float(dest_y)
+    session.z = float(dest_z)
+    session.orientation = float(orientation)
+    session.persist_map_id = int(map_id)
+    session.persist_x = float(dest_x)
+    session.persist_y = float(dest_y)
+    session.persist_z = float(dest_z)
+    session.persist_orientation = float(orientation)
+    _clear_transport_state(session)
+
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "map_id": int(map_id),
+            "x": float(dest_x),
+            "y": float(dest_y),
+            "z": float(dest_z),
+            "orientation": float(orientation),
+        },
+    )()
+    Logger.info(
+        "[WorldBoat] transfer start opcode=%s tguid=0x%016X transport_time=%s "
+        "from=(%.2f %.2f) to=(map=%s %.2f %.2f %.2f %.2f)",
+        opcode_name,
+        transport_guid & 0xFFFFFFFFFFFFFFFF,
+        int(transport_time),
+        float(x),
+        float(y),
+        int(map_id),
+        float(dest_x),
+        float(dest_y),
+        float(dest_z),
+        float(orientation),
+    )
+    responses = _clear_loaded_world_objects_for_transfer(session)
+    responses.extend(
+        [
+            ("SMSG_TRANSFER_PENDING", build_login_packet("SMSG_TRANSFER_PENDING", ctx)),
+            ("SMSG_NEW_WORLD", build_login_packet("SMSG_NEW_WORLD", ctx)),
+            (
+                "SMSG_MESSAGECHAT",
+                encode_skyfire_messagechat_system_payload(
+                    "[WorldBoat] Ratchet -> Booty Bay transfer"
+                ),
+            ),
+        ]
+    )
+    return responses
 
 
 def _movement_flags_for_sync(session) -> int:
@@ -2516,8 +2722,11 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
         limit=400,
     )
     keep_guids = set()
+    from server.modules.handlers.world.transport_runtime import prepare_runtime_transport_entry
+
     for entry in keep_entries:
-        if int(entry.get("type", 0) or 0) == 15:
+        entry = prepare_runtime_transport_entry(entry)
+        if int(entry.get("type", 0) or 0) == 15 or bool(entry.get("use_transport_guid")):
             keep_guids.add(
                 int(MoTransportGuid.from_spawn_guid(int(entry.get("guid", 0) or 0)))
             )
@@ -4517,6 +4726,7 @@ def _apply_runtime_elevator_position(
     *,
     opcode_name: str,
     update_offset_from_client: bool,
+    preserve_airborne_state: bool = False,
     client_x: float | None = None,
     client_y: float | None = None,
     client_z: float | None = None,
@@ -4530,7 +4740,12 @@ def _apply_runtime_elevator_position(
         )
         if client_z is not None:
             client_dz = float(client_z) - float(state.get("current_z", 0.0) or 0.0)
-            if abs(client_dz) <= _ELEVATOR_STEP_HEIGHT_THRESHOLD:
+            z_threshold = (
+                _ELEVATOR_JUMP_LOCAL_Z_THRESHOLD
+                if preserve_airborne_state or opcode_name == "MSG_MOVE_JUMP"
+                else _ELEVATOR_STEP_HEIGHT_THRESHOLD
+            )
+            if abs(client_dz) <= z_threshold:
                 session.elevator_local_offset_z = client_dz
 
     x = float(state.get("base_x", 0.0) or 0.0) + float(
@@ -4552,10 +4767,11 @@ def _apply_runtime_elevator_position(
     movement_state.y = y
     movement_state.z = z
     movement_state.orientation = float(getattr(session, "orientation", 0.0) or 0.0)
-    movement_state.flags = int(getattr(movement_state, "flags", 0) or 0) & ~(
-        _MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING
-    )
-    _clear_jump_fall_state(movement_state)
+    if not preserve_airborne_state:
+        movement_state.flags = int(getattr(movement_state, "flags", 0) or 0) & ~(
+            _MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING
+        )
+        _clear_jump_fall_state(movement_state)
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     Logger.debug(
@@ -4607,16 +4823,6 @@ def _runtime_elevator_support(
             )
             return False, float(x), float(y), float(z), None
         _tick_elevator_state(state, now)
-        if opcode_name == "MSG_MOVE_JUMP":
-            _detach_runtime_elevator(
-                session,
-                reason="jump",
-                opcode_name=opcode_name,
-                x=float(x),
-                y=float(y),
-                z=float(z),
-            )
-            return False, float(x), float(y), float(z), None
 
         dx = float(x) - float(state.get("base_x", 0.0) or 0.0)
         dy = float(y) - float(state.get("base_y", 0.0) or 0.0)
@@ -4639,12 +4845,19 @@ def _runtime_elevator_support(
             "MSG_MOVE_START_STRAFE_RIGHT",
             "MSG_MOVE_HEARTBEAT",
             "MSG_MOVE_STOP",
+            "MSG_MOVE_JUMP",
         }
+        preserve_airborne = bool(
+            opcode_name == "MSG_MOVE_JUMP"
+            or int(movement_flags) & (_MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING)
+            or bool(getattr(_movement_state(session), "has_fall_data", False))
+        )
         new_x, new_y, new_z = _apply_runtime_elevator_position(
             session,
             state,
             opcode_name=opcode_name,
             update_offset_from_client=update_offset,
+            preserve_airborne_state=preserve_airborne,
             client_x=float(x),
             client_y=float(y),
             client_z=float(z),
@@ -4767,11 +4980,18 @@ def _tick_lift_transport_support(session) -> None:
             return
         now = time.time()
         _tick_elevator_state(state, now)
+        movement_state = _movement_state(session)
+        preserve_airborne = bool(
+            int(getattr(movement_state, "flags", 0) or 0)
+            & (_MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING)
+            or bool(getattr(movement_state, "has_fall_data", False))
+        )
         x, y, z = _apply_runtime_elevator_position(
             session,
             state,
             opcode_name="ELEVATOR_TICK",
             update_offset_from_client=False,
+            preserve_airborne_state=preserve_airborne,
         )
         payload = build_smsg_player_move_payload(session)
         responses: list[tuple[str, bytes]] = []
@@ -5919,6 +6139,9 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     stream_responses = _maybe_stream_world_objects(session)
     if stream_responses:
         movement_responses.extend(stream_responses)
+    boat_transfer_responses = _maybe_start_manual_boat_transfer(session, opcode_name)
+    if boat_transfer_responses:
+        movement_responses.extend(boat_transfer_responses)
     companion_responses = _maybe_move_companion_pet_for_opcode(session, opcode_name)
     if companion_responses:
         movement_responses.extend(companion_responses)
@@ -6074,6 +6297,7 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
     # completion still owns the final world bootstrap and pending reset.
     session.near_teleport_pending = False
     session.worldport_ack_pending = False
+    session.manual_boat_transfer_pending = False
 
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)

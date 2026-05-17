@@ -100,6 +100,24 @@ def test_transport_gameobject_uses_start_open_state_and_full_health():
     assert fields[gameobjects._GAMEOBJECT_FIELD_FLAGS] & gameobjects._GO_FLAG_TRANSPORT
 
 
+def test_transport_gameobject_packs_path_progress_in_dynamic_flags():
+    entry = {
+        **_entry(),
+        "entry": 4170,
+        "display_id": 360,
+        "type": 11,
+        "transport_period": 32000,
+        "transport_path_progress": 16000,
+    }
+    world_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+
+    fields = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
+
+    packed = fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS]
+    assert packed & 0xFFFF == 0
+    assert ((packed >> 16) & 0xFFFF) in (32767, 32768)
+
+
 def test_mo_transport_uses_mo_transport_guid():
     entry = {**_entry(), "guid": 6, "type": 15}
 

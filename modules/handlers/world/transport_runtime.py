@@ -14,19 +14,25 @@ from server.modules.handlers.world.bootstrap.gameobjects import _build_gameobjec
 from server.modules.game.guid import GameObjectGuid, MoTransportGuid
 from server.modules.handlers.world.bootstrap.playerobjects import make_update_object_response
 
+GAMEOBJECT_TYPE_TRANSPORT = 11
 GAMEOBJECT_TYPE_MO_TRANSPORT = 15
 
-ENABLE_TRANSPORT_RUNTIME_UPDATES = False
+ENABLE_TRANSPORT_RUNTIME_UPDATES = True
 ENABLE_SYNTHETIC_TRANSPORT_TEST_SPAWNS = False
 _TRANSPORT_TICK_SECONDS = 0.25
 _TRANSPORT_VISIBILITY_RADIUS = 700.0
 _DEFAULT_ROUTE_DISTANCE = 320.0
 _DEFAULT_ROUTE_SPEED = 22.0
 _DEFAULT_ROUTE_WAIT_SECONDS = 1.0
+_ELEVATOR_ROUTE_WAIT_SECONDS = 2.0
 _THREAD_IDLE_TIMEOUT_SECONDS = 20.0
 _SYNTHETIC_TRANSPORT_RADIUS = 700.0
 _TRANSPORT_SEND_DISTANCE = 2.0
 _USE_LEGACY_GUID_FOR_SYNTHETIC_TRANSPORTS = True
+_THUNDER_BLUFF_ELEVATOR_ENTRIES = frozenset({4170, 4171, 47296})
+_THUNDER_BLUFF_ELEVATOR_LOW_Z = 68.586
+_THUNDER_BLUFF_ELEVATOR_HIGH_Z = 130.080
+_THUNDER_BLUFF_ELEVATOR_PERIOD_SECONDS = 32.0
 
 # Entry-specific boat/zeppelin routes can be added here without touching the
 # runtime state machine. Nodes may cross maps; the tick code logs transitions.
@@ -159,6 +165,7 @@ class RuntimeTransportState:
     last_sent_y: float = float("inf")
     last_sent_z: float = float("inf")
     last_sent_map_id: int = -1
+    path_progress_ms: float = 0.0
 
 
 def register_loaded_transport_entry(
@@ -168,8 +175,8 @@ def register_loaded_transport_entry(
     world_guid: int,
     map_id: int,
 ) -> None:
-    """Remember visible MO transports so the runtime can move them."""
-    if int(entry.get("type", 0) or 0) != GAMEOBJECT_TYPE_MO_TRANSPORT:
+    """Remember visible moving transports so the runtime can move them."""
+    if not is_runtime_transport_entry(entry):
         return
 
     loaded_transports = getattr(session, "loaded_transport_entries", None)
@@ -184,18 +191,77 @@ def register_loaded_transport_entry(
 
     if ENABLE_TRANSPORT_RUNTIME_UPDATES:
         ensure_transport_runtime_for_session(session)
-    Logger.info(
-        "[WorldTransport] stream register guid=%s world_guid=0x%016X entry=%s "
-        "name=%r display=%s pos=(%.2f %.2f %.2f)",
-        int(entry.get("guid", 0) or 0),
-        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-        int(entry.get("entry", 0) or 0),
-        str(entry.get("name", "") or ""),
-        int(entry.get("display_id", 0) or 0),
-        float(entry.get("x", 0.0) or 0.0),
-        float(entry.get("y", 0.0) or 0.0),
-        float(entry.get("z", 0.0) or 0.0),
+    if is_thunder_bluff_elevator_entry(entry):
+        Logger.info(
+            "[WorldElevator] transport spawned guid=%s world_guid=0x%016X entry=%s "
+            "pos=(%.2f %.2f %.2f) low=%.3f high=%.3f",
+            int(entry.get("guid", 0) or 0),
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(entry.get("entry", 0) or 0),
+            float(entry.get("x", 0.0) or 0.0),
+            float(entry.get("y", 0.0) or 0.0),
+            float(entry.get("z", 0.0) or 0.0),
+            _THUNDER_BLUFF_ELEVATOR_LOW_Z,
+            _THUNDER_BLUFF_ELEVATOR_HIGH_Z,
+        )
+    else:
+        Logger.info(
+            "[WorldTransport] stream register guid=%s world_guid=0x%016X entry=%s "
+            "name=%r display=%s pos=(%.2f %.2f %.2f)",
+            int(entry.get("guid", 0) or 0),
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(entry.get("entry", 0) or 0),
+            str(entry.get("name", "") or ""),
+            int(entry.get("display_id", 0) or 0),
+            float(entry.get("x", 0.0) or 0.0),
+            float(entry.get("y", 0.0) or 0.0),
+            float(entry.get("z", 0.0) or 0.0),
+        )
+
+
+def is_runtime_transport_entry(entry: dict[str, Any]) -> bool:
+    gameobject_type = int(entry.get("type", 0) or 0)
+    return bool(
+        gameobject_type == GAMEOBJECT_TYPE_MO_TRANSPORT
+        or is_thunder_bluff_elevator_entry(entry)
     )
+
+
+def is_thunder_bluff_elevator_entry(entry: dict[str, Any] | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    gameobject_type = int(entry.get("type", 0) or 0)
+    original_type = int(entry.get("original_type", gameobject_type) or gameobject_type)
+    if gameobject_type not in (GAMEOBJECT_TYPE_TRANSPORT, GAMEOBJECT_TYPE_MO_TRANSPORT):
+        return False
+    if original_type not in (GAMEOBJECT_TYPE_TRANSPORT, GAMEOBJECT_TYPE_MO_TRANSPORT):
+        return False
+    if int(entry.get("map", entry.get("map_id", 0)) or 0) != 1:
+        return False
+    if int(entry.get("entry", 0) or 0) in _THUNDER_BLUFF_ELEVATOR_ENTRIES:
+        return True
+    z = float(entry.get("z", 0.0) or 0.0)
+    return (
+        abs(z - _THUNDER_BLUFF_ELEVATOR_LOW_Z) <= 1.0
+        or abs(z - _THUNDER_BLUFF_ELEVATOR_HIGH_Z) <= 1.0
+    )
+
+
+def prepare_runtime_transport_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Normalize runtime transport metadata without changing client-visible lift type."""
+    prepared = dict(entry)
+    if not is_thunder_bluff_elevator_entry(prepared):
+        return prepared
+
+    original_type = int(prepared.get("type", 0) or 0)
+    prepared["original_type"] = int(prepared.get("original_type", original_type) or original_type)
+    prepared["use_transport_guid"] = True
+    prepared["transport_period"] = int(_THUNDER_BLUFF_ELEVATOR_PERIOD_SECONDS * 1000.0)
+    prepared["data0"] = int(prepared.get("data0", 0) or prepared["transport_period"])
+    prepared["data1"] = int(prepared.get("data1", 0) or 30)
+    prepared["data2"] = int(prepared.get("data2", 0) or 1)
+    prepared["data3"] = int(prepared.get("data3", 0) or 0)
+    return prepared
 
 
 def unregister_loaded_transport_entry(session: Any, world_guid: int) -> None:
@@ -349,7 +415,7 @@ def _nearest_route_node_index(
 
 def apply_transport_runtime_position(session: Any, entry: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of entry with current runtime transport coordinates."""
-    if int(entry.get("type", 0) or 0) != GAMEOBJECT_TYPE_MO_TRANSPORT:
+    if not is_runtime_transport_entry(entry):
         return entry
     if not ENABLE_TRANSPORT_RUNTIME_UPDATES:
         return entry
@@ -367,6 +433,8 @@ def apply_transport_runtime_position(session: Any, entry: dict[str, Any]) -> dic
     moved_entry["z"] = float(state.z)
     moved_entry["orientation"] = float(state.orientation)
     moved_entry["world_guid"] = world_guid
+    moved_entry["transport_path_progress"] = int(state.path_progress_ms) & 0xFFFFFFFF
+    moved_entry["transport_period"] = int(_transport_period_ms(moved_entry))
     return moved_entry
 
 
@@ -553,6 +621,23 @@ def _runtime_transport_states() -> dict[int, RuntimeTransportState]:
 
 
 def _build_default_route(entry: dict[str, Any]) -> list[TransportRouteNode]:
+    if is_thunder_bluff_elevator_entry(entry):
+        map_id = int(entry.get("map", entry.get("map_id", 1)) or 1)
+        x = float(entry.get("x", 0.0) or 0.0)
+        y = float(entry.get("y", 0.0) or 0.0)
+        static_z = float(entry.get("z", _THUNDER_BLUFF_ELEVATOR_LOW_Z) or _THUNDER_BLUFF_ELEVATOR_LOW_Z)
+        low = _THUNDER_BLUFF_ELEVATOR_LOW_Z
+        high = _THUNDER_BLUFF_ELEVATOR_HIGH_Z
+        if abs(static_z - high) < abs(static_z - low):
+            return [
+                TransportRouteNode(map_id, x, y, high, _ELEVATOR_ROUTE_WAIT_SECONDS),
+                TransportRouteNode(map_id, x, y, low, _ELEVATOR_ROUTE_WAIT_SECONDS),
+            ]
+        return [
+            TransportRouteNode(map_id, x, y, low, _ELEVATOR_ROUTE_WAIT_SECONDS),
+            TransportRouteNode(map_id, x, y, high, _ELEVATOR_ROUTE_WAIT_SECONDS),
+        ]
+
     entry_id = int(entry.get("entry", 0) or 0)
     hardcoded = _HARDCODED_TRANSPORT_ROUTES.get(entry_id)
     if hardcoded:
@@ -591,17 +676,37 @@ def _resolve_route_distance(entry: dict[str, Any]) -> float:
 
 
 def _resolve_transport_speed(entry: dict[str, Any]) -> float:
+    if is_thunder_bluff_elevator_entry(entry):
+        travel_seconds = max(1.0, _THUNDER_BLUFF_ELEVATOR_PERIOD_SECONDS * 0.5)
+        return abs(_THUNDER_BLUFF_ELEVATOR_HIGH_Z - _THUNDER_BLUFF_ELEVATOR_LOW_Z) / travel_seconds
+
     size = float(entry.get("size", 1.0) or 1.0)
     if size > 4.0:
         return _DEFAULT_ROUTE_SPEED * 0.85
     return _DEFAULT_ROUTE_SPEED
 
 
+def _transport_period_ms(entry: dict[str, Any]) -> int:
+    period = int(entry.get("transport_period", 0) or 0)
+    if period > 0:
+        return period
+    if is_thunder_bluff_elevator_entry(entry):
+        return int(_THUNDER_BLUFF_ELEVATOR_PERIOD_SECONDS * 1000.0)
+    data0 = int(entry.get("data0", 0) or 0)
+    return max(1, int(data0))
+
+
 def _tick_transport_state(state: RuntimeTransportState) -> None:
     now = time.monotonic()
     elapsed = max(0.0, min(2.0, now - float(state.last_tick)))
     state.last_tick = now
-    if elapsed <= 0.0 or now < float(state.wait_until):
+    if elapsed <= 0.0:
+        return
+    period = max(1, int(_transport_period_ms({"entry": state.entry, "transport_period": 0})))
+    if state.entry in _THUNDER_BLUFF_ELEVATOR_ENTRIES:
+        period = int(_THUNDER_BLUFF_ELEVATOR_PERIOD_SECONDS * 1000.0)
+    state.path_progress_ms = (float(state.path_progress_ms) + (elapsed * 1000.0)) % float(period)
+    if now < float(state.wait_until):
         return
 
     remaining = float(elapsed) * float(state.speed)
@@ -666,6 +771,28 @@ def _advance_transport_node(
         float(state.z),
         float(target.wait_time),
     )
+    if is_thunder_bluff_elevator_state(state):
+        Logger.info(
+            "[WorldElevator] node transition world_guid=0x%016X entry=%s node=%s/%s "
+            "z=%.3f pause=%.2f",
+            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+            int(state.entry),
+            int(state.node_index),
+            len(state.route),
+            float(state.z),
+            float(target.wait_time),
+        )
+        if float(target.wait_time) > 0.0:
+            Logger.info(
+                "[WorldElevator] endpoint pause world_guid=0x%016X seconds=%.2f",
+                int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+                float(target.wait_time),
+            )
+        Logger.info(
+            "[WorldElevator] reverse direction world_guid=0x%016X next_node=%s",
+            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+            int((state.node_index + 1) % len(state.route)),
+        )
     if old_map != int(state.map_id):
         Logger.info(
             "[WorldTransport] map transition world_guid=0x%016X entry=%s %s -> %s",
@@ -699,15 +826,31 @@ def _maybe_log_transport_tick(world_guid: int, entry: dict[str, Any]) -> None:
         return
 
     state.tick_log_after = now + 5.0
-    Logger.debug(
-        "[WorldTransport] tick world_guid=0x%016X entry=%s map=%s "
-        "node=%s pos=(%.2f %.2f %.2f) o=%.3f",
-        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-        int(entry.get("entry", 0) or 0),
-        int(entry.get("map", 0) or 0),
-        int(state.node_index),
-        float(entry.get("x", 0.0) or 0.0),
-        float(entry.get("y", 0.0) or 0.0),
-        float(entry.get("z", 0.0) or 0.0),
-        float(entry.get("orientation", 0.0) or 0.0),
-    )
+    if is_thunder_bluff_elevator_entry(entry):
+        Logger.debug(
+            "[WorldElevator] transport tick world_guid=0x%016X entry=%s node=%s "
+            "pos=(%.2f %.2f %.2f)",
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(entry.get("entry", 0) or 0),
+            int(state.node_index),
+            float(entry.get("x", 0.0) or 0.0),
+            float(entry.get("y", 0.0) or 0.0),
+            float(entry.get("z", 0.0) or 0.0),
+        )
+    else:
+        Logger.debug(
+            "[WorldTransport] tick world_guid=0x%016X entry=%s map=%s "
+            "node=%s pos=(%.2f %.2f %.2f) o=%.3f",
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(entry.get("entry", 0) or 0),
+            int(entry.get("map", 0) or 0),
+            int(state.node_index),
+            float(entry.get("x", 0.0) or 0.0),
+            float(entry.get("y", 0.0) or 0.0),
+            float(entry.get("z", 0.0) or 0.0),
+            float(entry.get("orientation", 0.0) or 0.0),
+        )
+
+
+def is_thunder_bluff_elevator_state(state: RuntimeTransportState) -> bool:
+    return int(state.entry) in _THUNDER_BLUFF_ELEVATOR_ENTRIES

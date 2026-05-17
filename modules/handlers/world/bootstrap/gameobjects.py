@@ -23,6 +23,7 @@ _OBJECT_FIELD_GUID_LOW = 0
 _OBJECT_FIELD_GUID_HIGH = 1
 _OBJECT_FIELD_TYPE = 4
 _OBJECT_FIELD_ENTRY = 5
+_OBJECT_FIELD_DYNAMIC_FLAGS = 6
 _OBJECT_FIELD_SCALE = 7
 _GAMEOBJECT_FIELD_DISPLAY_ID = 10
 _GAMEOBJECT_FIELD_FLAGS = 11
@@ -169,8 +170,23 @@ def _gameobject_movement_block_uint32(entry: Mapping[str, Any]) -> int:
     """Return the extra movement block value required by the create flags."""
     gameobject_type = _entry_int(entry, "type") & 0xFF
     if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
-        return int(time.time() * 1000.0) & 0xFFFFFFFF
+        return _entry_int(entry, "transport_path_progress", int(time.time() * 1000.0)) & 0xFFFFFFFF
     return _GAMEOBJECT_MOVEMENT_BLOCK_UINT32
+
+
+def _gameobject_dynamic_flags(entry: Mapping[str, Any]) -> int:
+    """Pack GO dynamic flags; transport path progress lives in the high half."""
+    gameobject_type = _entry_int(entry, "type") & 0xFF
+    if gameobject_type not in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
+        return 0
+
+    period = _entry_int(entry, "transport_period", _entry_int(entry, "data0"))
+    if period <= 0:
+        return 0xFFFF0000
+
+    timer = _entry_int(entry, "transport_path_progress") % int(period)
+    path_progress = int((float(timer) / float(period)) * 65535.0) & 0xFFFF
+    return path_progress << 16
 
 
 def _effective_gameobject_state(entry: Mapping[str, Any]) -> int:
@@ -234,6 +250,7 @@ def _build_gameobject_field_values(entry: Mapping[str, Any], *, world_guid: int)
         _OBJECT_FIELD_GUID_HIGH: (int(world_guid) >> 32) & 0xFFFFFFFF,
         _OBJECT_FIELD_TYPE: 33,
         _OBJECT_FIELD_ENTRY: _entry_int(entry, "entry"),
+        _OBJECT_FIELD_DYNAMIC_FLAGS: _gameobject_dynamic_flags(entry),
         _OBJECT_FIELD_SCALE: _u32_from_float(_entry_float(entry, "size", 1.0)),
         _GAMEOBJECT_FIELD_DISPLAY_ID: _entry_int(entry, "display_id"),
         _GAMEOBJECT_FIELD_FLAGS: gameobject_flags,

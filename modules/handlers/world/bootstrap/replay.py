@@ -27,6 +27,7 @@ from server.modules.handlers.world.bootstrap.playerobjects import (
 )
 from server.modules.handlers.world.transport_runtime import (
     apply_transport_runtime_position,
+    prepare_runtime_transport_entry,
     register_loaded_transport_entry,
     synthetic_transport_entries_near,
 )
@@ -518,7 +519,8 @@ def build_database_gameobject_responses(session, *, loaded_guids: set[int] | Non
     seen = loaded_guids if isinstance(loaded_guids, set) else None
     filtered_entries: list[dict] = []
     for entry in entries:
-        if int(entry.get("type", 0) or 0) == 15:
+        entry = prepare_runtime_transport_entry(entry)
+        if int(entry.get("type", 0) or 0) == 15 or bool(entry.get("use_transport_guid")):
             world_guid = int(
                 entry.get("world_guid")
                 or MoTransportGuid.from_spawn_guid(int(entry.get("guid", 0) or 0))
