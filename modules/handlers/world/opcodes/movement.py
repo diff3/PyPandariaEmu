@@ -19,6 +19,7 @@ from server.modules.handlers.world.bootstrap.replay import (
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
+from server.modules.handlers.world.achievement_service import discover_area
 from server.modules.interpretation.utils import dsl_decode
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.position.position_service import (
@@ -1565,6 +1566,13 @@ def _is_real_runtime_elevator_entry(entry: dict[str, Any] | None) -> bool:
     if not isinstance(entry, dict):
         return False
     try:
+        from server.modules.handlers.world.feature_config import elevators_enabled
+
+        if not elevators_enabled():
+            return False
+    except Exception:
+        return False
+    try:
         from server.modules.handlers.world.transport_runtime import is_thunder_bluff_elevator_entry
     except Exception:
         return False
@@ -2807,6 +2815,10 @@ def _maybe_stream_gameobjects(session) -> list[tuple[str, bytes]]:
 
 
 def _stream_nearby_npcs(session) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.feature_config import npcs_enabled
+
+    if not npcs_enabled():
+        return []
     if not bool(getattr(session, "npcs_visible", False)):
         return []
     if not bool(getattr(session, "npc_auto_stream", False)):
@@ -4233,6 +4245,20 @@ def _save_current_position_like_command(
     return _save_session_position(session, reason=str(reason), online=online, force=force)
 
 
+def _maybe_discover_current_area(session) -> list[tuple[str, bytes]]:
+    try:
+        area_id = int(getattr(session, "zone", 0) or getattr(session, "persist_zone", 0) or 0)
+        return discover_area(session, area_id)
+    except Exception as exc:
+        Logger.error(
+            "[Explore] discovery failed player=%s area=%s err=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            int(getattr(session, "zone", 0) or 0),
+            exc,
+        )
+        return []
+
+
 def _maybe_periodic_position_save(
     session,
     *,
@@ -4795,6 +4821,23 @@ def _runtime_elevator_support(
     previous_z: float,
     movement_flags: int,
 ) -> tuple[bool, float, float, float, dict[str, Any] | None]:
+    try:
+        from server.modules.handlers.world.feature_config import elevators_enabled
+
+        if not elevators_enabled():
+            if int(getattr(session, "attached_elevator_guid", 0) or 0):
+                _detach_runtime_elevator(
+                    session,
+                    reason="disabled",
+                    opcode_name=opcode_name,
+                    x=float(x),
+                    y=float(y),
+                    z=float(z),
+                )
+            return False, float(x), float(y), float(z), None
+    except Exception:
+        return False, float(x), float(y), float(z), None
+
     now = time.time()
     session.runtime_elevator_bypass_old_support = False
     active_guid = int(getattr(session, "attached_elevator_guid", 0) or 0)
@@ -6093,6 +6136,9 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         _sync_session_from_movement_state(session)
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
+    discovery_responses = _maybe_discover_current_area(session)
+    if discovery_responses:
+        movement_responses.extend(discovery_responses)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _maybe_periodic_position_save(session)
     if lift_support is not None:
@@ -6175,6 +6221,7 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
     _sync_session_from_movement_state(session)
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
+    discovery_responses = _maybe_discover_current_area(session)
     _maybe_periodic_position_save(session)
 
     Logger.debug(
@@ -6185,6 +6232,7 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
     broadcast_player_state_update(session, force=True)
     stream_responses = _maybe_stream_world_objects(session)
     responses = []
+    responses.extend(discovery_responses)
     responses.extend(stream_responses)
     return 0, (responses or None)
 

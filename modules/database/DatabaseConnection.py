@@ -147,6 +147,7 @@ class DatabaseConnection:
     _account_data_tables_ready = False
     _addon_tables_ready = False
     _mount_state_table_ready = False
+    _achievement_tables_ready = False
     _db_signature = None
 
     @staticmethod
@@ -205,6 +206,7 @@ class DatabaseConnection:
         DatabaseConnection._account_data_tables_ready = False
         DatabaseConnection._addon_tables_ready = False
         DatabaseConnection._mount_state_table_ready = False
+        DatabaseConnection._achievement_tables_ready = False
 
     @staticmethod
     def initialize():
@@ -1294,6 +1296,237 @@ class DatabaseConnection:
             session.rollback()
             Logger.error(
                 f"[DB] save_character_explored_zones failed guid={char_guid} realm={realm_id}: {exc}"
+            )
+            return False
+
+    @staticmethod
+    def ensure_character_achievement_tables() -> bool:
+        if DatabaseConnection._achievement_tables_ready:
+            return True
+
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS character_exploration (
+                    guid BIGINT UNSIGNED NOT NULL,
+                    realm INT UNSIGNED NOT NULL DEFAULT 1,
+                    area_id INT UNSIGNED NOT NULL,
+                    discovered_at INT UNSIGNED NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guid, realm, area_id),
+                    KEY idx_character_exploration_area (area_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS character_criteria_progress (
+                    guid BIGINT UNSIGNED NOT NULL,
+                    realm INT UNSIGNED NOT NULL DEFAULT 1,
+                    criteria_id INT UNSIGNED NOT NULL,
+                    counter BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                    completed_at INT UNSIGNED NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guid, realm, criteria_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS character_achievement_progress (
+                    guid BIGINT UNSIGNED NOT NULL,
+                    realm INT UNSIGNED NOT NULL DEFAULT 1,
+                    achievement_id INT UNSIGNED NOT NULL,
+                    completed TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                    completion_time INT UNSIGNED NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guid, realm, achievement_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """))
+            session.commit()
+            DatabaseConnection._achievement_tables_ready = True
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.error(f"[DB] ensure_character_achievement_tables failed: {exc}")
+            return False
+
+    @staticmethod
+    def load_character_exploration(char_guid: int, realm_id: int) -> dict[int, int]:
+        if not DatabaseConnection.ensure_character_achievement_tables():
+            return {}
+        session = DatabaseConnection.chars()
+        try:
+            rows = session.execute(
+                text("""
+                    SELECT area_id, discovered_at
+                    FROM character_exploration
+                    WHERE guid = :guid AND realm = :realm
+                """),
+                {"guid": int(char_guid), "realm": int(realm_id)},
+            ).fetchall()
+            return {int(row[0]): int(row[1] or 0) for row in rows}
+        except Exception as exc:
+            Logger.error(
+                f"[DB] load_character_exploration failed guid={char_guid} realm={realm_id}: {exc}"
+            )
+            return {}
+
+    @staticmethod
+    def save_character_exploration(
+        char_guid: int,
+        realm_id: int,
+        area_id: int,
+        discovered_at: int,
+    ) -> bool:
+        if not DatabaseConnection.ensure_character_achievement_tables():
+            return False
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(
+                text("""
+                    INSERT INTO character_exploration
+                        (guid, realm, area_id, discovered_at)
+                    VALUES
+                        (:guid, :realm, :area_id, :discovered_at)
+                    ON DUPLICATE KEY UPDATE
+                        discovered_at = LEAST(discovered_at, VALUES(discovered_at))
+                """),
+                {
+                    "guid": int(char_guid),
+                    "realm": int(realm_id),
+                    "area_id": int(area_id),
+                    "discovered_at": int(discovered_at),
+                },
+            )
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.error(
+                f"[DB] save_character_exploration failed guid={char_guid} realm={realm_id} "
+                f"area={area_id}: {exc}"
+            )
+            return False
+
+    @staticmethod
+    def load_character_criteria_progress(char_guid: int, realm_id: int) -> dict[int, dict]:
+        if not DatabaseConnection.ensure_character_achievement_tables():
+            return {}
+        session = DatabaseConnection.chars()
+        try:
+            rows = session.execute(
+                text("""
+                    SELECT criteria_id, counter, completed_at
+                    FROM character_criteria_progress
+                    WHERE guid = :guid AND realm = :realm
+                """),
+                {"guid": int(char_guid), "realm": int(realm_id)},
+            ).fetchall()
+            return {
+                int(row[0]): {
+                    "counter": int(row[1] or 0),
+                    "completed_at": int(row[2] or 0),
+                }
+                for row in rows
+            }
+        except Exception as exc:
+            Logger.error(
+                f"[DB] load_character_criteria_progress failed guid={char_guid} "
+                f"realm={realm_id}: {exc}"
+            )
+            return {}
+
+    @staticmethod
+    def save_character_criteria_progress(
+        char_guid: int,
+        realm_id: int,
+        criteria_id: int,
+        counter: int,
+        completed_at: int,
+    ) -> bool:
+        if not DatabaseConnection.ensure_character_achievement_tables():
+            return False
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(
+                text("""
+                    INSERT INTO character_criteria_progress
+                        (guid, realm, criteria_id, counter, completed_at)
+                    VALUES
+                        (:guid, :realm, :criteria_id, :counter, :completed_at)
+                    ON DUPLICATE KEY UPDATE
+                        counter = GREATEST(counter, VALUES(counter)),
+                        completed_at = IF(completed_at = 0, VALUES(completed_at), completed_at)
+                """),
+                {
+                    "guid": int(char_guid),
+                    "realm": int(realm_id),
+                    "criteria_id": int(criteria_id),
+                    "counter": int(counter),
+                    "completed_at": int(completed_at),
+                },
+            )
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.error(
+                f"[DB] save_character_criteria_progress failed guid={char_guid} "
+                f"realm={realm_id} criteria={criteria_id}: {exc}"
+            )
+            return False
+
+    @staticmethod
+    def load_character_achievement_progress(char_guid: int, realm_id: int) -> dict[int, int]:
+        if not DatabaseConnection.ensure_character_achievement_tables():
+            return {}
+        session = DatabaseConnection.chars()
+        try:
+            rows = session.execute(
+                text("""
+                    SELECT achievement_id, completion_time
+                    FROM character_achievement_progress
+                    WHERE guid = :guid AND realm = :realm AND completed = 1
+                """),
+                {"guid": int(char_guid), "realm": int(realm_id)},
+            ).fetchall()
+            return {int(row[0]): int(row[1] or 0) for row in rows}
+        except Exception as exc:
+            Logger.error(
+                f"[DB] load_character_achievement_progress failed guid={char_guid} "
+                f"realm={realm_id}: {exc}"
+            )
+            return {}
+
+    @staticmethod
+    def save_character_achievement_progress(
+        char_guid: int,
+        realm_id: int,
+        achievement_id: int,
+        completion_time: int,
+    ) -> bool:
+        if not DatabaseConnection.ensure_character_achievement_tables():
+            return False
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(
+                text("""
+                    INSERT INTO character_achievement_progress
+                        (guid, realm, achievement_id, completed, completion_time)
+                    VALUES
+                        (:guid, :realm, :achievement_id, 1, :completion_time)
+                    ON DUPLICATE KEY UPDATE
+                        completed = 1,
+                        completion_time = IF(completion_time = 0, VALUES(completion_time), completion_time)
+                """),
+                {
+                    "guid": int(char_guid),
+                    "realm": int(realm_id),
+                    "achievement_id": int(achievement_id),
+                    "completion_time": int(completion_time),
+                },
+            )
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.error(
+                f"[DB] save_character_achievement_progress failed guid={char_guid} "
+                f"realm={realm_id} achievement={achievement_id}: {exc}"
             )
             return False
 

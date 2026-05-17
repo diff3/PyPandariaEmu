@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 
 from shared.Logger import Logger
+from server.modules.handlers.world.feature_config import flight_paths_enabled
 from server.modules.handlers.world.state.runtime import broadcast_player_state_update
 
 
@@ -70,6 +71,9 @@ def start_taxi_flight(
 ) -> list[tuple[str, bytes]]:
     if len(path_points) < 2:
         Logger.warning("[TAXI] start rejected reason=too_few_points destination=%s", int(destination_node))
+        return []
+    if not flight_paths_enabled():
+        Logger.info("[TAXI] start blocked; flight paths disabled")
         return []
 
     generation = int(getattr(session, "_taxi_generation", 0) or 0) + 1

@@ -768,6 +768,10 @@ def world_go_hide(session, _args):
 
 
 def world_go_show(session, _args):
+    from server.modules.handlers.world.feature_config import gameobjects_enabled
+
+    if not gameobjects_enabled():
+        return _notification_response("[WorldGO] disabled by config")
     session.gameobjects_visible = True
     session.last_gameobject_stream_at = 0.0
     responses = _show_nearby_gameobjects(session)
@@ -799,6 +803,10 @@ def world_npc_hide(session, _args):
 
 
 def world_npc_show(session, _args):
+    from server.modules.handlers.world.feature_config import npcs_enabled
+
+    if not npcs_enabled():
+        return _notification_response("[WorldNPC] disabled by config")
     session.npcs_visible = True
     session.last_npc_stream_at = 0.0
     responses, shown_count = _refresh_nearby_npcs(session)
@@ -807,6 +815,10 @@ def world_npc_show(session, _args):
 
 
 def world_npc_on(session, _args):
+    from server.modules.handlers.world.feature_config import npcs_enabled
+
+    if not npcs_enabled():
+        return _notification_response("[WorldNPC] disabled by config")
     session.npcs_visible = True
     session.npc_auto_stream = True
     session.last_npc_stream_at = 0.0
@@ -977,8 +989,10 @@ def world_boat_status(session, _args):
 
 @register_command("taxi", ".taxi <on|off|status>")
 def cmd_taxi(session, args: list[str]) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.feature_config import taxi_cheat_enabled as config_taxi_cheat_enabled
+
     if not args:
-        enabled = bool(getattr(session, "taxi_cheat_enabled", False))
+        enabled = bool(getattr(session, "taxi_cheat_enabled", False)) or config_taxi_cheat_enabled()
         return _notification_response(f"[Taxi] cheat={int(enabled)}")
 
     sub = str(args[0]).lower()
@@ -989,7 +1003,7 @@ def cmd_taxi(session, args: list[str]) -> list[tuple[str, bytes]]:
         session.taxi_cheat_enabled = False
         return _notification_response("[Taxi] cheat off")
     if sub == "status":
-        enabled = bool(getattr(session, "taxi_cheat_enabled", False))
+        enabled = bool(getattr(session, "taxi_cheat_enabled", False)) or config_taxi_cheat_enabled()
         return _notification_response(f"[Taxi] cheat={int(enabled)}")
     return _notification_response("Usage: .taxi <on|off|status>")
 
@@ -1958,6 +1972,11 @@ def cmd_tel(session, args: list[str]) -> list[tuple[str, bytes]]:
 @register_command("map", ".map <on|0>")
 def cmd_map(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Toggle explored zones for the current player."""
+    from server.modules.handlers.world.feature_config import map_cheat_enabled
+
+    if not map_cheat_enabled():
+        return _notification_response("[Map] exploration cheat is disabled on this server.")
+
     argument = str(args[0]).strip().lower() if args else ""
     if argument in {"on", "1", "all"}:
         responses = list(_helper("build_map_exploration_update_responses")(session, True))

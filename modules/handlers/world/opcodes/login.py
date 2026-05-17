@@ -36,6 +36,7 @@ from server.modules.handlers.world.account_data import (
     load_character_account_data,
     load_global_account_data,
 )
+from server.modules.handlers.world.achievement_service import initialize_session_achievements
 from server.modules.handlers.world.bootstrap import replay as bootstrap_replay
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from DSL.modules.EncoderHandler import EncoderHandler
@@ -94,8 +95,16 @@ from server.modules.handlers.world.state.runtime import (
     build_explored_zones_update_response,
     pack_wow_game_time,
     refresh_region_weather,
+    set_session_explored_zones_state,
     sync_all_players_on_map,
     sync_player_visibility,
+)
+from server.modules.handlers.world.feature_config import (
+    gameobjects_enabled,
+    map_cheat_enabled,
+    npc_auto_stream_enabled,
+    npcs_enabled,
+    taxi_cheat_enabled as config_taxi_cheat_enabled,
 )
 
 USE_REPLAY_BOOTSTRAP = True
@@ -377,8 +386,9 @@ def _reset_loaded_world_object_state(session) -> None:
     session.loaded_transport_entries = {}
     session.loaded_npcs = set()
     session.npc_flags_by_guid = {}
-    session.npcs_visible = False
-    session.npc_auto_stream = False
+    session.gameobjects_visible = bool(gameobjects_enabled())
+    session.npcs_visible = bool(npcs_enabled())
+    session.npc_auto_stream = bool(npc_auto_stream_enabled())
     session.last_gameobject_stream_at = 0.0
     session.last_npc_stream_at = 0.0
 
@@ -808,6 +818,9 @@ def handle_player_login(session, ctx: PacketContext):
     ]
 
     session.explored_zones_raw = str(getattr(row, "exploredZones", "") or "")
+    if map_cheat_enabled():
+        set_session_explored_zones_state(session, True)
+    session.taxi_cheat_enabled = bool(config_taxi_cheat_enabled())
     session.chosen_title = int(getattr(row, "chosenTitle", 0) or 0)
     session.known_titles_raw = str(getattr(row, "knownTitles", "") or "")
 
@@ -876,6 +889,8 @@ def handle_player_login(session, ctx: PacketContext):
     _resolve_session_ids(session)
     _set_login_state(session, LoginState.PLAYER_LOGIN)
 
+    achievement_login_responses = initialize_session_achievements(session)
+
     Logger.success(
         f"[WorldHandlers] PLAYER_LOGIN name={session.player_name} "
         f"char_guid={char_guid} map={session.map_id} zone={session.zone} realm={realm_id}"
@@ -885,6 +900,7 @@ def handle_player_login(session, ctx: PacketContext):
 
     responses: list[tuple[str, bytes]] = []
     responses.extend(build_player_login_packets(login_ctx))
+    responses.extend(achievement_login_responses)
 
     if getattr(session, "loading_screen_done", False):
         Logger.info("[WorldHandlers] PLAYER_LOGIN consuming deferred LOADING_SCREEN_NOTIFY show=0")

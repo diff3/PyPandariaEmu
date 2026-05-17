@@ -13,7 +13,12 @@ from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
 from server.modules.dbc.DBCReader import read_dbc
 from server.modules.game.guid import GuidHelper
+from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.handlers.world.dispatcher import register
+from server.modules.handlers.world.feature_config import (
+    flight_paths_enabled,
+    taxi_cheat_enabled as config_taxi_cheat_enabled,
+)
 from server.modules.handlers.world.taxi_runtime import (
     TaxiPathPoint,
     start_taxi_flight,
@@ -303,7 +308,7 @@ def _nearest_taxi_node(session) -> TaxiNode | None:
 
 
 def _known_taxi_node_ids(session) -> tuple[int, ...]:
-    if bool(getattr(session, "taxi_cheat_enabled", False)):
+    if bool(getattr(session, "taxi_cheat_enabled", False)) or config_taxi_cheat_enabled():
         return tuple(sorted(int(node_id) for node_id in _load_taxi_nodes()))
 
     nodes = set(_FALLBACK_HORDE_NODE_IDS)
@@ -392,6 +397,18 @@ def build_show_taxi_nodes_payload(session, guid: int) -> bytes:
 
 def build_activate_taxi_reply_payload(result: int = _TAXI_ACTIVATE_OK) -> bytes:
     return struct.pack("<I", int(result) & 0xFFFFFFFF)
+
+
+def _flight_paths_disabled_responses() -> list[tuple[str, bytes]]:
+    return [
+        ("SMSG_ACTIVATE_TAXI_REPLY", build_activate_taxi_reply_payload()),
+        (
+            "SMSG_MESSAGECHAT",
+            encode_skyfire_messagechat_system_payload(
+                "Flight paths are disabled on this server."
+            ),
+        ),
+    ]
 
 
 def _taxi_destination_position(node_id: int) -> tuple[int, float, float, float, float] | None:
@@ -582,6 +599,9 @@ def handle_activate_taxi(session, ctx):
         int(destination_node),
         len(data),
     )
+    if not flight_paths_enabled():
+        Logger.info("[Taxi] flight paths disabled; rejecting CMSG_ACTIVATE_TAXI")
+        return 0, _flight_paths_disabled_responses()
 
     responses = [("SMSG_ACTIVATE_TAXI_REPLY", build_activate_taxi_reply_payload())]
     destination = _taxi_destination_position(destination_node)
@@ -620,6 +640,9 @@ def handle_activate_taxi_express(session, ctx):
         int(len(nodes)),
         len(data),
     )
+    if not flight_paths_enabled():
+        Logger.info("[Taxi] flight paths disabled; rejecting CMSG_ACTIVATE_TAXI_EXPRESS")
+        return 0, _flight_paths_disabled_responses()
 
     responses = [("SMSG_ACTIVATE_TAXI_REPLY", build_activate_taxi_reply_payload())]
     if destination_node <= 0:

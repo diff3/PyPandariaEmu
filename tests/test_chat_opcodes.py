@@ -1387,6 +1387,10 @@ def test_build_level_command_responses_appends_explicit_level_field(monkeypatch)
 
 def test_map_on_reveals_all_explored_zones(monkeypatch):
     captured = {}
+    monkeypatch.setattr(
+        "server.modules.handlers.world.feature_config.map_cheat_enabled",
+        lambda: True,
+    )
 
     monkeypatch.setattr(
         chat_handlers,
@@ -1433,6 +1437,10 @@ def test_map_on_reveals_all_explored_zones(monkeypatch):
 
 def test_map_zero_clears_all_explored_zones(monkeypatch):
     captured = {}
+    monkeypatch.setattr(
+        "server.modules.handlers.world.feature_config.map_cheat_enabled",
+        lambda: True,
+    )
 
     monkeypatch.setattr(
         chat_handlers,

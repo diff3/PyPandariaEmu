@@ -732,7 +732,10 @@ def build_npc_update_object_payload(map_id: int, spawns: list[dict]) -> bytes:
 # --- DB → PACKET ---
 def build_database_creature_responses(session, *, loaded_guids: set[int] | None = None):
     from server.modules.database.DatabaseConnection import DatabaseConnection
+    from server.modules.handlers.world.feature_config import npcs_enabled
 
+    if not npcs_enabled():
+        return []
     if not getattr(session, "npcs_visible", False):
         return []
 

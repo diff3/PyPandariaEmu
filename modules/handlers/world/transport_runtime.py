@@ -13,6 +13,10 @@ from typing import Any
 from shared.Logger import Logger
 from shared.PathUtils import get_dbc_root
 from server.modules.dbc import read_dbc
+from server.modules.handlers.world.feature_config import (
+    elevators_enabled,
+    moving_transports_enabled,
+)
 from server.modules.handlers.world.bootstrap.gameobjects import _build_gameobject_update_payload
 from server.modules.game.guid import GameObjectGuid, MoTransportGuid
 from server.modules.handlers.world.bootstrap.playerobjects import make_update_object_response
@@ -222,6 +226,8 @@ def register_loaded_transport_entry(
     """Remember visible moving transports so the runtime can move them."""
     if not is_runtime_transport_entry(entry):
         return
+    if not _runtime_enabled_for_entry(entry):
+        return
 
     loaded_transports = getattr(session, "loaded_transport_entries", None)
     if not isinstance(loaded_transports, dict):
@@ -272,6 +278,19 @@ def is_runtime_transport_entry(entry: dict[str, Any]) -> bool:
     )
 
 
+def _runtime_enabled_for_entry(entry: dict[str, Any] | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    gameobject_type = int(entry.get("type", 0) or 0)
+    if is_thunder_bluff_elevator_entry(entry):
+        return elevators_enabled()
+    if gameobject_type == GAMEOBJECT_TYPE_MO_TRANSPORT:
+        return moving_transports_enabled()
+    if _has_transport_animation(entry):
+        return elevators_enabled()
+    return moving_transports_enabled()
+
+
 def _has_transport_animation(entry: dict[str, Any] | None) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -308,6 +327,8 @@ def prepare_runtime_transport_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Normalize runtime transport metadata without changing client-visible lift type."""
     prepared = dict(entry)
     gameobject_type = int(prepared.get("type", 0) or 0)
+    if not _runtime_enabled_for_entry(prepared):
+        return prepared
     animation = _transport_animation_for_entry(int(prepared.get("entry", 0) or 0))
     if animation is None and gameobject_type == GAMEOBJECT_TYPE_MO_TRANSPORT:
         prepared["use_transport_guid"] = True
@@ -361,6 +382,9 @@ def synthetic_transport_entries_near(
 ) -> list[dict[str, Any]]:
     """Return server-owned route transports near the current player."""
     if not bool(getattr(session, "gameobjects_visible", True)):
+        return []
+
+    if not moving_transports_enabled():
         return []
 
     entries = _world_db_transport_entries_near(session, loaded_guids=loaded_guids)
@@ -603,6 +627,8 @@ def apply_transport_runtime_position(session: Any, entry: dict[str, Any]) -> dic
     """Return a copy of entry with current runtime transport coordinates."""
     if not is_runtime_transport_entry(entry):
         return entry
+    if not _runtime_enabled_for_entry(entry):
+        return entry
     if not ENABLE_TRANSPORT_RUNTIME_UPDATES:
         return entry
 
@@ -626,6 +652,8 @@ def apply_transport_runtime_position(session: Any, entry: dict[str, Any]) -> dic
 
 def ensure_transport_runtime_for_session(session: Any) -> None:
     if not ENABLE_TRANSPORT_RUNTIME_UPDATES:
+        return
+    if not (elevators_enabled() or moving_transports_enabled()):
         return
 
     if bool(getattr(session, "_transport_runtime_running", False)):

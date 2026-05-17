@@ -571,10 +571,11 @@ def build_SMSG_INITIALIZE_FACTIONS(ctx) -> bytes:
 
 
 def build_SMSG_ALL_ACHIEVEMENT_DATA(ctx) -> bytes:
-    return _encode("SMSG_ALL_ACHIEVEMENT_DATA", {
-        "earned_count": 0,
-        "progress_count": 0,
-    })
+    from server.modules.handlers.world.achievement_service import build_all_achievement_data_payload
+
+    payload = build_all_achievement_data_payload(ctx)
+    Logger.info("[Achievement] initial sync payload bytes=%s", len(payload))
+    return payload
 
 
 def build_SMSG_ALL_ACCOUNT_CRITERIA(ctx) -> bytes:

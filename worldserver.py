@@ -57,6 +57,7 @@ except Exception:
 config = ConfigLoader.load_config()
 
 from server.modules.database.DatabaseConnection import DatabaseConnection
+from server.modules.handlers.world.feature_config import log_effective_world_feature_config
 from server.modules.opcodes.WorldOpcodes import (
     WORLD_CLIENT_OPCODES,
     WORLD_SERVER_OPCODES,
@@ -93,6 +94,7 @@ WORLD_HANDLERS = opcode_handlers
 
 HOST = config["worldserver"]["host"]
 PORT = config["worldserver"]["port"]
+log_effective_world_feature_config()
 STARTED_AT = time.time()
 running = True
 restart_requested = False

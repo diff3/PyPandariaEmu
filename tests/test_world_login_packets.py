@@ -141,10 +141,8 @@ def test_post_update_object_packets_include_empty_achievement_state():
 def test_all_achievement_data_packet_is_minimal_empty_state():
     payload = login_packets.build_SMSG_ALL_ACHIEVEMENT_DATA(SimpleNamespace())
 
-    earned_count, progress_count = struct.unpack("<II", payload)
-
-    assert earned_count == 0
-    assert progress_count == 0
+    # MoP writes two bit-packed zero counts: 19 bits criteria + 20 bits earned.
+    assert payload == b"\x00\x00\x00\x00\x00"
 
 
 def test_all_account_criteria_packet_is_minimal_empty_state():

@@ -230,6 +230,11 @@ class WorldLoginContext:
 
             known_spells=session.known_spells,
             action_buttons=session.action_buttons,
+            achievements={
+                "completed": dict(getattr(session, "achievement_completed", {}) or {}),
+                "criteria": dict(getattr(session, "achievement_criteria_progress", {}) or {}),
+                "discovered_areas": dict(getattr(session, "discovered_areas", {}) or {}),
+            },
             weather=dict(getattr(session, "weather", {}) or {}),
             motd=resolved_motd,
         )
