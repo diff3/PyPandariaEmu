@@ -2210,7 +2210,9 @@ def test_world_lift_on_keeps_already_streamed_elevator(monkeypatch):
     alice.map_id = 1
     alice.x = -1300.0
     alice.y = 180.0
-    streamed_guid = 0x13000100000369
+    from server.modules.game.guid import MoTransportGuid
+
+    streamed_guid = int(MoTransportGuid.from_spawn_guid(873))
     alice.loaded_gameobjects = {streamed_guid}
     alice.loaded_lifts = {streamed_guid}
 

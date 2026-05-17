@@ -31,6 +31,7 @@ def test_thunder_bluff_elevator_uses_transport_runtime_route(monkeypatch):
     _reset_transport_states()
     now = 100.0
     monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
+    monkeypatch.setattr(transport_runtime, "_transport_animation_for_entry", lambda entry_id: None)
 
     session = SimpleNamespace()
     entry = {
@@ -83,6 +84,163 @@ def test_thunder_bluff_elevator_uses_transport_runtime_route(monkeypatch):
         / 16.0,
         3,
     )
+
+
+def test_type11_transport_animation_uses_dbc_timed_route(monkeypatch):
+    _reset_transport_states()
+    now = 200.0
+    monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
+
+    animation = transport_runtime.TransportAnimationPath(
+        entry=999001,
+        nodes=(
+            transport_runtime.TransportAnimationNode(0, 0.0, 0.0, 0.0),
+            transport_runtime.TransportAnimationNode(5000, 0.0, 0.0, 10.0),
+            transport_runtime.TransportAnimationNode(10000, 0.0, 0.0, 0.0),
+        ),
+        period_ms=10000,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "_transport_animation_for_entry",
+        lambda entry_id: animation if int(entry_id) == 999001 else None,
+    )
+
+    session = SimpleNamespace()
+    entry = {
+        "guid": 9001,
+        "world_guid": 0xF110000000099001,
+        "entry": 999001,
+        "map": 1,
+        "type": 11,
+        "display_id": 360,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 0.0,
+        "size": 1.0,
+    }
+
+    assert transport_runtime.is_runtime_transport_entry(entry) is True
+    prepared = transport_runtime.prepare_runtime_transport_entry(entry)
+
+    assert prepared["use_transport_guid"] is True
+    assert prepared["transport_period"] == 10000
+
+    moved = transport_runtime.apply_transport_runtime_position(session, prepared)
+    assert moved["z"] == 30.0
+
+    now = 202.0
+    moved = transport_runtime.apply_transport_runtime_position(session, prepared)
+
+    assert round(moved["z"], 3) == 34.0
+    assert moved["transport_path_progress"] == 2000
+    state = transport_runtime._runtime_transport_states()[prepared["world_guid"]]
+    assert state.timed_route is True
+    assert state.route_period_ms == 10000
+
+
+def test_mo_transport_without_dbc_gets_same_map_runtime_route(monkeypatch):
+    _reset_transport_states()
+    now = 300.0
+    monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
+    monkeypatch.setattr(transport_runtime, "_transport_animation_for_entry", lambda entry_id: None)
+
+    session = SimpleNamespace()
+    entry = {
+        "guid": 444,
+        "world_guid": 0x1FC00000000001BC,
+        "entry": 175354,
+        "map": 1,
+        "type": 15,
+        "display_id": 3015,
+        "x": 1000.0,
+        "y": 2000.0,
+        "z": 12.0,
+        "orientation": 0.0,
+        "size": 1.0,
+        "data0": 0,
+    }
+
+    assert transport_runtime.is_runtime_transport_entry(entry) is True
+    prepared = transport_runtime.prepare_runtime_transport_entry(entry)
+
+    assert prepared["use_transport_guid"] is True
+    assert prepared["same_map_transport_route"] is True
+    assert prepared["transport_period"] == transport_runtime._DEFAULT_MO_TRANSPORT_PERIOD_MS
+
+    moved = transport_runtime.apply_transport_runtime_position(session, prepared)
+    assert moved["map"] == 1
+    assert moved["x"] == 1000.0
+
+    now = 305.0
+    moved = transport_runtime.apply_transport_runtime_position(session, prepared)
+
+    assert moved["map"] == 1
+    assert moved["x"] > 1000.0
+    assert moved["z"] == 12.0
+    state = transport_runtime._runtime_transport_states()[prepared["world_guid"]]
+    assert len(state.route) == 5
+    assert {node.map_id for node in state.route} == {1}
+
+
+def test_world_db_transport_spawns_from_same_map_taxi_nodes(monkeypatch):
+    _reset_transport_states()
+    now = 400.0
+    monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
+    monkeypatch.setattr(
+        transport_runtime,
+        "_load_world_db_transports",
+        lambda: (
+            {
+                "guid": 7,
+                "entry": 20808,
+                "name": "The Maiden's Fancy",
+                "period": 231236,
+                "display_id": 3015,
+                "faction": 0,
+                "flags": 0,
+                "size": 1.0,
+                "path_id": 241,
+                "data1": 30,
+                "data2": 1,
+                "data3": 0,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "_transport_taxi_path_nodes_by_path",
+        lambda: {
+            241: (
+                transport_runtime.TransportTaxiPathNode(241, 0, 1, -1370.0, -4266.0, 0.0),
+                transport_runtime.TransportTaxiPathNode(241, 1, 1, -1265.0, -4140.0, 0.0),
+                transport_runtime.TransportTaxiPathNode(241, 20, 0, -14123.0, 852.0, 0.0),
+                transport_runtime.TransportTaxiPathNode(241, 21, 0, -14268.0, 964.0, 0.0),
+            )
+        },
+    )
+
+    session = SimpleNamespace(
+        gameobjects_visible=True,
+        map_id=1,
+        x=-1372.0,
+        y=-4268.0,
+        realm_id=1,
+    )
+
+    entries = transport_runtime.synthetic_transport_entries_near(session, loaded_guids=set())
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["entry"] == 20808
+    assert entry["map"] == 1
+    assert entry["guid"] == transport_runtime._same_map_transport_spawn_guid(7, map_id=1)
+    assert entry["world_guid"] == transport_runtime.MoTransportGuid.from_spawn_guid(entry["guid"])
+    assert entry["world_db_transport"] is True
+    state = transport_runtime._runtime_transport_states()[entry["world_guid"]]
+    assert len(state.route) == 2
+    assert {node.map_id for node in state.route} == {1}
 
 
 def test_runtime_elevator_without_lift_support_leaves_z_unchanged(monkeypatch):
