@@ -1388,6 +1388,48 @@ class DatabaseConnection:
         return dict(row)
 
     @staticmethod
+    def get_gameobject_template(entry: int) -> dict | None:
+        if int(entry or 0) <= 0:
+            return None
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        data_columns = ",\n                ".join(f"data{i}" for i in range(24))
+        quest_columns = ",\n                ".join(f"questItem{i}" for i in range(1, 7))
+        stmt = text(
+            f"""
+            SELECT
+                entry,
+                type,
+                displayId,
+                name,
+                IconName,
+                castBarCaption,
+                unk1,
+                {data_columns},
+                size,
+                {quest_columns},
+                unkInt32
+            FROM gameobject_template
+            WHERE entry = :entry
+            LIMIT 1
+            """
+        )
+        try:
+            row = session.execute(stmt, {"entry": int(entry)}).mappings().first()
+        except Exception as exc:
+            Logger.warning(f"[DB] gameobject_template lookup failed for entry={entry}: {exc}")
+            return None
+
+        if row is None:
+            return None
+        return dict(row)
+
+    @staticmethod
     def get_creatures_near(
         map_id: int,
         x: float,

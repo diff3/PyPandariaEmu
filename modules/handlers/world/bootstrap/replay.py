@@ -7,7 +7,7 @@ import struct
 from DSL.modules.bitsHandler import BitWriter
 from shared.Logger import Logger
 from shared.PathUtils import get_captures_root
-from server.modules.game.guid import CreatureGuid, GameObjectGuid, GuidHelper
+from server.modules.game.guid import CreatureGuid, GameObjectGuid, GuidHelper, MoTransportGuid
 from server.modules.handlers.world.bootstrap.gameobjects import (
     _build_gameobject_field_values,
     _build_gameobject_update_payload,
@@ -24,6 +24,11 @@ from server.modules.handlers.world.bootstrap.playerobjects import (
     find_player_living_movement_block,
     make_update_object_response,
     unpack_guid,
+)
+from server.modules.handlers.world.transport_runtime import (
+    apply_transport_runtime_position,
+    register_loaded_transport_entry,
+    synthetic_transport_entries_near,
 )
 from server.modules.handlers.world.login.packets import build_login_packet
 
@@ -230,6 +235,44 @@ def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1
         struct.pack_into("<I", mask, word_index * 4, current_word | (1 << bit_index))
         field_bytes += struct.pack("<I", int(fields[field_index]) & 0xFFFFFFFF)
     return bytes(mask), bytes(field_bytes)
+
+
+def register_loaded_lift_entry(session, entry: dict, *, world_guid: int, map_id: int) -> None:
+    """Remember loaded transport gameobjects so movement can match transport GUIDs."""
+    if int(entry.get("type", 0) or 0) != 11:
+        return
+
+    loaded_lift_entries = getattr(session, "loaded_lift_entries", None)
+    if not isinstance(loaded_lift_entries, dict):
+        loaded_lift_entries = {}
+        session.loaded_lift_entries = loaded_lift_entries
+
+    loaded_lift_entries[int(world_guid)] = {
+        "guid": int(entry.get("guid", 0) or 0),
+        "world_guid": int(world_guid),
+        "entry": int(entry.get("entry", 0) or 0),
+        "map": int(map_id),
+        "x": float(entry.get("x", 0.0) or 0.0),
+        "y": float(entry.get("y", 0.0) or 0.0),
+        "z": float(entry.get("z", 0.0) or 0.0),
+        "orientation": float(entry.get("orientation", 0.0) or 0.0),
+        "size": float(entry.get("size", 1.0) or 1.0),
+        "data0": int(entry.get("data0", 0) or 0),
+        "data1": int(entry.get("data1", 0) or 0),
+    }
+    Logger.info(
+        "[WorldLift] stream register guid=%s world_guid=0x%016X entry=%s "
+        "name=%r display=%s flags=0x%X pos=(%.2f %.2f %.2f)",
+        int(entry.get("guid", 0) or 0),
+        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(entry.get("entry", 0) or 0),
+        str(entry.get("name", "") or ""),
+        int(entry.get("display_id", 0) or 0),
+        int(entry.get("flags", 0) or 0),
+        float(entry.get("x", 0.0) or 0.0),
+        float(entry.get("y", 0.0) or 0.0),
+        float(entry.get("z", 0.0) or 0.0),
+    )
 
 
 def _build_creature_create_flags() -> bytes:
@@ -470,19 +513,54 @@ def build_database_gameobject_responses(session, *, loaded_guids: set[int] | Non
     )
     if not entries:
         Logger.info("[WorldLoginReplay] no DB gameobjects near map=%s x=%.1f y=%.1f", map_id, x, y)
-        return []
+        entries = []
 
     seen = loaded_guids if isinstance(loaded_guids, set) else None
     filtered_entries: list[dict] = []
     for entry in entries:
-        world_guid = int(
-            entry.get("world_guid")
-            or GameObjectGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), int(realm_id) or 1)
-        )
+        if int(entry.get("type", 0) or 0) == 15:
+            world_guid = int(
+                entry.get("world_guid")
+                or MoTransportGuid.from_spawn_guid(int(entry.get("guid", 0) or 0))
+            )
+        else:
+            world_guid = int(
+                entry.get("world_guid")
+                or GameObjectGuid.from_spawn_guid(
+                    int(entry.get("guid", 0) or 0),
+                    int(realm_id) or 1,
+                )
+            )
         if seen is not None and world_guid in seen:
             continue
         entry["world_guid"] = world_guid
         filtered_entries.append(entry)
+        register_loaded_lift_entry(
+            session,
+            entry,
+            world_guid=world_guid,
+            map_id=map_id,
+        )
+        register_loaded_transport_entry(
+            session,
+            entry,
+            world_guid=world_guid,
+            map_id=map_id,
+        )
+        if seen is not None:
+            seen.add(world_guid)
+
+    for entry in synthetic_transport_entries_near(session, loaded_guids=seen):
+        world_guid = int(entry.get("world_guid", 0) or 0)
+        if world_guid <= 0:
+            continue
+        filtered_entries.append(entry)
+        register_loaded_transport_entry(
+            session,
+            entry,
+            world_guid=world_guid,
+            map_id=int(entry.get("map", map_id) or map_id),
+        )
         if seen is not None:
             seen.add(world_guid)
 
@@ -497,12 +575,52 @@ def build_database_gameobject_responses(session, *, loaded_guids: set[int] | Non
         x,
         y,
     )
-    return [
-        make_update_object_response(
-            _build_gameobject_update_payload(map_id=map_id, entry=entry, realm_id=realm_id)
+    responses: list[tuple[str, bytes]] = []
+    for entry in filtered_entries:
+        entry = apply_transport_runtime_position(session, entry)
+        payload = _build_gameobject_update_payload(
+            map_id=map_id,
+            entry=entry,
+            realm_id=realm_id,
         )
-        for entry in filtered_entries
-    ]
+        if bool(entry.get("synthetic_transport")):
+            Logger.info(
+                "[WorldTransport] synthetic create guid=%s entry=%s type=%s "
+                "payload=%s pos=(%.2f %.2f %.2f) o=%.3f",
+                int(entry.get("guid", 0) or 0),
+                int(entry.get("entry", 0) or 0),
+                int(entry.get("type", 0) or 0),
+                len(payload),
+                float(entry.get("x", 0.0) or 0.0),
+                float(entry.get("y", 0.0) or 0.0),
+                float(entry.get("z", 0.0) or 0.0),
+                float(entry.get("orientation", 0.0) or 0.0),
+            )
+        if int(entry.get("type", 0) or 0) == 11:
+            Logger.info(
+                "[WorldLift] stream create guid=%s entry=%s payload=%s "
+                "pos=(%.2f %.2f %.2f)",
+                int(entry.get("guid", 0) or 0),
+                int(entry.get("entry", 0) or 0),
+                len(payload),
+                float(entry.get("x", 0.0) or 0.0),
+                float(entry.get("y", 0.0) or 0.0),
+                float(entry.get("z", 0.0) or 0.0),
+            )
+        if int(entry.get("type", 0) or 0) == 15:
+            Logger.info(
+                "[WorldTransport] stream create guid=%s entry=%s payload=%s "
+                "pos=(%.2f %.2f %.2f) o=%.3f",
+                int(entry.get("guid", 0) or 0),
+                int(entry.get("entry", 0) or 0),
+                len(payload),
+                float(entry.get("x", 0.0) or 0.0),
+                float(entry.get("y", 0.0) or 0.0),
+                float(entry.get("z", 0.0) or 0.0),
+                float(entry.get("orientation", 0.0) or 0.0),
+            )
+        responses.append(make_update_object_response(payload))
+    return responses
 
 
 

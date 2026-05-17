@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import math
 import struct
+import time
 from typing import Any, Mapping
 
 from DSL.modules.EncoderHandler import EncoderHandler
-from server.modules.game.guid import GameObjectGuid
+from server.modules.game.guid import GameObjectGuid, MoTransportGuid
 
 _GAMEOBJECT_CREATE_FLAGS = bytes.fromhex("000000030040")
 _GAMEOBJECT_UPDATE_COUNT = 1
@@ -27,11 +28,19 @@ _GAMEOBJECT_FIELD_DISPLAY_ID = 10
 _GAMEOBJECT_FIELD_FLAGS = 11
 _GAMEOBJECT_FIELD_ROTATION_START = 12
 _GAMEOBJECT_FIELD_FACTION = 16
-_GAMEOBJECT_FIELD_BYTES_1 = 18
-_GAMEOBJECT_FIELD_BYTES_2 = 19
+_GAMEOBJECT_FIELD_LEVEL = 17
+_GAMEOBJECT_FIELD_PERCENT_HEALTH = 18
+_GAMEOBJECT_FIELD_STATE_SPELL_VISUAL_ID = 19
 _GAMEOBJECT_ROTATION_COMPONENT_KEYS = ("rotation0", "rotation1", "rotation2", "rotation3")
 _PACKED_QUATERNION_X_SCALE = 2_097_152
 _PACKED_QUATERNION_YZ_SCALE = 1_048_576
+
+_GAMEOBJECT_TYPE_TRANSPORT = 11
+_GAMEOBJECT_TYPE_MO_TRANSPORT = 15
+_GO_FLAG_TRANSPORT = 0x00000008
+_GO_STATE_ACTIVE = 0
+_GO_STATE_READY = 1
+_GO_HEALTH_FULL = 0xFF
 
 
 def _entry_int(entry: Mapping[str, Any], key: str, default: int = 0) -> int:
@@ -156,6 +165,35 @@ def _gameobject_rotation_packed(entry: Mapping[str, Any]) -> int:
     return _pack_gameobject_rotation(*_rotation_components(entry))
 
 
+def _gameobject_movement_block_uint32(entry: Mapping[str, Any]) -> int:
+    """Return the extra movement block value required by the create flags."""
+    gameobject_type = _entry_int(entry, "type") & 0xFF
+    if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
+        return int(time.time() * 1000.0) & 0xFFFFFFFF
+    return _GAMEOBJECT_MOVEMENT_BLOCK_UINT32
+
+
+def _effective_gameobject_state(entry: Mapping[str, Any]) -> int:
+    """Return the client-visible GO state after type-specific initialization."""
+    gameobject_type = _entry_int(entry, "type") & 0xFF
+    if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
+        start_open = _entry_int(entry, "data1") != 0
+        return _GO_STATE_ACTIVE if start_open else _GO_STATE_READY
+    return _entry_int(entry, "state") & 0xFF
+
+
+def _pack_gameobject_percent_health(entry: Mapping[str, Any]) -> int:
+    state = _effective_gameobject_state(entry)
+    gameobject_type = _entry_int(entry, "type") & 0xFF
+    return state | (gameobject_type << 8) | (_GO_HEALTH_FULL << 24)
+
+
+def _pack_gameobject_state_spell_visual_id(entry: Mapping[str, Any]) -> int:
+    artkit = _entry_int(entry, "artkit") & 0xFF
+    animprogress = _entry_int(entry, "animprogress") & 0xFF
+    return (artkit << 8) | (animprogress << 24)
+
+
 def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1) -> tuple[bytes, bytes]:
     """Build a fixed-size update mask and packed uint32 field payload."""
     if not fields:
@@ -174,6 +212,11 @@ def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1
 
 def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
     """Resolve the full 64-bit world guid for a GameObject spawn."""
+    if _entry_int(entry, "type") == _GAMEOBJECT_TYPE_MO_TRANSPORT:
+        return int(
+            entry.get("world_guid")
+            or MoTransportGuid.from_spawn_guid(_entry_int(entry, "guid"))
+        )
     return int(
         entry.get("world_guid")
         or GameObjectGuid.from_spawn_guid(_entry_int(entry, "guid"), int(realm_id) or 1)
@@ -182,9 +225,10 @@ def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
 
 def _build_gameobject_field_values(entry: Mapping[str, Any], *, world_guid: int) -> dict[int, int]:
     """Build update-field values for a single GameObject create packet."""
-    state = _entry_int(entry, "state") & 0xFF
     gameobject_type = _entry_int(entry, "type") & 0xFF
-    object_bytes_1 = state | (gameobject_type << 8)
+    gameobject_flags = _entry_int(entry, "flags")
+    if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
+        gameobject_flags |= _GO_FLAG_TRANSPORT
     field_values: dict[int, int] = {
         _OBJECT_FIELD_GUID_LOW: int(world_guid) & 0xFFFFFFFF,
         _OBJECT_FIELD_GUID_HIGH: (int(world_guid) >> 32) & 0xFFFFFFFF,
@@ -192,10 +236,16 @@ def _build_gameobject_field_values(entry: Mapping[str, Any], *, world_guid: int)
         _OBJECT_FIELD_ENTRY: _entry_int(entry, "entry"),
         _OBJECT_FIELD_SCALE: _u32_from_float(_entry_float(entry, "size", 1.0)),
         _GAMEOBJECT_FIELD_DISPLAY_ID: _entry_int(entry, "display_id"),
-        _GAMEOBJECT_FIELD_FLAGS: _entry_int(entry, "flags"),
-        _GAMEOBJECT_FIELD_BYTES_1: object_bytes_1,
-        _GAMEOBJECT_FIELD_BYTES_2: (_entry_int(entry, "animprogress") & 0xFF) << 24,
+        _GAMEOBJECT_FIELD_FLAGS: gameobject_flags,
+        _GAMEOBJECT_FIELD_PERCENT_HEALTH: _pack_gameobject_percent_health(entry),
+        _GAMEOBJECT_FIELD_STATE_SPELL_VISUAL_ID: _pack_gameobject_state_spell_visual_id(entry),
     }
+    if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
+        field_values[_GAMEOBJECT_FIELD_LEVEL] = _entry_int(
+            entry,
+            "transport_period",
+            _entry_int(entry, "data0"),
+        )
     faction = _entry_int(entry, "faction")
     if faction != 0:
         field_values[_GAMEOBJECT_FIELD_FACTION] = faction
@@ -239,7 +289,7 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
             "stationary_orientation": stationary_orientation,
             "stationary_x": stationary_x,
             # The current create flags expect these two fields explicitly.
-            "movement_block_uint32": _GAMEOBJECT_MOVEMENT_BLOCK_UINT32,
+            "movement_block_uint32": _gameobject_movement_block_uint32(entry),
             "gameobject_rotation_packed": _gameobject_rotation_packed(entry),
             "mask_blocks": len(mask_bytes) // 4,
             "mask": mask_bytes,

@@ -46,6 +46,7 @@ class HighGuid:
     PLAYER     = 0x0003
     UNIT       = 0x000F      # Creature / NPC
     GAMEOBJECT = 0x0013
+    MO_TRANSPORT = 0x1FC0
     PET        = 0x0009
     DYNAMIC    = 0x0006
 
@@ -199,3 +200,9 @@ class GameObjectGuid:
     @staticmethod
     def from_spawn_guid(spawn_guid: int, realm: int) -> int:
         return GuidHelper.make(HighGuid.GAMEOBJECT, realm, spawn_guid)
+
+
+class MoTransportGuid:
+    @staticmethod
+    def from_spawn_guid(spawn_guid: int) -> int:
+        return GuidHelper.make(HighGuid.MO_TRANSPORT, 0, int(spawn_guid))

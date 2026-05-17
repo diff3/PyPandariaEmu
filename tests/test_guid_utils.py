@@ -9,6 +9,7 @@ from server.modules.game.guid import (
     PlayerGuid,
     CreatureGuid,
     GameObjectGuid,
+    MoTransportGuid,
 )
 
 
@@ -43,6 +44,12 @@ class TestGuidUtils(unittest.TestCase):
         self.assertEqual(GuidHelper.decode(player).high, HighGuid.PLAYER)
         self.assertEqual(GuidHelper.decode(creature).high, HighGuid.UNIT)
         self.assertEqual(GuidHelper.decode(gameobject).high, HighGuid.GAMEOBJECT)
+
+    def test_mo_transport_guid_uses_skyfire_highguid_shape(self):
+        transport = MoTransportGuid.from_spawn_guid(6)
+        self.assertEqual(transport, 0x1FC0000000000006)
+        self.assertEqual(GuidHelper.to_le_bytes(transport)[7], 0x1F)
+        self.assertEqual(GuidHelper.to_le_bytes(transport)[6], 0xC0)
 
 
 if __name__ == "__main__":

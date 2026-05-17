@@ -2073,6 +2073,155 @@ def test_world_go_show_spawns_nearby_gameobjects(monkeypatch):
     ]
 
 
+def test_world_lift_on_loads_nearby_elevator_gameobjects(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.DatabaseConnection,
+        "get_gameobjects_near",
+        lambda map_id, x, y, radius, limit: [
+            {
+                "guid": 873,
+                "entry": 11899,
+                "map_id": int(map_id),
+                "x": float(x) + 1.0,
+                "y": float(y) + 2.0,
+                "z": 321.0,
+                "orientation": 0.0,
+                "rotation0": 0.0,
+                "rotation1": 0.0,
+                "rotation2": 0.0,
+                "rotation3": 1.0,
+                "animprogress": 0,
+                "state": 1,
+                "type": 11,
+                "display_id": 360,
+                "name": "Mesa Elevator",
+                "faction": 0,
+                "flags": 40,
+                "size": 1.0,
+                "data0": 0,
+                "data1": 0,
+                "data2": 0,
+                "data3": 0,
+            },
+            {
+                "guid": 69967,
+                "entry": 3195,
+                "map_id": int(map_id),
+                "x": float(x) + 3.0,
+                "y": float(y) + 4.0,
+                "z": 18.0,
+                "orientation": 0.0,
+                "rotation0": 0.0,
+                "rotation1": 0.0,
+                "rotation2": 0.0,
+                "rotation3": 1.0,
+                "animprogress": 0,
+                "state": 1,
+                "type": 5,
+                "display_id": 308,
+                "name": "Thunder Bluff",
+                "faction": 0,
+                "flags": 0,
+                "size": 1.0,
+                "data0": 0,
+                "data1": 0,
+                "data2": 0,
+                "data3": 0,
+            },
+        ],
+        raising=False,
+    )
+
+    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    monkeypatch.setattr(
+        replay_module,
+        "_build_gameobject_update_payload",
+        lambda **kwargs: f"lift-{kwargs['entry']['entry']}".encode(),
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.map_id = 1
+    alice.x = -1300.0
+    alice.y = 180.0
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["lift", "on"])
+
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"lift-11899")
+    assert responses[-1] == ("SMSG_MESSAGECHAT", b"system|[WorldLift] on 1 updates")
+    assert alice.lifts_visible is True
+    assert alice.real_lift_transport_only is True
+    assert len(alice.loaded_lifts) == 1
+    assert len(alice.loaded_lift_entries) == 1
+    loaded_lift = next(iter(alice.loaded_lift_entries.values()))
+    assert loaded_lift["guid"] == 873
+    assert loaded_lift["entry"] == 11899
+    assert loaded_lift["map"] == 1
+    assert loaded_lift["z"] == 321.0
+
+
+def test_world_lift_on_keeps_already_streamed_elevator(monkeypatch):
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.DatabaseConnection,
+        "get_gameobjects_near",
+        lambda map_id, x, y, radius, limit: [
+            {
+                "guid": 873,
+                "entry": 11899,
+                "map_id": int(map_id),
+                "x": float(x) + 1.0,
+                "y": float(y) + 2.0,
+                "z": 321.0,
+                "orientation": 0.0,
+                "rotation0": 0.0,
+                "rotation1": 0.0,
+                "rotation2": 0.0,
+                "rotation3": 1.0,
+                "animprogress": 0,
+                "state": 1,
+                "type": 11,
+                "display_id": 360,
+                "name": "Mesa Elevator",
+                "faction": 0,
+                "flags": 40,
+                "size": 1.0,
+                "data0": 0,
+                "data1": 0,
+            },
+        ],
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.map_id = 1
+    alice.x = -1300.0
+    alice.y = 180.0
+    streamed_guid = 0x13000100000369
+    alice.loaded_gameobjects = {streamed_guid}
+    alice.loaded_lifts = {streamed_guid}
+
+    responses = chat_handlers.chat_commands.cmd_world(alice, ["lift", "on"])
+
+    assert responses == [("SMSG_MESSAGECHAT", b"system|[WorldLift] on 0 updates")]
+    assert alice.loaded_lifts == set()
+    assert alice.loaded_gameobjects == {streamed_guid}
+    assert streamed_guid in alice.loaded_lift_entries
+
+
 def test_world_npc_status_reports_visibility_and_cache(monkeypatch):
     monkeypatch.setattr(
         chat_handlers.chat_commands,

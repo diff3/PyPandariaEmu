@@ -39,7 +39,7 @@ def test_static_update_object_capture_is_skipped_for_db_loader():
     assert replay._should_skip_static_update_object_capture(session, path) is True
 
 
-def test_build_gameobject_update_payload_uses_gameobject_guid():
+def test_build_gameobject_update_payload_uses_mo_transport_guid():
     replay = _import_replay()
     entry = {
         "guid": 4,
@@ -66,7 +66,7 @@ def test_build_gameobject_update_payload_uses_gameobject_guid():
     packed_guid = replay.extract_first_update_object_guid_info(payload)[0]
 
     assert update_type == 1
-    assert packed_guid == replay.GameObjectGuid.from_spawn_guid(4, 1)
+    assert packed_guid == replay.MoTransportGuid.from_spawn_guid(4)
 
 
 def test_build_gameobject_update_payload_uses_db_rotation(monkeypatch):
@@ -103,7 +103,7 @@ def test_build_gameobject_update_payload_uses_db_rotation(monkeypatch):
     payload = gameobjects._build_gameobject_update_payload(map_id=1, entry=entry, realm_id=1)
     field_values = gameobjects._build_gameobject_field_values(
         entry,
-        world_guid=gameobjects.GameObjectGuid.from_spawn_guid(4, 1),
+        world_guid=gameobjects.MoTransportGuid.from_spawn_guid(4),
     )
 
     assert payload == b"payload"
@@ -148,7 +148,7 @@ def test_build_gameobject_update_payload_derives_upright_rotation_from_orientati
     gameobjects._build_gameobject_update_payload(map_id=1, entry=entry, realm_id=1)
     field_values = gameobjects._build_gameobject_field_values(
         entry,
-        world_guid=gameobjects.GameObjectGuid.from_spawn_guid(4, 1),
+        world_guid=gameobjects.MoTransportGuid.from_spawn_guid(4),
     )
 
     assert captured["fields"]["stationary_orientation"] == entry["orientation"]

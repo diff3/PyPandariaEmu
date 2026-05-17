@@ -374,6 +374,7 @@ def _reset_morph_state(session, race: int, gender: int) -> None:
 def _reset_loaded_world_object_state(session) -> None:
     """Drop client-visible world object bookkeeping for a fresh login."""
     session.loaded_gameobjects = set()
+    session.loaded_transport_entries = {}
     session.loaded_npcs = set()
     session.npc_flags_by_guid = {}
     session.npcs_visible = False

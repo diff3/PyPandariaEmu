@@ -14,6 +14,8 @@ from server.modules.game.guid import GuidHelper
 
 
 MAX_CREATURE_QUEST_ITEMS = 6
+MAX_GAMEOBJECT_DATA = 24
+MAX_GAMEOBJECT_QUEST_ITEMS = 6
 
 
 def _get_realm_name() -> str:
@@ -384,6 +386,72 @@ def handle_creature_query(session, ctx: PacketContext) -> Tuple[int, Optional[li
         return 1, None
 
     return 0, [("SMSG_CREATURE_QUERY_RESPONSE", response)]
+
+
+def _cstring(value: Any) -> bytes:
+    text = str(value or "")
+    return text.encode("utf-8", errors="ignore") + b"\x00"
+
+
+def _build_gameobject_query_response_payload(entry: int, info: dict | None) -> bytes:
+    payload = bytearray()
+    payload.append(0x80 if info else 0x00)
+    payload += struct.pack("<I", int(entry) & 0xFFFFFFFF)
+    if not info:
+        return bytes(payload)
+
+    stats = bytearray()
+    stats += struct.pack("<I", int(info.get("type", 0) or 0) & 0xFFFFFFFF)
+    stats += struct.pack("<I", int(info.get("displayId", 0) or 0) & 0xFFFFFFFF)
+    stats += _cstring(info.get("name", ""))
+    stats += b"\x00\x00\x00"
+    stats += _cstring(info.get("IconName", ""))
+    stats += _cstring(info.get("castBarCaption", ""))
+    stats += _cstring(info.get("unk1", ""))
+
+    for index in range(MAX_GAMEOBJECT_DATA):
+        stats += struct.pack("<I", int(info.get(f"data{index}", 0) or 0) & 0xFFFFFFFF)
+
+    stats += struct.pack("<f", float(info.get("size", 1.0) or 1.0))
+    stats.append(MAX_GAMEOBJECT_QUEST_ITEMS)
+    for index in range(1, MAX_GAMEOBJECT_QUEST_ITEMS + 1):
+        stats += struct.pack("<I", int(info.get(f"questItem{index}", 0) or 0) & 0xFFFFFFFF)
+
+    stats += struct.pack("<i", int(info.get("unkInt32", 0) or 0))
+    payload += struct.pack("<I", len(stats))
+    payload += stats
+    return bytes(payload)
+
+
+@register("CMSG_GAMEOBJECT_QUERY")
+def handle_gameobject_query(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    Logger.debug(f"[ENTITY] opcode={ctx.name}")
+    payload = bytes(ctx.payload or b"")
+    if len(payload) < 4:
+        return 0, None
+
+    entry = struct.unpack_from("<I", payload, 0)[0]
+    if entry <= 0:
+        return 0, None
+
+    try:
+        info = DatabaseConnection.get_gameobject_template(entry)
+        response = _build_gameobject_query_response_payload(entry, info)
+        if info:
+            Logger.info(
+                "[WorldHandlers] GAMEOBJECT_QUERY entry=%s name=%r type=%s display=%s",
+                entry,
+                str(info.get("name", "") or ""),
+                int(info.get("type", 0) or 0),
+                int(info.get("displayId", 0) or 0),
+            )
+        else:
+            Logger.info(f"[WorldHandlers] GAMEOBJECT_QUERY entry={entry} missing in gameobject_template")
+    except Exception as exc:
+        Logger.error(f"[WorldHandlers] Failed to encode SMSG_GAMEOBJECT_QUERY_RESPONSE entry={entry}: {exc}")
+        return 1, None
+
+    return 0, [("SMSG_GAMEOBJECT_QUERY_RESPONSE", response)]
 
 
 @register("CMSG_NAME_QUERY")
