@@ -518,173 +518,6 @@ def _show_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
     return list(build_database_gameobject_responses(session, loaded_guids=loaded_gameobjects))
 
 
-def _loaded_lifts(session) -> set[int]:
-    loaded_lifts = getattr(session, "loaded_lifts", None)
-    if not isinstance(loaded_lifts, set):
-        loaded_lifts = set()
-        session.loaded_lifts = loaded_lifts
-    return loaded_lifts
-
-
-def _loaded_lift_entries(session) -> dict[int, dict[str, Any]]:
-    loaded_lift_entries = getattr(session, "loaded_lift_entries", None)
-    if not isinstance(loaded_lift_entries, dict):
-        loaded_lift_entries = {}
-        session.loaded_lift_entries = loaded_lift_entries
-    return loaded_lift_entries
-
-
-def _remember_loaded_lift_entry(session, entry: dict[str, Any], *, world_guid: int, map_id: int) -> None:
-    loaded_lift_entries = _loaded_lift_entries(session)
-    loaded_lift_entries[int(world_guid)] = {
-        "guid": int(entry.get("guid", 0) or 0),
-        "world_guid": int(world_guid),
-        "entry": int(entry.get("entry", 0) or 0),
-        "map": int(map_id),
-        "x": float(entry.get("x", 0.0) or 0.0),
-        "y": float(entry.get("y", 0.0) or 0.0),
-        "z": float(entry.get("z", 0.0) or 0.0),
-        "orientation": float(entry.get("orientation", 0.0) or 0.0),
-        "size": float(entry.get("size", 1.0) or 1.0),
-        "data0": int(entry.get("data0", 0) or 0),
-        "data1": int(entry.get("data1", 0) or 0),
-    }
-
-
-def _hide_loaded_lifts(session) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.opcodes.movement import _build_out_of_range_update_object_payload
-
-    loaded_lifts = _loaded_lifts(session)
-    loaded_lift_entries = _loaded_lift_entries(session)
-    loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
-    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
-    if not isinstance(loaded_gameobjects, set):
-        loaded_gameobjects = set()
-    map_id = int(getattr(session, "map_id", 0) or 0)
-
-    responses: list[tuple[str, bytes]] = []
-    for guid in sorted(int(guid) for guid in loaded_lifts):
-        if int(guid) in loaded_gameobjects:
-            Logger.info("[WorldLift] hide keep stream-owned guid=0x%X", int(guid))
-            continue
-        responses.append(
-            (
-                "SMSG_UPDATE_OBJECT",
-                _build_out_of_range_update_object_payload(map_id=map_id, guid=int(guid)),
-            )
-        )
-        loaded_lift_entries.pop(int(guid), None)
-        if isinstance(loaded_transport_entries, dict):
-            loaded_transport_entries.pop(int(guid), None)
-    loaded_lifts.clear()
-    return responses
-
-
-def _show_nearby_lifts(session) -> list[tuple[str, bytes]]:
-    from server.modules.game.guid import GameObjectGuid, MoTransportGuid
-    from server.modules.handlers.world.bootstrap.gameobjects import _effective_gameobject_state
-    from server.modules.handlers.world.bootstrap.replay import (
-        _build_gameobject_update_payload,
-        make_update_object_response,
-    )
-    from server.modules.handlers.world.transport_runtime import (
-        apply_transport_runtime_position,
-        prepare_runtime_transport_entry,
-        register_loaded_transport_entry,
-    )
-    try:
-        from server.modules.handlers.world.bootstrap.replay import register_loaded_lift_entry
-    except ImportError:
-        register_loaded_lift_entry = _remember_loaded_lift_entry
-
-    loaded_lifts = _loaded_lifts(session)
-    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
-    if not isinstance(loaded_gameobjects, set):
-        loaded_gameobjects = set()
-        session.loaded_gameobjects = loaded_gameobjects
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    realm_id = int(getattr(session, "realm_id", 1) or 1)
-    x = float(getattr(session, "x", 0.0) or 0.0)
-    y = float(getattr(session, "y", 0.0) or 0.0)
-
-    entries = [
-        entry
-        for entry in DatabaseConnection.get_gameobjects_near(map_id, x, y, radius=450.0, limit=120)
-        if int(entry.get("type", 0) or 0) == 11
-    ]
-
-    responses: list[tuple[str, bytes]] = []
-    for entry in entries:
-        entry = prepare_runtime_transport_entry(entry)
-        if int(entry.get("type", 0) or 0) == 15 or bool(entry.get("use_transport_guid")):
-            world_guid = MoTransportGuid.from_spawn_guid(int(entry.get("guid", 0) or 0))
-        else:
-            world_guid = GameObjectGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), realm_id)
-        if world_guid in loaded_lifts or world_guid in loaded_gameobjects:
-            entry["world_guid"] = world_guid
-            register_loaded_lift_entry(
-                session,
-                entry,
-                world_guid=world_guid,
-                map_id=map_id,
-            )
-            register_loaded_transport_entry(
-                session,
-                entry,
-                world_guid=world_guid,
-                map_id=map_id,
-            )
-            if world_guid in loaded_gameobjects:
-                Logger.info(
-                    "[WorldLift] show keep already-streamed guid=%s entry=%s",
-                    int(entry.get("guid", 0) or 0),
-                    int(entry.get("entry", 0) or 0),
-                )
-            continue
-        loaded_lifts.add(world_guid)
-        entry["world_guid"] = world_guid
-        register_loaded_lift_entry(
-            session,
-            entry,
-            world_guid=world_guid,
-            map_id=map_id,
-        )
-        register_loaded_transport_entry(
-            session,
-            entry,
-            world_guid=world_guid,
-            map_id=map_id,
-        )
-        loaded_gameobjects.add(world_guid)
-        entry = apply_transport_runtime_position(session, entry)
-        payload = _build_gameobject_update_payload(map_id=map_id, entry=entry, realm_id=realm_id)
-        responses.append(make_update_object_response(payload))
-        effective_flags = int(entry.get("flags", 0) or 0) | 0x00000008
-        Logger.info(
-            "[WorldLift] show guid=%s entry=%s name=%r display=%s flags=0x%X "
-            "effective_flags=0x%X state=%s effective_state=%s "
-            "pause=%s start_open=%s size=%s "
-            "payload=%s pos=(%.2f %.2f %.2f)",
-            int(entry.get("guid", 0) or 0),
-            int(entry.get("entry", 0) or 0),
-            str(entry.get("name", "") or ""),
-            int(entry.get("display_id", 0) or 0),
-            int(entry.get("flags", 0) or 0),
-            effective_flags,
-            int(entry.get("state", 0) or 0),
-            _effective_gameobject_state(entry),
-            int(entry.get("data0", 0) or 0),
-            int(entry.get("data1", 0) or 0),
-            float(entry.get("size", 1.0) or 1.0),
-            len(payload),
-            float(entry.get("x", 0.0) or 0.0),
-            float(entry.get("y", 0.0) or 0.0),
-            float(entry.get("z", 0.0) or 0.0),
-        )
-
-    return responses
-
-
 def _hide_loaded_npcs(session) -> list[tuple[str, bytes]]:
     from server.modules.handlers.world.opcodes.movement import _build_out_of_range_update_object_payload
 
@@ -833,33 +666,18 @@ def world_npc_off(session, _args):
 
 
 def world_lift_status(session, _args):
-    loaded_now = len(_loaded_lifts(session))
-    visible = bool(getattr(session, "lifts_visible", False))
-    real_transport_only = bool(getattr(session, "real_lift_transport_only", False))
+    loaded_now = len(getattr(session, "loaded_transport_entries", {}) or {})
     return _notification_response(
-        "[WorldLift] "
-        f"visible={int(visible)} "
-        f"real_transport_only={int(real_transport_only)} "
-        f"loaded_now={int(loaded_now)}"
+        f"[TransportElevator] legacy lift controls removed; runtime_transports={int(loaded_now)}"
     )
 
 
 def world_lift_on(session, _args):
-    session.lifts_visible = True
-    session.real_lift_transport_only = True
-    responses = _hide_loaded_lifts(session)
-    show_responses = _show_nearby_lifts(session)
-    responses.extend(show_responses)
-    responses.extend(_notification_response(f"[WorldLift] on {len(show_responses)} updates"))
-    return responses
+    return _notification_response("[TransportElevator] legacy lift controls removed; use WorldTransportManager")
 
 
 def world_lift_off(session, _args):
-    session.lifts_visible = False
-    session.real_lift_transport_only = False
-    responses = _hide_loaded_lifts(session)
-    responses.extend(_notification_response("[WorldLift] off"))
-    return responses
+    return _notification_response("[TransportElevator] legacy lift controls removed; use WorldTransportManager")
 
 
 def world_lift_show(session, args):
@@ -870,121 +688,16 @@ def world_lift_hide(session, args):
     return world_lift_off(session, args)
 
 
-def _manual_boat_entries(session) -> dict[int, dict[str, Any]]:
-    entries = getattr(session, "manual_boat_entries", None)
-    if not isinstance(entries, dict):
-        entries = {}
-        session.manual_boat_entries = entries
-    return entries
-
-
-def _build_manual_ratchet_boat_entry(session, *, gameobject_type: int) -> dict[str, Any]:
-    from server.modules.game.guid import MoTransportGuid
-
-    if int(gameobject_type) != 15:
-        raise ValueError("manual boat test only supports GAMEOBJECT_TYPE_MO_TRANSPORT")
-
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    realm_id = int(getattr(session, "realm_id", 1) or 1)
-    x = float(getattr(session, "x", 0.0) or 0.0)
-    y = float(getattr(session, "y", 0.0) or 0.0)
-    z = float(getattr(session, "z", 0.0) or 0.0)
-    orientation = float(getattr(session, "orientation", 0.0) or 0.0)
-    spawn_guid = 9_501_001
-    world_guid = int(MoTransportGuid.from_spawn_guid(spawn_guid))
-
-    return {
-        "guid": int(spawn_guid),
-        "world_guid": int(world_guid),
-        "entry": 20808,
-        "map": int(map_id),
-        "map_id": int(map_id),
-        "x": x + 8.0,
-        "y": y,
-        "z": z + 0.5,
-        "orientation": orientation,
-        "rotation0": 0.0,
-        "rotation1": 0.0,
-        "rotation2": 0.0,
-        "rotation3": 1.0,
-        "animprogress": 0,
-        "state": 0,
-        "type": int(gameobject_type),
-        "display_id": 3015,
-        "name": "Ship (Ratchet Manual Visibility Test)",
-        "faction": 0,
-        "flags": 0,
-        "size": 1.0,
-        "data0": 0,
-        "data1": 30,
-        "data2": 1,
-        "data3": 0,
-        "transport_period": 339575,
-        "manual_boat_test": True,
-    }
-
-
-def _hide_manual_boats(session) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.opcodes.movement import _build_out_of_range_update_object_payload
-
-    entries = _manual_boat_entries(session)
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    responses = [
-        (
-            "SMSG_UPDATE_OBJECT",
-            _build_out_of_range_update_object_payload(map_id=map_id, guid=int(guid)),
-        )
-        for guid in sorted(int(guid) for guid in entries)
-    ]
-    entries.clear()
-    return responses
-
-
 def world_boat_test(session, args):
-    from server.modules.handlers.world.bootstrap.replay import (
-        _build_gameobject_update_payload,
-        make_update_object_response,
-    )
-
-    mode = str(args[0]).lower() if args else "transport"
-    if mode != "transport":
-        return _notification_response("Usage: .world boat test transport")
-    gameobject_type = 15
-    entry = _build_manual_ratchet_boat_entry(session, gameobject_type=gameobject_type)
-    entries = _manual_boat_entries(session)
-    entries[int(entry["world_guid"])] = dict(entry)
-    payload = _build_gameobject_update_payload(
-        map_id=int(entry["map"]),
-        entry=entry,
-        realm_id=int(getattr(session, "realm_id", 1) or 1),
-    )
-    Logger.info(
-        "[WorldBoat] manual test mode=%s guid=%s world_guid=0x%016X "
-        "type=%s entry=%s display=%s payload=%s pos=(%.2f %.2f %.2f)",
-        mode,
-        int(entry["guid"]),
-        int(entry["world_guid"]) & 0xFFFFFFFFFFFFFFFF,
-        int(entry["type"]),
-        int(entry["entry"]),
-        int(entry["display_id"]),
-        len(payload),
-        float(entry["x"]),
-        float(entry["y"]),
-        float(entry["z"]),
-    )
-    responses = [make_update_object_response(payload)]
-    responses.extend(_notification_response(f"[WorldBoat] test {mode} sent"))
-    return responses
+    return _notification_response("[WorldBoat] manual test disabled; movement is DBC-only")
 
 
 def world_boat_clear(session, _args):
-    responses = _hide_manual_boats(session)
-    responses.extend(_notification_response(f"[WorldBoat] cleared {max(0, len(responses) - 1)}"))
-    return responses
+    return _notification_response("[WorldBoat] manual test disabled; nothing to clear")
 
 
 def world_boat_status(session, _args):
-    return _notification_response(f"[WorldBoat] manual_loaded={len(_manual_boat_entries(session))}")
+    return _notification_response("[WorldBoat] manual_loaded=0 disabled=1")
 
 
 @register_command("taxi", ".taxi <on|off|status>")

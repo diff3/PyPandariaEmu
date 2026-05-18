@@ -31,6 +31,8 @@ from server.modules.handlers.world.mount.mount_service import load_mount_spells
 from server.modules.handlers.world.pet.pet_service import load_battle_pets
 from server.modules.handlers.world.teleport.teleport_service import load_teleports
 from server.modules.handlers.world.state.global_state import global_state
+from server.modules.handlers.world.transport_runtime import start_world_transport_manager
+from server.modules.handlers.world.movements.manager import get_movement_manager
 from server.modules.handlers.world.runtime.lifecycle import handle_disconnect_session
 from server.modules.handlers.world.addons import load_from_db as load_addon_cache
 
@@ -611,6 +613,14 @@ def run_world() -> None:
         preload_cache()
     except Exception:
         pass
+    try:
+        get_movement_manager().load_templates()
+    except Exception as exc:
+        Logger.warning(f"[MovementManager] template load failed: {exc}")
+    try:
+        start_world_transport_manager()
+    except Exception as exc:
+        Logger.warning(f"[TransportManager] startup failed: {exc}")
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

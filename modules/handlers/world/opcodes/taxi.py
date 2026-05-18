@@ -19,6 +19,7 @@ from server.modules.handlers.world.feature_config import (
     flight_paths_enabled,
     taxi_cheat_enabled as config_taxi_cheat_enabled,
 )
+from server.modules.handlers.world.movements.cache import get_movement_cache
 from server.modules.handlers.world.taxi_runtime import (
     TaxiPathPoint,
     start_taxi_flight,
@@ -65,7 +66,6 @@ _TAXI_MOUNT_DISPLAY_BY_CREATURE_ID: dict[int, int] = {
     32981: 28421,  # Riding Scourge Gryphon (Taxi)
 }
 _TAXI_PATH_FMT = "diii"
-_TAXI_PATH_NODE_FMT = "diiifffiiii"
 _TAXI_RESAMPLE_DISTANCE_YARDS = 4.0
 
 
@@ -257,31 +257,30 @@ def _load_taxi_path_points_by_path() -> dict[int, tuple[TaxiPathPoint, ...]]:
     if _TAXI_PATH_POINTS_BY_PATH is not None:
         return _TAXI_PATH_POINTS_BY_PATH
 
-    grouped: dict[int, list[tuple[int, TaxiPathPoint]]] = {}
+    paths: dict[int, tuple[TaxiPathPoint, ...]] = {}
     try:
-        for record in read_dbc(f"{_dbc_path()}/TaxiPathNode.dbc", _TAXI_PATH_NODE_FMT):
-            path_id = int(record[1] or 0)
-            node_index = int(record[2] or 0)
-            if path_id <= 0:
-                continue
-            grouped.setdefault(path_id, []).append(
-                (
-                    node_index,
-                    TaxiPathPoint(
-                        x=float(record[4] or 0.0),
-                        y=float(record[5] or 0.0),
-                        z=float(record[6] or 0.0),
-                        orientation=None,
-                    ),
+        cache = get_movement_cache()
+        cache.load()
+    except Exception as exc:
+        Logger.warning("[Taxi] failed movement cache TaxiPathNode load: %s", exc)
+        _TAXI_PATH_POINTS_BY_PATH = {}
+        return _TAXI_PATH_POINTS_BY_PATH
+
+    for path_id, template in cache.taxi_paths.items():
+        points: list[TaxiPathPoint] = []
+        for node in template.nodes:
+            points.append(
+                TaxiPathPoint(
+                    x=float(node.x),
+                    y=float(node.y),
+                    z=float(node.z),
+                    orientation=None,
                 )
             )
-    except Exception as exc:
-        Logger.warning("[Taxi] failed to load TaxiPathNode.dbc: %s", exc)
+        if len(points) >= 2:
+            paths[int(path_id)] = tuple(points)
 
-    _TAXI_PATH_POINTS_BY_PATH = {
-        path_id: tuple(point for _index, point in sorted(points, key=lambda item: item[0]))
-        for path_id, points in grouped.items()
-    }
+    _TAXI_PATH_POINTS_BY_PATH = paths
     return _TAXI_PATH_POINTS_BY_PATH
 
 
@@ -458,24 +457,8 @@ def _taxi_path_points_from_nodes(session, node_ids: tuple[int, ...]) -> tuple[in
         )
         return map_id, resampled
 
-    for node_id in node_ids:
-        node = nodes.get(int(node_id))
-        if node is None:
-            continue
-        if int(node.map_id) != map_id:
-            Logger.warning(
-                "[TAXI] skipping cross-map node=%s node_map=%s session_map=%s",
-                int(node.node_id),
-                int(node.map_id),
-                int(map_id),
-            )
-            continue
-        point = TaxiPathPoint(float(node.x), float(node.y), float(node.z), None)
-        last = points[-1]
-        if _taxi_point_distance(last, point) > 1.0:
-            points.append(point)
-
-    Logger.info("[TAXI] using fallback node line nodes=%s points=%s", list(node_ids), len(points))
+    _ = nodes
+    Logger.warning("[TAXI] missing DBC path nodes=%s; no fallback movement generated", list(node_ids))
     return map_id, points
 
 

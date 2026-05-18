@@ -238,44 +238,6 @@ def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1
     return bytes(mask), bytes(field_bytes)
 
 
-def register_loaded_lift_entry(session, entry: dict, *, world_guid: int, map_id: int) -> None:
-    """Remember loaded transport gameobjects so movement can match transport GUIDs."""
-    if int(entry.get("type", 0) or 0) != 11:
-        return
-
-    loaded_lift_entries = getattr(session, "loaded_lift_entries", None)
-    if not isinstance(loaded_lift_entries, dict):
-        loaded_lift_entries = {}
-        session.loaded_lift_entries = loaded_lift_entries
-
-    loaded_lift_entries[int(world_guid)] = {
-        "guid": int(entry.get("guid", 0) or 0),
-        "world_guid": int(world_guid),
-        "entry": int(entry.get("entry", 0) or 0),
-        "map": int(map_id),
-        "x": float(entry.get("x", 0.0) or 0.0),
-        "y": float(entry.get("y", 0.0) or 0.0),
-        "z": float(entry.get("z", 0.0) or 0.0),
-        "orientation": float(entry.get("orientation", 0.0) or 0.0),
-        "size": float(entry.get("size", 1.0) or 1.0),
-        "data0": int(entry.get("data0", 0) or 0),
-        "data1": int(entry.get("data1", 0) or 0),
-    }
-    Logger.info(
-        "[WorldLift] stream register guid=%s world_guid=0x%016X entry=%s "
-        "name=%r display=%s flags=0x%X pos=(%.2f %.2f %.2f)",
-        int(entry.get("guid", 0) or 0),
-        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-        int(entry.get("entry", 0) or 0),
-        str(entry.get("name", "") or ""),
-        int(entry.get("display_id", 0) or 0),
-        int(entry.get("flags", 0) or 0),
-        float(entry.get("x", 0.0) or 0.0),
-        float(entry.get("y", 0.0) or 0.0),
-        float(entry.get("z", 0.0) or 0.0),
-    )
-
-
 def _build_creature_create_flags() -> bytes:
     # Living-unit create flags for the 5.4.8 UPDATE_OBJECT layout.
     # Keep this byte-aligned; otherwise the movement block starts mid-bit.
@@ -536,19 +498,14 @@ def build_database_gameobject_responses(session, *, loaded_guids: set[int] | Non
         if seen is not None and world_guid in seen:
             continue
         entry["world_guid"] = world_guid
+        if not register_loaded_transport_entry(
+            session,
+            entry,
+            world_guid=world_guid,
+            map_id=map_id,
+        ):
+            continue
         filtered_entries.append(entry)
-        register_loaded_lift_entry(
-            session,
-            entry,
-            world_guid=world_guid,
-            map_id=map_id,
-        )
-        register_loaded_transport_entry(
-            session,
-            entry,
-            world_guid=world_guid,
-            map_id=map_id,
-        )
         if seen is not None:
             seen.add(world_guid)
 
@@ -600,7 +557,7 @@ def build_database_gameobject_responses(session, *, loaded_guids: set[int] | Non
             )
         if int(entry.get("type", 0) or 0) == 11:
             Logger.info(
-                "[WorldLift] stream create guid=%s entry=%s payload=%s "
+                "[TransportElevator] stream create guid=%s entry=%s payload=%s "
                 "pos=(%.2f %.2f %.2f)",
                 int(entry.get("guid", 0) or 0),
                 int(entry.get("entry", 0) or 0),

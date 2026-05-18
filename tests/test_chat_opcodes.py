@@ -2162,17 +2162,14 @@ def test_world_lift_on_loads_nearby_elevator_gameobjects(monkeypatch):
 
     responses = chat_handlers.chat_commands.cmd_world(alice, ["lift", "on"])
 
-    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"lift-11899")
-    assert responses[-1] == ("SMSG_MESSAGECHAT", b"system|[WorldLift] on 1 updates")
-    assert alice.lifts_visible is True
-    assert alice.real_lift_transport_only is True
-    assert len(alice.loaded_lifts) == 1
-    assert len(alice.loaded_lift_entries) == 1
-    loaded_lift = next(iter(alice.loaded_lift_entries.values()))
-    assert loaded_lift["guid"] == 873
-    assert loaded_lift["entry"] == 11899
-    assert loaded_lift["map"] == 1
-    assert loaded_lift["z"] == 321.0
+    assert responses == [
+        (
+            "SMSG_MESSAGECHAT",
+            b"system|[TransportElevator] legacy lift controls removed; use WorldTransportManager",
+        )
+    ]
+    assert not hasattr(alice, "loaded_lifts")
+    assert not hasattr(alice, "loaded_lift_entries")
 
 
 def test_world_lift_on_keeps_already_streamed_elevator(monkeypatch):
@@ -2222,14 +2219,17 @@ def test_world_lift_on_keeps_already_streamed_elevator(monkeypatch):
 
     streamed_guid = int(MoTransportGuid.from_spawn_guid(873))
     alice.loaded_gameobjects = {streamed_guid}
-    alice.loaded_lifts = {streamed_guid}
 
     responses = chat_handlers.chat_commands.cmd_world(alice, ["lift", "on"])
 
-    assert responses == [("SMSG_MESSAGECHAT", b"system|[WorldLift] on 0 updates")]
-    assert alice.loaded_lifts == set()
+    assert responses == [
+        (
+            "SMSG_MESSAGECHAT",
+            b"system|[TransportElevator] legacy lift controls removed; use WorldTransportManager",
+        )
+    ]
     assert alice.loaded_gameobjects == {streamed_guid}
-    assert streamed_guid in alice.loaded_lift_entries
+    assert not hasattr(alice, "loaded_lift_entries")
 
 
 def test_world_npc_status_reports_visibility_and_cache(monkeypatch):

@@ -126,39 +126,22 @@ def taxi_tick(session, *, now: float | None = None) -> bool:
     if bool(getattr(state, "completed", False)):
         return False
 
-    current_time = time.time() if now is None else float(now)
-    last_tick = float(getattr(session, "_taxi_last_tick_at", 0.0) or 0.0)
-    if last_tick <= 0.0:
-        last_tick = current_time
-    elapsed = max(0.0, min(1.0, current_time - last_tick))
-    session._taxi_last_tick_at = current_time
-
-    distance_left = float(state.speed) * elapsed
     points = list(state.path_points)
+    current_time = time.time() if now is None else float(now)
+    test_start = float(getattr(session, "_taxi_last_tick_at", 0.0) or 0.0)
+    start_time = test_start if test_start > 0.0 and test_start <= current_time else float(state.started_at)
+    traveled = max(0.0, current_time - start_time) * float(state.speed)
+    total = _path_length(points)
+    if total <= 0.001 or traveled >= total:
+        _complete_taxi(session, state)
+        return False
 
-    while distance_left >= 0.0 and state.current_segment < len(points) - 1:
-        start = points[state.current_segment]
-        end = points[state.current_segment + 1]
-        segment_length = _distance(start, end)
-        if segment_length <= 0.001:
-            _advance_segment(state)
-            continue
-
-        segment_left = segment_length * (1.0 - float(state.segment_progress))
-        if distance_left < segment_left:
-            state.segment_progress += distance_left / segment_length
-            orientation = _segment_orientation(start, end)
-            _apply_taxi_position(session, _lerp_point(start, end, state.segment_progress), orientation)
-            _send_taxi_movement_update(session, state)
-            return True
-
-        distance_left -= segment_left
-        state.segment_progress = 1.0
-        _apply_taxi_position(session, end, _segment_orientation(start, end))
-        _advance_segment(state)
-
-    _complete_taxi(session, state)
-    return False
+    segment, progress, point, orientation = _point_at_distance(points, traveled)
+    state.current_segment = int(segment)
+    state.segment_progress = float(progress)
+    _apply_taxi_position(session, point, orientation)
+    _send_taxi_movement_update(session, state)
+    return True
 
 
 def _start_taxi_thread(session, generation: int) -> None:
@@ -360,6 +343,27 @@ def _distance(a: TaxiPathPoint, b: TaxiPathPoint) -> float:
     dy = float(b.y) - float(a.y)
     dz = float(b.z) - float(a.z)
     return math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+
+
+def _path_length(points: list[TaxiPathPoint]) -> float:
+    return sum(_distance(start, end) for start, end in zip(points, points[1:]))
+
+
+def _point_at_distance(points: list[TaxiPathPoint], target_distance: float) -> tuple[int, float, TaxiPathPoint, float]:
+    remaining = max(0.0, float(target_distance))
+    for index, (start, end) in enumerate(zip(points, points[1:])):
+        segment_length = _distance(start, end)
+        if segment_length <= 0.001:
+            continue
+        if remaining <= segment_length:
+            progress = remaining / segment_length
+            return index, progress, _lerp_point(start, end, progress), _segment_orientation(start, end)
+        remaining -= segment_length
+
+    final_index = max(0, len(points) - 2)
+    start = points[final_index]
+    end = points[-1]
+    return final_index, 1.0, end, _segment_orientation(start, end)
 
 
 def _lerp_point(a: TaxiPathPoint, b: TaxiPathPoint, progress: float) -> TaxiPathPoint:

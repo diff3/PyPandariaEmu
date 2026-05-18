@@ -3,155 +3,55 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
-from pathlib import Path
 import threading
 import time
 from typing import Any
 
 from shared.Logger import Logger
-from shared.PathUtils import get_dbc_root
-from server.modules.dbc import read_dbc
 from server.modules.handlers.world.feature_config import (
     elevators_enabled,
     moving_transports_enabled,
 )
 from server.modules.handlers.world.bootstrap.gameobjects import _build_gameobject_update_payload
-from server.modules.game.guid import GameObjectGuid, MoTransportGuid
+from server.modules.game.guid import MoTransportGuid
 from server.modules.handlers.world.bootstrap.playerobjects import make_update_object_response
+from server.modules.handlers.world.movements.cache import get_movement_cache
 
 GAMEOBJECT_TYPE_TRANSPORT = 11
 GAMEOBJECT_TYPE_MO_TRANSPORT = 15
 
+TRANSPORT_STATE_ACTIVE = "ACTIVE"
+TRANSPORT_STATE_ARRIVING = "ARRIVING"
+TRANSPORT_STATE_DOCKED = "DOCKED"
+TRANSPORT_STATE_DEPARTING = "DEPARTING"
+TRANSPORT_STATE_TRANSFER_PENDING = "TRANSFER_PENDING"
+TRANSPORT_STATE_DESPAWNED = "DESPAWNED"
+
+ATTACH_STATE_DETACHED = "DETACHED"
+ATTACH_STATE_ATTACHING = "ATTACHING"
+ATTACH_STATE_ATTACHED = "ATTACHED"
+ATTACH_STATE_DETACHING = "DETACHING"
+ATTACH_STATE_TRANSFERRING = "TRANSFERRING"
+
 ENABLE_TRANSPORT_RUNTIME_UPDATES = True
-ENABLE_SYNTHETIC_TRANSPORT_TEST_SPAWNS = False
 _TRANSPORT_TICK_SECONDS = 0.25
 _TRANSPORT_VISIBILITY_RADIUS = 700.0
 _DEFAULT_ROUTE_DISTANCE = 320.0
 _DEFAULT_ROUTE_SPEED = 22.0
 _DEFAULT_ROUTE_WAIT_SECONDS = 1.0
 _DEFAULT_MO_TRANSPORT_PERIOD_MS = 180_000
-_DEFAULT_MO_TRANSPORT_ROUTE_DISTANCE = 420.0
-_DEFAULT_MO_TRANSPORT_ROUTE_LATERAL = 90.0
-_DEFAULT_MO_TRANSPORT_WAIT_SECONDS = 4.0
 _ELEVATOR_ROUTE_WAIT_SECONDS = 2.0
 _THREAD_IDLE_TIMEOUT_SECONDS = 20.0
-_SYNTHETIC_TRANSPORT_RADIUS = 700.0
 _TRANSPORT_SEND_DISTANCE = 2.0
-_USE_LEGACY_GUID_FOR_SYNTHETIC_TRANSPORTS = True
-_THUNDER_BLUFF_ELEVATOR_ENTRIES = frozenset({4170, 4171, 47296})
-_THUNDER_BLUFF_ELEVATOR_LOW_Z = 68.586
-_THUNDER_BLUFF_ELEVATOR_HIGH_Z = 130.080
-_THUNDER_BLUFF_ELEVATOR_PERIOD_SECONDS = 32.0
-_TRANSPORT_ANIMATION_FORMAT = "diifffx"
-_TRANSPORT_TAXI_PATH_NODE_FORMAT = "diiifffiiii"
-_TRANSPORT_ANIMATION_FALLBACKS = (
-    Path("/home/magnus/projects/mistofpandaria/TransportAnimation.dbc"),
-)
-_TRANSPORT_DBC_FALLBACKS = (
-    Path("/home/magnus/projects/mistofpandaria"),
-)
+_THUNDER_BLUFF_ELEVATOR_ENTRIES = frozenset({4170, 4171, 11898, 11899, 47296, 47297})
+_TRANSPORT_CROSS_MAP_HOLD_SECONDS = 15.0
+_TRANSPORT_CROSS_MAP_DISTANCE = _DEFAULT_ROUTE_SPEED * _TRANSPORT_CROSS_MAP_HOLD_SECONDS
 _WORLD_DB_TRANSPORT_VISIBILITY_RADIUS = 900.0
-
-# Entry-specific boat/zeppelin routes can be added here without touching the
-# runtime state machine. Nodes may cross maps; the tick code logs transitions.
-_HARDCODED_TRANSPORT_ROUTES: dict[int, list[tuple[int, float, float, float, float]]] = {}
-
-_SYNTHETIC_TRANSPORTS: tuple[dict[str, Any], ...] = (
-    {
-        "guid": 9_500_101,
-        "entry": 176310,
-        "display_id": 3015,
-        "name": "Ship (Ratchet Static Visibility Test)",
-        "type": 5,
-        "route": (
-            (1, -1000.0, -3826.0, 5.8, 0.0),
-            (1, -1000.0, -3826.0, 5.8, 0.0),
-        ),
-    },
-    {
-        "guid": 9_500_001,
-        "entry": 20808,
-        "display_id": 3015,
-        "name": "Ship (The Maiden's Fancy)",
-        "route": (
-            (0, -14297.2, 531.0, 8.8, 1.0),
-            (0, -14370.0, 760.0, 8.8, 1.0),
-            (0, -14297.2, 531.0, 8.8, 1.0),
-        ),
-    },
-    {
-        "guid": 9_500_002,
-        "entry": 176310,
-        "display_id": 3015,
-        "name": "Ship (The Bravery)",
-        "route": (
-            (1, -1005.0, -3828.0, 5.6, 1.0),
-            (1, -1215.0, -3920.0, 5.6, 1.0),
-            (1, -1005.0, -3828.0, 5.6, 1.0),
-        ),
-    },
-    {
-        "guid": 9_500_003,
-        "entry": 176231,
-        "display_id": 3015,
-        "name": "Ship (The Lady Mehley)",
-        "route": (
-            (0, -3805.0, -725.0, 33.4, 1.0),
-            (0, -4050.0, -1120.0, 33.4, 1.0),
-            (0, -3805.0, -725.0, 33.4, 1.0),
-        ),
-    },
-    {
-        "guid": 9_500_005,
-        "entry": 176231,
-        "display_id": 3015,
-        "name": "Ship (Auberdine Ferry)",
-        "route": (
-            (1, 6428.0, 821.0, 7.0, 1.0),
-            (1, 6180.0, 1040.0, 7.0, 1.0),
-            (1, 6428.0, 821.0, 7.0, 1.0),
-        ),
-    },
-    {
-        "guid": 9_500_004,
-        "entry": 164871,
-        "display_id": 3031,
-        "name": "Zeppelin (The Thundercaller)",
-        "route": (
-            (1, -1025.0, -3825.0, 42.0, 1.0),
-            (1, -1325.0, -4100.0, 80.0, 1.0),
-            (1, -1025.0, -3825.0, 42.0, 1.0),
-        ),
-    },
-    {
-        "guid": 9_500_006,
-        "entry": 164871,
-        "display_id": 3031,
-        "name": "Zeppelin (Orgrimmar Tower)",
-        "route": (
-            (1, 1346.0, -4635.0, 70.0, 2.0),
-            (1, 1160.0, -4865.0, 105.0, 1.0),
-            (0, 2062.0, 274.0, 112.0, 2.0),
-            (0, 2300.0, 400.0, 132.0, 1.0),
-            (1, 1346.0, -4635.0, 70.0, 2.0),
-        ),
-    },
-    {
-        "guid": 9_500_007,
-        "entry": 164871,
-        "display_id": 3031,
-        "name": "Zeppelin (Undercity Tower)",
-        "route": (
-            (0, 2062.0, 274.0, 112.0, 2.0),
-            (0, 2300.0, 400.0, 132.0, 1.0),
-            (1, 1346.0, -4635.0, 70.0, 2.0),
-            (1, 1160.0, -4865.0, 105.0, 1.0),
-            (0, 2062.0, 274.0, 112.0, 2.0),
-        ),
-    },
-)
+_DEEPRUN_TRAM_MAP_ID = 369
+_DEEPRUN_TRAM_ENTRY = 194675
+_DEEPRUN_TRAM_DISPLAY_ID = 8587
 
 
 @dataclass(frozen=True)
@@ -206,14 +106,349 @@ class RuntimeTransportState:
     last_tick: float
     wait_until: float
     last_logged_node: int = -1
+    last_node_event_index: int = -1
+    last_node_event_progress_ms: int = 0
+    last_node_event_reason: str = ""
+    lifecycle_state: str = TRANSPORT_STATE_ACTIVE
+    previous_lifecycle_state: str = ""
     tick_log_after: float = 0.0
     last_sent_x: float = float("inf")
     last_sent_y: float = float("inf")
     last_sent_z: float = float("inf")
     last_sent_map_id: int = -1
     path_progress_ms: float = 0.0
+    last_timed_route_progress_ms: int = -1
     timed_route: bool = False
     route_period_ms: int = 0
+    shared_clock_key: str = ""
+    route_kind: str = ""
+    elevator_phase_state: str = ""
+    passengers: set[int] = field(default_factory=set)
+
+
+class WorldTransportManager:
+    def __init__(self) -> None:
+        self.entries: dict[int, dict[str, Any]] = {}
+        self._lock = threading.RLock()
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._last_tick_log: float = 0.0
+
+    def start(self) -> None:
+        with self._lock:
+            if self._running:
+                return
+            self._register_builtin_transports_locked()
+            self._running = True
+            self._thread = threading.Thread(
+                target=self._run_loop,
+                name="world-transport-manager",
+                daemon=True,
+            )
+            self._thread.start()
+            Logger.info("[TransportManager] start transports=%s", len(self.entries))
+
+    def stop(self) -> None:
+        with self._lock:
+            self._running = False
+
+    def reset_for_tests(self) -> None:
+        with self._lock:
+            self.entries.clear()
+            _runtime_transport_states().clear()
+            self._running = False
+            self._thread = None
+
+    def register_transport(self, entry: dict[str, Any], *, source: str = "runtime") -> RuntimeTransportState | None:
+        if not isinstance(entry, dict):
+            return None
+        if not is_runtime_transport_entry(entry):
+            return None
+        if not _runtime_enabled_for_entry(entry):
+            return None
+
+        world_guid = int(entry.get("world_guid", 0) or 0)
+        if world_guid <= 0:
+            return None
+
+        with self._lock:
+            if world_guid in self.entries:
+                Logger.info(
+                    "[TransportDuplicate] transport=0x%016X entry=%s source=%s",
+                    world_guid & 0xFFFFFFFFFFFFFFFF,
+                    int(entry.get("entry", 0) or 0),
+                    str(source),
+                )
+                return _runtime_transport_states().get(world_guid)
+            duplicate_guid = self._duplicate_runtime_guid_locked(entry)
+            if duplicate_guid:
+                Logger.info(
+                    "[TransportDuplicate] transport=0x%016X entry=%s duplicate_of=0x%016X source=%s",
+                    world_guid & 0xFFFFFFFFFFFFFFFF,
+                    int(entry.get("entry", 0) or 0),
+                    duplicate_guid & 0xFFFFFFFFFFFFFFFF,
+                    str(source),
+                )
+                return _runtime_transport_states().get(duplicate_guid)
+
+            transport_entry = dict(entry)
+            transport_entry["world_guid"] = world_guid
+            transport_entry.setdefault(
+                "home_map",
+                int(transport_entry.get("map", transport_entry.get("map_id", 0)) or 0),
+            )
+            self.entries[world_guid] = transport_entry
+            state = _transport_state_for_entry(transport_entry)
+            Logger.info(
+                "[TransportRegister] transport=0x%016X entry=%s map=%s source=%s",
+                world_guid & 0xFFFFFFFFFFFFFFFF,
+                int(transport_entry.get("entry", 0) or 0),
+                int(transport_entry.get("map", transport_entry.get("map_id", 0)) or 0),
+                str(source),
+            )
+            if is_thunder_bluff_elevator_entry(transport_entry):
+                Logger.info(
+                    "[TransportElevator] transport=0x%016X entry=%s map=%s pos=(%.2f %.2f %.2f)",
+                    world_guid & 0xFFFFFFFFFFFFFFFF,
+                    int(transport_entry.get("entry", 0) or 0),
+                    int(transport_entry.get("map", transport_entry.get("map_id", 0)) or 0),
+                    float(transport_entry.get("x", 0.0) or 0.0),
+                    float(transport_entry.get("y", 0.0) or 0.0),
+                    float(transport_entry.get("z", 0.0) or 0.0),
+                )
+            return state
+
+    def _duplicate_runtime_guid_locked(self, entry: dict[str, Any]) -> int:
+        if not is_thunder_bluff_elevator_entry(entry):
+            return 0
+        entry_id = int(entry.get("entry", 0) or 0)
+        map_id = int(entry.get("map", entry.get("map_id", 0)) or 0)
+        x = round(float(entry.get("x", 0.0) or 0.0), 1)
+        y = round(float(entry.get("y", 0.0) or 0.0), 1)
+        for existing_guid, existing in self.entries.items():
+            if not is_thunder_bluff_elevator_entry(existing):
+                continue
+            if int(existing.get("entry", 0) or 0) != entry_id:
+                continue
+            if int(existing.get("map", existing.get("map_id", 0)) or 0) != map_id:
+                continue
+            if round(float(existing.get("x", 0.0) or 0.0), 1) != x:
+                continue
+            if round(float(existing.get("y", 0.0) or 0.0), 1) != y:
+                continue
+            return int(existing_guid)
+        return 0
+
+    def entry_for_guid(self, world_guid: int) -> dict[str, Any] | None:
+        with self._lock:
+            entry = self.entries.get(int(world_guid))
+            return dict(entry) if isinstance(entry, dict) else None
+
+    def state_for_guid(self, world_guid: int) -> RuntimeTransportState | None:
+        return _runtime_transport_states().get(int(world_guid))
+
+    def lifecycle_state_for_guid(self, world_guid: int) -> str:
+        state = self.state_for_guid(int(world_guid))
+        if state is None:
+            return TRANSPORT_STATE_DESPAWNED
+        return str(getattr(state, "lifecycle_state", TRANSPORT_STATE_ACTIVE) or TRANSPORT_STATE_ACTIVE)
+
+    def can_attach(self, session: Any, world_guid: int) -> bool:
+        world_guid = int(world_guid)
+        state = self.state_for_guid(world_guid)
+        if state is None:
+            Logger.warning(
+                "[TransportAttach] denied reason=unknown transport=0x%016X player=%s",
+                world_guid & 0xFFFFFFFFFFFFFFFF,
+                int(getattr(session, "char_guid", 0) or 0),
+            )
+            return False
+        if int(getattr(session, "map_id", 0) or 0) != int(state.map_id):
+            Logger.warning(
+                "[TransportAttach] denied reason=wrong_map transport=0x%016X player=%s "
+                "player_map=%s transport_map=%s state=%s",
+                world_guid & 0xFFFFFFFFFFFFFFFF,
+                int(getattr(session, "char_guid", 0) or 0),
+                int(getattr(session, "map_id", 0) or 0),
+                int(state.map_id),
+                str(getattr(state, "lifecycle_state", "")),
+            )
+            return False
+        lifecycle = str(getattr(state, "lifecycle_state", TRANSPORT_STATE_ACTIVE) or TRANSPORT_STATE_ACTIVE)
+        if lifecycle not in (TRANSPORT_STATE_ACTIVE, TRANSPORT_STATE_DOCKED):
+            Logger.warning(
+                "[TransportAttach] denied reason=lifecycle transport=0x%016X player=%s state=%s",
+                world_guid & 0xFFFFFFFFFFFFFFFF,
+                int(getattr(session, "char_guid", 0) or 0),
+                lifecycle,
+            )
+            return False
+        return True
+
+    def record_attach(self, session: Any, world_guid: int, *, opcode_name: str = "") -> None:
+        state = self.state_for_guid(int(world_guid))
+        char_guid = int(getattr(session, "char_guid", 0) or 0)
+        if state is not None and char_guid > 0:
+            state.passengers.add(char_guid)
+        session.transport_attach_state = ATTACH_STATE_ATTACHED
+        session.transport_attach_timestamp = float(time.monotonic())
+        session.transport_attach_source_map = int(getattr(session, "map_id", 0) or 0)
+        Logger.info(
+            "[TransportAttach] opcode=%s player=%s transport=0x%016X state=%s "
+            "map=%s passengers=%s",
+            str(opcode_name),
+            char_guid,
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            str(getattr(state, "lifecycle_state", "")) if state is not None else "unknown",
+            int(getattr(session, "map_id", 0) or 0),
+            len(state.passengers) if state is not None else 0,
+        )
+
+    def record_detach(self, session: Any, world_guid: int, *, opcode_name: str = "", reason: str = "client") -> None:
+        state = self.state_for_guid(int(world_guid))
+        char_guid = int(getattr(session, "char_guid", 0) or 0)
+        if state is not None and char_guid > 0:
+            state.passengers.discard(char_guid)
+        session.transport_attach_state = ATTACH_STATE_DETACHED
+        Logger.info(
+            "[TransportDetach] opcode=%s reason=%s player=%s transport=0x%016X "
+            "state=%s map=%s passengers=%s",
+            str(opcode_name),
+            str(reason),
+            char_guid,
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            str(getattr(state, "lifecycle_state", "")) if state is not None else "unknown",
+            int(getattr(session, "map_id", 0) or 0),
+            len(state.passengers) if state is not None else 0,
+        )
+
+    def entries_near(
+        self,
+        session: Any,
+        *,
+        loaded_guids: set[int] | None = None,
+        radius: float = _TRANSPORT_VISIBILITY_RADIUS,
+    ) -> list[dict[str, Any]]:
+        session_map = int(getattr(session, "map_id", 0) or 0)
+        session_x = float(getattr(session, "x", 0.0) or 0.0)
+        session_y = float(getattr(session, "y", 0.0) or 0.0)
+        entries: list[dict[str, Any]] = []
+        with self._lock:
+            source_entries = list(self.entries.items())
+
+        for world_guid, entry in source_entries:
+            if isinstance(loaded_guids, set) and int(world_guid) in loaded_guids:
+                continue
+            home_map = entry.get("home_map")
+            if home_map is not None and int(home_map) != session_map:
+                continue
+            moved_entry = apply_transport_runtime_position(session, entry)
+            moved_map = moved_entry.get("map", session_map)
+            if moved_map is None:
+                moved_map = session_map
+            if int(moved_map) != session_map:
+                continue
+            dx = float(moved_entry.get("x", 0.0) or 0.0) - session_x
+            dy = float(moved_entry.get("y", 0.0) or 0.0) - session_y
+            if math.hypot(dx, dy) > float(radius):
+                continue
+            entries.append(moved_entry)
+            Logger.debug(
+                "[TransportStream] streamed transport=0x%016X player=%s phase=%s node=%s state=%s map=%s",
+                int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+                int(getattr(session, "char_guid", 0) or 0),
+                int(moved_entry.get("transport_path_progress", 0) or 0),
+                int(getattr(_runtime_transport_states().get(int(world_guid)), "node_index", 0) or 0),
+                str(getattr(_runtime_transport_states().get(int(world_guid)), "lifecycle_state", "")),
+                int(session_map),
+            )
+        return entries
+
+    def _run_loop(self) -> None:
+        while True:
+            with self._lock:
+                if not self._running:
+                    return
+                states = list(_runtime_transport_states().items())
+            for _world_guid, state in states:
+                _tick_transport_state(state)
+            self._log_tick(states)
+            time.sleep(_TRANSPORT_TICK_SECONDS)
+
+    def _log_tick(self, states: list[tuple[int, RuntimeTransportState]]) -> None:
+        now = time.monotonic()
+        if now < self._last_tick_log + 5.0:
+            return
+        self._last_tick_log = now
+        Logger.debug("[TransportManager] tick transports=%s", len(states))
+
+    def _register_builtin_transports_locked(self) -> None:
+        self._register_deeprun_trams_locked()
+        self._register_world_db_transports_locked()
+        self._register_thunder_bluff_elevators_locked()
+
+    def _register_deeprun_trams_locked(self) -> None:
+        Logger.warning("[MovementManager] Deeprun Tram has no DBC template; not spawning hardcoded tram")
+
+    def _register_world_db_transports_locked(self) -> None:
+        for spec in _load_world_db_transports():
+            route = _build_timed_taxi_transport_route(
+                int(spec.get("path_id", 0) or 0),
+                period_ms=int(spec.get("period", 0) or _DEFAULT_MO_TRANSPORT_PERIOD_MS),
+            )
+            if len(route) < 2:
+                continue
+            map_ids = sorted({int(node.map_id) for node in route})
+            for map_id in map_ids:
+                world_guid = int(
+                    MoTransportGuid.from_spawn_guid(
+                        _same_map_transport_spawn_guid(int(spec.get("guid", 0) or 0), map_id=map_id)
+                    )
+                )
+                start_index = _nearest_route_node_index(
+                    route,
+                    map_id=map_id,
+                    x=route[0].x,
+                    y=route[0].y,
+                )
+                entry = _entry_from_world_db_transport_spec(
+                    spec,
+                    world_guid=world_guid,
+                    route=route,
+                    start_index=start_index,
+                )
+                entry["map"] = int(map_id)
+                entry["map_id"] = int(map_id)
+                entry["home_map"] = int(map_id)
+                self.register_transport(entry, source="world-db")
+
+    def _register_thunder_bluff_elevators_locked(self) -> None:
+        for entry in _load_thunder_bluff_elevator_entries():
+            prepared = prepare_runtime_transport_entry(entry)
+            world_guid = int(
+                prepared.get("world_guid")
+                or MoTransportGuid.from_spawn_guid(int(prepared.get("guid", 0) or 0))
+            )
+            prepared["world_guid"] = world_guid
+            self.register_transport(prepared, source="thunder-bluff-elevator")
+
+
+_WORLD_TRANSPORT_MANAGER = WorldTransportManager()
+
+
+def get_world_transport_manager() -> WorldTransportManager:
+    return _WORLD_TRANSPORT_MANAGER
+
+
+def start_world_transport_manager() -> None:
+    if not (elevators_enabled() or moving_transports_enabled()):
+        Logger.info("[TransportManager] start skipped; transports disabled")
+        return
+    _WORLD_TRANSPORT_MANAGER.start()
+
+
+def reset_world_transport_manager_for_tests() -> None:
+    _WORLD_TRANSPORT_MANAGER.reset_for_tests()
 
 
 def register_loaded_transport_entry(
@@ -222,12 +457,12 @@ def register_loaded_transport_entry(
     *,
     world_guid: int,
     map_id: int,
-) -> None:
+) -> bool:
     """Remember visible moving transports so the runtime can move them."""
     if not is_runtime_transport_entry(entry):
-        return
+        return True
     if not _runtime_enabled_for_entry(entry):
-        return
+        return True
 
     loaded_transports = getattr(session, "loaded_transport_entries", None)
     if not isinstance(loaded_transports, dict):
@@ -237,22 +472,23 @@ def register_loaded_transport_entry(
     transport_entry = dict(entry)
     transport_entry["world_guid"] = int(world_guid)
     transport_entry["map"] = int(map_id)
+    state = get_world_transport_manager().register_transport(transport_entry, source="stream")
+    if state is not None and int(state.guid) != int(world_guid):
+        return False
     loaded_transports[int(world_guid)] = transport_entry
 
     if ENABLE_TRANSPORT_RUNTIME_UPDATES:
         ensure_transport_runtime_for_session(session)
     if is_thunder_bluff_elevator_entry(entry):
         Logger.info(
-            "[WorldElevator] transport spawned guid=%s world_guid=0x%016X entry=%s "
-            "pos=(%.2f %.2f %.2f) low=%.3f high=%.3f",
+            "[TransportElevator] transport spawned guid=%s world_guid=0x%016X entry=%s "
+            "pos=(%.2f %.2f %.2f)",
             int(entry.get("guid", 0) or 0),
             int(world_guid) & 0xFFFFFFFFFFFFFFFF,
             int(entry.get("entry", 0) or 0),
             float(entry.get("x", 0.0) or 0.0),
             float(entry.get("y", 0.0) or 0.0),
             float(entry.get("z", 0.0) or 0.0),
-            _THUNDER_BLUFF_ELEVATOR_LOW_Z,
-            _THUNDER_BLUFF_ELEVATOR_HIGH_Z,
         )
     else:
         Logger.info(
@@ -267,6 +503,7 @@ def register_loaded_transport_entry(
             float(entry.get("y", 0.0) or 0.0),
             float(entry.get("z", 0.0) or 0.0),
         )
+    return True
 
 
 def is_runtime_transport_entry(entry: dict[str, Any]) -> bool:
@@ -314,12 +551,17 @@ def is_thunder_bluff_elevator_entry(entry: dict[str, Any] | None) -> bool:
         return False
     if int(entry.get("map", entry.get("map_id", 0)) or 0) != 1:
         return False
-    if int(entry.get("entry", 0) or 0) in _THUNDER_BLUFF_ELEVATOR_ENTRIES:
-        return True
-    z = float(entry.get("z", 0.0) or 0.0)
-    return (
-        abs(z - _THUNDER_BLUFF_ELEVATOR_LOW_Z) <= 1.0
-        or abs(z - _THUNDER_BLUFF_ELEVATOR_HIGH_Z) <= 1.0
+    entry_id = int(entry.get("entry", 0) or 0)
+    return entry_id in _THUNDER_BLUFF_ELEVATOR_ENTRIES
+
+
+def is_deeprun_tram_entry(entry: dict[str, Any] | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    return bool(
+        entry.get("deeprun_tram")
+        and int(entry.get("map", entry.get("map_id", -1)) or -1) == _DEEPRUN_TRAM_MAP_ID
+        and int(entry.get("entry", 0) or 0) == _DEEPRUN_TRAM_ENTRY
     )
 
 
@@ -353,7 +595,7 @@ def prepare_runtime_transport_entry(entry: dict[str, Any]) -> dict[str, Any]:
     period_ms = (
         int(animation.period_ms)
         if animation is not None
-        else int(_THUNDER_BLUFF_ELEVATOR_PERIOD_SECONDS * 1000.0)
+        else int(prepared.get("data0", 0) or 1)
     )
     prepared["transport_period"] = int(period_ms)
     prepared["data0"] = int(prepared.get("data0", 0) or prepared["transport_period"])
@@ -387,42 +629,11 @@ def synthetic_transport_entries_near(
     if not moving_transports_enabled():
         return []
 
-    entries = _world_db_transport_entries_near(session, loaded_guids=loaded_guids)
-    if not ENABLE_SYNTHETIC_TRANSPORT_TEST_SPAWNS:
-        return entries
-
-    session_map = int(getattr(session, "map_id", 0) or 0)
-    session_x = float(getattr(session, "x", 0.0) or 0.0)
-    session_y = float(getattr(session, "y", 0.0) or 0.0)
-    realm_id = int(getattr(session, "realm_id", 1) or 1)
-
-    for spec in _SYNTHETIC_TRANSPORTS:
-        world_guid = _synthetic_transport_world_guid(
-            int(spec["guid"]),
-            realm_id=realm_id,
-        )
-        if isinstance(loaded_guids, set) and world_guid in loaded_guids:
-            continue
-
-        entry = _entry_from_synthetic_spec(
-            spec,
-            world_guid=world_guid,
-            realm_id=realm_id,
-            near_map=session_map,
-            near_x=session_x,
-            near_y=session_y,
-        )
-        moved_entry = apply_transport_runtime_position(session, entry)
-        if int(moved_entry.get("map", session_map) or session_map) != session_map:
-            continue
-
-        dx = float(moved_entry.get("x", 0.0) or 0.0) - session_x
-        dy = float(moved_entry.get("y", 0.0) or 0.0) - session_y
-        if math.hypot(dx, dy) > _SYNTHETIC_TRANSPORT_RADIUS:
-            continue
-
-        entries.append(moved_entry)
-
+    entries = get_world_transport_manager().entries_near(
+        session,
+        loaded_guids=loaded_guids,
+        radius=max(_TRANSPORT_VISIBILITY_RADIUS, _WORLD_DB_TRANSPORT_VISIBILITY_RADIUS),
+    )
     return entries
 
 
@@ -449,9 +660,9 @@ def _world_db_transport_entries_near(
         if isinstance(loaded_guids, set) and world_guid in loaded_guids:
             continue
 
-        route = _build_same_map_taxi_transport_route(
+        route = _build_timed_taxi_transport_route(
             int(spec.get("path_id", 0) or 0),
-            map_id=session_map,
+            period_ms=int(spec.get("period", 0) or _DEFAULT_MO_TRANSPORT_PERIOD_MS),
         )
         if len(route) < 2:
             continue
@@ -480,77 +691,73 @@ def _world_db_transport_entries_near(
     return entries
 
 
-def _synthetic_transport_world_guid(spawn_guid: int, *, realm_id: int) -> int:
-    if _USE_LEGACY_GUID_FOR_SYNTHETIC_TRANSPORTS:
-        return int(GameObjectGuid.from_spawn_guid(int(spawn_guid), int(realm_id) or 1))
-    return int(MoTransportGuid.from_spawn_guid(int(spawn_guid)))
-
-
 def _same_map_transport_spawn_guid(transport_guid: int, *, map_id: int) -> int:
     return (max(0, int(map_id)) * 100_000) + int(transport_guid)
 
 
-def _entry_from_synthetic_spec(
-    spec: dict[str, Any],
-    *,
-    world_guid: int,
-    realm_id: int,
-    near_map: int,
-    near_x: float,
-    near_y: float,
-) -> dict[str, Any]:
-    route = [
-        TransportRouteNode(
-            int(node[0]),
-            float(node[1]),
-            float(node[2]),
-            float(node[3]),
-            float(node[4]),
-        )
-        for node in spec["route"]
-    ]
-    start_index = _nearest_route_node_index(
-        route,
-        map_id=int(near_map),
-        x=float(near_x),
-        y=float(near_y),
+def _shared_route_phase_ms(clock_key: str, period_ms: int) -> int:
+    _ = str(clock_key or "")
+    period = max(1, int(period_ms or 1))
+    return int(time.monotonic() * 1000.0) % period
+
+
+def linked_transport_world_guid(entry: dict[str, Any], *, map_id: int) -> int:
+    base_guid = int(
+        entry.get("transport_db_guid", 0)
+        or entry.get("source_transport_guid", 0)
+        or entry.get("guid", 0)
+        or 0
     )
-    first = route[start_index]
-    second = route[(start_index + 1) % len(route)] if len(route) > 1 else first
-    entry = {
-        "guid": int(spec["guid"]),
-        "world_guid": int(world_guid),
-        "entry": int(spec["entry"]),
-        "map": int(first.map_id),
-        "map_id": int(first.map_id),
-        "x": float(first.x),
-        "y": float(first.y),
-        "z": float(first.z),
-        "orientation": _orientation_between(first, second, 0.0),
-        "rotation0": 0.0,
-        "rotation1": 0.0,
-        "rotation2": 0.0,
-        "rotation3": 1.0,
-        "animprogress": 0,
-        "state": 0,
-        "type": int(spec.get("type", GAMEOBJECT_TYPE_MO_TRANSPORT)),
-        "display_id": int(spec["display_id"]),
-        "name": str(spec["name"]),
-        "faction": 0,
-        "flags": 0,
-        "size": 1.0,
-        "data0": 0,
-        "data1": 30,
-        "data2": 1,
-        "data3": 0,
-        "realm_id": int(realm_id),
-        "route_start_index": int(start_index),
-        "synthetic_transport": True,
-    }
-    _HARDCODED_TRANSPORT_ROUTES[int(spec["entry"])] = [
-        (int(node.map_id), float(node.x), float(node.y), float(node.z), float(node.wait_time))
-        for node in route
-    ]
+    if base_guid <= 0:
+        return int(entry.get("world_guid", 0) or 0)
+    return int(MoTransportGuid.from_spawn_guid(_same_map_transport_spawn_guid(base_guid, map_id=int(map_id))))
+
+
+def runtime_transport_state_for_guid(world_guid: int) -> RuntimeTransportState | None:
+    return _runtime_transport_states().get(int(world_guid))
+
+
+def authoritative_transport_entry_for_guid(world_guid: int) -> dict[str, Any] | None:
+    return get_world_transport_manager().entry_for_guid(int(world_guid))
+
+
+def can_attach_transport(session: Any, world_guid: int) -> bool:
+    return get_world_transport_manager().can_attach(session, int(world_guid))
+
+
+def record_transport_attach(session: Any, world_guid: int, *, opcode_name: str = "") -> None:
+    get_world_transport_manager().record_attach(session, int(world_guid), opcode_name=opcode_name)
+
+
+def record_transport_detach(
+    session: Any,
+    world_guid: int,
+    *,
+    opcode_name: str = "",
+    reason: str = "client",
+) -> None:
+    get_world_transport_manager().record_detach(
+        session,
+        int(world_guid),
+        opcode_name=opcode_name,
+        reason=reason,
+    )
+
+
+def build_linked_transport_destination_entry(
+    source_entry: dict[str, Any],
+    *,
+    destination_map: int,
+) -> dict[str, Any]:
+    entry = dict(source_entry)
+    world_guid = linked_transport_world_guid(entry, map_id=int(destination_map))
+    entry["world_guid"] = int(world_guid)
+    entry["guid"] = int(world_guid) & 0xFFFFFFFF
+    entry["map"] = int(destination_map)
+    entry["map_id"] = int(destination_map)
+    entry["home_map"] = int(destination_map)
+    entry["use_transport_guid"] = True
+    entry["world_db_transport"] = bool(entry.get("world_db_transport", False))
     return entry
 
 
@@ -572,6 +779,7 @@ def _entry_from_world_db_transport_spec(
         "entry": int(spec.get("entry", 0) or 0),
         "map": int(first.map_id),
         "map_id": int(first.map_id),
+        "home_map": int(first.map_id),
         "x": float(first.x),
         "y": float(first.y),
         "z": float(first.z),
@@ -596,11 +804,19 @@ def _entry_from_world_db_transport_spec(
         "route_start_index": int(start_index) % len(route),
         "world_db_transport": True,
         "use_transport_guid": True,
+        "runtime_route": [
+            (
+                int(node.map_id),
+                float(node.x),
+                float(node.y),
+                float(node.z),
+                float(node.wait_time),
+                int(node.time_ms),
+            )
+            for node in route
+        ],
+        "shared_route_clock_key": f"world-db-transport:{int(spec.get('guid', 0) or 0)}",
     }
-    _HARDCODED_TRANSPORT_ROUTES[int(entry["entry"])] = [
-        (int(node.map_id), float(node.x), float(node.y), float(node.z), float(node.wait_time))
-        for node in route
-    ]
     return entry
 
 
@@ -785,16 +1001,24 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
     if len(route) < 2:
         return None
 
+    timed_route = _is_timed_route(route)
     start_index = int(entry.get("route_start_index", 0) or 0)
-    if start_index > 0:
+    if start_index > 0 and not timed_route:
         start_index %= len(route)
         route = route[start_index:] + route[:start_index]
 
     now = time.monotonic()
     first = route[0]
     second = route[1]
-    timed_route = _is_timed_route(route)
-    route_period_ms = _route_period_ms(route) or _transport_period_ms(entry)
+    route_period_ms = max(int(_route_period_ms(route) or 0), int(_transport_period_ms(entry) or 0))
+    shared_clock_key = str(entry.get("shared_route_clock_key", "") or "")
+    if not shared_clock_key and is_thunder_bluff_elevator_entry(entry):
+        shared_clock_key = f"thunder-bluff-elevator:{world_guid}"
+    path_progress_ms = (
+        float(_shared_route_phase_ms(shared_clock_key, route_period_ms))
+        if shared_clock_key
+        else 0.0
+    )
     state = RuntimeTransportState(
         guid=world_guid,
         entry=int(entry.get("entry", 0) or 0),
@@ -812,7 +1036,16 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
         wait_until=now + max(0.0, float(first.wait_time)),
         timed_route=timed_route,
         route_period_ms=route_period_ms,
+        path_progress_ms=path_progress_ms,
+        shared_clock_key=shared_clock_key,
+        route_kind="thunder_bluff_elevator"
+        if is_thunder_bluff_elevator_entry(entry)
+        else "deeprun_tram"
+        if bool(entry.get("deeprun_tram"))
+        else "",
     )
+    if state.timed_route and state.shared_clock_key:
+        _apply_timed_route_position(state)
     states[world_guid] = state
     Logger.info(
         "[WorldTransport] route load world_guid=0x%016X entry=%s display=%s "
@@ -853,84 +1086,35 @@ def _transport_animation_paths() -> dict[int, TransportAnimationPath]:
         return cached
 
     paths: dict[int, TransportAnimationPath] = {}
-    dbc_path = _resolve_transport_animation_dbc_path()
-    if dbc_path is None:
-        setattr(_transport_animation_paths, "_paths", paths)
-        Logger.warning("[WorldTransport] TransportAnimation.dbc not found; local lifts stay hardcoded only")
-        return paths
-
     try:
-        rows = read_dbc(dbc_path, _TRANSPORT_ANIMATION_FORMAT)
+        cache = get_movement_cache()
+        cache.load()
     except Exception as exc:
         setattr(_transport_animation_paths, "_paths", paths)
-        Logger.warning("[WorldTransport] TransportAnimation.dbc load failed path=%s err=%s", dbc_path, exc)
+        Logger.warning("[WorldTransport] movement cache load failed err=%s", exc)
         return paths
 
-    grouped: dict[int, list[TransportAnimationNode]] = {}
-    for row in rows:
-        try:
-            entry_id = int(row[1])
-            time_ms = int(row[2])
-            node = TransportAnimationNode(
-                time_ms=max(0, time_ms),
-                x=float(row[3]),
-                y=float(row[4]),
-                z=float(row[5]),
-            )
-        except (TypeError, ValueError, IndexError):
-            continue
-        grouped.setdefault(entry_id, []).append(node)
-
-    for entry_id, nodes in grouped.items():
-        ordered = tuple(sorted(nodes, key=lambda node: int(node.time_ms)))
-        if len(ordered) < 2:
-            continue
-        period_ms = max(int(node.time_ms) for node in ordered)
-        if period_ms <= 0:
-            continue
+    for entry_id, template in cache.transport_animation.items():
         paths[int(entry_id)] = TransportAnimationPath(
             entry=int(entry_id),
-            nodes=ordered,
-            period_ms=int(period_ms),
+            nodes=tuple(
+                TransportAnimationNode(
+                    time_ms=int(node.time_ms),
+                    x=float(node.x),
+                    y=float(node.y),
+                    z=float(node.z),
+                )
+                for node in template.nodes
+            ),
+            period_ms=int(template.period_ms),
         )
 
     setattr(_transport_animation_paths, "_paths", paths)
     Logger.info(
-        "[WorldTransport] TransportAnimation.dbc loaded path=%s animated_entries=%s",
-        dbc_path,
+        "[WorldTransport] DBC movement animation templates loaded animated_entries=%s",
         len(paths),
     )
     return paths
-
-
-def _resolve_transport_animation_dbc_path() -> Path | None:
-    return _resolve_dbc_file("TransportAnimation.dbc", explicit_fallbacks=_TRANSPORT_ANIMATION_FALLBACKS)
-
-
-def _resolve_dbc_file(
-    filename: str,
-    *,
-    explicit_fallbacks: tuple[Path, ...] = (),
-) -> Path | None:
-    roots: list[Path] = []
-    configured_root = get_dbc_root()
-    if configured_root is not None:
-        roots.append(Path(configured_root))
-    roots.extend(_TRANSPORT_DBC_FALLBACKS)
-    roots.extend(path.parent for path in explicit_fallbacks)
-
-    seen: set[Path] = set()
-    for root in roots:
-        candidate = Path(root) / str(filename)
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if candidate.exists():
-            return candidate
-    for candidate in explicit_fallbacks:
-        if candidate.exists():
-            return candidate
-    return None
 
 
 def _load_world_db_transports() -> tuple[dict[str, Any], ...]:
@@ -1000,53 +1184,179 @@ def _load_world_db_transports() -> tuple[dict[str, Any], ...]:
     return result
 
 
+def _load_thunder_bluff_elevator_entries() -> tuple[dict[str, Any], ...]:
+    cached = getattr(_load_thunder_bluff_elevator_entries, "_entries", None)
+    if isinstance(cached, tuple):
+        return cached
+
+    try:
+        from server.modules.database.DatabaseConnection import DatabaseConnection
+        from sqlalchemy import text
+
+        session = DatabaseConnection.world()
+        entry_list = ",".join(str(int(entry)) for entry in sorted(_THUNDER_BLUFF_ELEVATOR_ENTRIES))
+        rows = session.execute(
+            text(
+                f"""
+                SELECT
+                    g.guid,
+                    g.id AS entry,
+                    g.map,
+                    g.position_x AS x,
+                    g.position_y AS y,
+                    g.position_z AS z,
+                    g.orientation,
+                    gt.displayId AS display_id,
+                    gt.type,
+                    gt.faction,
+                    gt.flags,
+                    gt.size,
+                    gt.data0,
+                    gt.data1,
+                    gt.data2,
+                    gt.data3
+                FROM gameobject g
+                JOIN gameobject_template gt ON gt.entry = g.id
+                WHERE g.map = 1
+                  AND g.id IN ({entry_list})
+                """
+            ),
+        ).mappings()
+    except Exception as exc:
+        setattr(_load_thunder_bluff_elevator_entries, "_entries", ())
+        Logger.warning("[TransportManager] Thunder Bluff elevator preload failed err=%s", exc)
+        return ()
+
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for row in rows:
+        guid = int(row.get("guid", 0) or 0)
+        dedupe_key = (
+            int(row.get("entry", 0) or 0),
+            int(round(float(row.get("x", 0.0) or 0.0) * 10.0)),
+            int(round(float(row.get("y", 0.0) or 0.0) * 10.0)),
+            int(round(float(row.get("z", 0.0) or 0.0) * 10.0)),
+        )
+        if guid <= 0 or dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        entries.append(
+            {
+                "guid": guid,
+                "entry": int(row.get("entry", 0) or 0),
+                "map": int(row.get("map", 1) or 1),
+                "map_id": int(row.get("map", 1) or 1),
+                "x": float(row.get("x", 0.0) or 0.0),
+                "y": float(row.get("y", 0.0) or 0.0),
+                "z": float(row.get("z", 0.0) or 0.0),
+                "orientation": float(row.get("orientation", 0.0) or 0.0),
+                "type": int(row.get("type", GAMEOBJECT_TYPE_TRANSPORT) or GAMEOBJECT_TYPE_TRANSPORT),
+                "display_id": int(row.get("display_id", 0) or 0),
+                "faction": int(row.get("faction", 0) or 0),
+                "flags": int(row.get("flags", 0) or 0),
+                "size": float(row.get("size", 1.0) or 1.0),
+                "data0": int(row.get("data0", 0) or 0),
+                "data1": int(row.get("data1", 0) or 0),
+                "data2": int(row.get("data2", 0) or 0),
+                "data3": int(row.get("data3", 0) or 0),
+                "name": "Thunder Bluff Elevator",
+            }
+        )
+
+    result = tuple(entries)
+    setattr(_load_thunder_bluff_elevator_entries, "_entries", result)
+    Logger.info("[TransportManager] Thunder Bluff elevators loaded count=%s", len(result))
+    return result
+
+
 def _transport_taxi_path_nodes_by_path() -> dict[int, tuple[TransportTaxiPathNode, ...]]:
     cached = getattr(_transport_taxi_path_nodes_by_path, "_paths", None)
     if isinstance(cached, dict):
         return cached
 
     paths: dict[int, tuple[TransportTaxiPathNode, ...]] = {}
-    dbc_path = _resolve_dbc_file("TaxiPathNode.dbc")
-    if dbc_path is None:
-        setattr(_transport_taxi_path_nodes_by_path, "_paths", paths)
-        Logger.warning("[WorldTransport] TaxiPathNode.dbc not found; DB transports cannot spawn")
-        return paths
-
-    grouped: dict[int, list[TransportTaxiPathNode]] = {}
     try:
-        rows = read_dbc(dbc_path, _TRANSPORT_TAXI_PATH_NODE_FORMAT)
+        cache = get_movement_cache()
+        cache.load()
     except Exception as exc:
         setattr(_transport_taxi_path_nodes_by_path, "_paths", paths)
-        Logger.warning("[WorldTransport] TaxiPathNode.dbc load failed path=%s err=%s", dbc_path, exc)
+        Logger.warning("[WorldTransport] movement cache taxi load failed err=%s", exc)
         return paths
 
-    for row in rows:
-        try:
-            path_id = int(row[1])
-            node = TransportTaxiPathNode(
-                path_id=path_id,
-                node_index=int(row[2]),
-                map_id=int(row[3]),
-                x=float(row[4]),
-                y=float(row[5]),
-                z=float(row[6]),
+    for path_id, template in cache.taxi_paths.items():
+        nodes: list[TransportTaxiPathNode] = []
+        for index, node in enumerate(template.nodes):
+            nodes.append(
+                TransportTaxiPathNode(
+                    path_id=int(path_id),
+                    node_index=int(index),
+                    map_id=int(node.map_id),
+                    x=float(node.x),
+                    y=float(node.y),
+                    z=float(node.z),
+                )
             )
-        except (TypeError, ValueError, IndexError):
-            continue
-        grouped.setdefault(path_id, []).append(node)
-
-    for path_id, nodes in grouped.items():
-        ordered = tuple(sorted(nodes, key=lambda node: int(node.node_index)))
-        if len(ordered) >= 2:
-            paths[int(path_id)] = ordered
+        if len(nodes) >= 2:
+            paths[int(path_id)] = tuple(nodes)
 
     setattr(_transport_taxi_path_nodes_by_path, "_paths", paths)
     Logger.info(
-        "[WorldTransport] TaxiPathNode.dbc loaded path=%s transport_paths=%s",
-        dbc_path,
+        "[WorldTransport] DBC movement taxi path templates loaded transport_paths=%s",
         len(paths),
     )
     return paths
+
+def _build_timed_taxi_transport_route(path_id: int, *, period_ms: int) -> list[TransportRouteNode]:
+    nodes = _transport_taxi_path_nodes_by_path().get(int(path_id), ())
+    if len(nodes) < 2:
+        return []
+
+    distances: list[float] = [0.0]
+    total = 0.0
+    previous = nodes[0]
+    for node in nodes[1:]:
+        if int(previous.map_id) == int(node.map_id):
+            total += math.sqrt(
+                ((float(node.x) - float(previous.x)) ** 2)
+                + ((float(node.y) - float(previous.y)) ** 2)
+                + ((float(node.z) - float(previous.z)) ** 2)
+            )
+        else:
+            total += float(_TRANSPORT_CROSS_MAP_DISTANCE)
+        distances.append(total)
+        previous = node
+
+    period = max(1, int(period_ms or _DEFAULT_MO_TRANSPORT_PERIOD_MS))
+    if total <= 0.0:
+        step = period / max(1, len(nodes) - 1)
+        return [
+            TransportRouteNode(
+                int(node.map_id),
+                float(node.x),
+                float(node.y),
+                float(node.z),
+                0.0,
+                int(min(period, round(index * step))),
+            )
+            for index, node in enumerate(nodes)
+        ]
+
+    route: list[TransportRouteNode] = []
+    for index, node in enumerate(nodes):
+        time_ms = int(round((float(distances[index]) / total) * float(period)))
+        if index == 0:
+            time_ms = 0
+        route.append(
+            TransportRouteNode(
+                int(node.map_id),
+                float(node.x),
+                float(node.y),
+                float(node.z),
+                0.0,
+                min(period, max(0, time_ms)),
+            )
+        )
+    return route
 
 
 def _build_same_map_taxi_transport_route(path_id: int, *, map_id: int) -> list[TransportRouteNode]:
@@ -1070,104 +1380,44 @@ def _build_same_map_taxi_transport_route(path_id: int, *, map_id: int) -> list[T
 
 
 def _build_default_route(entry: dict[str, Any]) -> list[TransportRouteNode]:
+    runtime_route = entry.get("runtime_route")
+    if isinstance(runtime_route, (list, tuple)):
+        route: list[TransportRouteNode] = []
+        for node in runtime_route:
+            if not isinstance(node, (list, tuple)) or len(node) < 4:
+                continue
+            route.append(
+                TransportRouteNode(
+                    int(node[0]),
+                    float(node[1]),
+                    float(node[2]),
+                    float(node[3]),
+                    float(node[4]) if len(node) > 4 else 0.0,
+                    int(node[5]) if len(node) > 5 else 0,
+                )
+            )
+        if len(route) >= 2:
+            return route
+
     dbc_route = _build_dbc_animation_route(entry)
     if dbc_route:
         return dbc_route
 
     if is_thunder_bluff_elevator_entry(entry):
-        map_id = int(entry.get("map", entry.get("map_id", 1)) or 1)
-        x = float(entry.get("x", 0.0) or 0.0)
-        y = float(entry.get("y", 0.0) or 0.0)
-        static_z = float(entry.get("z", _THUNDER_BLUFF_ELEVATOR_LOW_Z) or _THUNDER_BLUFF_ELEVATOR_LOW_Z)
-        low = _THUNDER_BLUFF_ELEVATOR_LOW_Z
-        high = _THUNDER_BLUFF_ELEVATOR_HIGH_Z
-        if abs(static_z - high) < abs(static_z - low):
-            return [
-                TransportRouteNode(map_id, x, y, high, _ELEVATOR_ROUTE_WAIT_SECONDS),
-                TransportRouteNode(map_id, x, y, low, _ELEVATOR_ROUTE_WAIT_SECONDS),
-            ]
-        return [
-            TransportRouteNode(map_id, x, y, low, _ELEVATOR_ROUTE_WAIT_SECONDS),
-            TransportRouteNode(map_id, x, y, high, _ELEVATOR_ROUTE_WAIT_SECONDS),
-        ]
+        Logger.warning(
+            "[TransportElevator] missing DBC route entry=%s guid=%s; not using fallback path",
+            int(entry.get("entry", 0) or 0),
+            int(entry.get("guid", 0) or 0),
+        )
+        return []
 
-    entry_id = int(entry.get("entry", 0) or 0)
-    hardcoded = _HARDCODED_TRANSPORT_ROUTES.get(entry_id)
-    if hardcoded:
-        return [
-            TransportRouteNode(
-                int(node[0]),
-                float(node[1]),
-                float(node[2]),
-                float(node[3]),
-                float(node[4]),
-            )
-            for node in hardcoded
-        ]
-
-    if int(entry.get("type", 0) or 0) == GAMEOBJECT_TYPE_MO_TRANSPORT:
-        return _build_same_map_mo_transport_route(entry)
-
-    map_id = int(entry.get("map", entry.get("map_id", 0)) or 0)
-    x = float(entry.get("x", 0.0) or 0.0)
-    y = float(entry.get("y", 0.0) or 0.0)
-    z = float(entry.get("z", 0.0) or 0.0)
-    orientation = float(entry.get("orientation", 0.0) or 0.0)
-    distance = _resolve_route_distance(entry)
-    dx = math.cos(orientation) * distance
-    dy = math.sin(orientation) * distance
-    wait = _DEFAULT_ROUTE_WAIT_SECONDS
-    return [
-        TransportRouteNode(map_id, x, y, z, wait),
-        TransportRouteNode(map_id, x + dx, y + dy, z, wait),
-        TransportRouteNode(map_id, x, y, z, wait),
-    ]
-
-
-def _build_same_map_mo_transport_route(entry: dict[str, Any]) -> list[TransportRouteNode]:
-    map_id = int(entry.get("map", entry.get("map_id", 0)) or 0)
-    x = float(entry.get("x", 0.0) or 0.0)
-    y = float(entry.get("y", 0.0) or 0.0)
-    z = float(entry.get("z", 0.0) or 0.0)
-    orientation = float(entry.get("orientation", 0.0) or 0.0)
-    forward_x = math.cos(orientation)
-    forward_y = math.sin(orientation)
-    lateral_x = math.cos(orientation + (math.pi * 0.5))
-    lateral_y = math.sin(orientation + (math.pi * 0.5))
-    distance = _resolve_mo_transport_route_distance(entry)
-    lateral = min(_DEFAULT_MO_TRANSPORT_ROUTE_LATERAL, distance * 0.35)
-    wait = _DEFAULT_MO_TRANSPORT_WAIT_SECONDS
-    return [
-        TransportRouteNode(map_id, x, y, z, wait),
-        TransportRouteNode(
-            map_id,
-            x + (forward_x * distance),
-            y + (forward_y * distance),
-            z,
-            0.0,
-        ),
-        TransportRouteNode(
-            map_id,
-            x + (forward_x * distance) + (lateral_x * lateral),
-            y + (forward_y * distance) + (lateral_y * lateral),
-            z,
-            wait,
-        ),
-        TransportRouteNode(
-            map_id,
-            x + (lateral_x * lateral),
-            y + (lateral_y * lateral),
-            z,
-            0.0,
-        ),
-        TransportRouteNode(map_id, x, y, z, wait),
-    ]
-
-
-def _resolve_mo_transport_route_distance(entry: dict[str, Any]) -> float:
-    size = float(entry.get("size", 1.0) or 1.0)
-    scaled = _DEFAULT_MO_TRANSPORT_ROUTE_DISTANCE * max(0.65, min(1.4, size))
-    return max(180.0, min(700.0, scaled))
+    Logger.warning(
+        "[MovementManager] missing DBC movement entry=%s guid=%s type=%s; movement disabled",
+        int(entry.get("entry", 0) or 0),
+        int(entry.get("guid", 0) or 0),
+        int(entry.get("type", 0) or 0),
+    )
+    return []
 
 
 def _build_dbc_animation_route(entry: dict[str, Any]) -> list[TransportRouteNode]:
@@ -1237,19 +1487,13 @@ def _resolve_transport_speed(entry: dict[str, Any]) -> float:
         return _average_animation_speed(entry, animation)
 
     if int(entry.get("type", 0) or 0) == GAMEOBJECT_TYPE_MO_TRANSPORT:
-        period_seconds = max(30.0, float(_transport_period_ms(entry)) / 1000.0)
-        route = _build_same_map_mo_transport_route(entry)
-        distance = 0.0
-        for current, target in zip(route, route[1:]):
-            dx = float(target.x) - float(current.x)
-            dy = float(target.y) - float(current.y)
-            dz = float(target.z) - float(current.z)
-            distance += math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
-        return max(2.0, min(_DEFAULT_ROUTE_SPEED, distance / period_seconds))
+        return _DEFAULT_ROUTE_SPEED
 
     if is_thunder_bluff_elevator_entry(entry):
-        travel_seconds = max(1.0, _THUNDER_BLUFF_ELEVATOR_PERIOD_SECONDS * 0.5)
-        return abs(_THUNDER_BLUFF_ELEVATOR_HIGH_Z - _THUNDER_BLUFF_ELEVATOR_LOW_Z) / travel_seconds
+        animation = _transport_animation_for_entry(int(entry.get("entry", 0) or 0))
+        if animation is not None:
+            return _average_animation_speed(entry, animation)
+        return _DEFAULT_ROUTE_SPEED
 
     size = float(entry.get("size", 1.0) or 1.0)
     if size > 4.0:
@@ -1282,7 +1526,9 @@ def _transport_period_ms(entry: dict[str, Any]) -> int:
     if int(entry.get("type", 0) or 0) == GAMEOBJECT_TYPE_MO_TRANSPORT:
         return _DEFAULT_MO_TRANSPORT_PERIOD_MS
     if is_thunder_bluff_elevator_entry(entry):
-        return int(_THUNDER_BLUFF_ELEVATOR_PERIOD_SECONDS * 1000.0)
+        animation = _transport_animation_for_entry(int(entry.get("entry", 0) or 0))
+        if animation is not None:
+            return int(animation.period_ms)
     data0 = int(entry.get("data0", 0) or 0)
     return max(1, int(data0))
 
@@ -1294,7 +1540,10 @@ def _tick_transport_state(state: RuntimeTransportState) -> None:
     if elapsed <= 0.0:
         return
     period = max(1, int(state.route_period_ms))
-    state.path_progress_ms = (float(state.path_progress_ms) + (elapsed * 1000.0)) % float(period)
+    if str(getattr(state, "shared_clock_key", "") or ""):
+        state.path_progress_ms = float(_shared_route_phase_ms(state.shared_clock_key, period))
+    else:
+        state.path_progress_ms = (float(state.path_progress_ms) + (elapsed * 1000.0)) % float(period)
     if bool(state.timed_route):
         _apply_timed_route_position(state)
         return
@@ -1340,12 +1589,16 @@ def _tick_transport_state(state: RuntimeTransportState) -> None:
             return
 
 
+
 def _apply_timed_route_position(state: RuntimeTransportState) -> None:
     route = state.route
     if len(route) < 2:
         return
 
-    progress = int(state.path_progress_ms) % max(1, int(state.route_period_ms or 1))
+    period = max(1, int(state.route_period_ms or 1))
+    progress = int(state.path_progress_ms) % period
+    previous_progress = int(getattr(state, "last_timed_route_progress_ms", -1) or -1)
+    state.last_timed_route_progress_ms = int(progress)
     current_index = 0
     target_index = 1
     for index in range(len(route) - 1):
@@ -1372,13 +1625,23 @@ def _apply_timed_route_position(state: RuntimeTransportState) -> None:
         ratio = 1.0
 
     state.node_index = int(current_index)
+    lifecycle_state = _transport_lifecycle_for_segment(state, current, target, progress)
     state.map_id = int(current.map_id)
     if int(current.map_id) != int(target.map_id):
+        _set_transport_lifecycle(
+            state,
+            TRANSPORT_STATE_TRANSFER_PENDING,
+            node_index=int(current_index),
+            progress_ms=int(progress),
+            reason="transfer_node",
+        )
         if ratio >= 1.0:
+            state.node_index = int(target_index)
             state.map_id = int(target.map_id)
             state.x = float(target.x)
             state.y = float(target.y)
             state.z = float(target.z)
+        _log_timed_route_node_events(state, previous_progress, progress, period, current_index)
         return
 
     dx = float(target.x) - float(current.x)
@@ -1389,33 +1652,179 @@ def _apply_timed_route_position(state: RuntimeTransportState) -> None:
     state.z = float(current.z) + (dz * ratio)
     if abs(dx) > 0.001 or abs(dy) > 0.001:
         state.orientation = math.atan2(dy, dx)
+    _set_transport_lifecycle(
+        state,
+        lifecycle_state,
+        node_index=int(current_index),
+        progress_ms=int(progress),
+        reason="route_phase",
+    )
 
-    if int(current_index) != int(state.last_logged_node):
-        state.last_logged_node = int(current_index)
+    _log_timed_route_node_events(state, previous_progress, progress, period, current_index)
+
+
+def _log_timed_route_node_events(
+    state: RuntimeTransportState,
+    previous_progress: int,
+    progress: int,
+    period: int,
+    current_index: int,
+) -> None:
+    route = state.route
+    if len(route) < 2:
+        return
+
+    if previous_progress < 0:
+        _log_timed_route_node_event(state, int(current_index), int(progress), reason="initial")
+        return
+
+    crossed: list[int] = []
+    previous = int(previous_progress)
+    current = int(progress)
+    route_period = max(1, int(period))
+    if current >= previous:
+        for index, node in enumerate(route):
+            node_time = int(node.time_ms)
+            if previous < node_time <= current:
+                crossed.append(index)
+    else:
+        for index, node in enumerate(route):
+            node_time = int(node.time_ms)
+            if previous < node_time <= route_period:
+                crossed.append(index)
+        for index, node in enumerate(route):
+            node_time = int(node.time_ms)
+            if node_time > 0 and node_time <= current:
+                crossed.append(index)
+
+    if not crossed and int(current_index) != int(state.last_logged_node):
+        crossed.append(int(current_index))
+
+    for index in crossed:
+        reason = "route_end" if int(index) == len(route) - 1 else "node"
+        _log_timed_route_node_event(state, int(index), int(progress), reason=reason)
+
+
+def _transport_lifecycle_for_segment(
+    state: RuntimeTransportState,
+    current: TransportRouteNode,
+    target: TransportRouteNode,
+    progress: int,
+) -> str:
+    if int(current.map_id) != int(target.map_id):
+        return TRANSPORT_STATE_TRANSFER_PENDING
+
+    route = state.route
+    if len(route) < 2:
+        return TRANSPORT_STATE_ACTIVE
+
+    index = int(state.node_index)
+    previous_index = (index - 1) % len(route)
+    previous = route[previous_index]
+    node_time = int(current.time_ms)
+    next_time = int(target.time_ms)
+    previous_time = int(previous.time_ms)
+    if index == 0:
+        previous_time = 0
+    after_node_ms = max(0, int(progress) - node_time)
+    to_next_ms = max(0, next_time - int(progress))
+    arriving = bool(index > 0 and int(previous.map_id) == int(current.map_id) and after_node_ms <= 2_000)
+    departing = bool(to_next_ms <= 2_000)
+    docked = bool(next_time > node_time and after_node_ms <= 4_000)
+
+    if arriving:
+        return TRANSPORT_STATE_ARRIVING
+    if docked:
+        return TRANSPORT_STATE_DOCKED
+    if departing:
+        return TRANSPORT_STATE_DEPARTING
+    _ = previous_time
+    return TRANSPORT_STATE_ACTIVE
+
+
+def _set_transport_lifecycle(
+    state: RuntimeTransportState,
+    lifecycle_state: str,
+    *,
+    node_index: int,
+    progress_ms: int,
+    reason: str,
+) -> None:
+    new_state = str(lifecycle_state or TRANSPORT_STATE_ACTIVE)
+    old_state = str(getattr(state, "lifecycle_state", "") or "")
+    if old_state == new_state:
+        return
+    state.previous_lifecycle_state = old_state
+    state.lifecycle_state = new_state
+    Logger.info(
+        "[TransportState] guid=0x%016X entry=%s %s -> %s node=%s phase=%sms "
+        "map=%s passengers=%s reason=%s",
+        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+        int(state.entry),
+        old_state or "NONE",
+        new_state,
+        int(node_index),
+        int(progress_ms),
+        int(state.map_id),
+        len(getattr(state, "passengers", set()) or set()),
+        str(reason),
+    )
+    Logger.info(
+        "[TransportPhase] guid=0x%016X entry=%s state=%s node=%s phase=%sms map=%s",
+        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+        int(state.entry),
+        new_state,
+        int(node_index),
+        int(progress_ms),
+        int(state.map_id),
+    )
+    if new_state == TRANSPORT_STATE_DOCKED:
         Logger.info(
-            "[WorldTransport] node world_guid=0x%016X entry=%s node=%s/%s "
-            "map=%s pos=(%.2f %.2f %.2f) progress=%sms",
+            "[TransportDock] guid=0x%016X entry=%s node=%s phase=%sms map=%s",
             int(state.guid) & 0xFFFFFFFFFFFFFFFF,
             int(state.entry),
-            int(current_index),
-            len(route),
+            int(node_index),
+            int(progress_ms),
             int(state.map_id),
-            float(state.x),
-            float(state.y),
-            float(state.z),
-            int(progress),
         )
-        if is_thunder_bluff_elevator_state(state):
-            Logger.info(
-                "[WorldElevator] node transition world_guid=0x%016X entry=%s node=%s/%s "
-                "z=%.3f progress=%sms",
-                int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-                int(state.entry),
-                int(current_index),
-                len(route),
-                float(state.z),
-                int(progress),
-            )
+
+
+def _log_timed_route_node_event(
+    state: RuntimeTransportState,
+    node_index: int,
+    progress: int,
+    *,
+    reason: str,
+) -> None:
+    route = state.route
+    if not route:
+        return
+    index = max(0, min(len(route) - 1, int(node_index)))
+    if index == int(state.last_logged_node) and str(reason) != "route_end":
+        return
+
+    node = route[index]
+    state.last_logged_node = int(index)
+    state.last_node_event_index = int(index)
+    state.last_node_event_progress_ms = int(progress)
+    state.last_node_event_reason = str(reason)
+    Logger.info(
+        "[WorldTransport] node world_guid=0x%016X entry=%s node=%s/%s "
+        "map=%s pos=(%.2f %.2f %.2f) progress=%sms event=%s",
+        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+        int(state.entry),
+        int(index),
+        len(route),
+        int(node.map_id),
+        float(node.x),
+        float(node.y),
+        float(node.z),
+        int(progress),
+        str(reason),
+    )
+    if is_deeprun_tram_state(state):
+        target = route[(index + 1) % len(route)]
+        _log_deeprun_tram_node(state, node, target, index, progress)
 
 
 def _advance_transport_node(
@@ -1443,7 +1852,7 @@ def _advance_transport_node(
     )
     if is_thunder_bluff_elevator_state(state):
         Logger.info(
-            "[WorldElevator] node transition world_guid=0x%016X entry=%s node=%s/%s "
+            "[TransportElevator] node transition world_guid=0x%016X entry=%s node=%s/%s "
             "z=%.3f pause=%.2f",
             int(state.guid) & 0xFFFFFFFFFFFFFFFF,
             int(state.entry),
@@ -1454,12 +1863,12 @@ def _advance_transport_node(
         )
         if float(target.wait_time) > 0.0:
             Logger.info(
-                "[WorldElevator] endpoint pause world_guid=0x%016X seconds=%.2f",
+                "[TransportElevator] endpoint pause world_guid=0x%016X seconds=%.2f",
                 int(state.guid) & 0xFFFFFFFFFFFFFFFF,
                 float(target.wait_time),
             )
         Logger.info(
-            "[WorldElevator] reverse direction world_guid=0x%016X next_node=%s",
+            "[TransportElevator] reverse direction world_guid=0x%016X next_node=%s",
             int(state.guid) & 0xFFFFFFFFFFFFFFFF,
             int((state.node_index + 1) % len(state.route)),
         )
@@ -1498,7 +1907,7 @@ def _maybe_log_transport_tick(world_guid: int, entry: dict[str, Any]) -> None:
     state.tick_log_after = now + 5.0
     if is_thunder_bluff_elevator_entry(entry):
         Logger.debug(
-            "[WorldElevator] transport tick world_guid=0x%016X entry=%s node=%s "
+            "[TransportElevator] transport tick world_guid=0x%016X entry=%s node=%s "
             "pos=(%.2f %.2f %.2f)",
             int(world_guid) & 0xFFFFFFFFFFFFFFFF,
             int(entry.get("entry", 0) or 0),
@@ -1506,6 +1915,18 @@ def _maybe_log_transport_tick(world_guid: int, entry: dict[str, Any]) -> None:
             float(entry.get("x", 0.0) or 0.0),
             float(entry.get("y", 0.0) or 0.0),
             float(entry.get("z", 0.0) or 0.0),
+        )
+    elif is_deeprun_tram_entry(entry):
+        Logger.debug(
+            "[Tram] transport tick world_guid=0x%016X node=%s phase=%sms "
+            "pos=(%.2f %.2f %.2f) passenger_count=%s",
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(state.node_index),
+            int(state.path_progress_ms) & 0xFFFFFFFF,
+            float(entry.get("x", 0.0) or 0.0),
+            float(entry.get("y", 0.0) or 0.0),
+            float(entry.get("z", 0.0) or 0.0),
+            0,
         )
     else:
         Logger.debug(
@@ -1524,3 +1945,66 @@ def _maybe_log_transport_tick(world_guid: int, entry: dict[str, Any]) -> None:
 
 def is_thunder_bluff_elevator_state(state: RuntimeTransportState) -> bool:
     return int(state.entry) in _THUNDER_BLUFF_ELEVATOR_ENTRIES
+
+
+def is_deeprun_tram_state(state: RuntimeTransportState) -> bool:
+    return str(getattr(state, "route_kind", "") or "") == "deeprun_tram"
+
+
+def _deeprun_station_name(node: TransportRouteNode) -> str:
+    y = float(node.y)
+    if y <= 100.0:
+        return "stormwind"
+    if y >= 2400.0:
+        return "ironforge"
+    return ""
+
+
+def _log_deeprun_tram_node(
+    state: RuntimeTransportState,
+    current: TransportRouteNode,
+    target: TransportRouteNode,
+    current_index: int,
+    progress: int,
+) -> None:
+    station = _deeprun_station_name(current)
+    target_station = _deeprun_station_name(target)
+    Logger.info(
+        "[Tram] node reached world_guid=0x%016X node=%s/%s phase=%sms "
+        "progress=%.3f pos=(%.2f %.2f %.2f) passenger_count=%s",
+        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+        int(current_index),
+        len(state.route),
+        int(progress),
+        float(state.path_progress_ms) / float(max(1, state.route_period_ms)),
+        float(state.x),
+        float(state.y),
+        float(state.z),
+        0,
+    )
+    if station and station == target_station:
+        Logger.info(
+            "[Tram] station wait station=%s world_guid=0x%016X phase=%sms",
+            station,
+            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+            int(progress),
+        )
+    elif station:
+        Logger.info(
+            "[Tram] station depart station=%s world_guid=0x%016X phase=%sms",
+            station,
+            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+            int(progress),
+        )
+        Logger.info(
+            "[Tram] route reverse station=%s world_guid=0x%016X",
+            station,
+            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+        )
+    elif target_station:
+        Logger.info(
+            "[Tram] station arrive station=%s world_guid=0x%016X phase=%sms",
+            target_station,
+            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+            int(progress),
+        )

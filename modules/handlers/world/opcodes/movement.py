@@ -74,63 +74,6 @@ _MOVEMENTFLAG_CAN_FLY = 0x00800000
 _MOVEMENTFLAG_FLYING = 0x01000000
 _MOVEMENTFLAG2_CIRCLE_RUN_SYNC = 0x00000800
 
-_MANUAL_RATCHET_BOAT_GUID = int(MoTransportGuid.from_spawn_guid(9_501_001))
-_MANUAL_RATCHET_BOAT_TRANSFER_TIME = 115_000
-_MANUAL_RATCHET_BOAT_TRANSFER_X = -1030.0
-_MANUAL_RATCHET_BOAT_TRANSFER_Y = -4050.0
-_MANUAL_RATCHET_TO_BOOTY_BAY = (0, -14297.2, 531.0, 8.8, 1.0)
-
-_LIFT_STATE_FREE = "FREE"
-_LIFT_STATE_MAGNET = "MAGNET"
-_LIFT_STATE_ATTACHED = "ATTACHED"
-_LIFT_STATE_DETACHING = "DETACHING"
-_LIFT_SUPPORT_RADIUS_YARDS = 45.0
-_LIFT_SUPPORT_RELEASE_RADIUS_YARDS = 75.0
-_LIFT_SUPPORT_MAGNET_RADIUS_YARDS = 55.0
-_LIFT_SUPPORT_ABOVE_YARDS = 3.0
-_LIFT_SUPPORT_BELOW_YARDS = 8.0
-_LIFT_SUPPORT_MAGNET_ABOVE_YARDS = 6.0
-_LIFT_SUPPORT_MAGNET_BELOW_YARDS = 12.0
-_LIFT_SUPPORT_LOG_INTERVAL_SECONDS = 0.75
-_LIFT_SUPPORT_CACHE_SECONDS = 5.0
-_LIFT_SUPPORT_MAX_STATIC_SECONDS = 35.0
-_LIFT_SUPPORT_GRACE_SECONDS = 0.75
-_LIFT_SUPPORT_STABILIZE_SECONDS = 1.5
-_LIFT_SUPPORT_NO_RELOCK_SECONDS = 1.0
-_LIFT_SUPPORT_STABLE_HEARTBEATS_REQUIRED = 2
-_LIFT_SUPPORT_ATTACH_SECONDS = 1.75
-_LIFT_SUPPORT_STABLE_Z_DELTA = 0.75
-_LIFT_SUPPORT_LAND_Z_THRESHOLD = 3.0
-_LIFT_SUPPORT_HEARTBEAT_Z_THRESHOLD = 2.5
-_LIFT_SUPPORT_MAX_BAD_PACKETS = 3
-_THUNDER_BLUFF_LIFT_LOW_Z = 68.586
-_THUNDER_BLUFF_LIFT_HIGH_Z = 130.080
-_THUNDER_BLUFF_LIFT_PERIOD_SECONDS = 32.0
-_THUNDER_BLUFF_LIFT_TICK_SECONDS = 0.25
-_THUNDER_BLUFF_LIFT_TICK_MIN_DELTA_Z = 0.04
-_ELEVATOR_ATTACH_RADIUS_YARDS = 42.0
-_ELEVATOR_RELEASE_RADIUS_YARDS = 58.0
-_ELEVATOR_ATTACH_Z_THRESHOLD = 3.5
-_ELEVATOR_FALL_ATTACH_Z_THRESHOLD = 10.0
-_ELEVATOR_STEP_HEIGHT_THRESHOLD = 2.75
-_ELEVATOR_JUMP_LOCAL_Z_THRESHOLD = 14.0
-_ELEVATOR_NO_RELOCK_SECONDS = 1.0
-_LIFT_SUPPORT_APPLY_OPCODES = frozenset({
-    "MSG_MOVE_FALL_LAND",
-    "MSG_MOVE_HEARTBEAT",
-    "MSG_MOVE_START_FORWARD",
-})
-_LIFT_SUPPORT_ACTIVE_REFRESH_OPCODES = frozenset({
-    "MSG_MOVE_START_FORWARD",
-    "MSG_MOVE_STOP",
-})
-_LIFT_SUPPORT_RELEASE_OPCODES = frozenset({
-    "MSG_MOVE_JUMP",
-    "MSG_MOVE_START_BACKWARD",
-    "MSG_MOVE_START_FORWARD",
-    "MSG_MOVE_START_STRAFE_LEFT",
-    "MSG_MOVE_START_STRAFE_RIGHT",
-})
 _SKYFIRE_FLYING_MOVEMENT_OPCODES = frozenset({
     "MSG_MOVE_HEARTBEAT",
     "MSG_MOVE_START_ASCEND",
@@ -1133,12 +1076,9 @@ def _should_use_skyfire_flying_sequence(session, opcode_name: str) -> bool:
         return False
     if _movement_is_flying(session) or _movement_is_airborne(session):
         return True
-    if _lift_support_active(session):
-        return True
     if int(getattr(_movement_state(session), "transport_guid", 0) or 0):
         return True
-    loaded_lifts = getattr(session, "loaded_lift_entries", None)
-    return isinstance(loaded_lifts, dict) and bool(loaded_lifts)
+    return False
 
 
 def _parse_skyfire_flying_movement_info(
@@ -1497,6 +1437,17 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
     if not bool(parsed.get("has_transport_data")):
         if previous_guid:
             _log_transport_passenger_detach(session, previous_guid, opcode_name)
+            try:
+                from server.modules.handlers.world.transport_runtime import record_transport_detach
+
+                record_transport_detach(
+                    session,
+                    previous_guid,
+                    opcode_name=opcode_name,
+                    reason="client_clear",
+                )
+            except Exception as exc:
+                Logger.warning("[TransportDetach] lifecycle notify failed err=%s", exc)
             Logger.info(
                 "[TRANSPORT_STATE] clear opcode=%s previous_tguid=0x%016X",
                 opcode_name,
@@ -1516,6 +1467,32 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
         return
 
     transport_guid = int(parsed.get("transport_guid", 0) or 0)
+    if previous_guid != transport_guid:
+        try:
+            from server.modules.handlers.world.transport_runtime import can_attach_transport
+
+            if not can_attach_transport(session, transport_guid):
+                state.has_transport_data = False
+                state.transport_guid = 0
+                state.transport_x = 0.0
+                state.transport_y = 0.0
+                state.transport_z = 0.0
+                state.transport_orientation = 0.0
+                state.transport_time = 0
+                state.transport_time2 = 0
+                state.transport_time3 = 0
+                state.transport_seat = -1
+                state.transport_vehicle_id = 0
+                Logger.warning(
+                    "[TransportAttach] rejected opcode=%s tguid=0x%016X player=%s",
+                    opcode_name,
+                    transport_guid & 0xFFFFFFFFFFFFFFFF,
+                    int(getattr(session, "char_guid", 0) or 0),
+                )
+                return
+        except Exception as exc:
+            Logger.warning("[TransportAttach] lifecycle validation failed err=%s", exc)
+
     state.has_transport_data = True
     state.transport_guid = transport_guid
     state.transport_x = float(parsed.get("transport_x", 0.0) or 0.0)
@@ -1528,16 +1505,19 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
     state.transport_seat = int(parsed.get("transport_seat", -1))
     state.transport_vehicle_id = int(parsed.get("transport_vehicle_id", 0) or 0)
 
-    loaded_lifts = getattr(session, "loaded_lift_entries", None)
-    lift = loaded_lifts.get(transport_guid) if isinstance(loaded_lifts, dict) else None
     if previous_guid != transport_guid:
         _log_transport_passenger_attach(session, transport_guid, opcode_name)
+        try:
+            from server.modules.handlers.world.transport_runtime import record_transport_attach
+
+            record_transport_attach(session, transport_guid, opcode_name=opcode_name)
+        except Exception as exc:
+            Logger.warning("[TransportAttach] lifecycle notify failed err=%s", exc)
     Logger.info(
-        "[TRANSPORT_STATE] set opcode=%s tguid=0x%016X lift=%s "
+        "[TransportOffset] opcode=%s tguid=0x%016X "
         "offset=(%.3f %.3f %.3f) torient=%.3f time=%u seat=%s",
         opcode_name,
         transport_guid & 0xFFFFFFFFFFFFFFFF,
-        "yes" if isinstance(lift, dict) else "no",
         float(state.transport_x),
         float(state.transport_y),
         float(state.transport_z),
@@ -1548,17 +1528,21 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
 
 
 def _transport_entry_for_guid(session, transport_guid: int) -> dict[str, Any] | None:
+    try:
+        from server.modules.handlers.world.transport_runtime import authoritative_transport_entry_for_guid
+
+        entry = authoritative_transport_entry_for_guid(int(transport_guid))
+        if isinstance(entry, dict):
+            return entry
+    except Exception:
+        pass
+
     loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
     if isinstance(loaded_transport_entries, dict):
         entry = loaded_transport_entries.get(int(transport_guid))
         if isinstance(entry, dict):
             return entry
 
-    loaded_lifts = getattr(session, "loaded_lift_entries", None)
-    if isinstance(loaded_lifts, dict):
-        entry = loaded_lifts.get(int(transport_guid))
-        if isinstance(entry, dict):
-            return entry
     return None
 
 
@@ -1579,27 +1563,39 @@ def _is_real_runtime_elevator_entry(entry: dict[str, Any] | None) -> bool:
     return bool(is_thunder_bluff_elevator_entry(entry))
 
 
+def _is_deeprun_tram_entry(entry: dict[str, Any] | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    try:
+        from server.modules.handlers.world.transport_runtime import is_deeprun_tram_entry
+    except Exception:
+        return False
+    return bool(is_deeprun_tram_entry(entry))
+
+
 def _has_loaded_real_runtime_elevator(session) -> bool:
     loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
-    if isinstance(loaded_transport_entries, dict) and any(
+    return bool(isinstance(loaded_transport_entries, dict) and any(
         _is_real_runtime_elevator_entry(entry)
         for entry in loaded_transport_entries.values()
         if isinstance(entry, dict)
-    ):
-        return True
-
-    loaded_lifts = getattr(session, "loaded_lift_entries", None)
-    return bool(
-        isinstance(loaded_lifts, dict)
-        and any(
-            isinstance(entry, dict) and _is_thunder_bluff_lift(entry)
-            for entry in loaded_lifts.values()
-        )
-    )
+    ))
 
 
 def _log_transport_passenger_attach(session, transport_guid: int, opcode_name: str) -> None:
     entry = _transport_entry_for_guid(session, int(transport_guid))
+    if _is_deeprun_tram_entry(entry):
+        Logger.info(
+            "[Tram] passenger attach opcode=%s char=%s tguid=0x%016X "
+            "local=(%.3f %.3f %.3f)",
+            str(opcode_name),
+            int(getattr(session, "char_guid", 0) or 0),
+            int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
+            float(getattr(_movement_state(session), "transport_x", 0.0) or 0.0),
+            float(getattr(_movement_state(session), "transport_y", 0.0) or 0.0),
+            float(getattr(_movement_state(session), "transport_z", 0.0) or 0.0),
+        )
+        return
     if not _is_real_runtime_elevator_entry(entry):
         return
     Logger.info(
@@ -1617,6 +1613,14 @@ def _log_transport_passenger_attach(session, transport_guid: int, opcode_name: s
 
 def _log_transport_passenger_detach(session, transport_guid: int, opcode_name: str) -> None:
     entry = _transport_entry_for_guid(session, int(transport_guid))
+    if _is_deeprun_tram_entry(entry):
+        Logger.info(
+            "[Tram] passenger detach opcode=%s char=%s tguid=0x%016X",
+            str(opcode_name),
+            int(getattr(session, "char_guid", 0) or 0),
+            int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
+        )
+        return
     if not _is_real_runtime_elevator_entry(entry):
         return
     Logger.info(
@@ -1669,72 +1673,178 @@ def _clear_loaded_world_objects_for_transfer(session) -> list[tuple[str, bytes]]
     return responses
 
 
-def _maybe_start_manual_boat_transfer(session, opcode_name: str) -> list[tuple[str, bytes]]:
+def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tuple[str, bytes]]:
     state = _movement_state(session)
     transport_guid = int(getattr(state, "transport_guid", 0) or 0)
-    if transport_guid != _MANUAL_RATCHET_BOAT_GUID:
+    if transport_guid <= 0:
         return []
-    if int(getattr(session, "map_id", 0) or 0) != 1:
+    if bool(getattr(session, "transport_transfer_pending", False)):
         return []
     if bool(getattr(session, "manual_boat_transfer_pending", False)):
         return []
     if _is_teleporting(session):
         return []
 
-    transport_time = int(getattr(state, "transport_time", 0) or 0)
-    x = float(getattr(session, "x", 0.0) or 0.0)
-    y = float(getattr(session, "y", 0.0) or 0.0)
-    if transport_time < _MANUAL_RATCHET_BOAT_TRANSFER_TIME:
+    entry = _transport_entry_for_guid(session, transport_guid)
+    if not isinstance(entry, dict):
         return []
-    if x > _MANUAL_RATCHET_BOAT_TRANSFER_X or y > _MANUAL_RATCHET_BOAT_TRANSFER_Y:
+
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            apply_transport_runtime_position,
+            build_linked_transport_destination_entry,
+            linked_transport_world_guid,
+            runtime_transport_state_for_guid,
+        )
+    except Exception as exc:
+        Logger.warning("[TransportTransfer] runtime unavailable err=%s", exc)
         return []
+
+    runtime_state = runtime_transport_state_for_guid(transport_guid)
+    if runtime_state is None:
+        moved_entry = apply_transport_runtime_position(session, entry)
+        runtime_state = runtime_transport_state_for_guid(transport_guid)
+        if runtime_state is None:
+            return []
+        entry = moved_entry
+
+    source_map = int(getattr(session, "map_id", 0) or 0)
+    destination_map = int(getattr(runtime_state, "map_id", source_map))
+    if destination_map == source_map:
+        return []
+
+    local_x = float(getattr(state, "transport_x", 0.0) or 0.0)
+    local_y = float(getattr(state, "transport_y", 0.0) or 0.0)
+    local_z = float(getattr(state, "transport_z", 0.0) or 0.0)
+    local_o = float(getattr(state, "transport_orientation", 0.0) or 0.0)
+    destination_guid = int(linked_transport_world_guid(entry, map_id=destination_map))
+    destination_entry = build_linked_transport_destination_entry(entry, destination_map=destination_map)
+    destination_entry = apply_transport_runtime_position(session, destination_entry)
+    if int(destination_entry.get("map", destination_map)) == destination_map:
+        destination_x = float(destination_entry.get("x", getattr(runtime_state, "x", 0.0)) or 0.0)
+        destination_y = float(destination_entry.get("y", getattr(runtime_state, "y", 0.0)) or 0.0)
+        destination_z = float(destination_entry.get("z", getattr(runtime_state, "z", 0.0)) or 0.0)
+        destination_o = float(destination_entry.get("orientation", getattr(runtime_state, "orientation", 0.0)) or 0.0)
+    else:
+        destination_x = float(getattr(runtime_state, "x", 0.0) or 0.0)
+        destination_y = float(getattr(runtime_state, "y", 0.0) or 0.0)
+        destination_z = float(getattr(runtime_state, "z", 0.0) or 0.0)
+        destination_o = float(getattr(runtime_state, "orientation", 0.0) or 0.0)
+        destination_entry["map"] = int(destination_map)
+        destination_entry["map_id"] = int(destination_map)
+        destination_entry["x"] = destination_x
+        destination_entry["y"] = destination_y
+        destination_entry["z"] = destination_z
+        destination_entry["orientation"] = destination_o
+
+    player_x = destination_x + local_x
+    player_y = destination_y + local_y
+    player_z = destination_z + local_z
+    player_o = destination_o + local_o
 
     from server.modules.handlers.world.login.packets import build_login_packet
 
-    map_id, dest_x, dest_y, dest_z, orientation = _MANUAL_RATCHET_TO_BOOTY_BAY
-    session.manual_boat_transfer_pending = True
+    session.transport_transfer_pending = True
+    session.manual_boat_transfer_pending = False
     session.teleport_pending = True
     session.worldport_ack_pending = True
     session.near_teleport_pending = False
-    session.teleport_destination = "manual-boat:ratchet-to-booty-bay"
-    session.map_id = int(map_id)
-    session.x = float(dest_x)
-    session.y = float(dest_y)
-    session.z = float(dest_z)
-    session.orientation = float(orientation)
-    session.persist_map_id = int(map_id)
-    session.persist_x = float(dest_x)
-    session.persist_y = float(dest_y)
-    session.persist_z = float(dest_z)
-    session.persist_orientation = float(orientation)
-    _clear_transport_state(session)
+    session.teleport_destination = (
+        f"transport:{int(entry.get('entry', 0) or 0)}:"
+        f"{source_map}->{destination_map}"
+    )
+    session.pending_transport_transfer = {
+        "source_guid": int(transport_guid),
+        "destination_guid": int(destination_guid),
+        "source_map": int(source_map),
+        "destination_map": int(destination_map),
+        "node_index": int(getattr(runtime_state, "node_index", 0) or 0),
+        "route_phase": int(getattr(runtime_state, "path_progress_ms", 0) or 0),
+        "local_x": local_x,
+        "local_y": local_y,
+        "local_z": local_z,
+        "local_o": local_o,
+        "destination_entry": dict(destination_entry),
+    }
+    try:
+        from server.modules.handlers.world.transport_runtime import record_transport_detach
+
+        record_transport_detach(
+            session,
+            transport_guid,
+            opcode_name=opcode_name,
+            reason="transfer",
+        )
+    except Exception as exc:
+        Logger.warning("[TransportTransfer] source lifecycle detach failed err=%s", exc)
+    session.transport_attach_state = "TRANSFERRING"
+    clear_responses = _clear_loaded_world_objects_for_transfer(session)
+
+    session.map_id = int(destination_map)
+    session.x = float(player_x)
+    session.y = float(player_y)
+    session.z = float(player_z)
+    session.orientation = float(player_o)
+    session.persist_map_id = int(destination_map)
+    session.persist_x = float(player_x)
+    session.persist_y = float(player_y)
+    session.persist_z = float(player_z)
+    session.persist_orientation = float(player_o)
+
+    state.has_transport_data = True
+    state.transport_guid = int(destination_guid)
+    state.transport_x = local_x
+    state.transport_y = local_y
+    state.transport_z = local_z
+    state.transport_orientation = local_o
+    state.transport_time = int(getattr(runtime_state, "path_progress_ms", 0) or 0) & 0xFFFFFFFF
+    state.transport_time2 = int(getattr(state, "transport_time2", 0) or 0) & 0xFFFFFFFF
+    state.transport_time3 = int(getattr(state, "transport_time3", 0) or 0) & 0xFFFFFFFF
+    state.x = float(player_x)
+    state.y = float(player_y)
+    state.z = float(player_z)
+    state.orientation = float(player_o)
+
+    Logger.info(
+        "[TransportTransfer] begin transport=0x%016X node=%s source_map=%s dest_map=%s",
+        transport_guid & 0xFFFFFFFFFFFFFFFF,
+        int(getattr(runtime_state, "node_index", 0) or 0),
+        source_map,
+        destination_map,
+    )
+    Logger.info(
+        "[TransportTransfer] passenger saved player=%s local=(%.3f %.3f %.3f %.3f) "
+        "dest_transport=0x%016X route_phase=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        local_x,
+        local_y,
+        local_z,
+        local_o,
+        destination_guid & 0xFFFFFFFFFFFFFFFF,
+        int(getattr(runtime_state, "path_progress_ms", 0) or 0),
+    )
+    Logger.info(
+        "[TransportTransfer] worldport player=%s map=%s pos=(%.2f %.2f %.2f %.2f)",
+        int(getattr(session, "char_guid", 0) or 0),
+        destination_map,
+        player_x,
+        player_y,
+        player_z,
+        player_o,
+    )
 
     ctx = type(
         "Ctx",
         (),
         {
-            "map_id": int(map_id),
-            "x": float(dest_x),
-            "y": float(dest_y),
-            "z": float(dest_z),
-            "orientation": float(orientation),
+            "map_id": int(destination_map),
+            "x": float(player_x),
+            "y": float(player_y),
+            "z": float(player_z),
+            "orientation": float(player_o),
         },
     )()
-    Logger.info(
-        "[WorldBoat] transfer start opcode=%s tguid=0x%016X transport_time=%s "
-        "from=(%.2f %.2f) to=(map=%s %.2f %.2f %.2f %.2f)",
-        opcode_name,
-        transport_guid & 0xFFFFFFFFFFFFFFFF,
-        int(transport_time),
-        float(x),
-        float(y),
-        int(map_id),
-        float(dest_x),
-        float(dest_y),
-        float(dest_z),
-        float(orientation),
-    )
-    responses = _clear_loaded_world_objects_for_transfer(session)
+    responses = list(clear_responses)
     responses.extend(
         [
             ("SMSG_TRANSFER_PENDING", build_login_packet("SMSG_TRANSFER_PENDING", ctx)),
@@ -1742,12 +1852,67 @@ def _maybe_start_manual_boat_transfer(session, opcode_name: str) -> list[tuple[s
             (
                 "SMSG_MESSAGECHAT",
                 encode_skyfire_messagechat_system_payload(
-                    "[WorldBoat] Ratchet -> Booty Bay transfer"
+                    f"[TransportTransfer] {source_map} -> {destination_map}"
                 ),
             ),
         ]
     )
     return responses
+
+
+def _complete_pending_transport_transfer(session) -> None:
+    pending = getattr(session, "pending_transport_transfer", None)
+    if not isinstance(pending, dict):
+        session.transport_transfer_pending = False
+        return
+
+    state = _movement_state(session)
+    destination_guid = int(pending.get("destination_guid", 0) or 0)
+    destination_entry = pending.get("destination_entry")
+    if destination_guid > 0:
+        state.has_transport_data = True
+        state.transport_guid = destination_guid
+        state.transport_x = float(pending.get("local_x", 0.0) or 0.0)
+        state.transport_y = float(pending.get("local_y", 0.0) or 0.0)
+        state.transport_z = float(pending.get("local_z", 0.0) or 0.0)
+        state.transport_orientation = float(pending.get("local_o", 0.0) or 0.0)
+        loaded = getattr(session, "loaded_transport_entries", None)
+        if not isinstance(loaded, dict):
+            loaded = {}
+            session.loaded_transport_entries = loaded
+        if isinstance(destination_entry, dict):
+            loaded[destination_guid] = dict(destination_entry)
+        try:
+            from server.modules.handlers.world.transport_runtime import record_transport_attach
+
+            record_transport_attach(
+                session,
+                destination_guid,
+                opcode_name="CMSG_MOVE_WORLDPORT_ACK",
+            )
+        except Exception as exc:
+            Logger.warning("[TransportTransfer] destination lifecycle attach failed err=%s", exc)
+        Logger.info(
+            "[TransportTransfer] destination attach player=%s transport=0x%016X "
+            "local=(%.3f %.3f %.3f %.3f)",
+            int(getattr(session, "char_guid", 0) or 0),
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+            float(state.transport_x),
+            float(state.transport_y),
+            float(state.transport_z),
+            float(state.transport_orientation),
+        )
+
+    Logger.info(
+        "[TransportTransfer] completed player=%s source_map=%s dest_map=%s node=%s route_phase=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        int(pending.get("source_map", 0) or 0),
+        int(pending.get("destination_map", 0) or 0),
+        int(pending.get("node_index", 0) or 0),
+        int(pending.get("route_phase", 0) or 0),
+    )
+    session.pending_transport_transfer = None
+    session.transport_transfer_pending = False
 
 
 def _movement_flags_for_sync(session) -> int:
@@ -2754,35 +2919,23 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
         Logger.warning("[WorldTransport] synthetic keep lookup failed err=%s", exc)
 
     stale_guids = sorted(int(guid) for guid in loaded_gameobjects if int(guid) not in keep_guids)
-    loaded_lift_entries = getattr(session, "loaded_lift_entries", None)
-    loaded_lifts = getattr(session, "loaded_lifts", None)
     loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
     for guid in stale_guids:
-        is_lift = isinstance(loaded_lift_entries, dict) and int(guid) in loaded_lift_entries
         is_transport = (
             isinstance(loaded_transport_entries, dict)
             and int(guid) in loaded_transport_entries
         )
-        if is_lift:
-            lift = loaded_lift_entries.get(int(guid), {})
-            Logger.info(
-                "[WorldLift] stream despawn guid=0x%X entry=%s pos=(%.2f %.2f %.2f)",
-                int(guid),
-                int(lift.get("entry", 0) or 0) if isinstance(lift, dict) else 0,
-                float(lift.get("x", 0.0) or 0.0) if isinstance(lift, dict) else 0.0,
-                float(lift.get("y", 0.0) or 0.0) if isinstance(lift, dict) else 0.0,
-                float(lift.get("z", 0.0) or 0.0) if isinstance(lift, dict) else 0.0,
-            )
-        elif is_transport:
+        if is_transport:
             transport = loaded_transport_entries.get(int(guid), {})
             Logger.info(
-                "[WorldTransport] stream despawn guid=0x%X entry=%s pos=(%.2f %.2f %.2f)",
+                "[TransportStream] keep-authoritative guid=0x%X entry=%s pos=(%.2f %.2f %.2f)",
                 int(guid),
                 int(transport.get("entry", 0) or 0) if isinstance(transport, dict) else 0,
                 float(transport.get("x", 0.0) or 0.0) if isinstance(transport, dict) else 0.0,
                 float(transport.get("y", 0.0) or 0.0) if isinstance(transport, dict) else 0.0,
                 float(transport.get("z", 0.0) or 0.0) if isinstance(transport, dict) else 0.0,
             )
+            continue
         else:
             Logger.debug("[GO_STREAM] despawn guid=0x%X", int(guid))
         responses.append(
@@ -2792,12 +2945,8 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
             )
         )
         loaded_gameobjects.discard(int(guid))
-        if isinstance(loaded_lift_entries, dict):
-            loaded_lift_entries.pop(int(guid), None)
         if isinstance(loaded_transport_entries, dict):
             loaded_transport_entries.pop(int(guid), None)
-        if isinstance(loaded_lifts, set):
-            loaded_lifts.discard(int(guid))
 
     return responses
 
@@ -3247,8 +3396,6 @@ def _apply_post_parse_movement_cleanup(
     session,
     state,
     opcode_name: str,
-    *,
-    on_lift_support: bool = False,
 ) -> None:
     flags_before = int(getattr(state, "flags", 0) or 0)
     flags_after = int(flags_before)
@@ -3266,12 +3413,9 @@ def _apply_post_parse_movement_cleanup(
             | _MOVEMENTFLAG_FALLING
         )
 
-    if on_lift_support:
-        flags_after &= ~_MOVEMENTFLAG_FALLING
-
     if flags_after != flags_before:
         state.flags = int(flags_after)
-        if opcode_name == "MSG_MOVE_FALL_LAND" or on_lift_support:
+        if opcode_name == "MSG_MOVE_FALL_LAND":
             state.has_fall_data = False
             state.fall_time = 0
             state.fall_vertical_speed = 0.0
@@ -3287,14 +3431,13 @@ def _apply_post_parse_movement_cleanup(
     }:
         Logger.debug(
             "[MOVE_CLEANUP] opcode=%s flags_before=0x%X flags_after=0x%X "
-            "pos=(%.3f %.3f %.3f) lift=%s",
+            "pos=(%.3f %.3f %.3f)",
             opcode_name,
             flags_before,
             flags_after,
             float(getattr(state, "x", 0.0) or 0.0),
             float(getattr(state, "y", 0.0) or 0.0),
             float(getattr(state, "z", 0.0) or 0.0),
-            bool(on_lift_support),
         )
 
 
@@ -4290,1556 +4433,6 @@ def _maybe_periodic_position_save(
     return _save_session_position(session, reason="autosave", online=1, force=True)
 
 
-def _ensure_lift_support_cache(session, *, x: float, y: float) -> None:
-    loaded_lifts = getattr(session, "loaded_lift_entries", None)
-    if isinstance(loaded_lifts, dict) and loaded_lifts:
-        return
-
-    now = time.time()
-    last_refresh = float(getattr(session, "last_lift_support_cache_at", 0.0) or 0.0)
-    if (now - last_refresh) < _LIFT_SUPPORT_CACHE_SECONDS:
-        return
-    session.last_lift_support_cache_at = now
-
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    realm_id = int(getattr(session, "realm_id", 1) or 1)
-    try:
-        entries = DatabaseConnection.get_gameobjects_near(
-            map_id,
-            float(x),
-            float(y),
-            radius=450.0,
-            limit=120,
-        )
-    except Exception as exc:
-        Logger.debug("[WorldLift] support cache query failed: %s", exc)
-        return
-
-    cache: dict[int, dict[str, Any]] = {}
-    for entry in entries:
-        if int(entry.get("type", 0) or 0) != 11:
-            continue
-        spawn_guid = int(entry.get("guid", 0) or 0)
-        world_guid = GameObjectGuid.from_spawn_guid(spawn_guid, realm_id)
-        cache[int(world_guid)] = {
-            "guid": spawn_guid,
-            "world_guid": int(world_guid),
-            "entry": int(entry.get("entry", 0) or 0),
-            "map": map_id,
-            "x": float(entry.get("x", 0.0) or 0.0),
-            "y": float(entry.get("y", 0.0) or 0.0),
-            "z": float(entry.get("z", 0.0) or 0.0),
-            "orientation": float(entry.get("orientation", 0.0) or 0.0),
-            "size": float(entry.get("size", 1.0) or 1.0),
-            "data0": int(entry.get("data0", 0) or 0),
-            "data1": int(entry.get("data1", 0) or 0),
-        }
-
-    if cache:
-        session.loaded_lift_entries = cache
-        Logger.info(
-            "[WorldLift] support cache loaded count=%s map=%s pos=(%.2f %.2f)",
-            len(cache),
-            map_id,
-            float(x),
-            float(y),
-        )
-
-
-def _lift_support_guid(lift: dict[str, Any]) -> int:
-    return int(lift.get("world_guid", 0) or lift.get("guid", 0) or 0)
-
-
-def _lift_support_radius(lift: dict[str, Any]) -> float:
-    return max(
-        _LIFT_SUPPORT_RADIUS_YARDS,
-        _LIFT_SUPPORT_RADIUS_YARDS * float(lift.get("size", 1.0) or 1.0),
-    )
-
-
-def _lift_support_release_radius(lift: dict[str, Any]) -> float:
-    return max(
-        _LIFT_SUPPORT_RELEASE_RADIUS_YARDS,
-        _LIFT_SUPPORT_RELEASE_RADIUS_YARDS * float(lift.get("size", 1.0) or 1.0),
-    )
-
-
-def _lift_support_magnet_radius(lift: dict[str, Any]) -> float:
-    return max(
-        _LIFT_SUPPORT_MAGNET_RADIUS_YARDS,
-        _LIFT_SUPPORT_MAGNET_RADIUS_YARDS * float(lift.get("size", 1.0) or 1.0),
-    )
-
-
-def _lift_support_z_threshold(opcode_name: str) -> float:
-    if opcode_name == "MSG_MOVE_FALL_LAND":
-        return _LIFT_SUPPORT_LAND_Z_THRESHOLD
-    return _LIFT_SUPPORT_HEARTBEAT_Z_THRESHOLD
-
-
-def _is_thunder_bluff_lift(lift: dict[str, Any]) -> bool:
-    if int(lift.get("map", 0) or 0) != 1:
-        return False
-    lift_z = float(lift.get("z", 0.0) or 0.0)
-    return (
-        abs(lift_z - _THUNDER_BLUFF_LIFT_LOW_Z) <= 1.0
-        or abs(lift_z - _THUNDER_BLUFF_LIFT_HIGH_Z) <= 1.0
-    )
-
-
-def _lift_transport_period_seconds(lift: dict[str, Any]) -> float:
-    """Return the transport animation period used for simple type 11 support."""
-    data0 = int(lift.get("data0", 0) or 0)
-    if data0 >= 1000:
-        return max(4.0, float(data0) / 1000.0)
-    return _THUNDER_BLUFF_LIFT_PERIOD_SECONDS
-
-
-def _thunder_bluff_lift_platform_z(lift: dict[str, Any], now: float) -> float:
-    """Approximate the client-side type 11 elevator animation from a timer."""
-    low_z = _THUNDER_BLUFF_LIFT_LOW_Z
-    high_z = _THUNDER_BLUFF_LIFT_HIGH_Z
-    period = _lift_transport_period_seconds(lift)
-    half_period = period * 0.5
-    if half_period <= 0.0:
-        return float(lift.get("z", low_z) or low_z)
-
-    static_z = float(lift.get("z", low_z) or low_z)
-    phase = 0.0
-    if abs(static_z - high_z) < abs(static_z - low_z):
-        phase = half_period
-
-    timer = (float(now) + phase) % period
-    if timer <= half_period:
-        progress = timer / half_period
-    else:
-        progress = 1.0 - ((timer - half_period) / half_period)
-    progress = max(0.0, min(1.0, progress))
-    return low_z + ((high_z - low_z) * progress)
-
-
-def _start_lift_motion(session, lift: dict[str, Any], now: float) -> None:
-    platform_z = _lift_support_platform_z(session, lift, now, active=True)
-    session.supported_lift_motion_direction = 0.0
-    session.supported_lift_motion_started_at = float(now)
-    session.supported_lift_motion_start_z = platform_z
-    session.supported_lift_last_platform_z = platform_z
-
-
-def _lift_support_platform_z(
-    session,
-    lift: dict[str, Any],
-    now: float,
-    *,
-    active: bool,
-) -> float:
-    static_z = float(lift.get("z", 0.0) or 0.0)
-    if _is_thunder_bluff_lift(lift):
-        return _thunder_bluff_lift_platform_z(lift, now)
-    if not active:
-        return static_z
-    return static_z
-
-
-def _lift_support_active(session) -> bool:
-    return int(getattr(session, "supported_lift_guid", 0) or 0) != 0
-
-
-def _real_lift_transport_only(session) -> bool:
-    """Return whether lift support should be bypassed for pure client transport."""
-    return False
-
-
-def _lift_support_state(session) -> str:
-    state = str(getattr(session, "lift_state", _LIFT_STATE_FREE) or _LIFT_STATE_FREE)
-    if state not in {
-        _LIFT_STATE_FREE,
-        _LIFT_STATE_MAGNET,
-        _LIFT_STATE_ATTACHED,
-        _LIFT_STATE_DETACHING,
-    }:
-        return _LIFT_STATE_FREE
-    return state
-
-
-def _set_lift_support_state(
-    session,
-    state: str,
-    *,
-    opcode_name: str,
-    reason: str,
-    now: float,
-) -> None:
-    previous = _lift_support_state(session)
-    if previous == state:
-        return
-    session.lift_state = state
-    Logger.info(
-        "[WorldLift] state %s -> %s reason=%s opcode=%s t=%.3f",
-        previous,
-        state,
-        str(reason),
-        str(opcode_name),
-        float(now),
-    )
-
-
-def _lift_support_falling_state(session, movement_flags: int) -> bool:
-    return bool(
-        int(movement_flags) & (_MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING)
-        or bool(getattr(_movement_state(session), "has_fall_data", False))
-    )
-
-
-def _lift_support_stabilizing(session, now: float) -> bool:
-    return float(now) <= float(getattr(session, "lift_stabilizing_until", 0.0) or 0.0)
-
-
-def _start_lift_support_stabilization(session, now: float, opcode_name: str) -> None:
-    until = float(now) + _LIFT_SUPPORT_STABILIZE_SECONDS
-    current_until = float(getattr(session, "lift_stabilizing_until", 0.0) or 0.0)
-    if current_until >= until:
-        return
-    session.lift_stabilizing_until = until
-    Logger.info(
-        "[WorldLift] stabilization start opcode=%s until=%.3f duration=%.3f",
-        str(opcode_name),
-        until,
-        _LIFT_SUPPORT_STABILIZE_SECONDS,
-    )
-
-
-def _queue_lift_support_message(session, message: str) -> None:
-    if not bool(getattr(session, "debug_lift_chat_messages", False)):
-        return
-    messages = getattr(session, "lift_support_messages", None)
-    if not isinstance(messages, list):
-        messages = []
-        session.lift_support_messages = messages
-    if not messages or messages[-1] != message:
-        messages.append(message)
-
-
-def _drain_lift_support_messages(session) -> list[tuple[str, bytes]]:
-    messages = getattr(session, "lift_support_messages", None)
-    if not isinstance(messages, list) or not messages:
-        return []
-    session.lift_support_messages = []
-    return [
-        ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(str(message)))
-        for message in messages
-    ]
-
-
-def _send_lift_transport_responses(session, responses: list[tuple[str, bytes]]) -> None:
-    sender = getattr(session, "send_response", None)
-    if not callable(sender) or not responses:
-        return
-    try:
-        sender(responses)
-    except Exception as exc:
-        Logger.warning(
-            "[WorldLift] transport tick send failed guid=%s err=%s",
-            int(getattr(session, "char_guid", 0) or 0),
-            exc,
-        )
-
-
-def _elevator_states(session) -> dict[int, dict[str, Any]]:
-    states = getattr(session, "runtime_elevator_states", None)
-    if not isinstance(states, dict):
-        states = {}
-        session.runtime_elevator_states = states
-    return states
-
-
-def _elevator_state_for_lift(
-    session,
-    lift: dict[str, Any],
-    now: float,
-) -> dict[str, Any]:
-    guid = _lift_support_guid(lift)
-    states = _elevator_states(session)
-    state = states.get(guid)
-    if isinstance(state, dict):
-        _tick_elevator_state(state, now)
-        return state
-
-    static_z = float(lift.get("z", _THUNDER_BLUFF_LIFT_LOW_Z) or _THUNDER_BLUFF_LIFT_LOW_Z)
-    low_z = _THUNDER_BLUFF_LIFT_LOW_Z
-    high_z = _THUNDER_BLUFF_LIFT_HIGH_Z
-    current_z = low_z
-    direction = 1.0
-    if abs(static_z - high_z) < abs(static_z - low_z):
-        current_z = high_z
-        direction = -1.0
-
-    period = _lift_transport_period_seconds(lift)
-    travel_seconds = max(1.0, period * 0.5)
-    speed = abs(high_z - low_z) / travel_seconds
-    state = {
-        "guid": int(guid),
-        "entry": int(lift.get("entry", 0) or 0),
-        "map_id": int(lift.get("map", 0) or 0),
-        "base_x": float(lift.get("x", 0.0) or 0.0),
-        "base_y": float(lift.get("y", 0.0) or 0.0),
-        "low_z": float(low_z),
-        "high_z": float(high_z),
-        "current_z": float(current_z),
-        "direction": float(direction),
-        "period": float(period),
-        "speed": float(speed),
-        "last_tick": float(now),
-    }
-    states[int(guid)] = state
-    Logger.info(
-        "[WorldLift] elevator runtime init guid=%s entry=%s base=(%.2f %.2f) "
-        "z=%.2f low=%.2f high=%.2f direction=%.1f speed=%.3f period=%.2f",
-        int(guid),
-        int(state["entry"]),
-        float(state["base_x"]),
-        float(state["base_y"]),
-        float(state["current_z"]),
-        float(state["low_z"]),
-        float(state["high_z"]),
-        float(state["direction"]),
-        float(state["speed"]),
-        float(state["period"]),
-    )
-    return state
-
-
-def _tick_elevator_state(state: dict[str, Any], now: float) -> None:
-    last_tick = float(state.get("last_tick", now) or now)
-    elapsed = max(0.0, min(1.0, float(now) - last_tick))
-    if elapsed <= 0.0:
-        return
-
-    current_z = float(state.get("current_z", 0.0) or 0.0)
-    direction = float(state.get("direction", 1.0) or 1.0)
-    speed = float(state.get("speed", 0.0) or 0.0)
-    low_z = float(state.get("low_z", current_z) or current_z)
-    high_z = float(state.get("high_z", current_z) or current_z)
-    next_z = current_z + (direction * speed * elapsed)
-    if next_z >= high_z:
-        next_z = high_z
-        direction = -1.0
-    elif next_z <= low_z:
-        next_z = low_z
-        direction = 1.0
-
-    state["current_z"] = float(next_z)
-    state["direction"] = float(direction)
-    state["last_tick"] = float(now)
-
-
-def _find_elevator_candidate(
-    session,
-    *,
-    x: float,
-    y: float,
-    z: float,
-    now: float,
-) -> tuple[dict[str, Any], dict[str, Any], float, float] | None:
-    _ensure_lift_support_cache(session, x=float(x), y=float(y))
-    loaded_lifts = getattr(session, "loaded_lift_entries", None)
-    if not isinstance(loaded_lifts, dict) or not loaded_lifts:
-        return None
-
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    best: tuple[dict[str, Any], dict[str, Any], float, float] | None = None
-    best_score = float("inf")
-    for lift in loaded_lifts.values():
-        if not isinstance(lift, dict):
-            continue
-        if int(lift.get("map", map_id) or 0) != map_id:
-            continue
-        if not _is_thunder_bluff_lift(lift):
-            continue
-
-        state = _elevator_state_for_lift(session, lift, now)
-        dx = float(x) - float(state.get("base_x", 0.0) or 0.0)
-        dy = float(y) - float(state.get("base_y", 0.0) or 0.0)
-        distance = math.sqrt((dx * dx) + (dy * dy))
-        if distance > _ELEVATOR_ATTACH_RADIUS_YARDS:
-            continue
-        dz = float(z) - float(state.get("current_z", 0.0) or 0.0)
-        score = (abs(dz) * 100.0) + distance
-        if score < best_score:
-            best = (lift, state, distance, dz)
-            best_score = score
-    return best
-
-
-def _detach_runtime_elevator(
-    session,
-    *,
-    reason: str,
-    opcode_name: str,
-    x: float,
-    y: float,
-    z: float,
-) -> None:
-    guid = int(getattr(session, "attached_elevator_guid", 0) or 0)
-    if not guid:
-        return
-    Logger.info(
-        "[WorldLift] elevator detach reason=%s opcode=%s guid=%s "
-        "pos=(%.2f %.2f %.2f)",
-        str(reason),
-        str(opcode_name),
-        guid,
-        float(x),
-        float(y),
-        float(z),
-    )
-    session.attached_elevator_guid = 0
-    session.elevator_local_offset_x = 0.0
-    session.elevator_local_offset_y = 0.0
-    session.elevator_local_offset_z = 0.0
-    session.no_elevator_relock_until = time.time() + (
-        _ELEVATOR_NO_RELOCK_SECONDS if reason == "jump" else 0.0
-    )
-    session._lift_transport_generation = int(
-        getattr(session, "_lift_transport_generation", 0) or 0
-    ) + 1
-
-
-def _attach_runtime_elevator(
-    session,
-    lift: dict[str, Any],
-    state: dict[str, Any],
-    *,
-    opcode_name: str,
-    x: float,
-    y: float,
-    z: float,
-    distance: float,
-    dz: float,
-) -> None:
-    guid = int(state.get("guid", 0) or 0)
-    session.attached_elevator_guid = guid
-    session.elevator_local_offset_x = float(x) - float(state.get("base_x", 0.0) or 0.0)
-    session.elevator_local_offset_y = float(y) - float(state.get("base_y", 0.0) or 0.0)
-    session.elevator_local_offset_z = float(z) - float(state.get("current_z", 0.0) or 0.0)
-    session.supported_lift_guid = 0
-    session.lift_state = _LIFT_STATE_FREE
-    _start_lift_transport_thread(session)
-    Logger.info(
-        "[WorldLift] elevator attach opcode=%s guid=%s entry=%s "
-        "player=(%.2f %.2f %.2f) elevator=(%.2f %.2f %.2f) "
-        "local=(%.2f %.2f %.2f) distance=%.2f dz=%.2f",
-        str(opcode_name),
-        guid,
-        int(lift.get("entry", 0) or 0),
-        float(x),
-        float(y),
-        float(z),
-        float(state.get("base_x", 0.0) or 0.0),
-        float(state.get("base_y", 0.0) or 0.0),
-        float(state.get("current_z", 0.0) or 0.0),
-        float(getattr(session, "elevator_local_offset_x", 0.0) or 0.0),
-        float(getattr(session, "elevator_local_offset_y", 0.0) or 0.0),
-        float(getattr(session, "elevator_local_offset_z", 0.0) or 0.0),
-        float(distance),
-        float(dz),
-    )
-
-
-def _apply_runtime_elevator_position(
-    session,
-    state: dict[str, Any],
-    *,
-    opcode_name: str,
-    update_offset_from_client: bool,
-    preserve_airborne_state: bool = False,
-    client_x: float | None = None,
-    client_y: float | None = None,
-    client_z: float | None = None,
-) -> tuple[float, float, float]:
-    if update_offset_from_client and client_x is not None and client_y is not None:
-        session.elevator_local_offset_x = (
-            float(client_x) - float(state.get("base_x", 0.0) or 0.0)
-        )
-        session.elevator_local_offset_y = (
-            float(client_y) - float(state.get("base_y", 0.0) or 0.0)
-        )
-        if client_z is not None:
-            client_dz = float(client_z) - float(state.get("current_z", 0.0) or 0.0)
-            z_threshold = (
-                _ELEVATOR_JUMP_LOCAL_Z_THRESHOLD
-                if preserve_airborne_state or opcode_name == "MSG_MOVE_JUMP"
-                else _ELEVATOR_STEP_HEIGHT_THRESHOLD
-            )
-            if abs(client_dz) <= z_threshold:
-                session.elevator_local_offset_z = client_dz
-
-    x = float(state.get("base_x", 0.0) or 0.0) + float(
-        getattr(session, "elevator_local_offset_x", 0.0) or 0.0
-    )
-    y = float(state.get("base_y", 0.0) or 0.0) + float(
-        getattr(session, "elevator_local_offset_y", 0.0) or 0.0
-    )
-    z = float(state.get("current_z", 0.0) or 0.0) + float(
-        getattr(session, "elevator_local_offset_z", 0.0) or 0.0
-    )
-
-    session.x = x
-    session.y = y
-    session.z = z
-    session.position_dirty = True
-    movement_state = _movement_state(session)
-    movement_state.x = x
-    movement_state.y = y
-    movement_state.z = z
-    movement_state.orientation = float(getattr(session, "orientation", 0.0) or 0.0)
-    if not preserve_airborne_state:
-        movement_state.flags = int(getattr(movement_state, "flags", 0) or 0) & ~(
-            _MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING
-        )
-        _clear_jump_fall_state(movement_state)
-    _capture_persist_position_from_session(session)
-    _mark_position_dirty(session)
-    Logger.debug(
-        "[WorldLift] elevator attached move opcode=%s guid=%s pos=(%.2f %.2f %.2f)",
-        str(opcode_name),
-        int(state.get("guid", 0) or 0),
-        x,
-        y,
-        z,
-    )
-    return x, y, z
-
-
-def _runtime_elevator_support(
-    session,
-    *,
-    opcode_name: str,
-    x: float,
-    y: float,
-    z: float,
-    previous_z: float,
-    movement_flags: int,
-) -> tuple[bool, float, float, float, dict[str, Any] | None]:
-    try:
-        from server.modules.handlers.world.feature_config import elevators_enabled
-
-        if not elevators_enabled():
-            if int(getattr(session, "attached_elevator_guid", 0) or 0):
-                _detach_runtime_elevator(
-                    session,
-                    reason="disabled",
-                    opcode_name=opcode_name,
-                    x=float(x),
-                    y=float(y),
-                    z=float(z),
-                )
-            return False, float(x), float(y), float(z), None
-    except Exception:
-        return False, float(x), float(y), float(z), None
-
-    now = time.time()
-    session.runtime_elevator_bypass_old_support = False
-    active_guid = int(getattr(session, "attached_elevator_guid", 0) or 0)
-    if _is_teleporting(session):
-        _detach_runtime_elevator(
-            session,
-            reason="teleport_pending",
-            opcode_name=opcode_name,
-            x=float(x),
-            y=float(y),
-            z=float(z),
-        )
-        return False, float(x), float(y), float(z), None
-
-    if active_guid:
-        states = _elevator_states(session)
-        state = states.get(active_guid)
-        if not isinstance(state, dict):
-            _detach_runtime_elevator(
-                session,
-                reason="missing_state",
-                opcode_name=opcode_name,
-                x=float(x),
-                y=float(y),
-                z=float(z),
-            )
-            return False, float(x), float(y), float(z), None
-        _tick_elevator_state(state, now)
-
-        dx = float(x) - float(state.get("base_x", 0.0) or 0.0)
-        dy = float(y) - float(state.get("base_y", 0.0) or 0.0)
-        distance = math.sqrt((dx * dx) + (dy * dy))
-        if distance > _ELEVATOR_RELEASE_RADIUS_YARDS:
-            _detach_runtime_elevator(
-                session,
-                reason="outside_xy",
-                opcode_name=opcode_name,
-                x=float(x),
-                y=float(y),
-                z=float(z),
-            )
-            return False, float(x), float(y), float(z), None
-
-        update_offset = opcode_name in {
-            "MSG_MOVE_START_FORWARD",
-            "MSG_MOVE_START_BACKWARD",
-            "MSG_MOVE_START_STRAFE_LEFT",
-            "MSG_MOVE_START_STRAFE_RIGHT",
-            "MSG_MOVE_HEARTBEAT",
-            "MSG_MOVE_STOP",
-            "MSG_MOVE_JUMP",
-        }
-        preserve_airborne = bool(
-            opcode_name == "MSG_MOVE_JUMP"
-            or int(movement_flags) & (_MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING)
-            or bool(getattr(_movement_state(session), "has_fall_data", False))
-        )
-        new_x, new_y, new_z = _apply_runtime_elevator_position(
-            session,
-            state,
-            opcode_name=opcode_name,
-            update_offset_from_client=update_offset,
-            preserve_airborne_state=preserve_airborne,
-            client_x=float(x),
-            client_y=float(y),
-            client_z=float(z),
-        )
-        return True, new_x, new_y, new_z, state
-
-    if opcode_name == "MSG_MOVE_JUMP":
-        session.no_elevator_relock_until = now + _ELEVATOR_NO_RELOCK_SECONDS
-        return False, float(x), float(y), float(z), None
-    if now < float(getattr(session, "no_elevator_relock_until", 0.0) or 0.0):
-        return False, float(x), float(y), float(z), None
-
-    candidate = _find_elevator_candidate(
-        session,
-        x=float(x),
-        y=float(y),
-        z=float(z),
-        now=now,
-    )
-    if candidate is None:
-        return False, float(x), float(y), float(z), None
-
-    lift, state, distance, dz = candidate
-    session.runtime_elevator_bypass_old_support = True
-    is_falling = bool(
-        int(movement_flags) & (_MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING)
-        or bool(getattr(_movement_state(session), "has_fall_data", False))
-        or float(z) < float(previous_z) - 0.05
-        or opcode_name == "MSG_MOVE_FALL_LAND"
-    )
-    z_threshold = (
-        _ELEVATOR_FALL_ATTACH_Z_THRESHOLD
-        if is_falling
-        else _ELEVATOR_ATTACH_Z_THRESHOLD
-    )
-    if abs(float(dz)) > z_threshold:
-        last_log = float(getattr(session, "last_elevator_miss_log_at", 0.0) or 0.0)
-        if now - last_log >= _LIFT_SUPPORT_LOG_INTERVAL_SECONDS:
-            session.last_elevator_miss_log_at = now
-            Logger.info(
-                "[WorldLift] elevator miss opcode=%s guid=%s entry=%s "
-                "distance=%.2f dz=%.2f threshold=%.2f player_z=%.2f current_z=%.2f",
-                str(opcode_name),
-                int(state.get("guid", 0) or 0),
-                int(state.get("entry", 0) or 0),
-                float(distance),
-                float(dz),
-                float(z_threshold),
-                float(z),
-                float(state.get("current_z", 0.0) or 0.0),
-            )
-        return False, float(x), float(y), float(z), None
-
-    _attach_runtime_elevator(
-        session,
-        lift,
-        state,
-        opcode_name=opcode_name,
-        x=float(x),
-        y=float(y),
-        z=float(z),
-        distance=float(distance),
-        dz=float(dz),
-    )
-    new_x, new_y, new_z = _apply_runtime_elevator_position(
-        session,
-        state,
-        opcode_name=opcode_name,
-        update_offset_from_client=False,
-    )
-    return True, new_x, new_y, new_z, state
-
-
-def _start_lift_transport_thread(session) -> None:
-    generation = int(getattr(session, "_lift_transport_generation", 0) or 0) + 1
-    session._lift_transport_generation = generation
-
-    def _worker() -> None:
-        while True:
-            time.sleep(_THUNDER_BLUFF_LIFT_TICK_SECONDS)
-            if int(getattr(session, "_lift_transport_generation", 0) or 0) != generation:
-                return
-            if not (
-                _lift_support_active(session)
-                or int(getattr(session, "attached_elevator_guid", 0) or 0)
-            ):
-                return
-            _tick_lift_transport_support(session)
-
-    threading.Thread(
-        target=_worker,
-        name=f"lift-{int(getattr(session, 'char_guid', 0) or 0)}",
-        daemon=True,
-    ).start()
-
-
-def _tick_lift_transport_support(session) -> None:
-    attached_guid = int(getattr(session, "attached_elevator_guid", 0) or 0)
-    if attached_guid:
-        if _is_teleporting(session):
-            _detach_runtime_elevator(
-                session,
-                reason="teleport_pending",
-                opcode_name="ELEVATOR_TICK",
-                x=float(getattr(session, "x", 0.0) or 0.0),
-                y=float(getattr(session, "y", 0.0) or 0.0),
-                z=float(getattr(session, "z", 0.0) or 0.0),
-            )
-            return
-        state = _elevator_states(session).get(attached_guid)
-        if not isinstance(state, dict):
-            _detach_runtime_elevator(
-                session,
-                reason="missing_state",
-                opcode_name="ELEVATOR_TICK",
-                x=float(getattr(session, "x", 0.0) or 0.0),
-                y=float(getattr(session, "y", 0.0) or 0.0),
-                z=float(getattr(session, "z", 0.0) or 0.0),
-            )
-            return
-        now = time.time()
-        _tick_elevator_state(state, now)
-        movement_state = _movement_state(session)
-        preserve_airborne = bool(
-            int(getattr(movement_state, "flags", 0) or 0)
-            & (_MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING)
-            or bool(getattr(movement_state, "has_fall_data", False))
-        )
-        x, y, z = _apply_runtime_elevator_position(
-            session,
-            state,
-            opcode_name="ELEVATOR_TICK",
-            update_offset_from_client=False,
-            preserve_airborne_state=preserve_airborne,
-        )
-        payload = build_smsg_player_move_payload(session)
-        responses: list[tuple[str, bytes]] = []
-        if payload:
-            responses.append(("SMSG_PLAYER_MOVE", payload))
-        _send_lift_transport_responses(session, responses)
-        broadcast_player_state_update(session, force=True)
-        Logger.debug(
-            "[WorldLift] elevator tick guid=%s z=%.2f pos=(%.2f %.2f %.2f)",
-            attached_guid,
-            float(state.get("current_z", 0.0) or 0.0),
-            x,
-            y,
-            z,
-        )
-        return
-
-    active_guid = int(getattr(session, "supported_lift_guid", 0) or 0)
-    if not active_guid or _is_teleporting(session):
-        return
-
-    loaded_lifts = getattr(session, "loaded_lift_entries", None)
-    lift = loaded_lifts.get(active_guid) if isinstance(loaded_lifts, dict) else None
-    if not isinstance(lift, dict) or not _is_thunder_bluff_lift(lift):
-        return
-
-    now = time.time()
-    x = float(getattr(session, "x", 0.0) or 0.0)
-    y = float(getattr(session, "y", 0.0) or 0.0)
-    z = float(getattr(session, "z", 0.0) or 0.0)
-    lift_x = float(lift.get("x", 0.0) or 0.0)
-    lift_y = float(lift.get("y", 0.0) or 0.0)
-    dx = x - lift_x
-    dy = y - lift_y
-    distance = math.sqrt((dx * dx) + (dy * dy))
-    release_radius = _lift_support_release_radius(lift)
-    if distance > release_radius:
-        _clear_lift_support_state(
-            session,
-            reason="outside_xy",
-            opcode_name="LIFT_TRANSPORT_TICK",
-            x=x,
-            y=y,
-            z=z,
-            lift=lift,
-        )
-        return
-
-    platform_z = _lift_support_platform_z(session, lift, now, active=True)
-    if abs(platform_z - z) < _THUNDER_BLUFF_LIFT_TICK_MIN_DELTA_Z:
-        return
-
-    session.z = float(platform_z)
-    session.position_dirty = True
-    movement_state = _movement_state(session)
-    movement_state.x = x
-    movement_state.y = y
-    movement_state.z = float(platform_z)
-    movement_state.orientation = float(getattr(session, "orientation", 0.0) or 0.0)
-    movement_state.flags = int(getattr(movement_state, "flags", 0) or 0) & ~(
-        _MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING
-    )
-    _clear_jump_fall_state(movement_state)
-    _capture_persist_position_from_session(session)
-    _mark_position_dirty(session)
-
-    payload = build_smsg_player_move_payload(session)
-    responses: list[tuple[str, bytes]] = []
-    if payload:
-        responses.append(("SMSG_PLAYER_MOVE", payload))
-    responses.extend(_drain_lift_support_messages(session))
-    _send_lift_transport_responses(session, responses)
-    broadcast_player_state_update(session, force=True)
-    Logger.debug(
-        "[WorldLift] transport tick guid=%s entry=%s pos=(%.2f %.2f %.2f)->z=%.2f distance=%.2f",
-        active_guid,
-        int(lift.get("entry", 0) or 0),
-        x,
-        y,
-        z,
-        platform_z,
-        distance,
-    )
-
-
-def _clear_lift_support_state(
-    session,
-    *,
-    reason: str,
-    opcode_name: str,
-    x: float,
-    y: float,
-    z: float,
-    lift: dict[str, Any] | None = None,
-    no_relock_seconds: float = 0.0,
-) -> None:
-    active_guid = int(getattr(session, "supported_lift_guid", 0) or 0)
-    if not active_guid:
-        return
-
-    lift_guid = active_guid
-    entry = 0
-    if isinstance(lift, dict):
-        lift_guid = _lift_support_guid(lift) or active_guid
-        entry = int(lift.get("entry", 0) or 0)
-        lift_x = float(lift.get("x", 0.0) or 0.0)
-        lift_y = float(lift.get("y", 0.0) or 0.0)
-        lift_z = float(lift.get("z", 0.0) or 0.0)
-    else:
-        lift_x = float("nan")
-        lift_y = float("nan")
-        lift_z = float("nan")
-
-    dx = float(x) - lift_x if math.isfinite(lift_x) else 0.0
-    dy = float(y) - lift_y if math.isfinite(lift_y) else 0.0
-    distance = math.sqrt((dx * dx) + (dy * dy)) if math.isfinite(lift_x) else 0.0
-    dz = float(z) - lift_z if math.isfinite(lift_z) else 0.0
-    started_at = float(getattr(session, "supported_lift_started_at", 0.0) or 0.0)
-    duration = max(0.0, time.time() - started_at) if started_at else 0.0
-    now = time.time()
-
-    Logger.info(
-        "[WorldLift] support release reason=%s opcode=%s state=%s guid=%s entry=%s "
-        "pos=(%.2f %.2f %.2f) lift=(%.2f %.2f %.2f) "
-        "distance=%.2f dz=%.2f duration=%.3f",
-        str(reason),
-        str(opcode_name),
-        _lift_support_state(session),
-        int(lift_guid),
-        int(entry),
-        float(x),
-        float(y),
-        float(z),
-        lift_x,
-        lift_y,
-        lift_z,
-        distance,
-        dz,
-        duration,
-    )
-    session.supported_lift_guid = 0
-    session.supported_lift_started_at = 0.0
-    session.supported_lift_last_seen_at = 0.0
-    session.supported_lift_bad_z_heartbeats = 0
-    session.support_bad_counter = 0
-    session.lift_stabilizing_until = 0.0
-    session.lift_stable_packet_counter = 0
-    session.supported_lift_motion_direction = 0.0
-    session.supported_lift_motion_started_at = 0.0
-    session.supported_lift_motion_start_z = 0.0
-    session.supported_lift_last_platform_z = 0.0
-    session._lift_transport_generation = int(
-        getattr(session, "_lift_transport_generation", 0) or 0
-    ) + 1
-    if no_relock_seconds > 0.0:
-        session.no_lift_relock_until = now + float(no_relock_seconds)
-        _set_lift_support_state(
-            session,
-            _LIFT_STATE_DETACHING,
-            opcode_name=opcode_name,
-            reason=reason,
-            now=now,
-        )
-    else:
-        session.no_lift_relock_until = 0.0
-        _set_lift_support_state(
-            session,
-            _LIFT_STATE_FREE,
-            opcode_name=opcode_name,
-            reason=reason,
-            now=now,
-        )
-    _queue_lift_support_message(session, "unlock from lift")
-
-
-def _find_loaded_lift_support(
-    session,
-    *,
-    opcode_name: str,
-    x: float,
-    y: float,
-    z: float,
-    previous_z: float,
-    movement_flags: int,
-) -> dict[str, Any] | None:
-    active_guid = int(getattr(session, "supported_lift_guid", 0) or 0)
-    if (
-        opcode_name not in _LIFT_SUPPORT_APPLY_OPCODES
-        and not (active_guid and opcode_name in _LIFT_SUPPORT_ACTIVE_REFRESH_OPCODES)
-    ):
-        return None
-
-    _ensure_lift_support_cache(session, x=float(x), y=float(y))
-
-    loaded_lifts = getattr(session, "loaded_lift_entries", None)
-    if not isinstance(loaded_lifts, dict) or not loaded_lifts:
-        return None
-
-    is_falling = bool(
-        movement_flags & (_MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING)
-    )
-    is_fall_packet = (
-        opcode_name == "MSG_MOVE_FALL_LAND"
-        or bool(getattr(_movement_state(session), "has_fall_data", False))
-    )
-    is_descending = float(z) < (float(previous_z) - 0.05)
-    if not (active_guid or is_falling or is_fall_packet or is_descending):
-        return None
-
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    best_lift: dict[str, Any] | None = None
-    best_distance_sq = float("inf")
-    nearest_lift: dict[str, Any] | None = None
-    nearest_distance_sq = float("inf")
-    nearest_dz = 0.0
-    now = time.time()
-    magnet_candidate = bool(
-        not active_guid and (is_falling or is_fall_packet or is_descending)
-    )
-
-    for lift_key, lift in loaded_lifts.items():
-        if not isinstance(lift, dict):
-            continue
-        if int(lift.get("map", map_id) or 0) != map_id:
-            continue
-        if active_guid and _lift_support_guid(lift) != active_guid:
-            continue
-
-        platform_z = _lift_support_platform_z(
-            session,
-            lift,
-            now,
-            active=bool(active_guid),
-        )
-        if active_guid and _is_thunder_bluff_lift(lift):
-            if z > _THUNDER_BLUFF_LIFT_HIGH_Z + _LIFT_SUPPORT_MAGNET_ABOVE_YARDS:
-                continue
-            if z < _THUNDER_BLUFF_LIFT_LOW_Z - _LIFT_SUPPORT_MAGNET_BELOW_YARDS:
-                continue
-        else:
-            above_limit = (
-                _LIFT_SUPPORT_MAGNET_ABOVE_YARDS
-                if magnet_candidate
-                else _LIFT_SUPPORT_ABOVE_YARDS
-            )
-            below_limit = (
-                _LIFT_SUPPORT_MAGNET_BELOW_YARDS
-                if magnet_candidate
-                else _LIFT_SUPPORT_BELOW_YARDS
-            )
-            if z > platform_z + above_limit:
-                continue
-            if z < platform_z - below_limit:
-                continue
-            if (
-                previous_z < platform_z - 2.0
-                and z < platform_z - 2.0
-                and not magnet_candidate
-            ):
-                continue
-
-        lift_x = float(lift.get("x", 0.0) or 0.0)
-        lift_y = float(lift.get("y", 0.0) or 0.0)
-        dx = float(x) - lift_x
-        dy = float(y) - lift_y
-        distance_sq = (dx * dx) + (dy * dy)
-        if distance_sq < nearest_distance_sq:
-            nearest_lift = lift
-            nearest_distance_sq = distance_sq
-            nearest_dz = float(z) - platform_z
-        radius = (
-            _lift_support_release_radius(lift)
-            if active_guid
-            else _lift_support_magnet_radius(lift)
-            if magnet_candidate
-            else _lift_support_radius(lift)
-        )
-        if distance_sq > radius * radius:
-            continue
-        if distance_sq < best_distance_sq:
-            best_distance_sq = distance_sq
-            best_lift = lift
-
-    if best_lift is None and nearest_lift is not None:
-        now = time.time()
-        last_log = float(getattr(session, "last_lift_support_miss_log_at", 0.0) or 0.0)
-        if (now - last_log) >= _LIFT_SUPPORT_LOG_INTERVAL_SECONDS:
-            session.last_lift_support_miss_log_at = now
-            Logger.debug(
-                "[WorldLift] support miss pos=(%.2f %.2f %.2f) "
-                "nearest_guid=%s entry=%s distance=%.2f dz=%.2f flags=0x%X",
-                float(x),
-                float(y),
-                float(z),
-                int(nearest_lift.get("guid", 0) or 0),
-                int(nearest_lift.get("entry", 0) or 0),
-                math.sqrt(nearest_distance_sq),
-                nearest_dz,
-                int(movement_flags),
-            )
-
-    return best_lift
-
-
-def _apply_loaded_lift_support(
-    session,
-    *,
-    opcode_name: str,
-    x: float,
-    y: float,
-    z: float,
-    previous_z: float,
-    movement_flags: int,
-) -> tuple[float, dict[str, Any] | None]:
-    elevator_handled, _elevator_x, _elevator_y, elevator_z, elevator_state = (
-        _runtime_elevator_support(
-            session,
-            opcode_name=opcode_name,
-            x=float(x),
-            y=float(y),
-            z=float(z),
-            previous_z=float(previous_z),
-            movement_flags=int(movement_flags),
-        )
-    )
-    if elevator_handled:
-        return float(elevator_z), {"runtime_elevator": True, "state": elevator_state}
-    if bool(getattr(session, "runtime_elevator_bypass_old_support", False)):
-        return float(z), None
-
-    if _real_lift_transport_only(session):
-        if _lift_support_active(session):
-            _clear_lift_support_state(
-                session,
-                reason="real_transport_only",
-                opcode_name=opcode_name,
-                x=float(x),
-                y=float(y),
-                z=float(z),
-            )
-        now = time.time()
-        last_log = float(getattr(session, "last_lift_real_only_log_at", 0.0) or 0.0)
-        if (now - last_log) >= _LIFT_SUPPORT_LOG_INTERVAL_SECONDS:
-            session.last_lift_real_only_log_at = now
-            Logger.debug(
-                "[WorldLift] fake support disabled real_transport_only=1 "
-                "opcode=%s pos=(%.2f %.2f %.2f)",
-                str(opcode_name),
-                float(x),
-                float(y),
-                float(z),
-            )
-        return float(z), None
-
-    now = time.time()
-    active_guid = int(getattr(session, "supported_lift_guid", 0) or 0)
-    lift_state = _lift_support_state(session)
-    falling_state = _lift_support_falling_state(session, int(movement_flags))
-    stabilizing = _lift_support_stabilizing(session, now)
-    magnet_candidate = bool(
-        not active_guid
-        and (
-            falling_state
-            or opcode_name == "MSG_MOVE_FALL_LAND"
-            or float(z) < (float(previous_z) - 0.05)
-        )
-    )
-
-    if _is_teleporting(session):
-        _clear_lift_support_state(
-            session,
-            reason="teleport_pending",
-            opcode_name=opcode_name,
-            x=float(x),
-            y=float(y),
-            z=float(z),
-        )
-        return float(z), None
-
-    no_relock_until = float(getattr(session, "no_lift_relock_until", 0.0) or 0.0)
-    if not active_guid and now < no_relock_until:
-        Logger.info(
-            "[WorldLift] acquire denied reason=no_relock opcode=%s flags=0x%X "
-            "fall=%s remaining=%.3f state=%s",
-            opcode_name,
-            int(movement_flags),
-            bool(falling_state),
-            no_relock_until - now,
-            lift_state,
-        )
-        return float(z), None
-    if not active_guid and lift_state == _LIFT_STATE_DETACHING and now >= no_relock_until:
-        _set_lift_support_state(
-            session,
-            _LIFT_STATE_FREE,
-            opcode_name=opcode_name,
-            reason="no_relock_expired",
-            now=now,
-        )
-        lift_state = _LIFT_STATE_FREE
-
-    can_refresh_active = bool(
-        active_guid and opcode_name in _LIFT_SUPPORT_ACTIVE_REFRESH_OPCODES
-    )
-    if opcode_name not in _LIFT_SUPPORT_APPLY_OPCODES and not can_refresh_active:
-        if opcode_name in _LIFT_SUPPORT_RELEASE_OPCODES:
-            if opcode_name == "MSG_MOVE_JUMP":
-                _clear_lift_support_state(
-                    session,
-                    reason="moving_away",
-                    opcode_name=opcode_name,
-                    x=float(x),
-                    y=float(y),
-                    z=float(z),
-                    no_relock_seconds=_LIFT_SUPPORT_NO_RELOCK_SECONDS,
-                )
-                return float(z), None
-            if active_guid:
-                Logger.info(
-                    "[WorldLift] moving_away ignored opcode=%s flags=0x%X "
-                    "fall=%s stabilizing=%s duration=%.3f state=%s",
-                    opcode_name,
-                    int(movement_flags),
-                    bool(falling_state),
-                    bool(stabilizing),
-                    max(
-                        0.0,
-                        now - float(
-                            getattr(session, "supported_lift_started_at", 0.0) or 0.0
-                        ),
-                    ),
-                    lift_state,
-                )
-                return float(z), None
-            _clear_lift_support_state(
-                session,
-                reason="moving_away",
-                opcode_name=opcode_name,
-                x=float(x),
-                y=float(y),
-                z=float(z),
-            )
-        return float(z), None
-
-    lift = _find_loaded_lift_support(
-        session,
-        opcode_name=opcode_name,
-        x=float(x),
-        y=float(y),
-        z=float(z),
-        previous_z=float(previous_z),
-        movement_flags=int(movement_flags),
-    )
-    if lift is None:
-        _clear_lift_support_state(
-            session,
-            reason="outside_xy",
-            opcode_name=opcode_name,
-            x=float(x),
-            y=float(y),
-            z=float(z),
-        )
-        return float(z), None
-
-    lift_guid = _lift_support_guid(lift)
-    active_for_lift = bool(active_guid == lift_guid)
-    platform_z = _lift_support_platform_z(
-        session,
-        lift,
-        now,
-        active=active_for_lift and lift_state == _LIFT_STATE_ATTACHED,
-    )
-    lift_x = float(lift.get("x", 0.0) or 0.0)
-    lift_y = float(lift.get("y", 0.0) or 0.0)
-    dx = float(x) - lift_x
-    dy = float(y) - lift_y
-    distance_sq = (dx * dx) + (dy * dy)
-    radius = (
-        _lift_support_release_radius(lift)
-        if active_guid == lift_guid
-        else _lift_support_magnet_radius(lift)
-        if magnet_candidate
-        else _lift_support_radius(lift)
-    )
-    started_at = float(getattr(session, "supported_lift_started_at", 0.0) or 0.0)
-    duration = max(0.0, now - started_at) if started_at else 0.0
-    if active_guid and opcode_name in _LIFT_SUPPORT_RELEASE_OPCODES:
-        Logger.info(
-            "[WorldLift] moving_away ignored opcode=%s flags=0x%X "
-            "fall=%s stabilizing=%s distance=%.2f dz=%.2f duration=%.3f",
-            opcode_name,
-            int(movement_flags),
-            bool(falling_state),
-            bool(stabilizing),
-            math.sqrt(distance_sq),
-            float(z) - platform_z,
-            duration,
-        )
-
-    if distance_sq > radius * radius:
-        distance = math.sqrt(distance_sq)
-        huge_escape = distance > (radius + 10.0)
-        if active_guid and not huge_escape:
-            bad_count = int(getattr(session, "support_bad_counter", 0) or 0) + 1
-            session.support_bad_counter = bad_count
-            Logger.info(
-                "[WorldLift] bad_counter reason=outside_xy opcode=%s "
-                "count=%s/%s flags=0x%X fall=%s stabilizing=%s "
-                "distance=%.2f radius=%.2f dz=%.2f duration=%.3f",
-                opcode_name,
-                bad_count,
-                _LIFT_SUPPORT_MAX_BAD_PACKETS,
-                int(movement_flags),
-                bool(falling_state),
-                bool(stabilizing),
-                distance,
-                radius,
-                float(z) - platform_z,
-                duration,
-            )
-            if bad_count < _LIFT_SUPPORT_MAX_BAD_PACKETS:
-                return float(z), None
-        else:
-            session.support_bad_counter = _LIFT_SUPPORT_MAX_BAD_PACKETS
-
-        if int(getattr(session, "support_bad_counter", 0) or 0) >= _LIFT_SUPPORT_MAX_BAD_PACKETS:
-            _clear_lift_support_state(
-                session,
-                reason="outside_xy",
-                opcode_name=opcode_name,
-                x=float(x),
-                y=float(y),
-                z=float(z),
-                lift=lift,
-            )
-        return float(z), None
-
-    z_delta = abs(float(z) - platform_z)
-    z_threshold = (
-        max(_LIFT_SUPPORT_MAGNET_ABOVE_YARDS, _LIFT_SUPPORT_MAGNET_BELOW_YARDS)
-        if magnet_candidate
-        else max(_lift_support_z_threshold(opcode_name), 6.0)
-        if active_for_lift
-        else _lift_support_z_threshold(opcode_name)
-    )
-    in_grace = bool(active_guid and duration <= _LIFT_SUPPORT_GRACE_SECONDS)
-    if z_delta > z_threshold:
-        if in_grace:
-            last_grace_log = float(
-                getattr(session, "last_lift_support_grace_log_at", 0.0) or 0.0
-            )
-            if (now - last_grace_log) >= _LIFT_SUPPORT_LOG_INTERVAL_SECONDS:
-                session.last_lift_support_grace_log_at = now
-                Logger.info(
-                    "[WorldLift] support sticky grace opcode=%s guid=%s entry=%s "
-                    "pos=(%.2f %.2f %.2f) lift=(%.2f %.2f %.2f) "
-                    "distance=%.2f dz=%.2f threshold=%.2f duration=%.3f",
-                    opcode_name,
-                    int(lift_guid),
-                    int(lift.get("entry", 0) or 0),
-                    float(x),
-                    float(y),
-                    float(z),
-                    lift_x,
-                    lift_y,
-                    platform_z,
-                    math.sqrt(distance_sq),
-                    float(z) - platform_z,
-                    z_threshold,
-                    duration,
-                )
-            return float(z), None
-
-        bad_z_count = int(getattr(session, "support_bad_counter", 0) or 0) + 1
-        session.support_bad_counter = bad_z_count
-        session.supported_lift_bad_z_heartbeats = bad_z_count
-        Logger.info(
-            "[WorldLift] bad_counter reason=z_too_far opcode=%s "
-            "count=%s/%s flags=0x%X fall=%s stabilizing=%s "
-            "distance=%.2f dz=%.2f threshold=%.2f duration=%.3f",
-            opcode_name,
-            bad_z_count,
-            _LIFT_SUPPORT_MAX_BAD_PACKETS,
-            int(movement_flags),
-            bool(falling_state),
-            bool(stabilizing),
-            math.sqrt(distance_sq),
-            float(z) - platform_z,
-            z_threshold,
-            duration,
-        )
-        if bad_z_count >= _LIFT_SUPPORT_MAX_BAD_PACKETS:
-            _clear_lift_support_state(
-                session,
-                reason="z_too_far",
-                opcode_name=opcode_name,
-                x=float(x),
-                y=float(y),
-                z=float(z),
-                lift=lift,
-            )
-        return float(z), None
-    session.supported_lift_bad_z_heartbeats = 0
-    session.support_bad_counter = 0
-
-    if active_guid and active_guid != lift_guid:
-        _clear_lift_support_state(
-            session,
-            reason="outside_xy",
-            opcode_name=opcode_name,
-            x=float(x),
-            y=float(y),
-            z=float(z),
-            lift=lift,
-        )
-        active_guid = 0
-
-    if active_guid:
-        if lift_state == _LIFT_STATE_MAGNET:
-            stable_opcode = opcode_name in {
-                "MSG_MOVE_HEARTBEAT",
-                "MSG_MOVE_STOP",
-            }
-            stable_packet = bool(
-                stable_opcode
-                and not falling_state
-                and z_delta <= _LIFT_SUPPORT_STABLE_Z_DELTA
-                and distance_sq <= radius * radius
-            )
-            if stable_packet:
-                stable_count = int(
-                    getattr(session, "lift_stable_packet_counter", 0) or 0
-                ) + 1
-                session.lift_stable_packet_counter = stable_count
-            else:
-                stable_count = int(
-                    getattr(session, "lift_stable_packet_counter", 0) or 0
-                )
-                if opcode_name == "MSG_MOVE_JUMP" or falling_state:
-                    stable_count = 0
-                    session.lift_stable_packet_counter = 0
-            duration_ready = bool(
-                duration >= _LIFT_SUPPORT_ATTACH_SECONDS
-                and not falling_state
-                and z_delta <= _LIFT_SUPPORT_STABLE_Z_DELTA
-                and distance_sq <= radius * radius
-            )
-            Logger.info(
-                "[WorldLift] stabilization progress opcode=%s state=%s "
-                "stable=%s count=%s/%s duration_ready=%s flags=0x%X "
-                "fall=%s distance=%.2f dz=%.2f duration=%.3f",
-                opcode_name,
-                lift_state,
-                bool(stable_packet),
-                int(stable_count),
-                _LIFT_SUPPORT_STABLE_HEARTBEATS_REQUIRED,
-                bool(duration_ready),
-                int(movement_flags),
-                bool(falling_state),
-                math.sqrt(distance_sq),
-                float(z) - platform_z,
-                duration,
-            )
-            if stable_count >= _LIFT_SUPPORT_STABLE_HEARTBEATS_REQUIRED or duration_ready:
-                attach_reason = "stable_packets"
-                if duration_ready and stable_count < _LIFT_SUPPORT_STABLE_HEARTBEATS_REQUIRED:
-                    attach_reason = "stable_duration"
-                _set_lift_support_state(
-                    session,
-                    _LIFT_STATE_ATTACHED,
-                    opcode_name=opcode_name,
-                    reason=attach_reason,
-                    now=now,
-                )
-                lift_state = _LIFT_STATE_ATTACHED
-                _start_lift_motion(session, lift, now)
-                platform_z = _lift_support_platform_z(
-                    session,
-                    lift,
-                    now,
-                    active=True,
-                )
-                Logger.info(
-                    "[WorldLift] transport support attached opcode=%s "
-                    "guid=%s entry=%s z=%.2f period=%.2f",
-                    opcode_name,
-                    int(lift_guid),
-                    int(lift.get("entry", 0) or 0),
-                    platform_z,
-                    _lift_transport_period_seconds(lift),
-                )
-        if opcode_name == "MSG_MOVE_FALL_LAND":
-            _start_lift_support_stabilization(session, now, opcode_name)
-            stabilizing = True
-        if started_at and (now - started_at) > _LIFT_SUPPORT_MAX_STATIC_SECONDS:
-            _clear_lift_support_state(
-                session,
-                reason="timeout",
-                opcode_name=opcode_name,
-                x=float(x),
-                y=float(y),
-                z=float(z),
-                lift=lift,
-            )
-            return float(z), None
-    else:
-        session.supported_lift_guid = int(lift_guid)
-        session.supported_lift_started_at = now
-        session.supported_lift_acquired_at = now
-        session.supported_lift_bad_z_heartbeats = 0
-        session.support_bad_counter = 0
-        session.lift_stable_packet_counter = 0
-        _set_lift_support_state(
-            session,
-            _LIFT_STATE_MAGNET,
-            opcode_name=opcode_name,
-            reason="magnet_acquire",
-            now=now,
-        )
-        lift_state = _LIFT_STATE_MAGNET
-        session.supported_lift_motion_direction = 0.0
-        session.supported_lift_motion_started_at = 0.0
-        session.supported_lift_motion_start_z = platform_z
-        session.supported_lift_last_platform_z = platform_z
-        if _is_thunder_bluff_lift(lift):
-            _start_lift_transport_thread(session)
-        _start_lift_support_stabilization(session, now, opcode_name)
-        stabilizing = True
-        _queue_lift_support_message(session, "locked to lift")
-        Logger.info(
-            "[WorldLift] support acquire opcode=%s guid=%s entry=%s "
-            "pos=(%.2f %.2f %.2f) lift=(%.2f %.2f %.2f) "
-            "distance=%.2f dz=%.2f state=%s magnet=%s flags=0x%X",
-            opcode_name,
-            int(lift_guid),
-            int(lift.get("entry", 0) or 0),
-            float(x),
-            float(y),
-            float(z),
-            lift_x,
-            lift_y,
-            platform_z,
-            math.sqrt(distance_sq),
-            float(z) - platform_z,
-            lift_state,
-            bool(magnet_candidate),
-            int(movement_flags),
-        )
-
-    session.supported_lift_last_seen_at = now
-    if stabilizing:
-        last_stable_log = float(
-            getattr(session, "last_lift_stabilizing_log_at", 0.0) or 0.0
-        )
-        if (now - last_stable_log) >= _LIFT_SUPPORT_LOG_INTERVAL_SECONDS:
-            session.last_lift_stabilizing_log_at = now
-            Logger.info(
-                "[WorldLift] stabilization active opcode=%s flags=0x%X "
-                "fall=%s duration=%.3f distance=%.2f dz=%.2f",
-                opcode_name,
-                int(movement_flags),
-                bool(falling_state),
-                duration,
-                math.sqrt(distance_sq),
-                float(z) - platform_z,
-            )
-
-    is_landing = opcode_name == "MSG_MOVE_FALL_LAND"
-    is_falling = bool(
-        int(movement_flags)
-        & (_MOVEMENTFLAG_FALLING | _MOVEMENTFLAG_DESCENDING)
-    )
-    has_fall_data = bool(getattr(_movement_state(session), "has_fall_data", False))
-    if not (active_for_lift or is_landing or is_falling or has_fall_data):
-        return float(z), None
-
-    last_log = float(getattr(session, "last_lift_support_log_at", 0.0) or 0.0)
-    if (now - last_log) >= _LIFT_SUPPORT_LOG_INTERVAL_SECONDS:
-        session.last_lift_support_log_at = now
-        Logger.info(
-            "[WorldLift] support apply opcode=%s guid=%s entry=%s "
-            "pos=(%.2f %.2f %.2f)->z=%.2f lift=(%.2f %.2f %.2f) "
-            "distance=%.2f dz=%.2f previous_z=%.2f duration=%.3f "
-            "state=%s magnet=%s flags=0x%X",
-            opcode_name,
-            int(lift_guid),
-            int(lift.get("entry", 0) or 0),
-            float(x),
-            float(y),
-            float(z),
-            platform_z,
-            lift_x,
-            lift_y,
-            platform_z,
-            math.sqrt(distance_sq),
-            float(z) - platform_z,
-            float(previous_z),
-            duration,
-            lift_state,
-            bool(magnet_candidate),
-            int(movement_flags),
-        )
-
-    return platform_z, lift
-
 
 @register("MSG_MOVE_START_FORWARD")
 @register("MSG_MOVE_START_BACKWARD")
@@ -6056,62 +4649,20 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         bool(orientation_accepted),
     )
 
-    lift_support = None
     transport_guid = int(getattr(state, "transport_guid", 0) or 0)
     if transport_guid:
-        _ensure_lift_support_cache(session, x=float(x), y=float(y))
-        loaded_lifts = getattr(session, "loaded_lift_entries", None)
-        transport_lift = (
-            loaded_lifts.get(transport_guid)
-            if isinstance(loaded_lifts, dict)
-            else None
+        Logger.debug(
+            "[TransportOffset] opcode=%s tguid=0x%016X offset=(%.3f %.3f %.3f) "
+            "world=(%.3f %.3f %.3f)",
+            opcode_name,
+            transport_guid & 0xFFFFFFFFFFFFFFFF,
+            float(getattr(state, "transport_x", 0.0) or 0.0),
+            float(getattr(state, "transport_y", 0.0) or 0.0),
+            float(getattr(state, "transport_z", 0.0) or 0.0),
+            float(x),
+            float(y),
+            float(z),
         )
-        if isinstance(transport_lift, dict):
-            if _lift_support_active(session):
-                _clear_lift_support_state(
-                    session,
-                    reason="real_transport_attach",
-                    opcode_name=opcode_name,
-                    x=float(x),
-                    y=float(y),
-                    z=float(z),
-                    lift=transport_lift,
-                )
-            Logger.info(
-                "[WorldLift] real transport active opcode=%s tguid=0x%016X "
-                "offset=(%.3f %.3f %.3f) world=(%.3f %.3f %.3f)",
-                opcode_name,
-                transport_guid & 0xFFFFFFFFFFFFFFFF,
-                float(getattr(state, "transport_x", 0.0) or 0.0),
-                float(getattr(state, "transport_y", 0.0) or 0.0),
-                float(getattr(state, "transport_z", 0.0) or 0.0),
-                float(x),
-                float(y),
-                float(z),
-            )
-    if not is_flying_movement:
-        if transport_guid:
-            supported_z = float(z)
-        else:
-            supported_z, lift_support = _apply_loaded_lift_support(
-                session,
-                opcode_name=opcode_name,
-                x=float(x),
-                y=float(y),
-                z=float(z),
-                previous_z=float(previous_z),
-                movement_flags=int(movement_flags),
-            )
-        if lift_support is not None:
-            z = float(supported_z)
-            _clear_jump_fall_state(state)
-            _apply_post_parse_movement_cleanup(
-                session,
-                state,
-                opcode_name,
-                on_lift_support=True,
-            )
-            state.flags = int(getattr(state, "flags", 0) or 0) & ~_MOVEMENTFLAG_DESCENDING
 
     state.x = float(x)
     state.y = float(y)
@@ -6141,13 +4692,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         movement_responses.extend(discovery_responses)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _maybe_periodic_position_save(session)
-    if lift_support is not None:
-        lift_move_payload = build_smsg_player_move_payload(session)
-        if lift_move_payload:
-            movement_responses.append(("SMSG_PLAYER_MOVE", lift_move_payload))
-    lift_message_responses = _drain_lift_support_messages(session)
-    if lift_message_responses:
-        movement_responses.extend(lift_message_responses)
     force_broadcast = opcode_name in {
         "MSG_MOVE_HEARTBEAT",
         "MSG_MOVE_JUMP",
@@ -6185,7 +4729,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     stream_responses = _maybe_stream_world_objects(session)
     if stream_responses:
         movement_responses.extend(stream_responses)
-    boat_transfer_responses = _maybe_start_manual_boat_transfer(session, opcode_name)
+    boat_transfer_responses = _maybe_start_transport_route_transfer(session, opcode_name)
     if boat_transfer_responses:
         movement_responses.extend(boat_transfer_responses)
     companion_responses = _maybe_move_companion_pet_for_opcode(session, opcode_name)
@@ -6346,6 +4890,7 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
     session.near_teleport_pending = False
     session.worldport_ack_pending = False
     session.manual_boat_transfer_pending = False
+    _complete_pending_transport_transfer(session)
 
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
