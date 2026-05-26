@@ -38,6 +38,12 @@ def get_auth_challenge() -> Optional[tuple[str, bytes]]:
 
 
 def reset_state() -> None:
+    try:
+        from server.modules.handlers.world.opcodes.entities import release_current_chair
+        release_current_chair(session, reason="reset")
+    except Exception as exc:
+        Logger.debug("[CHAIR] release on reset failed: %s", exc)
+
     region = getattr(session, "region", None)
     if region is not None:
         region.players.discard(session)
@@ -95,6 +101,12 @@ def handle_disconnect_session(target_session) -> None:
     state = getattr(target_session, "global_state", None)
 
     Logger.info(f"[DISCONNECT] guid={guid} start")
+
+    try:
+        from server.modules.handlers.world.opcodes.entities import release_current_chair
+        release_current_chair(target_session, reason="disconnect")
+    except Exception as exc:
+        Logger.debug("[CHAIR] release on disconnect failed: %s", exc)
 
     # --- Remove from world (broadcast) ---
     try:

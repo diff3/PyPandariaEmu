@@ -253,11 +253,11 @@ def _normalized_explored_zones(raw: str | None, *, size: int = _PLAYER_EXPLORED_
     return values[: int(size)]
 
 
-def set_session_explored_zones_state(session, reveal_all: bool, *, size: int = _PLAYER_EXPLORED_ZONES_SIZE) -> str:
-    field_value = 0xFFFFFFFF if bool(reveal_all) else 0
-    raw = " ".join(str(field_value) for _ in range(int(size)))
-    session.explored_zones_raw = raw
-    return raw
+def effective_explored_zones_for_client(session) -> list[int]:
+    if bool(getattr(session, "map_cheat_enabled", False)):
+        return [0xFFFFFFFF] * _PLAYER_EXPLORED_ZONES_SIZE
+
+    return _normalized_explored_zones(getattr(session, "explored_zones_raw", ""))
 
 
 def build_explored_zones_update_response(session) -> tuple[str, bytes] | None:
@@ -267,7 +267,7 @@ def build_explored_zones_update_response(session) -> tuple[str, bytes] | None:
     if guid <= 0:
         return None
 
-    values = _normalized_explored_zones(getattr(session, "explored_zones_raw", ""))
+    values = effective_explored_zones_for_client(session)
     return (
         "SMSG_UPDATE_OBJECT",
         build_multi_u32_update_object_payload(

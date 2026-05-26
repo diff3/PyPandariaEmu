@@ -10,10 +10,13 @@ from dataclasses import dataclass
 
 from shared.Logger import Logger
 from server.modules.handlers.world.feature_config import flight_paths_enabled
+from server.modules.handlers.world.movements.manager import get_movement_manager
+from server.modules.handlers.world.movements.templates import build_template
+from server.modules.handlers.world.movements.types import InterpolationMode, MovementKind, MovementNode
 from server.modules.handlers.world.state.runtime import broadcast_player_state_update
 
 
-TAXI_TICK_SECONDS = 0.05
+TAXI_TICK_SECONDS = 0.1
 DEFAULT_TAXI_SPEED = 32.0
 DEFAULT_TAXI_MOUNT_DISPLAY_ID = 6851
 
@@ -53,12 +56,57 @@ class TaxiRuntimeState:
     original_run_speed: float = 7.0
     original_fly_speed: float = 7.0
     original_fly_back_speed: float = 4.5
+    movement_instance_id: int = 0
+    movement_template_id: str = ""
+    movement_period_ms: int = 0
+
+
+def _taxi_instance_id(session) -> int:
+    char_guid = int(getattr(session, "char_guid", 0) or 0)
+    if char_guid <= 0:
+        char_guid = id(session) & 0x00FFFFFFFFFFFFFF
+    return 0x7A00000000000000 | (char_guid & 0x00FFFFFFFFFFFFFF)
+
+
+def _taxi_period_ms(path_points: list[TaxiPathPoint], speed: float) -> int:
+    total = _path_length(list(path_points))
+    return max(1, int((total / max(1.0, float(speed))) * 1000.0))
+
+
+def _build_taxi_template(session, path_points: list[TaxiPathPoint], period_ms: int):
+    total = max(0.001, _path_length(list(path_points)))
+    traveled = 0.0
+    previous: TaxiPathPoint | None = None
+    nodes: list[MovementNode] = []
+    for point in path_points:
+        if previous is not None:
+            traveled += _distance(previous, point)
+        nodes.append(
+            MovementNode(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                x=float(point.x),
+                y=float(point.y),
+                z=float(point.z),
+                time_ms=int(round((traveled / total) * float(period_ms))),
+                yaw=point.orientation,
+            )
+        )
+        previous = point
+    return build_template(
+        "taxi:%s:%s" % (
+            int(getattr(session, "char_guid", 0) or 0),
+            int(time.time() * 1000.0),
+        ),
+        MovementKind.TAXI,
+        tuple(nodes),
+        interpolation_mode=InterpolationMode.SPLINE,
+        period_ms=int(period_ms),
+    )
 
 
 def is_taxi_active(session) -> bool:
     state = getattr(session, "taxi_state", None)
     return bool(state is not None and getattr(state, "active", False) and not getattr(state, "completed", False))
-
 
 def start_taxi_flight(
     session,
@@ -76,14 +124,33 @@ def start_taxi_flight(
         Logger.info("[TAXI] start blocked; flight paths disabled")
         return []
 
+    speed = max(1.0, float(speed))
+    period_ms = _taxi_period_ms(path_points, speed)
+    template, reason = _build_taxi_template(session, path_points, period_ms)
+    if template is None:
+        Logger.warning("[TAXI] start rejected reason=invalid_template detail=%s", reason)
+        return []
+
     generation = int(getattr(session, "_taxi_generation", 0) or 0) + 1
     session._taxi_generation = generation
+    instance_id = _taxi_instance_id(session)
+    now_ms = int(time.monotonic() * 1000.0)
+    phase_offset_ms = -(now_ms % max(1, int(period_ms)))
+    # phase_offset_ms = 0
+    movement_instance = get_movement_manager().register_instance(
+        instance_id,
+        template,
+        phase_offset_ms=phase_offset_ms,
+    )
+    if movement_instance is None:
+        Logger.warning("[TAXI] start rejected reason=duplicate_movement_instance id=0x%016X", instance_id)
+        return []
     state = TaxiRuntimeState(
         active=True,
         path_points=list(path_points),
         current_segment=0,
         segment_progress=0.0,
-        speed=max(1.0, float(speed)),
+        speed=speed,
         started_at=time.time(),
         destination_map=int(destination_map),
         destination_node=int(destination_node),
@@ -97,6 +164,9 @@ def start_taxi_flight(
         original_run_speed=float(getattr(session, "run_speed", 7.0) or 7.0),
         original_fly_speed=float(getattr(session, "fly_speed", 7.0) or 7.0),
         original_fly_back_speed=float(getattr(session, "fly_back_speed", 4.5) or 4.5),
+        movement_instance_id=int(instance_id),
+        movement_template_id=str(template.template_id),
+        movement_period_ms=int(period_ms),
     )
     session.taxi_state = state
     session.taxi_controls_locked = True
@@ -118,7 +188,6 @@ def start_taxi_flight(
     _start_taxi_thread(session, generation)
     return responses
 
-
 def taxi_tick(session, *, now: float | None = None) -> bool:
     state = getattr(session, "taxi_state", None)
     if state is None or not bool(getattr(state, "active", False)):
@@ -126,35 +195,70 @@ def taxi_tick(session, *, now: float | None = None) -> bool:
     if bool(getattr(state, "completed", False)):
         return False
 
-    points = list(state.path_points)
-    current_time = time.time() if now is None else float(now)
-    test_start = float(getattr(session, "_taxi_last_tick_at", 0.0) or 0.0)
-    start_time = test_start if test_start > 0.0 and test_start <= current_time else float(state.started_at)
+    # Använd MONOTONIC överallt för att undvika klockdrift
+    current_time = time.monotonic() if now is None else float(now)
+    
+    # Hämta starttid (måste vara satt med time.monotonic() i start_taxi_flight!)
+    start_time = float(state.started_at)
+    
+    # Beräkna exakt tid som passerat SINCE START (lokal tid)
+    local_elapsed_ms = int((current_time - start_time) * 1000.0)
+
+    # Beräkna traveled för att avgöra när flygningen är klar (använder samma tid)
     traveled = max(0.0, current_time - start_time) * float(state.speed)
-    total = _path_length(points)
-    if total <= 0.001 or traveled >= total:
+    
+    total = _path_length(list(state.path_points))
+    completion_threshold = max(
+        0.5,
+        total - (float(state.speed) * TAXI_TICK_SECONDS)
+    )
+
+    if total <= 0.001 or traveled >= completion_threshold:
         _complete_taxi(session, state)
         return False
 
-    segment, progress, point, orientation = _point_at_distance(points, traveled)
-    state.current_segment = int(segment)
-    state.segment_progress = float(progress)
-    _apply_taxi_position(session, point, orientation)
+    # Klipp inte ut "last_elapsed_ms" här om du vill ha exakt tid för taxi.
+    # Taxi behöver exakt tid för att interpolera korrekt.
+    # (Om du har problem med "spikes" kan du klippa, men försök utan först)
+    
+    # Anropa movement manager med DEN NYA metoden för Taxi
+    # Detta ignorerar den globala started_at_ms i manager och använder din lokala tid
+    transform = get_movement_manager().tick_taxi_instance(
+        int(state.movement_instance_id),
+        local_elapsed_ms=local_elapsed_ms
+    )
+    
+    if transform is None:
+        Logger.warning("[TAXI] missing movement instance id=0x%016X", int(state.movement_instance_id))
+        _complete_taxi(session, state)
+        return False
+        
+    point = TaxiPathPoint(float(transform.x), float(transform.y), float(transform.z), float(transform.orientation))
+    state.current_segment = int(transform.node_index)
+    state.segment_progress = max(0.0, min(1.0, traveled / max(0.001, total)))
+    
+    _apply_taxi_position(session, point, float(transform.orientation))
     _send_taxi_movement_update(session, state)
     return True
 
 
 def _start_taxi_thread(session, generation: int) -> None:
-    session._taxi_last_tick_at = time.time()
+    state = getattr(session, "taxi_state", None)
+    session._taxi_last_tick_at = float(getattr(state, "started_at", time.time()) or time.time())
 
     def _worker() -> None:
         while True:
             time.sleep(TAXI_TICK_SECONDS)
+            # Kontrollera generation först
             if int(getattr(session, "_taxi_generation", 0) or 0) != int(generation):
                 return
-            if not is_taxi_active(session):
+            
+            # KALLA ENDAST EN GÅNG
+            if not taxi_tick(session):
                 return
-            taxi_tick(session)
+            
+            # Ta bort den andra anropet!
+            # taxi_tick(session)  <-- RADERA DENNA RAD
 
     threading.Thread(
         target=_worker,
@@ -162,18 +266,12 @@ def _start_taxi_thread(session, generation: int) -> None:
         daemon=True,
     ).start()
 
-
-def _advance_segment(state: TaxiRuntimeState) -> None:
-    state.current_segment += 1
-    state.segment_progress = 0.0
-    Logger.info("[TAXI] segment=%s progress=%.2f", int(state.current_segment), 0.0)
-
-
 def _complete_taxi(session, state: TaxiRuntimeState) -> None:
     if state.completed:
         return
     state.completed = True
     state.active = False
+    get_movement_manager().unregister_instance(int(state.movement_instance_id))
     session.taxi_controls_locked = False
     session._taxi_generation = int(getattr(session, "_taxi_generation", 0) or 0) + 1
 
@@ -347,33 +445,6 @@ def _distance(a: TaxiPathPoint, b: TaxiPathPoint) -> float:
 
 def _path_length(points: list[TaxiPathPoint]) -> float:
     return sum(_distance(start, end) for start, end in zip(points, points[1:]))
-
-
-def _point_at_distance(points: list[TaxiPathPoint], target_distance: float) -> tuple[int, float, TaxiPathPoint, float]:
-    remaining = max(0.0, float(target_distance))
-    for index, (start, end) in enumerate(zip(points, points[1:])):
-        segment_length = _distance(start, end)
-        if segment_length <= 0.001:
-            continue
-        if remaining <= segment_length:
-            progress = remaining / segment_length
-            return index, progress, _lerp_point(start, end, progress), _segment_orientation(start, end)
-        remaining -= segment_length
-
-    final_index = max(0, len(points) - 2)
-    start = points[final_index]
-    end = points[-1]
-    return final_index, 1.0, end, _segment_orientation(start, end)
-
-
-def _lerp_point(a: TaxiPathPoint, b: TaxiPathPoint, progress: float) -> TaxiPathPoint:
-    t = max(0.0, min(1.0, float(progress)))
-    return TaxiPathPoint(
-        x=float(a.x) + ((float(b.x) - float(a.x)) * t),
-        y=float(a.y) + ((float(b.y) - float(a.y)) * t),
-        z=float(a.z) + ((float(b.z) - float(a.z)) * t),
-        orientation=b.orientation,
-    )
 
 
 def _segment_orientation(a: TaxiPathPoint, b: TaxiPathPoint) -> float:

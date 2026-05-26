@@ -10,6 +10,7 @@ class GlobalState:
         self.weather_seed = 12345
         self.manual_region_weather = {}
         self.chat_channels = {}
+        self.chair_occupancy = {}
         self.sessions = set()
 
 

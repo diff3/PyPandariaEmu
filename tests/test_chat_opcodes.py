@@ -1385,7 +1385,7 @@ def test_build_level_command_responses_appends_explicit_level_field(monkeypatch)
     ]
 
 
-def test_map_on_reveals_all_explored_zones(monkeypatch):
+def test_mapcheat_on_reveals_all_explored_zones_without_saving(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         "server.modules.handlers.world.feature_config.map_cheat_enabled",
@@ -1395,22 +1395,18 @@ def test_map_on_reveals_all_explored_zones(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
         "build_explored_zones_update_response",
-        lambda session: captured.update({"explored_zones_raw": session.explored_zones_raw})
+        lambda session: captured.update(
+            {
+                "explored_zones_raw": session.explored_zones_raw,
+                "map_cheat_enabled": bool(getattr(session, "map_cheat_enabled", False)),
+            }
+        )
         or ("SMSG_UPDATE_OBJECT", b"map-update"),
     )
     monkeypatch.setattr(
         chat_handlers.DatabaseConnection,
         "save_character_explored_zones",
-        staticmethod(
-            lambda char_guid, realm_id, explored_zones: captured.update(
-                {
-                    "char_guid": int(char_guid),
-                    "realm_id": int(realm_id),
-                    "saved_explored_zones": str(explored_zones),
-                }
-            )
-            or True
-        ),
+        staticmethod(lambda *_args: captured.update({"saved": True}) or True),
         raising=False,
     )
     monkeypatch.setattr(
@@ -1422,20 +1418,23 @@ def test_map_on_reveals_all_explored_zones(monkeypatch):
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
     alice.realm_id = 1
+    alice.explored_zones_raw = "7 0 0"
 
-    responses = chat_handlers._handle_chat_command(alice, "map on")
+    responses = chat_handlers._handle_chat_command(alice, "mapcheat on")
 
-    assert captured["char_guid"] == 1001
-    assert captured["realm_id"] == 1
-    assert len(captured["saved_explored_zones"].split()) == 200
-    assert set(captured["saved_explored_zones"].split()) == {"4294967295"}
-    assert captured["explored_zones_raw"] == captured["saved_explored_zones"]
+    assert captured["map_cheat_enabled"] is True
+    assert captured["explored_zones_raw"] == "7 0 0"
+    assert "saved" not in captured
+    assert alice.map_cheat_enabled is True
     assert responses[0] == ("SMSG_UPDATE_OBJECT", b"map-update")
-    assert responses[-1] == ("SMSG_MESSAGECHAT", b"system|[Map] all explored")
-    assert ("SMSG_TITLE_EARNED", struct.pack("<I", 47)) in responses
+    assert responses[-1] == (
+        "SMSG_MESSAGECHAT",
+        b"system|[MapCheat] all areas temporarily visible",
+    )
+    assert ("SMSG_TITLE_EARNED", struct.pack("<I", 47)) not in responses
 
 
-def test_map_zero_clears_all_explored_zones(monkeypatch):
+def test_mapcheat_zero_restores_real_explored_zones_without_saving(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         "server.modules.handlers.world.feature_config.map_cheat_enabled",
@@ -1445,22 +1444,18 @@ def test_map_zero_clears_all_explored_zones(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
         "build_explored_zones_update_response",
-        lambda session: captured.update({"explored_zones_raw": session.explored_zones_raw})
+        lambda session: captured.update(
+            {
+                "explored_zones_raw": session.explored_zones_raw,
+                "map_cheat_enabled": bool(getattr(session, "map_cheat_enabled", False)),
+            }
+        )
         or ("SMSG_UPDATE_OBJECT", b"map-update"),
     )
     monkeypatch.setattr(
         chat_handlers.DatabaseConnection,
         "save_character_explored_zones",
-        staticmethod(
-            lambda char_guid, realm_id, explored_zones: captured.update(
-                {
-                    "char_guid": int(char_guid),
-                    "realm_id": int(realm_id),
-                    "saved_explored_zones": str(explored_zones),
-                }
-            )
-            or True
-        ),
+        staticmethod(lambda *_args: captured.update({"saved": True}) or True),
         raising=False,
     )
     monkeypatch.setattr(
@@ -1472,18 +1467,38 @@ def test_map_zero_clears_all_explored_zones(monkeypatch):
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
     alice.realm_id = 1
+    alice.explored_zones_raw = "7 0 0"
+    alice.map_cheat_enabled = True
 
-    responses = chat_handlers._handle_chat_command(alice, "map 0")
+    responses = chat_handlers._handle_chat_command(alice, "mapcheat 0")
 
-    assert captured["char_guid"] == 1001
-    assert captured["realm_id"] == 1
-    assert len(captured["saved_explored_zones"].split()) == 200
-    assert set(captured["saved_explored_zones"].split()) == {"0"}
-    assert captured["explored_zones_raw"] == captured["saved_explored_zones"]
+    assert captured["map_cheat_enabled"] is False
+    assert captured["explored_zones_raw"] == "7 0 0"
+    assert "saved" not in captured
+    assert alice.map_cheat_enabled is False
     assert responses == [
         ("SMSG_UPDATE_OBJECT", b"map-update"),
-        ("SMSG_MESSAGECHAT", b"system|[Map] exploration reset"),
+        ("SMSG_MESSAGECHAT", b"system|[MapCheat] real exploration restored"),
     ]
+
+
+def test_mapcheat_effective_mask_does_not_overwrite_real_mask():
+    runtime_module = importlib.import_module("server.modules.handlers.world.state.runtime")
+    session = SimpleNamespace(
+        explored_zones_raw="7 0 0",
+        map_cheat_enabled=False,
+    )
+
+    real_values = runtime_module.effective_explored_zones_for_client(session)
+    session.map_cheat_enabled = True
+    cheat_values = runtime_module.effective_explored_zones_for_client(session)
+    session.map_cheat_enabled = False
+    restored_values = runtime_module.effective_explored_zones_for_client(session)
+
+    assert real_values[:3] == [7, 0, 0]
+    assert cheat_values == [0xFFFFFFFF] * 200
+    assert restored_values[:3] == [7, 0, 0]
+    assert session.explored_zones_raw == "7 0 0"
 
 
 def test_player_value_updates_include_persisted_map_exploration(monkeypatch):

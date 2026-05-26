@@ -25,6 +25,11 @@ except ImportError:
 from server.modules.handlers.world.chat.codec import (
     encode_skyfire_messagechat_system_payload,
 )
+from server.modules.handlers.world.achievement_service import (
+    find_achievement_by_name,
+    grant_achievement_by_id,
+    repair_achievement_visibility,
+)
 from server.modules.handlers.world.inventory_sync import (
     build_inventory_delta_responses,
     build_login_inventory_sync_responses,
@@ -221,7 +226,7 @@ def _split_command(message: str) -> tuple[str, list[str]] | None:
 
     if head.startswith("."):
         head = head[1:]
-    elif head not in {"map"}:
+    elif head not in {"mapcheat"}:
         return None
 
     return head, parts[1:]
@@ -780,6 +785,7 @@ def cmd_level(session, args: list[str]) -> list[tuple[str, bytes]]:
     char_guid = int(getattr(session, "char_guid", 0) or 0)
     realm_id = int(getattr(session, "realm_id", 0) or 0)
 
+    session.previous_level = int(current_level)
     session.level = int(target_level)
     if char_guid > 0 and realm_id > 0:
         DatabaseConnection.save_character_level(
@@ -798,11 +804,6 @@ def cmd_level(session, args: list[str]) -> list[tuple[str, bytes]]:
         requested_level,
     )
     responses = list(_helper("build_level_command_responses")(session))
-    responses.extend(
-        _notification_response(
-            f"[Level] {current_level} -> {target_level}"
-        )
-    )
     return responses
 
 
@@ -1194,6 +1195,47 @@ def cmd_title(session, args: list[str]) -> list[tuple[str, bytes]]:
     return _append_feedback_response(responses, f"[Title] active bit={bit_index}")
 
 
+@register_command(
+    "achievement",
+    ".achievement <add|fix> [name]",
+    require_args=True,
+)
+def cmd_achievement(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Grant an achievement by id or lazy name search."""
+    subcommand = str(args[0] if args else "").casefold()
+    if subcommand == "fix":
+        responses = repair_achievement_visibility(session)
+        responses.extend(_notification_response("[Achievement] fixed visible progress"))
+        return responses
+
+    if len(args) < 2 or subcommand != "add":
+        return _notification_response("Usage: .achievement <add|fix> [name]")
+
+    query = " ".join(args[1:]).strip()
+    matches = find_achievement_by_name(query, limit=8)
+    if not matches:
+        return _notification_response(f"[Achievement] no match: {query}")
+
+    exact_query = " ".join(query.split()).casefold()
+    exact_matches = [
+        item for item in matches
+        if " ".join(str(item.name or "").split()).casefold() == exact_query
+    ]
+    if len(matches) > 1 and not exact_matches:
+        summary = ", ".join(f"{item.achievement_id}:{item.name}" for item in matches)
+        return _notification_response(f"[Achievement] matches: {summary}")
+
+    achievement = exact_matches[0] if exact_matches else matches[0]
+    earned, responses = grant_achievement_by_id(session, achievement.achievement_id)
+    status = "added" if earned else "already complete"
+    responses.extend(
+        _notification_response(
+            f"[Achievement] {status}: {achievement.achievement_id} {achievement.name}"
+        )
+    )
+    return responses
+
+
 @register_command("morph", ".morph <displayId|name|list>", require_args=True)
 def cmd_morph(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Morph the player into a target display id or list available morphs."""
@@ -1357,7 +1399,7 @@ def cmd_cheat(session, args: list[str]) -> list[tuple[str, bytes]]:
 
     inventory_game.refresh_session_inventory(session)
 
-    map_command = COMMANDS.get("map")
+    map_command = COMMANDS.get("mapcheat")
     if map_command:
         responses.extend(map_command.handler(session, ["on"]))
 
@@ -1682,24 +1724,32 @@ def cmd_tel(session, args: list[str]) -> list[tuple[str, bytes]]:
     )
 
 
-@register_command("map", ".map <on|0>")
-def cmd_map(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Toggle explored zones for the current player."""
+@register_command("mapcheat", ".mapcheat <on|0>")
+def cmd_mapcheat(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Toggle temporary explored-zone visibility for the current player."""
     from server.modules.handlers.world.feature_config import map_cheat_enabled
 
     if not map_cheat_enabled():
-        return _notification_response("[Map] exploration cheat is disabled on this server.")
+        return _notification_response("[MapCheat] exploration cheat is disabled on this server.")
 
     argument = str(args[0]).strip().lower() if args else ""
     if argument in {"on", "1", "all"}:
         responses = list(_helper("build_map_exploration_update_responses")(session, True))
-        responses.append(_notification_response("[Map] all explored")[0])
+        Logger.info(
+            "[MapCheat] enabled guid=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+        responses.append(_notification_response("[MapCheat] all areas temporarily visible")[0])
         return responses
     if argument in {"0", "off", "reset", "none"}:
         responses = list(_helper("build_map_exploration_update_responses")(session, False))
-        responses.append(_notification_response("[Map] exploration reset")[0])
+        Logger.info(
+            "[MapCheat] disabled guid=%s; resent real explored zones",
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+        responses.append(_notification_response("[MapCheat] real exploration restored")[0])
         return responses
-    return _notification_response("Usage: map <on|0>")
+    return _notification_response("Usage: mapcheat <on|0>")
 
 
 
@@ -1988,6 +2038,7 @@ def cmd_server(session, args):
 
 # Real commands live here for quick scanning.
 PRIMARY_COMMANDS = {
+    "achievement": Command(handler=cmd_achievement, usage=".achievement <add|fix> [name]", require_args=True),
     "additem": Command(handler=cmd_additem, usage=".additem <itemEntry> [count]"),
     "addmoney": Command(handler=cmd_addmoney, usage=".addmoney <copper | 10g10s10c>", require_args=False),
     "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>"),
@@ -2003,7 +2054,7 @@ PRIMARY_COMMANDS = {
     "help": Command(handler=cmd_help, usage=".help"),
     "learnspell": Command(handler=cmd_learnspell, usage=".learnspell <spell_id>", require_args=True),
     "level": Command(handler=cmd_level, usage=".level [delta]|set <level>"),
-    "map": Command(handler=cmd_map, usage=".map <on|0>"),
+    "mapcheat": Command(handler=cmd_mapcheat, usage=".mapcheat <on|0>"),
     "morph": Command(handler=cmd_morph, usage=".morph <displayId|namel|list>", require_args=True),
     "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
     "roll": Command(handler=cmd_roll, usage=".roll"),

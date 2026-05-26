@@ -589,7 +589,7 @@ def build_SMSG_LEVELUP_INFO(ctx) -> bytes:
     payload = bytearray()
     payload.extend(struct.pack("<I", 0))
     payload.extend(struct.pack("<" + ("I" * 5), *([0] * 5)))
-    payload.extend(struct.pack("<B", 0))
+    payload.extend(struct.pack("<I", 0))
     payload.extend(struct.pack("<I", level))
     payload.extend(struct.pack("<I", 0))
     payload.extend(struct.pack("<" + ("I" * 4), *([0] * 4)))

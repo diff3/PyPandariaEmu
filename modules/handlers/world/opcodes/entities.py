@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import struct
 from typing import Any, Optional, Tuple
 
@@ -10,12 +11,20 @@ from shared.Logger import Logger
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.dispatcher import register
-from server.modules.game.guid import GuidHelper
+from server.modules.game.guid import GameObjectGuid, GuidHelper
+from server.modules.handlers.world.bootstrap.replay import build_single_u32_update_object_payload
+from server.modules.handlers.world.opcodes.movement import build_same_map_teleport_payload
 
 
 MAX_CREATURE_QUEST_ITEMS = 6
 MAX_GAMEOBJECT_DATA = 24
 MAX_GAMEOBJECT_QUEST_ITEMS = 6
+GAMEOBJECT_TYPE_CHAIR = 7
+UNIT_FIELD_ANIMTIER = 0x4C
+UNIT_STAND_STATE_STAND = 0
+UNIT_STAND_STATE_SIT_LOW_CHAIR = 4
+UNIT_STAND_STATE_SIT_HIGH_CHAIR = 6
+CHAIR_USE_RADIUS = 10.0
 
 
 def _get_realm_name() -> str:
@@ -42,6 +51,282 @@ def _parse_guid(value: Any) -> Optional[int]:
         except Exception:
             return None
     return None
+
+
+def _player_guid(session) -> int:
+    return int(
+        getattr(session, "char_guid", 0)
+        or getattr(session, "world_guid", 0)
+        or getattr(session, "player_guid", 0)
+        or 0
+    )
+
+
+def _decode_gameobject_use_guid(payload: bytes, decoded: dict[str, Any] | None = None) -> Optional[int]:
+    decoded = decoded or {}
+    for key in ("guid", "object_guid", "gameobject_guid", "go_guid", "target_guid"):
+        guid = _parse_guid(decoded.get(key))
+        if guid is not None:
+            return guid
+
+    payload = bytes(payload or b"")
+    if len(payload) < 9:
+        return None
+
+    raw_guid = [0] * 8
+    byte_pos = 0
+    bit_pos = 0
+    for index in (6, 1, 3, 4, 0, 5, 7, 2):
+        raw_guid[index], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
+
+    if bit_pos:
+        byte_pos += 1
+
+    for index in (0, 1, 6, 2, 3, 4, 5, 7):
+        if not raw_guid[index]:
+            continue
+        if byte_pos >= len(payload):
+            return None
+        raw_guid[index] ^= payload[byte_pos]
+        byte_pos += 1
+
+    return int.from_bytes(bytes(raw_guid), "little", signed=False)
+
+
+def _find_visible_gameobject(session, world_guid: int) -> Optional[dict]:
+    if int(world_guid or 0) <= 0:
+        return None
+
+    try:
+        decoded = GuidHelper.decode(int(world_guid))
+        spawn_guid = int(decoded.low)
+    except Exception:
+        spawn_guid = int(world_guid) & 0xFFFFFFFF
+
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
+    entries = DatabaseConnection.get_gameobjects_near(
+        int(getattr(session, "map_id", 0) or 0),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        radius=CHAIR_USE_RADIUS,
+        limit=80,
+    )
+    for entry in entries:
+        entry_spawn_guid = int(entry.get("guid", 0) or 0)
+        entry_world_guid = int(GameObjectGuid.from_spawn_guid(entry_spawn_guid, realm_id))
+        if entry_spawn_guid == spawn_guid or entry_world_guid == int(world_guid):
+            result = dict(entry)
+            result["realm_id"] = realm_id
+            result["world_guid"] = entry_world_guid
+            return result
+    return None
+
+
+def _chair_key(entry: dict) -> int:
+    world_guid = int(entry.get("world_guid", 0) or 0)
+    if world_guid > 0:
+        return world_guid
+    return int(GameObjectGuid.from_spawn_guid(
+        int(entry.get("guid", 0) or 0),
+        int(entry.get("realm_id", 0) or 0) or 1,
+    ))
+
+
+def _get_chair_occupancy(session) -> dict:
+    state = getattr(session, "global_state", None)
+    if state is None:
+        occupancy = getattr(session, "chair_occupancy", None)
+        if not isinstance(occupancy, dict):
+            occupancy = {}
+            setattr(session, "chair_occupancy", occupancy)
+        return occupancy
+
+    occupancy = getattr(state, "chair_occupancy", None)
+    if not isinstance(occupancy, dict):
+        occupancy = {}
+        setattr(state, "chair_occupancy", occupancy)
+    return occupancy
+
+
+def _release_chair_seat(session, *, reason: str) -> None:
+    chair_guid = int(getattr(session, "current_chair", 0) or 0)
+    seat = getattr(session, "current_seat", None)
+    if chair_guid <= 0 or seat is None:
+        return
+
+    seats = _get_chair_occupancy(session).get(chair_guid)
+    if isinstance(seats, dict) and int(seats.get(int(seat), 0) or 0) == _player_guid(session):
+        seats.pop(int(seat), None)
+
+    setattr(session, "current_chair", None)
+    setattr(session, "current_seat", None)
+    Logger.debug(
+        "[CHAIR] released chair=0x%016X seat=%s player=%s reason=%s",
+        chair_guid,
+        int(seat),
+        int(_player_guid(session)),
+        str(reason),
+    )
+
+
+def release_current_chair(session, *, reason: str = "state-change") -> None:
+    _release_chair_seat(session, reason=reason)
+
+
+def _chair_slots(entry: dict) -> int:
+    slots = int(entry.get("data0", 0) or 0)
+    return max(1, slots)
+
+
+def _chair_stand_state(entry: dict) -> int:
+    height = int(entry.get("data1", 0) or 0)
+    height = max(0, min(height, UNIT_STAND_STATE_SIT_HIGH_CHAIR - UNIT_STAND_STATE_SIT_LOW_CHAIR))
+    return UNIT_STAND_STATE_SIT_LOW_CHAIR + height
+
+
+def _chair_seat_position(entry: dict, seat: int, slots: int) -> tuple[float, float, float, float]:
+    size = float(entry.get("size", 1.0) or 1.0)
+    orientation = float(entry.get("orientation", 0.0) or 0.0)
+    relative_distance = (size * int(seat)) - (size * (int(slots) - 1) / 2.0)
+    orthogonal_orientation = orientation + (math.pi * 0.5)
+    x = float(entry.get("x", 0.0) or 0.0) + relative_distance * math.cos(orthogonal_orientation)
+    y = float(entry.get("y", 0.0) or 0.0) + relative_distance * math.sin(orthogonal_orientation)
+    z = float(entry.get("z", 0.0) or 0.0)
+    return x, y, z, orientation
+
+
+def _select_chair_seat(session, entry: dict) -> Optional[tuple[int, float, float, float, float]]:
+    chair_guid = _chair_key(entry)
+    slots = _chair_slots(entry)
+    occupied = _get_chair_occupancy(session).setdefault(chair_guid, {})
+    player_guid = _player_guid(session)
+
+    for seat, occupant in list(occupied.items()):
+        if int(occupant or 0) == player_guid:
+            occupied.pop(int(seat), None)
+
+    best = None
+    best_dist = float("inf")
+    for seat in range(slots):
+        if int(occupied.get(seat, 0) or 0) > 0:
+            continue
+
+        x, y, z, orientation = _chair_seat_position(entry, seat, slots)
+        dx = x - float(getattr(session, "x", 0.0) or 0.0)
+        dy = y - float(getattr(session, "y", 0.0) or 0.0)
+        dist = (dx * dx) + (dy * dy)
+        if dist <= best_dist:
+            best = (seat, x, y, z, orientation)
+            best_dist = dist
+
+    return best
+
+
+def _stand_state_update_response(session, stand_state: int) -> tuple[str, bytes]:
+    return (
+        "SMSG_UPDATE_OBJECT",
+        build_single_u32_update_object_payload(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            guid=_player_guid(session),
+            field_index=UNIT_FIELD_ANIMTIER,
+            value=int(stand_state),
+        ),
+    )
+
+
+def _send_stand_state_to_peers(session, response: tuple[str, bytes]) -> None:
+    state = getattr(session, "global_state", None)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    for target in list(getattr(state, "sessions", set()) or ()):
+        if target is session:
+            continue
+        if int(getattr(target, "map_id", 0) or 0) != map_id:
+            continue
+        sender = getattr(target, "send_response", None)
+        if callable(sender):
+            sender([response])
+
+
+def _sit_on_chair(session, entry: dict) -> list[tuple[str, bytes]]:
+    selection = _select_chair_seat(session, entry)
+    if selection is None:
+        Logger.info("[CHAIR] no free seat entry=%s guid=%s", int(entry.get("entry", 0) or 0), int(entry.get("guid", 0) or 0))
+        return []
+
+    _release_chair_seat(session, reason="new-chair")
+    seat, x, y, z, orientation = selection
+    chair_guid = _chair_key(entry)
+    player_guid = _player_guid(session)
+    _get_chair_occupancy(session).setdefault(chair_guid, {})[int(seat)] = player_guid
+
+    session.x = float(x)
+    session.y = float(y)
+    session.z = float(z)
+    session.orientation = float(orientation)
+    movement_state = getattr(session, "movement_state", None)
+    if movement_state is not None:
+        movement_state.x = float(x)
+        movement_state.y = float(y)
+        movement_state.z = float(z)
+        movement_state.orientation = float(orientation)
+        movement_state.flags = 0
+        movement_state.flags2 = 0
+
+    stand_state = _chair_stand_state(entry)
+    session.player_stand_state = int(stand_state)
+    session.current_chair = int(chair_guid)
+    session.current_seat = int(seat)
+    session.near_teleport_pending = True
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+
+    Logger.info(
+        "[CHAIR] sit player=%s entry=%s chair=0x%016X seat=%s pos=(%.3f %.3f %.3f %.3f) stand=%s",
+        int(player_guid),
+        int(entry.get("entry", 0) or 0),
+        int(chair_guid),
+        int(seat),
+        float(x),
+        float(y),
+        float(z),
+        float(orientation),
+        int(stand_state),
+    )
+
+    stand_response = _stand_state_update_response(session, stand_state)
+    _send_stand_state_to_peers(session, stand_response)
+    return [
+        ("SMSG_MOVE_TELEPORT", build_same_map_teleport_payload(session)),
+        stand_response,
+    ]
+
+
+@register("CMSG_GAME_OBJ_REPORT_USE")
+@register("CMSG_GAME_OBJ_USE")
+def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    guid = _decode_gameobject_use_guid(bytes(ctx.payload or b""), ctx.decoded or {})
+    if guid is None:
+        Logger.warning("[GAMEOBJECT_USE] failed to decode guid payload=%s", bytes(ctx.payload or b"").hex())
+        return 0, None
+
+    entry = _find_visible_gameobject(session, int(guid))
+    if entry is None:
+        Logger.debug("[GAMEOBJECT_USE] missing visible gameobject guid=0x%016X", int(guid))
+        return 0, None
+
+    Logger.debug(
+        "[GAMEOBJECT_USE] guid=0x%016X entry=%s type=%s name=%r",
+        int(guid),
+        int(entry.get("entry", 0) or 0),
+        int(entry.get("type", 0) or 0),
+        str(entry.get("name", "") or ""),
+    )
+
+    if int(entry.get("type", 0) or 0) != GAMEOBJECT_TYPE_CHAIR:
+        return 0, None
+
+    responses = _sit_on_chair(session, entry)
+    return 0, (responses or None)
 
 
 def _pack_cstring(value: str, *, required: bool = False) -> bytes:

@@ -15,6 +15,7 @@ CHAT_MSG_SYSTEM = 0
 CHAT_MSG_YELL = 6
 CHAT_MSG_WHISPER = 7
 CHAT_MSG_WHISPER_INFORM = 8
+CHAT_MSG_ACHIEVEMENT = 46
 
 TEXT_EMOTE_TO_ANIM_EMOTE: dict[int, int] = {
     3: 14,
@@ -233,6 +234,7 @@ def _encode_skyfire_messagechat_payload(
     sender_guid: int = 0,
     receiver_guid: int = 0,
     language: int = 0,
+    achievement_id: int = 0,
 ) -> bytes:
     message_bytes = str(message or "").encode("utf-8", errors="strict")
     sender_raw = _chat_guid_bytes_for_messagechat(sender_guid)
@@ -240,9 +242,10 @@ def _encode_skyfire_messagechat_payload(
     group_raw = b"\x00" * 8
     guild_raw = b"\x00" * 8
     has_language = int(language or 0) > 0
+    has_achievement_id = int(chat_type) in {CHAT_MSG_ACHIEVEMENT} and int(achievement_id or 0) > 0
 
     bits = BitWriter()
-    bits.write_bits(1, 1)
+    bits.write_bits(0 if has_achievement_id else 1, 1)
     bits.write_bits(0, 1)
     bits.write_bits(0, 1)
     bits.write_bits(1, 1)
@@ -271,6 +274,8 @@ def _encode_skyfire_messagechat_payload(
     _append_guid_byte_seq(payload, guild_raw, (4, 5, 7, 3, 2, 6, 0, 1))
     _append_guid_byte_seq(payload, sender_raw, (4, 7, 1, 5, 0, 6, 2, 3))
     payload.append(int(chat_type) & 0xFF)
+    if has_achievement_id:
+        payload.extend(int(achievement_id).to_bytes(4, "little", signed=False))
     _append_guid_byte_seq(payload, group_raw, (1, 3, 4, 6, 0, 2, 5, 7))
     _append_guid_byte_seq(payload, receiver_raw, (2, 5, 3, 6, 7, 4, 1, 0))
     if has_language:
@@ -287,6 +292,22 @@ def encode_skyfire_messagechat_system_payload(message: str) -> bytes:
         sender_guid=0,
         receiver_guid=0,
         language=0,
+    )
+
+
+def encode_skyfire_messagechat_achievement_payload(
+    *,
+    sender_guid: int,
+    message: str,
+    achievement_id: int,
+) -> bytes:
+    return _encode_skyfire_messagechat_payload(
+        message,
+        chat_type=CHAT_MSG_ACHIEVEMENT,
+        sender_guid=int(sender_guid or 0),
+        receiver_guid=0,
+        language=0,
+        achievement_id=int(achievement_id or 0),
     )
 
 

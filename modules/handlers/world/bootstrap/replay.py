@@ -26,7 +26,7 @@ from server.modules.handlers.world.bootstrap.playerobjects import (
     unpack_guid,
 )
 from server.modules.handlers.world.transport_runtime import (
-    apply_transport_runtime_position,
+    cached_transport_runtime_entry,
     prepare_runtime_transport_entry,
     register_loaded_transport_entry,
     synthetic_transport_entries_near,
@@ -536,7 +536,7 @@ def build_database_gameobject_responses(session, *, loaded_guids: set[int] | Non
     )
     responses: list[tuple[str, bytes]] = []
     for entry in filtered_entries:
-        entry = apply_transport_runtime_position(session, entry)
+        entry = cached_transport_runtime_entry(session, entry)
         payload = _build_gameobject_update_payload(
             map_id=map_id,
             entry=entry,

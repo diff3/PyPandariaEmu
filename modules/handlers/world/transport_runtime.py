@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import math
+import struct
 import threading
 import time
 from typing import Any
@@ -15,19 +16,28 @@ from server.modules.handlers.world.feature_config import (
     moving_transports_enabled,
 )
 from server.modules.handlers.world.bootstrap.gameobjects import _build_gameobject_update_payload
-from server.modules.game.guid import MoTransportGuid
+from server.modules.game.guid import GuidHelper, MoTransportGuid
 from server.modules.handlers.world.bootstrap.playerobjects import make_update_object_response
 from server.modules.handlers.world.movements.cache import get_movement_cache
+from server.modules.handlers.world.movements.manager import get_movement_manager
+from server.modules.handlers.world.movements.templates import build_template
+from server.modules.handlers.world.movements.types import (
+    MovementKind,
+    MovementLifecycleEventType,
+    MovementVisibilityState,
+    MovementNode,
+    InterpolationMode,
+)
 
 GAMEOBJECT_TYPE_TRANSPORT = 11
 GAMEOBJECT_TYPE_MO_TRANSPORT = 15
 
 TRANSPORT_STATE_ACTIVE = "ACTIVE"
-TRANSPORT_STATE_ARRIVING = "ARRIVING"
-TRANSPORT_STATE_DOCKED = "DOCKED"
-TRANSPORT_STATE_DEPARTING = "DEPARTING"
 TRANSPORT_STATE_TRANSFER_PENDING = "TRANSFER_PENDING"
 TRANSPORT_STATE_DESPAWNED = "DESPAWNED"
+
+TRANSPORT_VISIBILITY_ACTIVE = MovementVisibilityState.ACTIVE.value
+TRANSPORT_VISIBILITY_WAITING = MovementVisibilityState.WAITING.value
 
 ATTACH_STATE_DETACHED = "DETACHED"
 ATTACH_STATE_ATTACHING = "ATTACHING"
@@ -38,14 +48,21 @@ ATTACH_STATE_TRANSFERRING = "TRANSFERRING"
 ENABLE_TRANSPORT_RUNTIME_UPDATES = True
 _TRANSPORT_TICK_SECONDS = 0.25
 _TRANSPORT_VISIBILITY_RADIUS = 700.0
-_DEFAULT_ROUTE_DISTANCE = 320.0
 _DEFAULT_ROUTE_SPEED = 22.0
-_DEFAULT_ROUTE_WAIT_SECONDS = 1.0
 _DEFAULT_MO_TRANSPORT_PERIOD_MS = 180_000
-_ELEVATOR_ROUTE_WAIT_SECONDS = 2.0
 _THREAD_IDLE_TIMEOUT_SECONDS = 20.0
 _TRANSPORT_SEND_DISTANCE = 2.0
-_THUNDER_BLUFF_ELEVATOR_ENTRIES = frozenset({4170, 4171, 11898, 11899, 47296, 47297})
+_THUNDER_BLUFF_ELEVATOR_ENTRIES = frozenset({
+
+    4170, 4171, 11898, 11899, 47296, 47297,
+
+    # Undercity
+
+  #  50496, 50499, 50502, 50506,
+
+   # 50509, 50513, 50516, 50528,
+
+})
 _TRANSPORT_CROSS_MAP_HOLD_SECONDS = 15.0
 _TRANSPORT_CROSS_MAP_DISTANCE = _DEFAULT_ROUTE_SPEED * _TRANSPORT_CROSS_MAP_HOLD_SECONDS
 _WORLD_DB_TRANSPORT_VISIBILITY_RADIUS = 900.0
@@ -96,34 +113,21 @@ class RuntimeTransportState:
     spawn_guid: int
     display_id: int
     route: list[TransportRouteNode]
-    speed: float
     node_index: int
     x: float
     y: float
     z: float
     orientation: float
     map_id: int
-    last_tick: float
-    wait_until: float
-    last_logged_node: int = -1
-    last_node_event_index: int = -1
-    last_node_event_progress_ms: int = 0
-    last_node_event_reason: str = ""
-    lifecycle_state: str = TRANSPORT_STATE_ACTIVE
-    previous_lifecycle_state: str = ""
     tick_log_after: float = 0.0
     last_sent_x: float = float("inf")
     last_sent_y: float = float("inf")
     last_sent_z: float = float("inf")
     last_sent_map_id: int = -1
     path_progress_ms: float = 0.0
-    last_timed_route_progress_ms: int = -1
     timed_route: bool = False
     route_period_ms: int = 0
     shared_clock_key: str = ""
-    route_kind: str = ""
-    elevator_phase_state: str = ""
-    passengers: set[int] = field(default_factory=set)
 
 
 class WorldTransportManager:
@@ -156,6 +160,7 @@ class WorldTransportManager:
         with self._lock:
             self.entries.clear()
             _runtime_transport_states().clear()
+            get_movement_manager().reset_for_tests()
             self._running = False
             self._thread = None
 
@@ -219,24 +224,32 @@ class WorldTransportManager:
             return state
 
     def _duplicate_runtime_guid_locked(self, entry: dict[str, Any]) -> int:
-        if not is_thunder_bluff_elevator_entry(entry):
+        if not is_runtime_transport_entry(entry):
             return 0
+
         entry_id = int(entry.get("entry", 0) or 0)
         map_id = int(entry.get("map", entry.get("map_id", 0)) or 0)
         x = round(float(entry.get("x", 0.0) or 0.0), 1)
         y = round(float(entry.get("y", 0.0) or 0.0), 1)
+
         for existing_guid, existing in self.entries.items():
-            if not is_thunder_bluff_elevator_entry(existing):
+            if not is_runtime_transport_entry(existing):
                 continue
+
             if int(existing.get("entry", 0) or 0) != entry_id:
                 continue
+
             if int(existing.get("map", existing.get("map_id", 0)) or 0) != map_id:
                 continue
+
             if round(float(existing.get("x", 0.0) or 0.0), 1) != x:
                 continue
+
             if round(float(existing.get("y", 0.0) or 0.0), 1) != y:
                 continue
+
             return int(existing_guid)
+
         return 0
 
     def entry_for_guid(self, world_guid: int) -> dict[str, Any] | None:
@@ -247,11 +260,11 @@ class WorldTransportManager:
     def state_for_guid(self, world_guid: int) -> RuntimeTransportState | None:
         return _runtime_transport_states().get(int(world_guid))
 
-    def lifecycle_state_for_guid(self, world_guid: int) -> str:
-        state = self.state_for_guid(int(world_guid))
-        if state is None:
-            return TRANSPORT_STATE_DESPAWNED
-        return str(getattr(state, "lifecycle_state", TRANSPORT_STATE_ACTIVE) or TRANSPORT_STATE_ACTIVE)
+    def visibility_state_for_guid(self, world_guid: int) -> str:
+        return _movement_visibility_state(int(world_guid))
+
+    def is_visible(self, world_guid: int) -> bool:
+        return get_movement_manager().is_visible(int(world_guid))
 
     def can_attach(self, session: Any, world_guid: int) -> bool:
         world_guid = int(world_guid)
@@ -263,6 +276,7 @@ class WorldTransportManager:
                 int(getattr(session, "char_guid", 0) or 0),
             )
             return False
+        _sync_transport_state_from_movement_cache(state)
         if int(getattr(session, "map_id", 0) or 0) != int(state.map_id):
             Logger.warning(
                 "[TransportAttach] denied reason=wrong_map transport=0x%016X player=%s "
@@ -271,16 +285,17 @@ class WorldTransportManager:
                 int(getattr(session, "char_guid", 0) or 0),
                 int(getattr(session, "map_id", 0) or 0),
                 int(state.map_id),
-                str(getattr(state, "lifecycle_state", "")),
+                _movement_lifecycle_state(world_guid),
             )
             return False
-        lifecycle = str(getattr(state, "lifecycle_state", TRANSPORT_STATE_ACTIVE) or TRANSPORT_STATE_ACTIVE)
-        if lifecycle not in (TRANSPORT_STATE_ACTIVE, TRANSPORT_STATE_DOCKED):
+        visibility = self.visibility_state_for_guid(world_guid)
+        if visibility not in (TRANSPORT_VISIBILITY_ACTIVE, TRANSPORT_VISIBILITY_WAITING):
             Logger.warning(
-                "[TransportAttach] denied reason=lifecycle transport=0x%016X player=%s state=%s",
+                "[TransportAttach] denied reason=visibility transport=0x%016X player=%s state=%s visibility=%s",
                 world_guid & 0xFFFFFFFFFFFFFFFF,
                 int(getattr(session, "char_guid", 0) or 0),
-                lifecycle,
+                _movement_lifecycle_state(world_guid),
+                visibility,
             )
             return False
         return True
@@ -289,7 +304,16 @@ class WorldTransportManager:
         state = self.state_for_guid(int(world_guid))
         char_guid = int(getattr(session, "char_guid", 0) or 0)
         if state is not None and char_guid > 0:
-            state.passengers.add(char_guid)
+            movement_state = getattr(session, "movement_state", None)
+            get_movement_manager().attach_passenger(
+                int(world_guid),
+                char_guid,
+                local_x=float(getattr(movement_state, "transport_x", 0.0) or 0.0),
+                local_y=float(getattr(movement_state, "transport_y", 0.0) or 0.0),
+                local_z=float(getattr(movement_state, "transport_z", 0.0) or 0.0),
+                local_o=float(getattr(movement_state, "transport_orientation", 0.0) or 0.0),
+                source_map=int(getattr(session, "map_id", 0) or 0),
+            )
         session.transport_attach_state = ATTACH_STATE_ATTACHED
         session.transport_attach_timestamp = float(time.monotonic())
         session.transport_attach_source_map = int(getattr(session, "map_id", 0) or 0)
@@ -299,17 +323,27 @@ class WorldTransportManager:
             str(opcode_name),
             char_guid,
             int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-            str(getattr(state, "lifecycle_state", "")) if state is not None else "unknown",
+            _movement_lifecycle_state(int(world_guid)),
             int(getattr(session, "map_id", 0) or 0),
-            len(state.passengers) if state is not None else 0,
+            _movement_passenger_count(int(world_guid)),
         )
 
     def record_detach(self, session: Any, world_guid: int, *, opcode_name: str = "", reason: str = "client") -> None:
         state = self.state_for_guid(int(world_guid))
         char_guid = int(getattr(session, "char_guid", 0) or 0)
         if state is not None and char_guid > 0:
-            state.passengers.discard(char_guid)
+            if str(reason) != "transfer":
+                get_movement_manager().detach_passenger(int(world_guid), char_guid)
         session.transport_attach_state = ATTACH_STATE_DETACHED
+        if str(reason) != "transfer":
+            movement_state = getattr(session, "movement_state", None)
+            if movement_state is not None:
+                movement_state.has_transport_data = False
+                movement_state.transport_guid = 0
+                movement_state.transport_x = 0.0
+                movement_state.transport_y = 0.0
+                movement_state.transport_z = 0.0
+                movement_state.transport_orientation = 0.0
         Logger.info(
             "[TransportDetach] opcode=%s reason=%s player=%s transport=0x%016X "
             "state=%s map=%s passengers=%s",
@@ -317,9 +351,9 @@ class WorldTransportManager:
             str(reason),
             char_guid,
             int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-            str(getattr(state, "lifecycle_state", "")) if state is not None else "unknown",
+            _movement_lifecycle_state(int(world_guid)),
             int(getattr(session, "map_id", 0) or 0),
-            len(state.passengers) if state is not None else 0,
+            _movement_passenger_count(int(world_guid)),
         )
 
     def entries_near(
@@ -339,10 +373,17 @@ class WorldTransportManager:
         for world_guid, entry in source_entries:
             if isinstance(loaded_guids, set) and int(world_guid) in loaded_guids:
                 continue
+            if not self.is_visible(int(world_guid)):
+                Logger.debug(
+                    "[TransportVisibility] stream skipped transport=0x%016X visibility=%s",
+                    int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+                    self.visibility_state_for_guid(int(world_guid)),
+                )
+                continue
             home_map = entry.get("home_map")
             if home_map is not None and int(home_map) != session_map:
                 continue
-            moved_entry = apply_transport_runtime_position(session, entry)
+            moved_entry = cached_transport_runtime_entry(session, entry)
             moved_map = moved_entry.get("map", session_map)
             if moved_map is None:
                 moved_map = session_map
@@ -359,7 +400,7 @@ class WorldTransportManager:
                 int(getattr(session, "char_guid", 0) or 0),
                 int(moved_entry.get("transport_path_progress", 0) or 0),
                 int(getattr(_runtime_transport_states().get(int(world_guid)), "node_index", 0) or 0),
-                str(getattr(_runtime_transport_states().get(int(world_guid)), "lifecycle_state", "")),
+                _movement_lifecycle_state(int(world_guid)),
                 int(session_map),
             )
         return entries
@@ -370,8 +411,9 @@ class WorldTransportManager:
                 if not self._running:
                     return
                 states = list(_runtime_transport_states().items())
+            get_movement_manager().tick(_transport_manager_server_time_ms(states))
             for _world_guid, state in states:
-                _tick_transport_state(state)
+                _sync_transport_state_from_movement_cache(state)
             self._log_tick(states)
             time.sleep(_TRANSPORT_TICK_SECONDS)
 
@@ -468,12 +510,34 @@ def register_loaded_transport_entry(
     if not isinstance(loaded_transports, dict):
         loaded_transports = {}
         session.loaded_transport_entries = loaded_transports
+    if int(world_guid) in loaded_transports:
+        Logger.info(
+            "[TransportVisibility] duplicate visible registration suppressed transport=0x%016X player=%s",
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+        return True
 
     transport_entry = dict(entry)
     transport_entry["world_guid"] = int(world_guid)
     transport_entry["map"] = int(map_id)
     state = get_world_transport_manager().register_transport(transport_entry, source="stream")
+    if state is None:
+        Logger.warning(
+            "[TransportVisibility] registration rejected transport=0x%016X player=%s reason=no_runtime_state",
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+        return False
     if state is not None and int(state.guid) != int(world_guid):
+        return False
+    if not get_world_transport_manager().is_visible(int(world_guid)):
+        Logger.info(
+            "[TransportVisibility] registration skipped transport=0x%016X player=%s visibility=%s",
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(getattr(session, "char_guid", 0) or 0),
+            get_world_transport_manager().visibility_state_for_guid(int(world_guid)),
+        )
         return False
     loaded_transports[int(world_guid)] = transport_entry
 
@@ -549,8 +613,8 @@ def is_thunder_bluff_elevator_entry(entry: dict[str, Any] | None) -> bool:
         return False
     if original_type not in (GAMEOBJECT_TYPE_TRANSPORT, GAMEOBJECT_TYPE_MO_TRANSPORT):
         return False
-    if int(entry.get("map", entry.get("map_id", 0)) or 0) != 1:
-        return False
+    # if int(entry.get("map", entry.get("map_id", 0)) or 0) != 1:
+      #  return False
     entry_id = int(entry.get("entry", 0) or 0)
     return entry_id in _THUNDER_BLUFF_ELEVATOR_ENTRIES
 
@@ -637,60 +701,6 @@ def synthetic_transport_entries_near(
     return entries
 
 
-def _world_db_transport_entries_near(
-    session: Any,
-    *,
-    loaded_guids: set[int] | None = None,
-) -> list[dict[str, Any]]:
-    transports = _load_world_db_transports()
-    if not transports:
-        return []
-
-    session_map = int(getattr(session, "map_id", 0) or 0)
-    session_x = float(getattr(session, "x", 0.0) or 0.0)
-    session_y = float(getattr(session, "y", 0.0) or 0.0)
-    entries: list[dict[str, Any]] = []
-
-    for spec in transports:
-        spawn_guid = _same_map_transport_spawn_guid(
-            int(spec.get("guid", 0) or 0),
-            map_id=session_map,
-        )
-        world_guid = int(MoTransportGuid.from_spawn_guid(spawn_guid))
-        if isinstance(loaded_guids, set) and world_guid in loaded_guids:
-            continue
-
-        route = _build_timed_taxi_transport_route(
-            int(spec.get("path_id", 0) or 0),
-            period_ms=int(spec.get("period", 0) or _DEFAULT_MO_TRANSPORT_PERIOD_MS),
-        )
-        if len(route) < 2:
-            continue
-
-        nearest_index = _nearest_route_node_index(
-            route,
-            map_id=session_map,
-            x=session_x,
-            y=session_y,
-        )
-        nearest = route[nearest_index]
-        if math.hypot(float(nearest.x) - session_x, float(nearest.y) - session_y) > _WORLD_DB_TRANSPORT_VISIBILITY_RADIUS:
-            continue
-
-        entry = _entry_from_world_db_transport_spec(
-            spec,
-            world_guid=world_guid,
-            route=route,
-            start_index=nearest_index,
-        )
-        moved_entry = apply_transport_runtime_position(session, entry)
-        if int(moved_entry.get("map", session_map) or session_map) != session_map:
-            continue
-        entries.append(moved_entry)
-
-    return entries
-
-
 def _same_map_transport_spawn_guid(transport_guid: int, *, map_id: int) -> int:
     return (max(0, int(map_id)) * 100_000) + int(transport_guid)
 
@@ -715,6 +725,25 @@ def linked_transport_world_guid(entry: dict[str, Any], *, map_id: int) -> int:
 
 def runtime_transport_state_for_guid(world_guid: int) -> RuntimeTransportState | None:
     return _runtime_transport_states().get(int(world_guid))
+
+
+def transport_transfer_destination_map_for_guid(world_guid: int) -> int | None:
+    state = runtime_transport_state_for_guid(int(world_guid))
+    if state is None:
+        return None
+    _sync_transport_state_from_movement_cache(state)
+    movement_state = get_movement_manager().get_state(int(world_guid))
+    latest_events = tuple(getattr(movement_state, "lifecycle_events", ()) or ())
+    latest_event = latest_events[-1] if latest_events else None
+    if (
+        latest_event is None
+        or latest_event.event_type != MovementLifecycleEventType.TRANSFER_BEGIN
+    ):
+        return None
+    destination_map = get_movement_manager().transfer_destination_map(int(world_guid))
+    if destination_map is None:
+        return None
+    return int(destination_map)
 
 
 def authoritative_transport_entry_for_guid(world_guid: int) -> dict[str, Any] | None:
@@ -839,8 +868,8 @@ def _nearest_route_node_index(
     return best_index
 
 
-def apply_transport_runtime_position(session: Any, entry: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of entry with current runtime transport coordinates."""
+def cached_transport_runtime_entry(session: Any, entry: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of entry with the cached authoritative transport coordinates."""
     if not is_runtime_transport_entry(entry):
         return entry
     if not _runtime_enabled_for_entry(entry):
@@ -849,19 +878,23 @@ def apply_transport_runtime_position(session: Any, entry: dict[str, Any]) -> dic
         return entry
 
     world_guid = int(entry.get("world_guid", 0) or 0)
-    state = _transport_state_for_entry(entry)
+    state = _runtime_transport_states().get(int(world_guid))
     if state is None:
         return entry
 
-    _tick_transport_state(state)
+    transform = get_movement_manager().get_transform(world_guid)
     moved_entry = dict(entry)
-    moved_entry["map"] = int(state.map_id)
-    moved_entry["x"] = float(state.x)
-    moved_entry["y"] = float(state.y)
-    moved_entry["z"] = float(state.z)
-    moved_entry["orientation"] = float(state.orientation)
+    moved_entry["map"] = int(transform.map_id if transform is not None else state.map_id)
+    moved_entry["x"] = float(transform.x if transform is not None else state.x)
+    moved_entry["y"] = float(transform.y if transform is not None else state.y)
+    moved_entry["z"] = float(transform.z if transform is not None else state.z)
+    moved_entry["orientation"] = float(
+        transform.orientation if transform is not None else state.orientation
+    )
     moved_entry["world_guid"] = world_guid
-    moved_entry["transport_path_progress"] = int(state.path_progress_ms) & 0xFFFFFFFF
+    moved_entry["transport_path_progress"] = int(
+        transform.phase_ms if transform is not None else state.path_progress_ms
+    ) & 0xFFFFFFFF
     moved_entry["transport_period"] = int(_transport_period_ms(moved_entry))
     return moved_entry
 
@@ -930,11 +963,34 @@ def _build_visible_transport_updates(
     responses: list[tuple[str, bytes]] = []
 
     for world_guid, entry in list(entries.items()):
-        moved_entry = apply_transport_runtime_position(session, entry)
         state = _runtime_transport_states().get(int(world_guid))
+        if state is not None:
+            _sync_transport_state_from_movement_cache(state)
+        if not get_world_transport_manager().is_visible(int(world_guid)):
+            responses.extend(
+                _despawn_loaded_transport(
+                    session,
+                    entries,
+                    int(world_guid),
+                    map_id=session_map,
+                    reason="lifecycle",
+                )
+            )
+            continue
+
+        moved_entry = cached_transport_runtime_entry(session, entry)
         if state is not None and not _should_send_transport_update(state):
             continue
         if int(moved_entry.get("map", session_map) or session_map) != session_map:
+            responses.extend(
+                _despawn_loaded_transport(
+                    session,
+                    entries,
+                    int(world_guid),
+                    map_id=session_map,
+                    reason="map",
+                )
+            )
             continue
 
         dx = float(moved_entry.get("x", 0.0) or 0.0) - session_x
@@ -953,6 +1009,50 @@ def _build_visible_transport_updates(
         _maybe_log_transport_tick(int(world_guid), moved_entry)
 
     return responses
+
+
+def _despawn_loaded_transport(
+    session: Any,
+    entries: dict[int, dict[str, Any]],
+    world_guid: int,
+    *,
+    map_id: int,
+    reason: str,
+) -> list[tuple[str, bytes]]:
+    entry = entries.pop(int(world_guid), None)
+    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
+    if isinstance(loaded_gameobjects, set):
+        loaded_gameobjects.discard(int(world_guid))
+    visibility = get_world_transport_manager().visibility_state_for_guid(int(world_guid))
+    Logger.info(
+        "[TransportVisibility] despawn transport=0x%016X player=%s reason=%s visibility=%s entry=%s",
+        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(getattr(session, "char_guid", 0) or 0),
+        str(reason),
+        visibility,
+        int(entry.get("entry", 0) or 0) if isinstance(entry, dict) else 0,
+    )
+    payload = _build_transport_out_of_range_payload(
+        map_id=int(map_id),
+        world_guid=int(world_guid),
+    )
+    return [("SMSG_UPDATE_OBJECT", payload)]
+
+
+def _build_transport_out_of_range_payload(*, map_id: int, world_guid: int) -> bytes:
+    payload = bytearray()
+    payload += struct.pack("<HI", int(map_id) & 0xFFFF, 1)
+    payload += struct.pack("<B", 3)
+    payload += struct.pack("<I", 1)
+    payload += GuidHelper.pack(int(world_guid) & 0xFFFFFFFFFFFFFFFF)
+    return bytes(payload)
+
+
+def _transport_manager_server_time_ms(states: list[tuple[int, RuntimeTransportState]]) -> int:
+    for _world_guid, state in states:
+        if str(getattr(state, "shared_clock_key", "") or ""):
+            return _transport_server_time_ms(state)
+    return int(time.monotonic() * 1000.0)
 
 
 def _should_send_transport_update(state: RuntimeTransportState) -> bool:
@@ -1006,8 +1106,10 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
     if start_index > 0 and not timed_route:
         start_index %= len(route)
         route = route[start_index:] + route[:start_index]
+    template = _movement_template_from_route(entry, route)
+    if template is None:
+        return None
 
-    now = time.monotonic()
     first = route[0]
     second = route[1]
     route_period_ms = max(int(_route_period_ms(route) or 0), int(_transport_period_ms(entry) or 0))
@@ -1019,43 +1121,46 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
         if shared_clock_key
         else 0.0
     )
+    phase_offset_ms = int(path_progress_ms) if not shared_clock_key else 0
+    movement_instance = get_movement_manager().register_instance(
+        world_guid,
+        template,
+        phase_offset_ms=phase_offset_ms,
+    )
+    if movement_instance is None:
+        Logger.warning(
+            "[MovementManager] transport activation rejected entry=%s guid=0x%016X",
+            int(entry.get("entry", 0) or 0),
+            world_guid & 0xFFFFFFFFFFFFFFFF,
+        )
+        return None
     state = RuntimeTransportState(
         guid=world_guid,
         entry=int(entry.get("entry", 0) or 0),
         spawn_guid=int(entry.get("guid", 0) or 0),
         display_id=int(entry.get("display_id", 0) or 0),
         route=route,
-        speed=_resolve_transport_speed(entry),
         node_index=0,
         x=float(first.x),
         y=float(first.y),
         z=float(first.z),
         orientation=_orientation_between(first, second, float(entry.get("orientation", 0.0) or 0.0)),
         map_id=int(first.map_id),
-        last_tick=now,
-        wait_until=now + max(0.0, float(first.wait_time)),
         timed_route=timed_route,
         route_period_ms=route_period_ms,
         path_progress_ms=path_progress_ms,
         shared_clock_key=shared_clock_key,
-        route_kind="thunder_bluff_elevator"
-        if is_thunder_bluff_elevator_entry(entry)
-        else "deeprun_tram"
-        if bool(entry.get("deeprun_tram"))
-        else "",
     )
-    if state.timed_route and state.shared_clock_key:
-        _apply_timed_route_position(state)
+    _sync_transport_state_from_movement_cache(state)
     states[world_guid] = state
     Logger.info(
         "[WorldTransport] route load world_guid=0x%016X entry=%s display=%s "
-        "map=%s nodes=%s speed=%.2f period=%sms timed=%s start=(%.2f %.2f %.2f)",
+        "map=%s nodes=%s period=%sms timed=%s start=(%.2f %.2f %.2f)",
         int(world_guid) & 0xFFFFFFFFFFFFFFFF,
         int(state.entry),
         int(state.display_id),
         int(state.map_id),
         len(route),
-        float(state.speed),
         int(state.route_period_ms),
         bool(state.timed_route),
         float(state.x),
@@ -1065,12 +1170,72 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
     return state
 
 
+def _movement_template_from_route(entry: dict[str, Any], route: list[TransportRouteNode]):
+    nodes = tuple(
+        MovementNode(
+            map_id=int(node.map_id),
+            x=float(node.x),
+            y=float(node.y),
+            z=float(node.z),
+            time_ms=int(node.time_ms),
+            station=bool(float(node.wait_time) > 0.0),
+        )
+        for node in route
+    )
+    template_id = "transport:%s:%s" % (
+        int(entry.get("entry", 0) or 0),
+        int(entry.get("world_guid", 0) or 0),
+    )
+    template, reason = build_template(
+        template_id,
+        _movement_kind_for_entry(entry),
+        nodes,
+        interpolation_mode=InterpolationMode.LINEAR,
+        period_ms=int(_route_period_ms(route) or _transport_period_ms(entry) or 0),
+    )
+    if template is None:
+        Logger.warning(
+            "[MovementManager] invalid transport template entry=%s guid=0x%016X reason=%s",
+            int(entry.get("entry", 0) or 0),
+            int(entry.get("world_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+            str(reason),
+        )
+    return template
+
+
+def _movement_kind_for_entry(entry: dict[str, Any]) -> MovementKind:
+    if is_thunder_bluff_elevator_entry(entry):
+        return MovementKind.ELEVATOR
+    if is_deeprun_tram_entry(entry):
+        return MovementKind.TRAM
+    return MovementKind.TRANSPORT
+
+
 def _runtime_transport_states() -> dict[int, RuntimeTransportState]:
     states = getattr(_runtime_transport_states, "_states", None)
     if not isinstance(states, dict):
         states = {}
         setattr(_runtime_transport_states, "_states", states)
     return states
+
+
+def _movement_lifecycle_state(world_guid: int) -> str:
+    state = get_movement_manager().get_state(int(world_guid))
+    if state is None:
+        return TRANSPORT_STATE_DESPAWNED
+    return str(getattr(state, "lifecycle_state", TRANSPORT_STATE_ACTIVE) or TRANSPORT_STATE_ACTIVE)
+
+
+def _movement_visibility_state(world_guid: int) -> str:
+    return get_movement_manager().visibility_state(int(world_guid)).value
+
+
+def _movement_passenger_count(world_guid: int) -> int:
+    state = get_movement_manager().get_state(int(world_guid))
+    passengers = getattr(state, "passengers", None)
+    if not isinstance(passengers, dict):
+        return 0
+    return len(passengers)
 
 
 def _transport_animation_for_entry(entry_id: int) -> TransportAnimationPath | None:
@@ -1359,26 +1524,6 @@ def _build_timed_taxi_transport_route(path_id: int, *, period_ms: int) -> list[T
     return route
 
 
-def _build_same_map_taxi_transport_route(path_id: int, *, map_id: int) -> list[TransportRouteNode]:
-    nodes = _transport_taxi_path_nodes_by_path().get(int(path_id), ())
-    if len(nodes) < 2:
-        return []
-    route = [
-        TransportRouteNode(
-            int(node.map_id),
-            float(node.x),
-            float(node.y),
-            float(node.z),
-            0.0,
-        )
-        for node in nodes
-        if int(node.map_id) == int(map_id)
-    ]
-    if len(route) < 2:
-        return []
-    return route
-
-
 def _build_default_route(entry: dict[str, Any]) -> list[TransportRouteNode]:
     runtime_route = entry.get("runtime_route")
     if isinstance(runtime_route, (list, tuple)):
@@ -1474,48 +1619,6 @@ def _route_period_ms(route: list[TransportRouteNode]) -> int:
     return max(1, max(int(node.time_ms) for node in route))
 
 
-def _resolve_route_distance(entry: dict[str, Any]) -> float:
-    data0 = int(entry.get("data0", 0) or 0)
-    if data0 > 0:
-        return max(160.0, min(900.0, float(data0) * 0.25))
-    return _DEFAULT_ROUTE_DISTANCE
-
-
-def _resolve_transport_speed(entry: dict[str, Any]) -> float:
-    animation = _transport_animation_for_entry(int(entry.get("entry", 0) or 0))
-    if animation is not None:
-        return _average_animation_speed(entry, animation)
-
-    if int(entry.get("type", 0) or 0) == GAMEOBJECT_TYPE_MO_TRANSPORT:
-        return _DEFAULT_ROUTE_SPEED
-
-    if is_thunder_bluff_elevator_entry(entry):
-        animation = _transport_animation_for_entry(int(entry.get("entry", 0) or 0))
-        if animation is not None:
-            return _average_animation_speed(entry, animation)
-        return _DEFAULT_ROUTE_SPEED
-
-    size = float(entry.get("size", 1.0) or 1.0)
-    if size > 4.0:
-        return _DEFAULT_ROUTE_SPEED * 0.85
-    return _DEFAULT_ROUTE_SPEED
-
-
-def _average_animation_speed(entry: dict[str, Any], animation: TransportAnimationPath) -> float:
-    route = _build_dbc_animation_route(entry)
-    if len(route) < 2:
-        return _DEFAULT_ROUTE_SPEED
-
-    distance = 0.0
-    for current, target in zip(route, route[1:]):
-        dx = float(target.x) - float(current.x)
-        dy = float(target.y) - float(current.y)
-        dz = float(target.z) - float(current.z)
-        distance += math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
-    seconds = max(1.0, float(animation.period_ms) / 1000.0)
-    return max(0.1, distance / seconds)
-
-
 def _transport_period_ms(entry: dict[str, Any]) -> int:
     period = int(entry.get("transport_period", 0) or 0)
     if period > 0:
@@ -1533,353 +1636,40 @@ def _transport_period_ms(entry: dict[str, Any]) -> int:
     return max(1, int(data0))
 
 
-def _tick_transport_state(state: RuntimeTransportState) -> None:
-    now = time.monotonic()
-    elapsed = max(0.0, min(2.0, now - float(state.last_tick)))
-    state.last_tick = now
-    if elapsed <= 0.0:
+def _sync_transport_state_from_movement_cache(state: RuntimeTransportState) -> None:
+    _ensure_movement_instance_for_state(state)
+    transform = get_movement_manager().get_transform(int(state.guid))
+    if transform is None:
         return
-    period = max(1, int(state.route_period_ms))
-    if str(getattr(state, "shared_clock_key", "") or ""):
-        state.path_progress_ms = float(_shared_route_phase_ms(state.shared_clock_key, period))
-    else:
-        state.path_progress_ms = (float(state.path_progress_ms) + (elapsed * 1000.0)) % float(period)
-    if bool(state.timed_route):
-        _apply_timed_route_position(state)
-        return
-    if now < float(state.wait_until):
-        return
-
-    remaining = float(elapsed) * float(state.speed)
-    while remaining > 0.0:
-        current = state.route[state.node_index]
-        next_index = (state.node_index + 1) % len(state.route)
-        target = state.route[next_index]
-        if int(current.map_id) != int(target.map_id):
-            state.x = float(target.x)
-            state.y = float(target.y)
-            state.z = float(target.z)
-            _advance_transport_node(state, next_index, target, now)
-            return
-
-        dx = float(target.x) - float(state.x)
-        dy = float(target.y) - float(state.y)
-        dz = float(target.z) - float(state.z)
-        distance = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
-        if distance <= 0.001:
-            _advance_transport_node(state, next_index, target, now)
-            break
-
-        if remaining < distance:
-            ratio = remaining / distance
-            state.x += dx * ratio
-            state.y += dy * ratio
-            state.z += dz * ratio
-            state.orientation = math.atan2(dy, dx)
-            state.map_id = int(current.map_id)
-            return
-
-        state.x = float(target.x)
-        state.y = float(target.y)
-        state.z = float(target.z)
-        state.orientation = math.atan2(dy, dx)
-        remaining -= distance
-        _advance_transport_node(state, next_index, target, now)
-        if state.wait_until > now:
-            return
+    state.node_index = int(transform.node_index)
+    state.map_id = int(transform.map_id)
+    state.x = float(transform.x)
+    state.y = float(transform.y)
+    state.z = float(transform.z)
+    state.orientation = float(transform.orientation)
+    state.path_progress_ms = float(transform.phase_ms)
 
 
-
-def _apply_timed_route_position(state: RuntimeTransportState) -> None:
-    route = state.route
-    if len(route) < 2:
-        return
-
+def _transport_server_time_ms(state: RuntimeTransportState) -> int:
     period = max(1, int(state.route_period_ms or 1))
-    progress = int(state.path_progress_ms) % period
-    previous_progress = int(getattr(state, "last_timed_route_progress_ms", -1) or -1)
-    state.last_timed_route_progress_ms = int(progress)
-    current_index = 0
-    target_index = 1
-    for index in range(len(route) - 1):
-        current = route[index]
-        target = route[index + 1]
-        if int(current.time_ms) <= progress <= int(target.time_ms):
-            current_index = index
-            target_index = index + 1
-            break
-    else:
-        current_index = len(route) - 1
-        target_index = 0
+    if str(getattr(state, "shared_clock_key", "") or ""):
+        return int(_shared_route_phase_ms(str(state.shared_clock_key), period))
+    return int(time.monotonic() * 1000.0)
 
-    current = route[current_index]
-    target = route[target_index]
-    start_ms = int(current.time_ms)
-    end_ms = int(target.time_ms)
-    if target_index == 0:
-        end_ms = max(start_ms + 1, int(state.route_period_ms))
 
-    duration_ms = max(1, end_ms - start_ms)
-    ratio = max(0.0, min(1.0, float(progress - start_ms) / float(duration_ms)))
-    if target_index == 0 and progress < start_ms:
-        ratio = 1.0
-
-    state.node_index = int(current_index)
-    lifecycle_state = _transport_lifecycle_for_segment(state, current, target, progress)
-    state.map_id = int(current.map_id)
-    if int(current.map_id) != int(target.map_id):
-        _set_transport_lifecycle(
-            state,
-            TRANSPORT_STATE_TRANSFER_PENDING,
-            node_index=int(current_index),
-            progress_ms=int(progress),
-            reason="transfer_node",
-        )
-        if ratio >= 1.0:
-            state.node_index = int(target_index)
-            state.map_id = int(target.map_id)
-            state.x = float(target.x)
-            state.y = float(target.y)
-            state.z = float(target.z)
-        _log_timed_route_node_events(state, previous_progress, progress, period, current_index)
+def _ensure_movement_instance_for_state(state: RuntimeTransportState) -> None:
+    if get_movement_manager().runtime_state(int(state.guid)) is not None:
         return
-
-    dx = float(target.x) - float(current.x)
-    dy = float(target.y) - float(current.y)
-    dz = float(target.z) - float(current.z)
-    state.x = float(current.x) + (dx * ratio)
-    state.y = float(current.y) + (dy * ratio)
-    state.z = float(current.z) + (dz * ratio)
-    if abs(dx) > 0.001 or abs(dy) > 0.001:
-        state.orientation = math.atan2(dy, dx)
-    _set_transport_lifecycle(
-        state,
-        lifecycle_state,
-        node_index=int(current_index),
-        progress_ms=int(progress),
-        reason="route_phase",
-    )
-
-    _log_timed_route_node_events(state, previous_progress, progress, period, current_index)
-
-
-def _log_timed_route_node_events(
-    state: RuntimeTransportState,
-    previous_progress: int,
-    progress: int,
-    period: int,
-    current_index: int,
-) -> None:
-    route = state.route
-    if len(route) < 2:
+    entry = {
+        "entry": int(state.entry),
+        "world_guid": int(state.guid),
+        "type": GAMEOBJECT_TYPE_MO_TRANSPORT,
+        "transport_period": int(state.route_period_ms),
+    }
+    template = _movement_template_from_route(entry, list(state.route))
+    if template is None:
         return
-
-    if previous_progress < 0:
-        _log_timed_route_node_event(state, int(current_index), int(progress), reason="initial")
-        return
-
-    crossed: list[int] = []
-    previous = int(previous_progress)
-    current = int(progress)
-    route_period = max(1, int(period))
-    if current >= previous:
-        for index, node in enumerate(route):
-            node_time = int(node.time_ms)
-            if previous < node_time <= current:
-                crossed.append(index)
-    else:
-        for index, node in enumerate(route):
-            node_time = int(node.time_ms)
-            if previous < node_time <= route_period:
-                crossed.append(index)
-        for index, node in enumerate(route):
-            node_time = int(node.time_ms)
-            if node_time > 0 and node_time <= current:
-                crossed.append(index)
-
-    if not crossed and int(current_index) != int(state.last_logged_node):
-        crossed.append(int(current_index))
-
-    for index in crossed:
-        reason = "route_end" if int(index) == len(route) - 1 else "node"
-        _log_timed_route_node_event(state, int(index), int(progress), reason=reason)
-
-
-def _transport_lifecycle_for_segment(
-    state: RuntimeTransportState,
-    current: TransportRouteNode,
-    target: TransportRouteNode,
-    progress: int,
-) -> str:
-    if int(current.map_id) != int(target.map_id):
-        return TRANSPORT_STATE_TRANSFER_PENDING
-
-    route = state.route
-    if len(route) < 2:
-        return TRANSPORT_STATE_ACTIVE
-
-    index = int(state.node_index)
-    previous_index = (index - 1) % len(route)
-    previous = route[previous_index]
-    node_time = int(current.time_ms)
-    next_time = int(target.time_ms)
-    previous_time = int(previous.time_ms)
-    if index == 0:
-        previous_time = 0
-    after_node_ms = max(0, int(progress) - node_time)
-    to_next_ms = max(0, next_time - int(progress))
-    arriving = bool(index > 0 and int(previous.map_id) == int(current.map_id) and after_node_ms <= 2_000)
-    departing = bool(to_next_ms <= 2_000)
-    docked = bool(next_time > node_time and after_node_ms <= 4_000)
-
-    if arriving:
-        return TRANSPORT_STATE_ARRIVING
-    if docked:
-        return TRANSPORT_STATE_DOCKED
-    if departing:
-        return TRANSPORT_STATE_DEPARTING
-    _ = previous_time
-    return TRANSPORT_STATE_ACTIVE
-
-
-def _set_transport_lifecycle(
-    state: RuntimeTransportState,
-    lifecycle_state: str,
-    *,
-    node_index: int,
-    progress_ms: int,
-    reason: str,
-) -> None:
-    new_state = str(lifecycle_state or TRANSPORT_STATE_ACTIVE)
-    old_state = str(getattr(state, "lifecycle_state", "") or "")
-    if old_state == new_state:
-        return
-    state.previous_lifecycle_state = old_state
-    state.lifecycle_state = new_state
-    Logger.info(
-        "[TransportState] guid=0x%016X entry=%s %s -> %s node=%s phase=%sms "
-        "map=%s passengers=%s reason=%s",
-        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-        int(state.entry),
-        old_state or "NONE",
-        new_state,
-        int(node_index),
-        int(progress_ms),
-        int(state.map_id),
-        len(getattr(state, "passengers", set()) or set()),
-        str(reason),
-    )
-    Logger.info(
-        "[TransportPhase] guid=0x%016X entry=%s state=%s node=%s phase=%sms map=%s",
-        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-        int(state.entry),
-        new_state,
-        int(node_index),
-        int(progress_ms),
-        int(state.map_id),
-    )
-    if new_state == TRANSPORT_STATE_DOCKED:
-        Logger.info(
-            "[TransportDock] guid=0x%016X entry=%s node=%s phase=%sms map=%s",
-            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-            int(state.entry),
-            int(node_index),
-            int(progress_ms),
-            int(state.map_id),
-        )
-
-
-def _log_timed_route_node_event(
-    state: RuntimeTransportState,
-    node_index: int,
-    progress: int,
-    *,
-    reason: str,
-) -> None:
-    route = state.route
-    if not route:
-        return
-    index = max(0, min(len(route) - 1, int(node_index)))
-    if index == int(state.last_logged_node) and str(reason) != "route_end":
-        return
-
-    node = route[index]
-    state.last_logged_node = int(index)
-    state.last_node_event_index = int(index)
-    state.last_node_event_progress_ms = int(progress)
-    state.last_node_event_reason = str(reason)
-    Logger.info(
-        "[WorldTransport] node world_guid=0x%016X entry=%s node=%s/%s "
-        "map=%s pos=(%.2f %.2f %.2f) progress=%sms event=%s",
-        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-        int(state.entry),
-        int(index),
-        len(route),
-        int(node.map_id),
-        float(node.x),
-        float(node.y),
-        float(node.z),
-        int(progress),
-        str(reason),
-    )
-    if is_deeprun_tram_state(state):
-        target = route[(index + 1) % len(route)]
-        _log_deeprun_tram_node(state, node, target, index, progress)
-
-
-def _advance_transport_node(
-    state: RuntimeTransportState,
-    next_index: int,
-    target: TransportRouteNode,
-    now: float,
-) -> None:
-    old_map = int(state.map_id)
-    state.node_index = int(next_index)
-    state.map_id = int(target.map_id)
-    state.wait_until = now + max(0.0, float(target.wait_time))
-    Logger.info(
-        "[WorldTransport] node world_guid=0x%016X entry=%s node=%s/%s "
-        "map=%s pos=(%.2f %.2f %.2f) wait=%.2f",
-        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-        int(state.entry),
-        int(state.node_index),
-        len(state.route),
-        int(state.map_id),
-        float(state.x),
-        float(state.y),
-        float(state.z),
-        float(target.wait_time),
-    )
-    if is_thunder_bluff_elevator_state(state):
-        Logger.info(
-            "[TransportElevator] node transition world_guid=0x%016X entry=%s node=%s/%s "
-            "z=%.3f pause=%.2f",
-            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-            int(state.entry),
-            int(state.node_index),
-            len(state.route),
-            float(state.z),
-            float(target.wait_time),
-        )
-        if float(target.wait_time) > 0.0:
-            Logger.info(
-                "[TransportElevator] endpoint pause world_guid=0x%016X seconds=%.2f",
-                int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-                float(target.wait_time),
-            )
-        Logger.info(
-            "[TransportElevator] reverse direction world_guid=0x%016X next_node=%s",
-            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-            int((state.node_index + 1) % len(state.route)),
-        )
-    if old_map != int(state.map_id):
-        Logger.info(
-            "[WorldTransport] map transition world_guid=0x%016X entry=%s %s -> %s",
-            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-            int(state.entry),
-            int(old_map),
-            int(state.map_id),
-        )
+    get_movement_manager().register_instance(int(state.guid), template)
 
 
 def _orientation_between(
@@ -1940,71 +1730,4 @@ def _maybe_log_transport_tick(world_guid: int, entry: dict[str, Any]) -> None:
             float(entry.get("y", 0.0) or 0.0),
             float(entry.get("z", 0.0) or 0.0),
             float(entry.get("orientation", 0.0) or 0.0),
-        )
-
-
-def is_thunder_bluff_elevator_state(state: RuntimeTransportState) -> bool:
-    return int(state.entry) in _THUNDER_BLUFF_ELEVATOR_ENTRIES
-
-
-def is_deeprun_tram_state(state: RuntimeTransportState) -> bool:
-    return str(getattr(state, "route_kind", "") or "") == "deeprun_tram"
-
-
-def _deeprun_station_name(node: TransportRouteNode) -> str:
-    y = float(node.y)
-    if y <= 100.0:
-        return "stormwind"
-    if y >= 2400.0:
-        return "ironforge"
-    return ""
-
-
-def _log_deeprun_tram_node(
-    state: RuntimeTransportState,
-    current: TransportRouteNode,
-    target: TransportRouteNode,
-    current_index: int,
-    progress: int,
-) -> None:
-    station = _deeprun_station_name(current)
-    target_station = _deeprun_station_name(target)
-    Logger.info(
-        "[Tram] node reached world_guid=0x%016X node=%s/%s phase=%sms "
-        "progress=%.3f pos=(%.2f %.2f %.2f) passenger_count=%s",
-        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-        int(current_index),
-        len(state.route),
-        int(progress),
-        float(state.path_progress_ms) / float(max(1, state.route_period_ms)),
-        float(state.x),
-        float(state.y),
-        float(state.z),
-        0,
-    )
-    if station and station == target_station:
-        Logger.info(
-            "[Tram] station wait station=%s world_guid=0x%016X phase=%sms",
-            station,
-            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-            int(progress),
-        )
-    elif station:
-        Logger.info(
-            "[Tram] station depart station=%s world_guid=0x%016X phase=%sms",
-            station,
-            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-            int(progress),
-        )
-        Logger.info(
-            "[Tram] route reverse station=%s world_guid=0x%016X",
-            station,
-            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-        )
-    elif target_station:
-        Logger.info(
-            "[Tram] station arrive station=%s world_guid=0x%016X phase=%sms",
-            target_station,
-            int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-            int(progress),
         )

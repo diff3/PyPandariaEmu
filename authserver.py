@@ -35,8 +35,10 @@ from shared.Logger import Logger
 AUTH_DEFS = [
     "AUTH_LOGON_CHALLENGE_C",
     "AUTH_LOGON_CHALLENGE_S",
+    "AUTH_LOGON_CHALLENGE_S_FAILURE",
     "AUTH_LOGON_PROOF_C",
     "AUTH_LOGON_PROOF_S",
+    "AUTH_LOGON_PROOF_S_FAILURE",
     "REALM_LIST_C",
     "REALM_LIST_S",
     "AUTH_RECONNECT_CHALLENGE_C",
@@ -125,6 +127,7 @@ class ConnectionContext:
     last_error: str | None = None
     username: str | None = None
     srp_session: SRP6Session | None = None
+    auth_failed: bool = False
 
 
 def next_state(state: str) -> str:
@@ -256,6 +259,17 @@ def post_check(
         )
         return StepResult.FAIL
 
+    if conn_ctx.auth_failed:
+        Logger.debug(
+            "[FSM] %s + AUTH_FAIL -> %s",
+            current_state,
+            INITIAL_STATE,
+        )
+        conn_ctx.state = INITIAL_STATE
+        conn_ctx.retry_count = 0
+        conn_ctx.auth_failed = False
+        return StepResult.SUCCESS
+
     next_logical_state = next_state(expected_state or current_state)
 
     Logger.debug(
@@ -304,6 +318,36 @@ def log_client_packet(opcode_name: str, data: bytes, decoded: dict) -> None:
         decoded,
         label=opcode_name,
     )
+
+
+def step_controller(
+    conn_ctx: ConnectionContext,
+    handler,
+    packet_ctx: PacketContext,
+) -> tuple[StepResult, bytes | None]:
+    packet_ctx.connection_ctx = conn_ctx
+
+    step_result = pre_check(conn_ctx, packet_ctx)
+    if step_result != StepResult.SUCCESS:
+        if step_result == StepResult.INVALID:
+            conn_ctx.state = INITIAL_STATE
+        return step_result, None
+
+    try:
+        handler_error, response = handler(packet_ctx)
+    except Exception as exc:
+        conn_ctx.last_error = str(exc)
+        Logger.error(
+            "[FATAL] state=%s opcode=%s error=%s",
+            conn_ctx.state,
+            packet_ctx.name,
+            exc,
+        )
+        Logger.error(traceback.format_exc())
+        return StepResult.FATAL, None
+
+    step_result = post_check(conn_ctx, packet_ctx, handler_error)
+    return step_result, response
 
 
 def process_packet(
@@ -363,11 +407,26 @@ def process_packet(
         return StepResult.FATAL, None
 
     username = extract_username(decoded)
-    if username:
+    if username and not conn_ctx.auth_failed:
         conn_ctx.username = username
 
     step_result = post_check(conn_ctx, packet_ctx, handler_error)
     return step_result, response
+
+
+def resolve_server_packet_name(response: bytes) -> str | None:
+    if not response:
+        return None
+
+    opcode = response[0]
+
+    if opcode == 0x00 and len(response) == 3:
+        return "AUTH_LOGON_CHALLENGE_S_FAILURE"
+
+    if opcode == 0x01 and len(response) == 4:
+        return "AUTH_LOGON_PROOF_S_FAILURE"
+
+    return AUTH_SERVER_OPCODES.get(opcode)
 
 
 def send_server_response(
@@ -382,7 +441,7 @@ def send_server_response(
         return None
 
     server_opcode = response[0]
-    server_name = AUTH_SERVER_OPCODES.get(server_opcode)
+    server_name = resolve_server_packet_name(response)
 
     if not server_name:
         reason = f"invalid server opcode 0x{server_opcode:02X}"

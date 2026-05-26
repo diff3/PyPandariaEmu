@@ -13,11 +13,31 @@ from dataclasses import dataclass
 from enum import Enum
 
 
+class InterpolationMode(str, Enum):
+    LINEAR = "LINEAR"
+    SPLINE = "SPLINE"
+
 class MovementKind(str, Enum):
     TRANSPORT = "transport"
     ELEVATOR = "elevator"
     TRAM = "tram"
     TAXI = "taxi"
+
+
+class MovementLifecycleEventType(str, Enum):
+    SPAWN = "SPAWN"
+    DESPAWN = "DESPAWN"
+    ARRIVED = "ARRIVED"
+    DEPARTED = "DEPARTED"
+    TRANSFER_BEGIN = "TRANSFER_BEGIN"
+    TRANSFER_COMPLETE = "TRANSFER_COMPLETE"
+
+
+class MovementVisibilityState(str, Enum):
+    ACTIVE = "ACTIVE"
+    WAITING = "WAITING"
+    DESPAWNED = "DESPAWNED"
+    TRANSFERRING = "TRANSFERRING"
 
 
 @dataclass(frozen=True)
@@ -51,6 +71,7 @@ class MovementTemplate:
     period_ms: int
     arc_lengths: tuple[ArcLengthSample, ...]
     total_length: float
+    interpolation_mode: InterpolationMode = InterpolationMode.SPLINE
     transfer_nodes: tuple[int, ...] = ()
     station_nodes: tuple[int, ...] = ()
 
@@ -62,6 +83,59 @@ class MovementInstance:
     started_at_ms: int = 0
     phase_offset_ms: int = 0
     active: bool = True
+
+
+@dataclass(frozen=True)
+class PassengerAttachment:
+    passenger_id: int
+    local_x: float = 0.0
+    local_y: float = 0.0
+    local_z: float = 0.0
+    local_o: float = 0.0
+    source_map: int = 0
+    attached_at_ms: int = 0
+
+
+@dataclass(frozen=True)
+class PassengerTransferState:
+    passenger_id: int
+    source_instance_id: int
+    destination_instance_id: int
+    target_map_id: int
+    local_x: float = 0.0
+    local_y: float = 0.0
+    local_z: float = 0.0
+    local_o: float = 0.0
+    started_at_ms: int = 0
+
+
+@dataclass(frozen=True)
+class MovementLifecycleEvent:
+    event_type: MovementLifecycleEventType
+    instance_id: int
+    phase_ms: int
+    node_index: int
+    target_map_id: int | None = None
+    message: str = ""
+
+
+@dataclass
+class MovementRuntimeState:
+    instance: MovementInstance
+    lifecycle_state: str = "ACTIVE"
+    previous_lifecycle_state: str = ""
+    visibility_state: str = MovementVisibilityState.ACTIVE.value
+    previous_visibility_state: str = ""
+    last_event: str = ""
+    last_phase_ms: int = -1
+    transfer_destination_map: int | None = None
+    evaluated_transform: "MovementTransform | None" = None
+    lifecycle_events: tuple[MovementLifecycleEvent, ...] = ()
+    last_node_index: int = -1
+    transfer_active: bool = False
+    spawned: bool = False
+    passengers: dict[int, PassengerAttachment] | None = None
+    pending_transfers: dict[int, PassengerTransferState] | None = None
 
 
 @dataclass(frozen=True)

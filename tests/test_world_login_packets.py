@@ -154,9 +154,9 @@ def test_all_account_criteria_packet_is_minimal_empty_state():
 def test_levelup_info_packet_uses_current_level():
     payload = login_packets.build_SMSG_LEVELUP_INFO(SimpleNamespace(level=90))
 
-    assert len(payload) == 49
-    assert struct.unpack_from("<I", payload, 25)[0] == 90
-    assert set(payload[:25] + payload[29:]) == {0}
+    assert len(payload) == 52
+    assert struct.unpack_from("<I", payload, 28)[0] == 90
+    assert set(payload[:28] + payload[32:]) == {0}
 
 
 def test_known_spells_packet_includes_common_for_alliance_race():

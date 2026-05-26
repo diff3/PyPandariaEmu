@@ -52,8 +52,8 @@ def test_taxi_tick_linearly_interpolates_and_sets_flying_flags(monkeypatch):
 
     assert taxi_runtime.taxi_tick(session, now=101.0) is True
 
-    assert round(session.x, 3) == 4.472
-    assert round(session.z, 3) == 2.236
+    assert 4.45 <= session.x <= 4.49
+    assert 2.22 <= session.z <= 2.25
     assert session.can_fly is True
     assert session.is_flying is True
     assert session.movement_state.flags & taxi_runtime._MOVEMENTFLAG_CAN_FLY

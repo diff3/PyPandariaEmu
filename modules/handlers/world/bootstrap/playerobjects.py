@@ -434,6 +434,7 @@ def _resolve_player_display_id(ctx) -> int:
     race = int(getattr(ctx, "race", 0) or 0)
     gender = int(getattr(ctx, "gender", 0) or 0)
     gender_map = _PLAYER_DISPLAY_IDS.get(race)
+
     if not gender_map:
         return 15475
     return int(gender_map.get(gender, 15475))

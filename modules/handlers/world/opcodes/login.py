@@ -89,19 +89,20 @@ _SANDBOX_RACE_REMAP = {
 _CINEMATIC_OFF = 0
 _CINEMATIC_PLAYED = 1
 _CINEMATIC_PENDING = 2
-from server.modules.handlers.world.position.area_service import resolve_zone_from_position
+from server.modules.handlers.world.position.area_service import (
+    resolve_area_from_position,
+    resolve_zone_from_position,
+)
 from server.modules.handlers.world.state.runtime import (
     attach_session_to_world_state,
     build_explored_zones_update_response,
     pack_wow_game_time,
     refresh_region_weather,
-    set_session_explored_zones_state,
     sync_all_players_on_map,
     sync_player_visibility,
 )
 from server.modules.handlers.world.feature_config import (
     gameobjects_enabled,
-    map_cheat_enabled,
     npc_auto_stream_enabled,
     npcs_enabled,
     taxi_cheat_enabled as config_taxi_cheat_enabled,
@@ -757,13 +758,21 @@ def handle_player_login(session, ctx: PacketContext):
             float(session.y),
         ) or int(row.zone or 0)
     )
+    session.current_area = int(
+        resolve_area_from_position(
+            int(session.map_id),
+            float(session.x),
+            float(session.y),
+        ) or int(session.zone)
+    )
 
     Logger.info(
-        "[Position] load guid=%s name=%s map=%s zone=%s x=%.3f y=%.3f z=%.3f o=%.3f",
+        "[Position] load guid=%s name=%s map=%s zone=%s area=%s x=%.3f y=%.3f z=%.3f o=%.3f",
         int(char_guid),
         selected_name,
         int(session.map_id),
         int(session.zone),
+        int(session.current_area),
         float(session.x),
         float(session.y),
         float(session.z),
@@ -818,8 +827,7 @@ def handle_player_login(session, ctx: PacketContext):
     ]
 
     session.explored_zones_raw = str(getattr(row, "exploredZones", "") or "")
-    if map_cheat_enabled():
-        set_session_explored_zones_state(session, True)
+    session.map_cheat_enabled = False
     session.taxi_cheat_enabled = bool(config_taxi_cheat_enabled())
     session.chosen_title = int(getattr(row, "chosenTitle", 0) or 0)
     session.known_titles_raw = str(getattr(row, "knownTitles", "") or "")

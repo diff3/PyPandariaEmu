@@ -44,8 +44,8 @@ from server.modules.handlers.world.opcodes import login as login_handlers
 from server.modules.handlers.world.state.runtime import (
     attach_session_to_world_state,
     build_explored_zones_update_response,
+    effective_explored_zones_for_client,
     force_player_visibility_destroy,
-    set_session_explored_zones_state,
 )
 from server.modules.handlers.world.opcodes import spells as spells_handlers
 from server.modules.handlers.world.opcodes.movement import (
@@ -1009,44 +1009,28 @@ def _build_forced_inventory_slot_resend_responses(session) -> list[tuple[str, by
 
 
 def _build_map_exploration_update_response(session, reveal_all: bool) -> tuple[str, bytes]:
-    explored_zones = set_session_explored_zones_state(session, bool(reveal_all))
-    char_guid = int(getattr(session, "char_guid", 0) or 0)
-    realm_id = int(getattr(session, "realm_id", 0) or 0)
-    if char_guid > 0 and realm_id > 0:
-        DatabaseConnection.save_character_explored_zones(
-            char_guid,
-            realm_id,
-            explored_zones,
-        )
+    session.map_cheat_enabled = bool(reveal_all)
 
     response = build_explored_zones_update_response(session)
     if response is not None:
         return response
 
-    field_value = 0xFFFFFFFF if bool(reveal_all) else 0
+    values = effective_explored_zones_for_client(session)
     return (
         "SMSG_UPDATE_OBJECT",
         build_multi_u32_update_object_payload(
             map_id=int(getattr(session, "map_id", 0) or 0),
             guid=_sender_chat_guid(session),
             field_updates=[
-                (_PLAYER_FIELD_EXPLORED_ZONES + offset, field_value)
-                for offset in range(_PLAYER_EXPLORED_ZONES_SIZE)
+                (_PLAYER_FIELD_EXPLORED_ZONES + offset, int(value))
+                for offset, value in enumerate(values)
             ],
         ),
     )
 
 
 def _build_map_exploration_update_responses(session, reveal_all: bool) -> list[tuple[str, bytes]]:
-    responses = [_build_map_exploration_update_response(session, reveal_all)]
-    if bool(reveal_all):
-        try:
-            from server.modules.handlers.world.title_service import grant_explorer_title_if_missing
-
-            responses.extend(grant_explorer_title_if_missing(session))
-        except Exception as exc:
-            Logger.warning("[Title] explorer auto-grant failed: %s", exc)
-    return responses
+    return [_build_map_exploration_update_response(session, reveal_all)]
 
 
 def send_run_speed(player, speed: float) -> tuple[str, bytes]:
@@ -1209,8 +1193,17 @@ def _build_fixspeed_responses(session) -> list[tuple[str, bytes]]:
 
 def _build_level_command_responses(session) -> list[tuple[str, bytes]]:
     from server.modules.handlers.world.state.runtime import _build_player_value_update_responses
+    from server.modules.handlers.world.achievement_service import update_level_achievements
 
-    responses = list(_build_player_value_update_responses(session))
+    responses: list[tuple[str, bytes]] = []
+    previous_level = int(getattr(session, "previous_level", getattr(session, "level", 1)) or 1)
+    current_level = int(getattr(session, "level", 1) or 1)
+    if current_level > previous_level:
+        levelup_payload = build_login_packet("SMSG_LEVELUP_INFO", session)
+        if levelup_payload is not None:
+            responses.append(("SMSG_LEVELUP_INFO", levelup_payload))
+
+    responses.extend(_build_player_value_update_responses(session))
     guid = int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0)
     if guid <= 0:
         return responses
@@ -1226,6 +1219,7 @@ def _build_level_command_responses(session) -> list[tuple[str, bytes]]:
             ),
         )
     )
+    responses.extend(update_level_achievements(session))
     return responses
 
 
@@ -1401,6 +1395,12 @@ def apply_player_state_change(
         field_updates[_UNIT_FIELD_FLAGS] = int(unit_flags)
 
     if position is not None:
+        try:
+            from server.modules.handlers.world.opcodes.entities import release_current_chair
+            release_current_chair(session, reason="teleport")
+        except Exception as exc:
+            Logger.debug("[CHAIR] release on teleport failed: %s", exc)
+
         old_map_id = int(getattr(session, "map_id", 0) or 0)
         target_map_id = old_map_id if map_id is None else int(map_id)
         same_map = old_map_id == target_map_id

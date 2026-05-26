@@ -109,6 +109,7 @@ class WorldSession:
     # --------------------------------------------------
     map_id: int = 0
     zone: int = 0
+    current_area: int = 0
     instance_id: int = 0
 
     x: float = 0.0
@@ -149,6 +150,9 @@ class WorldSession:
     mount_display_id: int = 0
     equipment_cache_raw: List[int] = field(default_factory=list)
     explored_zones_raw: str = ""
+    map_cheat_enabled: bool = False
+    current_chair: Optional[int] = None
+    current_seat: Optional[int] = None
     inventory_state: Any = None
     inventory_items: Dict[Any, Any] = field(default_factory=dict)
     inventory_by_guid: Dict[int, Any] = field(default_factory=dict)

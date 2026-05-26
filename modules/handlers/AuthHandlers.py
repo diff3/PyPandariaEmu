@@ -41,8 +41,10 @@ AUTH_SERVER_OPCODE_BY_NAME = {
     name: code for code, name in AUTH_SERVER_OPCODES.items()
 }
 _srp6_mode = "skyfire"
-AUTH_LOGON_PROOF_ERROR_GENERIC = 4
-ERR_UNKNOWN_ACCOUNT = 11
+WOW_SUCCESS = 0x00
+WOW_FAIL_UNKNOWN_ACCOUNT = 0x04
+AUTH_LOGON_PROOF_ERROR_GENERIC = WOW_FAIL_UNKNOWN_ACCOUNT
+ACCOUNT_FLAGS_PRO_PASS = 0x00800000
 REALM_CACHE = {}
 REALM_CACHE_TS = 0.0
 REALM_CACHE_TTL = 5.0
@@ -66,6 +68,28 @@ def extract_username(decoded: dict) -> str | None:
 def reset_auth_state(conn_ctx):
     conn_ctx.srp_session = None
     conn_ctx.username = None
+
+
+def mark_auth_failure(conn_ctx, reason: str) -> None:
+    reset_auth_state(conn_ctx)
+    conn_ctx.auth_failed = True
+    conn_ctx.last_error = reason
+
+
+def log_auth_failure_packet(packet_name: str, data: bytes) -> None:
+    Logger.debug(
+        "[AUTH_FAIL_PACKET] name=%s length=%s hex=%s",
+        packet_name,
+        len(data),
+        data.hex().upper(),
+    )
+
+
+def get_remote_ip(sock) -> str:
+    try:
+        return str(sock.getpeername()[0])
+    except Exception:
+        return "unknown"
 
 
 def normalize_account(account) -> dict | None:
@@ -149,24 +173,24 @@ def handle_AUTH_LOGON_CHALLENGE_C(ctx: PacketContext):
     username = extract_username(decoded)
 
     if not username:
-        reset_auth_state(conn_ctx)
+        mark_auth_failure(conn_ctx, "missing username")
 
-        return 0, build_AUTH_LOGON_CHALLENGE_FAILURE_S()
+        return 0, build_AUTH_LOGON_CHALLENGE_S_FAILURE()
 
     account = get_account(username)
 
     if account is None:
-        reset_auth_state(conn_ctx)
+        mark_auth_failure(conn_ctx, "unknown account")
 
-        return 0, build_AUTH_LOGON_CHALLENGE_FAILURE_S()
+        return 0, build_AUTH_LOGON_CHALLENGE_S_FAILURE()
 
     salt = account["salt"]
     verifier = account["verifier"]
 
     if not salt or not verifier:
-        reset_auth_state(conn_ctx)
+        mark_auth_failure(conn_ctx, "missing srp verifier")
 
-        return 0, build_AUTH_LOGON_CHALLENGE_FAILURE_S()
+        return 0, build_AUTH_LOGON_CHALLENGE_S_FAILURE()
 
     # Always create a fresh SRP session per connection
     session = SRP6Session(
@@ -189,8 +213,10 @@ def handle_AUTH_LOGON_CHALLENGE_C(ctx: PacketContext):
         )
 
         conn_ctx.srp_session = None
+        conn_ctx.auth_failed = True
+        conn_ctx.last_error = "srp challenge failed"
 
-        return 0, build_AUTH_LOGON_CHALLENGE_FAILURE_S()
+        return 0, build_AUTH_LOGON_CHALLENGE_S_FAILURE()
 
     fields = {
         "cmd": 0,
@@ -203,7 +229,6 @@ def handle_AUTH_LOGON_CHALLENGE_C(ctx: PacketContext):
         "N": session.core.get_N_bytes(),
         "s": salt,
         "unk3": os.urandom(16),
-        # "unk3": b"\x00" * 16,
         "securityFlags": 0,
     }
 
@@ -223,11 +248,21 @@ def build_AUTH_LOGON_CHALLENGE_S(fields: dict) -> bytes:
     return EncoderHandler.encode_packet("AUTH_LOGON_CHALLENGE_S", fields)
 
 
-def build_AUTH_LOGON_CHALLENGE_FAILURE_S() -> bytes:
-    return build_AUTH_LOGON_CHALLENGE_S({
+def build_AUTH_LOGON_CHALLENGE_S_FAILURE(
+    result: int = WOW_FAIL_UNKNOWN_ACCOUNT,
+) -> bytes:
+    fields = {
         "cmd": 0,
-        "error": ERR_UNKNOWN_ACCOUNT,
-    })
+        "error": WOW_SUCCESS,
+        "result": int(result),
+    }
+
+    out = EncoderHandler.encode_packet(
+        "AUTH_LOGON_CHALLENGE_S_FAILURE",
+        fields,
+    )
+    log_auth_failure_packet("AUTH_LOGON_CHALLENGE_S_FAILURE", out)
+    return out
 
 
 # ---- AUTH_LOGON_PROOF --------------------------------------------------
@@ -242,8 +277,9 @@ def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
         Logger.error(
             "[AUTH_LOGON_PROOF] No SRP session for connection"
         )
+        mark_auth_failure(conn_ctx, "missing srp session")
 
-        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
+        return 0, build_AUTH_LOGON_PROOF_S_FAILURE()
 
     A_raw = decoded.get("A")
     M1_raw = decoded.get("M1")
@@ -258,8 +294,10 @@ def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
         )
 
         conn_ctx.srp_session = None
+        conn_ctx.auth_failed = True
+        conn_ctx.last_error = "invalid proof hex"
 
-        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
+        return 0, build_AUTH_LOGON_PROOF_S_FAILURE()
 
     if not A or not M1:
         Logger.error(
@@ -267,8 +305,10 @@ def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
         )
 
         conn_ctx.srp_session = None
+        conn_ctx.auth_failed = True
+        conn_ctx.last_error = "missing proof values"
 
-        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
+        return 0, build_AUTH_LOGON_PROOF_S_FAILURE()
 
     ok, M2, session_key = session.verify_proof(A, M1)
 
@@ -279,24 +319,23 @@ def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
         Logger.warning(
             "[AUTH_FAIL] user=%s ip=%s reason=srp_failed",
             session.username,
-            ctx.sock.getpeername()[0],
+            get_remote_ip(ctx.sock),
         )
 
-        # Hard reset immediately on bad password
-        conn_ctx.srp_session = None
+        mark_auth_failure(conn_ctx, "srp proof failed")
 
-        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
+        return 0, build_AUTH_LOGON_PROOF_S_FAILURE()
 
     try:
         account = get_account(session.username)
         if not account:
-            conn_ctx.srp_session = None
-            return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
+            mark_auth_failure(conn_ctx, "account missing during proof")
+            return 0, build_AUTH_LOGON_PROOF_S_FAILURE()
 
         update_account_login(
             account.get("id"),
             session_key,
-            ctx.sock.getpeername()[0],
+            get_remote_ip(ctx.sock),
         )
 
         account["session_key"] = session_key
@@ -307,7 +346,7 @@ def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
             exc,
         )
         conn_ctx.srp_session = None
-        return 1, build_AUTH_LOGON_PROOF_FAILURE_S()
+        return 1, None
 
     # Username already lives in conn_ctx
     conn_ctx.username = session.username
@@ -317,7 +356,7 @@ def handle_AUTH_LOGON_PROOF_C(ctx: PacketContext):
             "cmd": 1,
             "error": 0,
             "M2": M2,
-            "unk1": 0x8000,
+            "unk1": ACCOUNT_FLAGS_PRO_PASS,
             "unk2": 0,
             "unk3": 0,
         }
@@ -347,20 +386,20 @@ def build_AUTH_LOGON_PROOF_S(fields: dict) -> bytes:
     return EncoderHandler.encode_packet("AUTH_LOGON_PROOF_S", fields)
 
 
-def build_AUTH_LOGON_PROOF_FAILURE_S(
+def build_AUTH_LOGON_PROOF_S_FAILURE(
     error: int = AUTH_LOGON_PROOF_ERROR_GENERIC,
 ) -> bytes:
-    """
-    Encode a minimal AUTH_LOGON_PROOF_S failure response.
-    """
-    return build_AUTH_LOGON_PROOF_S({
-        "cmd": 1,
-        "error": int(error),
-        "M2": b"\x00" * 20,
-        "unk1": 0,
-        "unk2": 0,
-        "unk3": 0,
-    })
+    out = EncoderHandler.encode_packet(
+        "AUTH_LOGON_PROOF_S_FAILURE",
+        {
+            "cmd": 1,
+            "error": int(error),
+            "unk1": 3,
+            "unk2": 0,
+        },
+    )
+    log_auth_failure_packet("AUTH_LOGON_PROOF_S_FAILURE", out)
+    return out
 
 
 # ---- REALM LIST ----------------------------------------------------------

@@ -34,7 +34,7 @@ from server.modules.handlers.world.account_data import (
     normalize_account_data_text,
 )
 from server.modules.game.equipment import _parse_equipment_cache
-from server.modules.game.guid import _guid_bytes_and_masks
+from server.modules.game.guid import _guid_bytes_and_masks, GuidHelper, HighGuid
 from server.modules.game.player import _decode_player_bytes
 from server.session.runtime import session
 from server.modules.opcodes.WorldOpcodes import (
@@ -429,40 +429,47 @@ def _next_character_guid(session) -> int:
     return max_guid + 1
 
 
-def _normalize_character_slots(session, account_id: int, realm_id: int) -> list[Characters]:
+def _normalize_character_slots(session, account_id: int, realm_id: int):
     rows = (
         session.query(Characters)
         .filter(
-            Characters.account == account_id,
-            Characters.realm == realm_id,
+            Characters.account == int(account_id),
+            Characters.realm == int(realm_id),
         )
-        .order_by(Characters.slot.asc(), Characters.guid.asc())
+        .order_by(
+            Characters.slot.asc(),
+            Characters.guid.asc(),
+        )
         .all()
     )
-    for idx, row in enumerate(rows):
-        if int(row.slot or 0) != idx:
-            row.slot = idx
+
+    #
+    # Rewrite all slots to stable 1-based ordering.
+    #
+    for index, row in enumerate(rows, start=1):
+        row.slot = index
+
+    session.commit()
+
     return rows
 
 
 def _next_character_slot(session, account_id: int, realm_id: int) -> int:
-    rows = _normalize_character_slots(session, account_id, realm_id)
-    return len(rows)
+    rows = _normalize_character_slots(
+        session,
+        account_id,
+        realm_id,
+    )
 
+    if not rows:
+        return 1
 
+    max_slot = max(
+        int(row.slot or 0)
+        for row in rows
+    )
 
-    if realm_id is None:
-        try:
-            realm = DatabaseConnection.get_realmlist()
-            realm_id = int(realm.id) if realm else None
-            if session:
-                session.realm_id = realm_id
-            else:
-                _session_state["realm_id"] = realm_id
-        except Exception:
-            realm_id = None
-
-    return account_id, realm_id
+    return max_slot + 1
 
 def _build_equipment_from_starting_items(race: int, class_: int, gender: int | None = None) -> Optional[list[dict]]:
     equipment_entries = _get_starting_equipment_entries(race, class_, gender)
@@ -908,14 +915,13 @@ def handle_CMSG_CHAR_DELETE(ctx: PacketContext):
 
     return 0, responses
 
-
 def handle_CMSG_REORDER_CHARACTERS(ctx: PacketContext):
     decoded = _log_ctx(ctx)
-
     Logger.info(f"[CHAR REORDER] decoded={to_safe_json(decoded)}")
 
     entries = decoded.get("entries") or []
     if not entries:
+        Logger.info("[CHAR REORDER] No entries to reorder.")
         return 0, None
 
     account_id = None
@@ -934,56 +940,144 @@ def handle_CMSG_REORDER_CHARACTERS(ctx: PacketContext):
         return 0, None
 
     db = DatabaseConnection.chars()
-    try:
-        rows = _normalize_character_slots(db, int(account_id), int(realm_id))
-        by_guid = {int(row.guid): row for row in rows}
-        ordered_guids = [int(row.guid) for row in rows]
 
-        for entry in entries:
-            guid = _coerce_guid_int(entry.get("guid"))
-            if not guid:
-                raw = bytearray(8)
-                has_guid_bytes = False
-                for i in range(8):
-                    key = f"guid_{i}"
-                    if key in entry:
-                        try:
-                            raw[i] = int(entry.get(key)) & 0xFF
-                            has_guid_bytes = True
-                        except Exception:
-                            raw[i] = 0
-                if has_guid_bytes:
-                    guid = int.from_bytes(bytes(raw), "little", signed=False)
-            slot = entry.get("slot")
-            if guid is None or slot is None:
+    try:
+        rows = _normalize_character_slots(
+            db,
+            int(account_id),
+            int(realm_id),
+        )
+
+        if not rows:
+            Logger.warning(
+                f"[CHAR REORDER] No characters found for "
+                f"account={account_id} realm={realm_id}"
+            )
+            return 0, None
+
+        by_guid = {
+            int(row.guid): row
+            for row in rows
+        }
+
+        ordered_guids = [
+            int(row.guid)
+            for row in rows
+        ]
+
+        Logger.info(
+            "[CHAR REORDER] Current DB order: %s",
+            [hex(g) for g in ordered_guids],
+        )
+
+        success_count = 0
+        processed_guids = set()
+
+        #
+        # The client does NOT send full player GUIDs here.
+        # It sends compact low-guid bytes.
+        #
+        success_count = 0
+        processed_guids = set()
+
+        for index, entry in enumerate(entries):
+            try:
+                low_guid = int(entry.get("guid_0", 0) or 1) & 0xFFFFFFFF
+                position_token = int(entry.get("guid_1", 0) or 1)
+
+                #
+                # Client sends:
+                #   0  -> first slot
+                #   10 -> slot 1
+                #   20 -> slot 2
+                # etc
+                #
+                if position_token == 0:
+                    target_slot = 1
+                else:
+                    target_slot = int(position_token // 10)
+
+            except Exception as exc:
+                Logger.warning(
+                    "[CHAR REORDER] Failed to parse entry=%s err=%s",
+                    entry,
+                    exc,
+                )
                 continue
 
-            guid = int(guid) & 0xFFFFFFFF
-            if guid not in by_guid:
+            Logger.debug(
+                "[CHAR REORDER] entry=%s -> guid=%s target_slot=%s",
+                entry,
+                hex(low_guid),
+                target_slot,
+            )
+
+            if low_guid not in by_guid:
+                Logger.warning(
+                    "[CHAR REORDER] GUID %s not found in DB",
+                    hex(low_guid),
+                )
+                continue
+
+            if low_guid in processed_guids:
+                Logger.warning(
+                    "[CHAR REORDER] Duplicate guid %s",
+                    hex(low_guid),
+                )
                 continue
 
             try:
-                target_slot = max(0, min(int(slot), len(ordered_guids) - 1))
-            except Exception:
+                ordered_guids.remove(low_guid)
+            except ValueError:
+                Logger.warning(
+                    "[CHAR REORDER] GUID %s missing from current order",
+                    hex(low_guid),
+                )
                 continue
 
-            ordered_guids.remove(guid)
-            ordered_guids.insert(target_slot, guid)
+            list_index = max(0, target_slot - 1)
 
-        for idx, guid in enumerate(ordered_guids):
-            by_guid[guid].slot = idx
+            list_index = min(
+                list_index,
+                len(ordered_guids),
+            )
+
+            ordered_guids.insert(
+                list_index,
+                low_guid,
+            )
+
+            processed_guids.add(low_guid)
+            success_count += 1
+
+        #
+        # Persist slots
+        #
+        for slot, guid in enumerate(ordered_guids, start=1):
+            row = by_guid.get(guid)
+
+            if row is None:
+                continue
+
+            row.slot = int(slot)
 
         db.commit()
+
         Logger.info(
-            f"[CHAR REORDER] Saved {len(entries)} reorder entries for "
-            f"account={account_id} realm={realm_id}"
+            "[CHAR REORDER] SUCCESS saved=%s new_order=%s",
+            success_count,
+            [hex(g) for g in ordered_guids],
         )
+
     except Exception as exc:
         db.rollback()
-        Logger.error(f"[CHAR REORDER] Failed: {exc}")
+
+        Logger.error(
+            f"[CHAR REORDER] FAILED: {exc}",
+            exc_info=True,
+        )
 
     return 0, None
-
 
 def handle_CMSG_CHAR_CREATE(ctx: PacketContext):
     data = _log_ctx(ctx)

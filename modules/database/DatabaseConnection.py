@@ -1327,7 +1327,7 @@ class DatabaseConnection:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """))
             session.execute(text("""
-                CREATE TABLE IF NOT EXISTS character_achievement_progress (
+                CREATE TABLE IF NOT EXISTS character_achievement_completed (
                     guid BIGINT UNSIGNED NOT NULL,
                     realm INT UNSIGNED NOT NULL DEFAULT 1,
                     achievement_id INT UNSIGNED NOT NULL,
@@ -1479,7 +1479,7 @@ class DatabaseConnection:
             rows = session.execute(
                 text("""
                     SELECT achievement_id, completion_time
-                    FROM character_achievement_progress
+                    FROM character_achievement_completed
                     WHERE guid = :guid AND realm = :realm AND completed = 1
                 """),
                 {"guid": int(char_guid), "realm": int(realm_id)},
@@ -1505,7 +1505,7 @@ class DatabaseConnection:
         try:
             session.execute(
                 text("""
-                    INSERT INTO character_achievement_progress
+                    INSERT INTO character_achievement_completed
                         (guid, realm, achievement_id, completed, completion_time)
                     VALUES
                         (:guid, :realm, :achievement_id, 1, :completion_time)
