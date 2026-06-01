@@ -171,20 +171,64 @@ _PLAYER_CREATE_GUID_MASK_OFFSET = 7
 _PLAYER_CREATE_GUID_VALUE_OFFSET = 8
 _PLAYER_CREATE_MOVEMENT_BLOCK_START = 10
 _PLAYER_CREATE_MOVEMENT_BLOCK_END = 76
-_PLAYER_CREATE_MOVEMENT_X_OFFSET = 29
-_PLAYER_CREATE_MOVEMENT_O_OFFSET = 33
-_PLAYER_CREATE_MOVEMENT_Y_OFFSET = 41
-_PLAYER_CREATE_MOVEMENT_Z_OFFSET = 62
 _PLAYER_CREATE_REMOTE_SELF_FLAG_OFFSET = 14
 _PLAYER_CREATE_REMOTE_SELF_FLAG = 0x40
 _PLAYER_CREATE_OBJECT_TYPE = 4
 _PLAYER_CREATE_UPDATE_COUNT = 1
 _PLAYER_CREATE_UPDATE_TYPE = 2
-_PLAYER_CREATE_CONST_MOVEMENT_BLOCK = bytes.fromhex(
-    "200000004009080000080000490000e040e00f494000009040c3f54840"
-    "de507d465c57d93f00002040aef47d46000090400f000020400000e040"
-    "711c9740fb536c41"
-)
+_PLAYER_CREATE_MOVEMENT_BLOCK_SIZE = 66
+_PLAYER_CREATE_MOVEMENT_HEADER_BITS_SIZE = 13
+
+_PLAYER_CREATE_BIT676 = 0
+_PLAYER_CREATE_HAS_ANIM_KITS = 0
+_PLAYER_CREATE_IS_LIVING = 1
+_PLAYER_CREATE_BIT810 = 0
+_PLAYER_CREATE_TRANSPORT_FRAMES = 0
+_PLAYER_CREATE_HAS_VEHICLE_DATA = 0
+_PLAYER_CREATE_BIT1044 = 0
+_PLAYER_CREATE_BIT476 = 0
+_PLAYER_CREATE_HAS_GAMEOBJECT_ROTATION = 0
+_PLAYER_CREATE_BIT680 = 1
+_PLAYER_CREATE_HAS_ATTACKING_TARGET = 0
+_PLAYER_CREATE_HAS_SCENE_OBJECT_DATA = 0
+_PLAYER_CREATE_BIT1064 = 0
+_PLAYER_CREATE_BIT668 = 0
+_PLAYER_CREATE_HAS_TRANSPORT_POSITION = 0
+_PLAYER_CREATE_BIT681 = 0
+_PLAYER_CREATE_HAS_STATIONARY_POSITION = 0
+_PLAYER_CREATE_GUID_BIT_2 = 0
+_PLAYER_CREATE_BIT140 = 0
+_PLAYER_CREATE_HAS_PITCH = 0
+_PLAYER_CREATE_HAS_TRANSPORT_DATA = 0
+_PLAYER_CREATE_HAS_TIMESTAMP = 0
+_PLAYER_CREATE_GUID_BIT_6 = 0
+_PLAYER_CREATE_GUID_BIT_4 = 0
+_PLAYER_CREATE_GUID_BIT_3 = 0
+_PLAYER_CREATE_HAS_ORIENTATION = 1
+_PLAYER_CREATE_BIT160 = 0
+_PLAYER_CREATE_GUID_BIT_5 = 0
+_PLAYER_CREATE_BITS98 = 0
+_PLAYER_CREATE_HAS_MOVEMENT_FLAGS = 0
+_PLAYER_CREATE_BITS168 = 0
+_PLAYER_CREATE_HAS_FALL_DATA = 0
+_PLAYER_CREATE_HAS_SPLINE_ELEVATION = 0
+_PLAYER_CREATE_HAS_SPLINE_DATA = 0
+_PLAYER_CREATE_BIT141 = 0
+_PLAYER_CREATE_GUID_BIT_0 = 1
+_PLAYER_CREATE_GUID_BIT_7 = 0
+_PLAYER_CREATE_GUID_BIT_1 = 0
+_PLAYER_CREATE_HAS_MOVEMENT_FLAGS_EXTRA = 0
+
+_PLAYER_CREATE_FLY_SPEED = 7.0
+_PLAYER_CREATE_TURN_SPEED = 3.1415939331054688
+_PLAYER_CREATE_SWIM_SPEED = 4.5
+_PLAYER_CREATE_PITCH_SPEED = 3.140000104904175
+_PLAYER_CREATE_WALK_SPEED = 2.5
+_PLAYER_CREATE_FLY_BACK_SPEED = 4.5
+_PLAYER_CREATE_MOVEMENT_GUID_BYTE = 0x0F
+_PLAYER_CREATE_RUN_BACK_SPEED = 2.5
+_PLAYER_CREATE_RUN_SPEED = 7.0
+_PLAYER_CREATE_SWIM_BACK_SPEED = 4.722221851348877
 
 _OBJECT_FIELD_GUID_LOW = 0
 _OBJECT_FIELD_TYPE = 4
@@ -652,7 +696,7 @@ def _locate_server_built_create_field_region(payload: bytes) -> dict[str, int] |
             return None
 
         offset += 1
-        mask_offset = offset + len(_PLAYER_CREATE_CONST_MOVEMENT_BLOCK)
+        mask_offset = offset + _PLAYER_CREATE_MOVEMENT_BLOCK_SIZE
         if mask_offset >= len(payload):
             return None
 
@@ -790,17 +834,104 @@ def _diff_bytes(a: bytes, b: bytes) -> list[tuple[int, int, int]]:
     return [(index, a[index], b[index]) for index in range(min(len(a), len(b))) if a[index] != b[index]]
 
 
-def _write_float_le(buffer: bytearray, offset: int, value: float) -> None:
-    struct.pack_into("<f", buffer, int(offset), float(value))
+def _pack_msb_bits(values: list[tuple[int, int]]) -> bytes:
+    output = bytearray()
+    current = 0
+    bit_count = 0
+    for value, width in values:
+        for bit_index in range(int(width) - 1, -1, -1):
+            current = (current << 1) | ((int(value) >> bit_index) & 1)
+            bit_count += 1
+            if bit_count == 8:
+                output.append(current)
+                current = 0
+                bit_count = 0
+    if bit_count:
+        output.append(current << (8 - bit_count))
+    return bytes(output)
+
+
+def build_player_create_movement_header() -> bytes:
+    """Build the known CreateObject movement bit header and speed section."""
+    header_bits = _pack_msb_bits([
+        (_PLAYER_CREATE_BIT676, 1),
+        (_PLAYER_CREATE_HAS_ANIM_KITS, 1),
+        (_PLAYER_CREATE_IS_LIVING, 1),
+        (_PLAYER_CREATE_BIT810, 1),
+        (0, 1),  # fake bit
+        (_PLAYER_CREATE_TRANSPORT_FRAMES, 22),
+        (_PLAYER_CREATE_HAS_VEHICLE_DATA, 1),
+        (_PLAYER_CREATE_BIT1044, 1),
+        (0, 1),  # fake bit
+        (_PLAYER_CREATE_BIT476, 1),
+        (_PLAYER_CREATE_HAS_GAMEOBJECT_ROTATION, 1),
+        (0, 1),  # fake bit
+        (_PLAYER_CREATE_BIT680, 1),
+        (_PLAYER_CREATE_HAS_ATTACKING_TARGET, 1),
+        (_PLAYER_CREATE_HAS_SCENE_OBJECT_DATA, 1),
+        (_PLAYER_CREATE_BIT1064, 1),
+        (0, 1),  # fake bit
+        (_PLAYER_CREATE_BIT668, 1),
+        (_PLAYER_CREATE_HAS_TRANSPORT_POSITION, 1),
+        (_PLAYER_CREATE_BIT681, 1),
+        (_PLAYER_CREATE_HAS_STATIONARY_POSITION, 1),
+        (_PLAYER_CREATE_GUID_BIT_2, 1),
+        (_PLAYER_CREATE_BIT140, 1),
+        (0 if _PLAYER_CREATE_HAS_PITCH else 1, 1),
+        (_PLAYER_CREATE_HAS_TRANSPORT_DATA, 1),
+        (0, 1),  # fake bit
+        (0 if _PLAYER_CREATE_HAS_TIMESTAMP else 1, 1),
+        (_PLAYER_CREATE_GUID_BIT_6, 1),
+        (_PLAYER_CREATE_GUID_BIT_4, 1),
+        (_PLAYER_CREATE_GUID_BIT_3, 1),
+        (0 if _PLAYER_CREATE_HAS_ORIENTATION else 1, 1),
+        (0 if _PLAYER_CREATE_BIT160 else 1, 1),
+        (_PLAYER_CREATE_GUID_BIT_5, 1),
+        (_PLAYER_CREATE_BITS98, 22),
+        (0 if _PLAYER_CREATE_HAS_MOVEMENT_FLAGS else 1, 1),
+        (_PLAYER_CREATE_BITS168, 19),
+        (_PLAYER_CREATE_HAS_FALL_DATA, 1),
+        (0 if _PLAYER_CREATE_HAS_SPLINE_ELEVATION else 1, 1),
+        (_PLAYER_CREATE_HAS_SPLINE_DATA, 1),
+        (_PLAYER_CREATE_BIT141, 1),
+        (_PLAYER_CREATE_GUID_BIT_0, 1),
+        (_PLAYER_CREATE_GUID_BIT_7, 1),
+        (_PLAYER_CREATE_GUID_BIT_1, 1),
+        (0 if _PLAYER_CREATE_HAS_MOVEMENT_FLAGS_EXTRA else 1, 1),
+    ])
+    if len(header_bits) != _PLAYER_CREATE_MOVEMENT_HEADER_BITS_SIZE:
+        raise ValueError("player create movement header size mismatch")
+
+    output = bytearray(header_bits)
+    # Speed section. These are named bootstrap defaults, not runtime movement
+    # authority; changing them would change packet identity.
+    output.extend(struct.pack("<f", _PLAYER_CREATE_FLY_SPEED))
+    output.extend(struct.pack("<f", _PLAYER_CREATE_TURN_SPEED))
+    output.extend(struct.pack("<f", _PLAYER_CREATE_SWIM_SPEED))
+    output.extend(struct.pack("<f", _PLAYER_CREATE_PITCH_SPEED))
+    return bytes(output)
 
 
 def build_movement_block(ctx) -> bytes:
     """Build the player CREATE_OBJECT movement block from code-only constants."""
-    output = bytearray(_PLAYER_CREATE_CONST_MOVEMENT_BLOCK)
-    _write_float_le(output, _PLAYER_CREATE_MOVEMENT_X_OFFSET, float(getattr(ctx, "x", 0.0) or 0.0))
-    _write_float_le(output, _PLAYER_CREATE_MOVEMENT_Y_OFFSET, float(getattr(ctx, "y", 0.0) or 0.0))
-    _write_float_le(output, _PLAYER_CREATE_MOVEMENT_Z_OFFSET, float(getattr(ctx, "z", 0.0) or 0.0))
-    _write_float_le(output, _PLAYER_CREATE_MOVEMENT_O_OFFSET, float(getattr(ctx, "orientation", 0.0) or 0.0))
+    output = bytearray(build_player_create_movement_header())
+    # Position section. These are the live-owned bytes in the create movement
+    # block and are patched from the login/runtime context.
+    output.extend(struct.pack("<f", float(getattr(ctx, "x", 0.0) or 0.0)))
+    output.extend(struct.pack("<f", float(getattr(ctx, "orientation", 0.0) or 0.0)))
+    output.extend(struct.pack("<f", _PLAYER_CREATE_WALK_SPEED))
+    output.extend(struct.pack("<f", float(getattr(ctx, "y", 0.0) or 0.0)))
+    output.extend(struct.pack("<f", _PLAYER_CREATE_FLY_BACK_SPEED))
+    # Guid section. The bit header only includes guid byte 0 today. This remains
+    # fixed in Phase 1 because deriving it would alter packets for non-captured
+    # low GUIDs.
+    output.append(_PLAYER_CREATE_MOVEMENT_GUID_BYTE)
+    output.extend(struct.pack("<f", _PLAYER_CREATE_RUN_BACK_SPEED))
+    output.extend(struct.pack("<f", _PLAYER_CREATE_RUN_SPEED))
+    output.extend(struct.pack("<f", _PLAYER_CREATE_SWIM_BACK_SPEED))
+    output.extend(struct.pack("<f", float(getattr(ctx, "z", 0.0) or 0.0)))
+    if len(output) != _PLAYER_CREATE_MOVEMENT_BLOCK_SIZE:
+        raise ValueError("player create movement block size mismatch")
     return bytes(output)
 
 

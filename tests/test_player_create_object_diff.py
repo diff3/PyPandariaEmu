@@ -13,6 +13,7 @@ import types
 
 from server.modules.handlers.world.bootstrap import playerobjects
 from server.modules.handlers.world.bootstrap.playerobjects import (
+    build_movement_block,
     build_full_player_create,
     build_update_mask,
     build_player_field_values,
@@ -20,6 +21,13 @@ from server.modules.handlers.world.bootstrap.playerobjects import (
     locate_mask_region,
     locate_field_region,
     extract_field_indices,
+)
+
+
+EXPECTED_PLAYER_CREATE_MOVEMENT_BLOCK = bytes.fromhex(
+    "200000004009080000080000490000e040e00f494000009040c3f54840"
+    "de507d465c57d93f00002040aef47d46000090400f000020400000e040"
+    "711c9740fb536c41"
 )
 
 
@@ -504,6 +512,24 @@ def test_remote_player_create_clears_local_self_movement_flag() -> None:
     assert self_payload[14] == 0x40
     assert remote_payload[14] == 0x00
     assert self_payload[:14] + b"\x00" + self_payload[15:] == remote_payload
+
+
+def test_player_create_movement_block_matches_known_bytes_for_self_and_remote() -> None:
+    """The native movement-block builder must preserve the previous byte shape."""
+    ctx = SimpleNamespace(
+        char_guid=14,
+        player_guid=14,
+        world_guid=14,
+        exact_0002_low_guid=14,
+        x=16212.216796875,
+        y=16253.169921875,
+        z=14.770503044128418,
+        orientation=1.6979784965515137,
+    )
+    remote_ctx = SimpleNamespace(**vars(ctx), exact_0002_remote_player=True)
+
+    assert build_movement_block(ctx) == EXPECTED_PLAYER_CREATE_MOVEMENT_BLOCK
+    assert build_movement_block(remote_ctx) == EXPECTED_PLAYER_CREATE_MOVEMENT_BLOCK
 
 
 def test_server_built_create_mask_roundtrip_matches_field_values() -> None:
