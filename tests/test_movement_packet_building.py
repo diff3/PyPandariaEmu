@@ -426,7 +426,7 @@ def test_circle_run_flags2_clears_when_combination_ends() -> None:
     assert not state.flags2 & movement._MOVEMENTFLAG2_CIRCLE_RUN_SYNC
 
 
-def test_post_jump_ground_movement_clears_fall_and_turn_state() -> None:
+def test_post_jump_ground_movement_clears_fall_state_without_canceling_held_turn() -> None:
     state = SimpleNamespace(
         x=0.0,
         y=0.0,
@@ -457,7 +457,7 @@ def test_post_jump_ground_movement_clears_fall_and_turn_state() -> None:
     assert ok is True
     assert state.flags & movement._MOVEMENTFLAG_FORWARD
     assert not state.flags & movement._MOVEMENTFLAG_FALLING
-    assert not state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+    assert state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
     assert state.has_fall_data is False
     assert state.fall_time == 0
     assert state.fall_vertical_speed == 0.0
@@ -1431,7 +1431,7 @@ def test_fall_land_clears_fall_data_in_movement_state() -> None:
     assert state.fall_cos_angle == 0.0
 
 
-def test_stale_fall_land_still_clears_fall_state() -> None:
+def test_small_timestamp_backstep_fall_land_still_clears_fall_state() -> None:
     state = SimpleNamespace(
         x=0.0,
         y=0.0,
@@ -1453,7 +1453,9 @@ def test_stale_fall_land_still_clears_fall_state() -> None:
 
     ok = movement._store_authoritative_movement(session, "MSG_MOVE_FALL_LAND", payload, None)
 
-    assert ok is False
+    assert ok is True
+    assert state.client_timestamp_ms == 999
+    assert state.timestamp_ms == 1001
     assert state.has_fall_data is False
     assert state.fall_time == 0
     assert state.fall_vertical_speed == 0.0
@@ -1461,6 +1463,216 @@ def test_stale_fall_land_still_clears_fall_state() -> None:
     assert state.fall_sin_angle == 0.0
     assert state.fall_cos_angle == 0.0
     assert not state.flags & movement._MOVEMENTFLAG_FALLING
+
+
+def test_fall_land_preserves_held_locomotion_flags() -> None:
+    state = SimpleNamespace(
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=0.5,
+        flags=(
+            movement._MOVEMENTFLAG_FORWARD
+            | movement._MOVEMENTFLAG_STRAFE_LEFT
+            | movement._MOVEMENTFLAG_TURN_RIGHT
+            | movement._MOVEMENTFLAG_FALLING
+        ),
+        flags2=0,
+        timestamp_ms=1000,
+        client_timestamp_ms=1000,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=True,
+        fall_time=123,
+        fall_vertical_speed=-7.9,
+        fall_horizontal_speed=2.0,
+        fall_sin_angle=0.47,
+        fall_cos_angle=-0.88,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        x=state.x,
+        y=state.y,
+        z=state.z,
+        orientation=state.orientation,
+        movement_state=state,
+        can_fly=False,
+        is_flying=False,
+    )
+    payload = (b"\x00" * 24) + (1001).to_bytes(4, "little")
+
+    ok = movement._store_authoritative_movement(session, "MSG_MOVE_FALL_LAND", payload, None)
+
+    assert ok is True
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert state.flags & movement._MOVEMENTFLAG_STRAFE_LEFT
+    assert state.flags & movement._MOVEMENTFLAG_TURN_RIGHT
+    assert not state.flags & movement._MOVEMENTFLAG_FALLING
+    assert state.has_fall_data is False
+
+
+def test_older_fall_land_cannot_overwrite_newer_position() -> None:
+    state = SimpleNamespace(
+        x=4.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.25,
+        flags=movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_FALLING,
+        flags2=0,
+        timestamp_ms=1500,
+        client_timestamp_ms=1500,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=True,
+        fall_time=100,
+        fall_vertical_speed=-7.9,
+        fall_horizontal_speed=7.0,
+        fall_sin_angle=0.0,
+        fall_cos_angle=1.0,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        x=4.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.25,
+        movement_state=state,
+        can_fly=False,
+        is_flying=False,
+    )
+    payload = (b"\x00" * 24) + (1200).to_bytes(4, "little")
+
+    ok = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_FALL_LAND",
+        payload,
+        (1.0, 0.0, 0.0, 0.5),
+    )
+
+    assert ok is True
+    assert state.x == 4.0
+    assert state.y == 0.0
+    assert state.z == 0.0
+    assert state.orientation == 0.25
+    assert session.x == 4.0
+    assert session.y == 0.0
+    assert session.z == 0.0
+    assert session.orientation == 0.25
+    assert not state.flags & movement._MOVEMENTFLAG_FALLING
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert state.has_fall_data is False
+
+
+def test_older_movement_packet_cannot_move_player_backwards() -> None:
+    state = SimpleNamespace(
+        x=8.0,
+        y=0.0,
+        z=0.0,
+        orientation=1.0,
+        flags=movement._MOVEMENTFLAG_FORWARD,
+        flags2=0,
+        timestamp_ms=2000,
+        client_timestamp_ms=2000,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+        fall_horizontal_speed=0.0,
+        fall_sin_angle=0.0,
+        fall_cos_angle=0.0,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        x=8.0,
+        y=0.0,
+        z=0.0,
+        orientation=1.0,
+        movement_state=state,
+        can_fly=False,
+        is_flying=False,
+    )
+    payload = (b"\x00" * 28) + (1500).to_bytes(4, "little")
+
+    ok = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_HEARTBEAT",
+        payload,
+        (2.0, 0.0, 0.0, 0.5),
+    )
+
+    assert ok is True
+    assert state.x == 8.0
+    assert state.y == 0.0
+    assert state.z == 0.0
+    assert state.orientation == 1.0
+    assert session.x == 8.0
+    assert session.y == 0.0
+    assert session.z == 0.0
+    assert session.orientation == 1.0
+
+
+def test_jump_then_current_fall_land_updates_position_and_clears_fall_state() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=movement._MOVEMENTFLAG_FORWARD,
+        flags2=0,
+        timestamp_ms=1000,
+        client_timestamp_ms=1000,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+        fall_horizontal_speed=0.0,
+        fall_sin_angle=0.0,
+        fall_cos_angle=0.0,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        movement_state=state,
+        can_fly=False,
+        is_flying=False,
+    )
+
+    jump_ok = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_JUMP",
+        (b"\x00" * 48) + (1100).to_bytes(4, "little"),
+        (1.0, 0.0, 1.0, 0.25),
+    )
+    land_ok = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_FALL_LAND",
+        (b"\x00" * 24) + (1200).to_bytes(4, "little"),
+        (4.0, 0.0, 0.0, 0.25),
+    )
+
+    assert jump_ok is True
+    assert land_ok is True
+    assert state.x == 4.0
+    assert state.y == 0.0
+    assert state.z == 0.0
+    assert state.orientation == 0.25
+    assert session.x == 4.0
+    assert not state.flags & movement._MOVEMENTFLAG_FALLING
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert state.has_fall_data is False
 
 
 def test_fall_land_does_not_cancel_active_flying_mount() -> None:
@@ -1507,7 +1719,141 @@ def test_fall_land_does_not_cancel_active_flying_mount() -> None:
     assert state.has_fall_data is False
 
 
-def test_stale_stop_strafe_still_clears_strafe_flags() -> None:
+def test_start_swim_enters_swimming_and_clears_fall_and_flying() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=10.0,
+        orientation=0.0,
+        flags=(
+            movement._MOVEMENTFLAG_FALLING
+            | movement._MOVEMENTFLAG_FLYING
+            | movement._MOVEMENTFLAG_ASCENDING
+        ),
+        flags2=0,
+        timestamp_ms=1000,
+        client_timestamp_ms=1000,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=True,
+        fall_time=123,
+        fall_vertical_speed=-7.9,
+        fall_horizontal_speed=2.0,
+        fall_sin_angle=0.47,
+        fall_cos_angle=-0.88,
+        is_ascending=True,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        movement_state=state,
+        can_fly=True,
+        is_flying=True,
+        mount_spell=0,
+    )
+
+    ok = movement._store_authoritative_movement(session, "MSG_MOVE_START_SWIM", b"", None)
+
+    assert ok is True
+    assert session.is_flying is False
+    assert state.flags & movement._MOVEMENTFLAG_SWIMMING
+    assert not state.flags & movement._MOVEMENTFLAG_FALLING
+    assert not state.flags & movement._MOVEMENTFLAG_FLYING
+    assert not state.flags & movement._MOVEMENTFLAG_ASCENDING
+    assert not state.flags & movement._MOVEMENTFLAG_DESCENDING
+    assert state.has_fall_data is False
+    assert state.is_ascending is False
+    assert state.is_descending is False
+
+
+def test_start_swim_wins_over_active_flying_mount() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=10.0,
+        orientation=0.0,
+        flags=(
+            movement._MOVEMENTFLAG_CAN_FLY
+            | movement._MOVEMENTFLAG_FLYING
+            | movement._MOVEMENTFLAG_FALLING
+        ),
+        flags2=0,
+        timestamp_ms=1000,
+        client_timestamp_ms=1000,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=True,
+        fall_time=123,
+        fall_vertical_speed=-7.9,
+        fall_horizontal_speed=2.0,
+        fall_sin_angle=0.47,
+        fall_cos_angle=-0.88,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        movement_state=state,
+        can_fly=True,
+        is_flying=True,
+        mount_spell=72286,
+    )
+
+    ok = movement._store_authoritative_movement(session, "MSG_MOVE_START_SWIM", b"", None)
+
+    assert ok is True
+    assert movement._movement_is_flying(session) is False
+    assert movement._has_active_flying_mount(session) is False
+    assert session.is_flying is False
+    assert state.flags & movement._MOVEMENTFLAG_CAN_FLY
+    assert state.flags & movement._MOVEMENTFLAG_SWIMMING
+    assert not state.flags & movement._MOVEMENTFLAG_FLYING
+    assert not state.flags & movement._MOVEMENTFLAG_FALLING
+
+
+def test_stop_swim_clears_swimming_flag() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=movement._MOVEMENTFLAG_SWIMMING,
+        flags2=0,
+        timestamp_ms=1000,
+        client_timestamp_ms=1000,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+        fall_horizontal_speed=0.0,
+        fall_sin_angle=0.0,
+        fall_cos_angle=0.0,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        movement_state=state,
+        can_fly=False,
+        is_flying=False,
+        mount_spell=0,
+    )
+
+    ok = movement._store_authoritative_movement(session, "MSG_MOVE_STOP_SWIM", b"", None)
+
+    assert ok is True
+    assert not state.flags & movement._MOVEMENTFLAG_SWIMMING
+
+
+def test_swim_opcodes_use_normal_movement_handler() -> None:
+    from server.modules.handlers.world.dispatcher import HANDLERS
+
+    assert HANDLERS["MSG_MOVE_START_SWIM"] is movement.handle_movement_packet
+    assert HANDLERS["MSG_MOVE_STOP_SWIM"] is movement.handle_movement_packet
+
+
+def test_small_timestamp_backstep_stop_strafe_still_clears_strafe_flags() -> None:
     state = SimpleNamespace(
         x=0.0,
         y=0.0,
@@ -1516,6 +1862,31 @@ def test_stale_stop_strafe_still_clears_strafe_flags() -> None:
         flags=movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_STRAFE_LEFT,
         flags2=0,
         timestamp_ms=1000,
+        counter=0,
+    )
+    session = SimpleNamespace(movement_state=state)
+    payload = (b"\x00" * 20) + (999).to_bytes(4, "little")
+
+    ok = movement._store_authoritative_movement(session, "MSG_MOVE_STOP_STRAFE", payload, None)
+
+    assert ok is True
+    assert state.client_timestamp_ms == 999
+    assert state.timestamp_ms == 1001
+    assert state.flags & movement._MOVEMENTFLAG_FORWARD
+    assert not state.flags & movement._MOVEMENTFLAG_STRAFE_LEFT
+    assert not state.flags & movement._MOVEMENTFLAG_STRAFE_RIGHT
+
+
+def test_severely_stale_stop_strafe_is_rejected_after_cleanup() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        flags=movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_STRAFE_LEFT,
+        flags2=0,
+        timestamp_ms=20000,
+        client_timestamp_ms=20000,
         counter=0,
     )
     session = SimpleNamespace(movement_state=state)
@@ -2091,6 +2462,84 @@ def test_handle_fall_land_clears_flying_state_and_restores_run_speed(monkeypatch
     assert not movement_state.flags & movement._MOVEMENTFLAG_ASCENDING
     assert not movement_state.flags & movement._MOVEMENTFLAG_DESCENDING
     assert broadcast_calls == [True]
+
+
+def test_handle_ground_fall_land_does_not_restore_unchanged_run_speed(monkeypatch) -> None:
+    run_speed_responses: list[bool] = []
+    session = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=31.0,
+        orientation=1.25,
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        realm_id=1,
+        run_speed=7.0,
+        fly_speed=7.0,
+        can_fly=False,
+        is_flying=False,
+    )
+    movement_state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=31.0,
+        orientation=1.25,
+        flags=movement._MOVEMENTFLAG_FORWARD | movement._MOVEMENTFLAG_FALLING,
+        flags2=0,
+        timestamp_ms=0,
+        counter=0,
+        has_fall_data=True,
+        fall_time=100,
+        fall_vertical_speed=-7.9,
+        fall_horizontal_speed=7.0,
+        fall_sin_angle=0.0,
+        fall_cos_angle=1.0,
+        is_ascending=False,
+        is_descending=False,
+        pitch=0.0,
+    )
+    ctx = SimpleNamespace(
+        name="MSG_MOVE_FALL_LAND",
+        opcode=0,
+        payload=b"\x00" * 40,
+        decoded={},
+    )
+
+    monkeypatch.setattr(movement, "_consume_pending_teleport_on_movement", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args, **kwargs: (11.0, 20.0, 30.0, 1.25))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_movement_state", lambda _session: movement_state)
+    monkeypatch.setattr(
+        movement,
+        "_sync_session_from_movement_state",
+        lambda target: (
+            setattr(target, "x", movement_state.x),
+            setattr(target, "y", movement_state.y),
+            setattr(target, "z", movement_state.z),
+            setattr(target, "orientation", movement_state.orientation),
+        ),
+    )
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda _session: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_periodic_position_save", lambda _session: None)
+    monkeypatch.setattr(movement, "_maybe_stream_gameobjects", lambda _session: [])
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        movement,
+        "build_move_set_run_speed_payload",
+        lambda _session: run_speed_responses.append(True) or b"run-speed",
+    )
+
+    status, responses = movement.handle_movement_packet(session, ctx)
+
+    assert status == 0
+    assert responses is None
+    assert run_speed_responses == []
+    assert session.is_flying is False
+    assert not movement_state.flags & movement._MOVEMENTFLAG_FALLING
+    assert movement_state.flags & movement._MOVEMENTFLAG_FORWARD
 
 
 def test_handle_fall_land_on_active_flying_mount_does_not_restore_run_speed(monkeypatch) -> None:

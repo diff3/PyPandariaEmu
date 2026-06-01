@@ -272,6 +272,16 @@ def test_update_object_0004_matches_pandaria548_value_update_shape():
     update = decoded["updates"][0]
 
     assert len(payload) == 288
+    assert payload == bytes.fromhex(
+        "010001000000008103073f4000000000000000e000000000000000000000000400000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000733c0000733c000000000000000000000100000000"
+    )
     assert update["update_type"] == 0
     assert update["guid"] == 0x0700000000000003
     assert update["mask_blocks"] == 63
@@ -279,6 +289,15 @@ def test_update_object_0004_matches_pandaria548_value_update_shape():
     assert update["fields"]["u32"] == [0, 15475, 15475, 0, 0]
     assert update["dynamic_mask_blocks"] == 1
     assert payload[-4:] == b"\x00\x00\x00\x00"
+
+
+def test_update_object_0003_template_builder_is_not_dispatched():
+    payload = login_packets.build_login_packet(
+        "SMSG_UPDATE_OBJECT_1773613176_0003",
+        SimpleNamespace(),
+    )
+    assert payload is None
+    assert not hasattr(login_packets, "build_SMSG_UPDATE_OBJECT_1773613176_0003")
 
 
 def test_update_object_1775665925_0004_matches_sniff_exactly():

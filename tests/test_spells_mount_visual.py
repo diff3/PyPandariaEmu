@@ -416,10 +416,10 @@ def test_login_flying_mount_restore_sends_flying_enable(monkeypatch):
     assert session.is_flying is True
     assert session.active_fly_aura_spell_id is not None
     assert session.fly_speed == session.run_speed * 3.2
-    assert session.movement_state.x == 100.0
-    assert session.movement_state.y == 200.0
-    assert session.movement_state.z == 300.0
-    assert session.movement_state.orientation == 1.5
+    assert session.movement_state.x == 0.0
+    assert session.movement_state.y == 0.0
+    assert session.movement_state.z == 0.0
+    assert session.movement_state.orientation == 0.0
     assert session.movement_state.has_fall_data is False
     assert session.movement_state.fall_vertical_speed == 0.0
     assert responses[4][1] == b"spline-fly"
@@ -493,6 +493,114 @@ def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
     assert session.can_fly is False
     assert session.is_flying is False
     assert not session.movement_state.flags & spells_handlers._MOVEMENTFLAG_FLYING_CAPABILITY
+
+
+def _mount_position_session(*, attached_to_transport: bool) -> SimpleNamespace:
+    movement_state = SimpleNamespace(
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.25,
+        flags=0,
+        is_ascending=False,
+        is_descending=False,
+        has_fall_data=True,
+        fall_time=123,
+        fall_vertical_speed=-1.0,
+        fall_horizontal_speed=2.0,
+        fall_sin_angle=0.25,
+        fall_cos_angle=0.75,
+        transport_guid=0,
+        transport_x=0.0,
+        transport_y=0.0,
+        transport_z=0.0,
+        transport_orientation=0.0,
+    )
+    if attached_to_transport:
+        movement_state.transport_guid = 0x1FC00000000186A7
+        movement_state.transport_x = 3.0
+        movement_state.transport_y = 4.0
+        movement_state.transport_z = 5.0
+        movement_state.transport_orientation = 0.5
+
+    return SimpleNamespace(
+        map_id=1,
+        char_guid=3,
+        world_guid=0x0003000100000003,
+        unit_flags=0x00000020,
+        mount_display_id=0,
+        mount_spell=None,
+        is_mounted=False,
+        can_fly=False,
+        is_flying=False,
+        x=100.0,
+        y=200.0,
+        z=300.0,
+        orientation=2.5,
+        movement_state=movement_state,
+        transport_attach_state="ATTACHED" if attached_to_transport else "DETACHED",
+        run_speed=7.0,
+        fly_speed=7.0,
+        display_id=15475,
+        native_display_id=15475,
+        active_mount_aura_spell_id=None,
+        active_mount_aura_slot=0,
+        active_fly_aura_spell_id=None,
+    )
+
+
+def _position_snapshot(session) -> tuple[float, ...]:
+    state = session.movement_state
+    return (
+        float(session.x),
+        float(session.y),
+        float(session.z),
+        float(session.orientation),
+        float(state.x),
+        float(state.y),
+        float(state.z),
+        float(state.orientation),
+        float(state.transport_x),
+        float(state.transport_y),
+        float(state.transport_z),
+        float(state.transport_orientation),
+    )
+
+
+def test_flying_mount_and_dismount_preserve_terrain_position_and_orientation(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda spell_id: 31007)
+    monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda spell_id: True)
+    monkeypatch.setattr(spells_handlers, "build_move_set_run_speed_payload", lambda session: b"run")
+    monkeypatch.setattr(spells_handlers, "build_move_set_flight_speed_payload", lambda session: b"flight")
+    monkeypatch.setattr(spells_handlers, "build_multi_u32_update_object_payload", lambda **fields: b"mount-update")
+
+    session = _mount_position_session(attached_to_transport=False)
+    before = _position_snapshot(session)
+
+    spells_handlers.handle_mount(session, 72286)
+    assert _position_snapshot(session) == before
+
+    spells_handlers.dismount(session)
+    assert _position_snapshot(session) == before
+
+
+def test_flying_mount_and_dismount_preserve_transport_position_and_orientation(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda spell_id: 31007)
+    monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda spell_id: True)
+    monkeypatch.setattr(spells_handlers, "build_move_set_run_speed_payload", lambda session: b"run")
+    monkeypatch.setattr(spells_handlers, "build_move_set_flight_speed_payload", lambda session: b"flight")
+    monkeypatch.setattr(spells_handlers, "build_multi_u32_update_object_payload", lambda **fields: b"mount-update")
+
+    session = _mount_position_session(attached_to_transport=True)
+    before = _position_snapshot(session)
+
+    spells_handlers.handle_mount(session, 72286)
+    assert _position_snapshot(session) == before
+
+    spells_handlers.dismount(session)
+    assert _position_snapshot(session) == before
 
 
 def test_handle_cast_spell_mount_button_toggles_to_dismount(monkeypatch):

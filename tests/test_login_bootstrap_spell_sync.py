@@ -23,30 +23,33 @@ from server.modules.handlers.world.opcodes import login as login_handlers
 from server.session.world_session import LoginState
 
 
-def test_run_replay_bootstrap_flag_on_uses_replay(monkeypatch) -> None:
+def test_build_player_bootstrap_packets_uses_native_builders(monkeypatch) -> None:
     session = SimpleNamespace()
+    calls: list[str] = []
 
-    monkeypatch.setattr(login_handlers, "USE_REPLAY_BOOTSTRAP", True)
+    monkeypatch.setattr(login_handlers, "_build_world_login_context", lambda _session: SimpleNamespace())
     monkeypatch.setattr(
-        login_handlers.bootstrap_replay,
-        "replay_movement_focus_sequence",
-        lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
+        login_handlers,
+        "build_login_packet",
+        lambda opcode_name, _ctx: calls.append(opcode_name)
+        or {
+            "SMSG_MOVE_SET_ACTIVE_MOVER": b"active-mover",
+            "SMSG_UPDATE_OBJECT_1773613176_0002": b"player-create",
+        }.get(opcode_name),
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_database_gameobject_responses",
+        lambda _session: [("SMSG_UPDATE_OBJECT", b"gameobject-create")],
     )
 
-    assert login_handlers.run_replay_bootstrap(session) == [("SMSG_UPDATE_OBJECT", b"create")]
-
-
-def test_run_replay_bootstrap_flag_off_uses_future_server_path(monkeypatch) -> None:
-    session = SimpleNamespace()
-
-    monkeypatch.setattr(login_handlers, "USE_REPLAY_BOOTSTRAP", False)
-    monkeypatch.setattr(
-        login_handlers.bootstrap_replay,
-        "replay_movement_focus_sequence",
-        lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
-    )
-
-    assert login_handlers.run_replay_bootstrap(session) == []
+    assert login_handlers.build_player_bootstrap_packets(session) == [
+        ("SMSG_MOVE_SET_ACTIVE_MOVER", b"active-mover"),
+        ("SMSG_UPDATE_OBJECT", b"player-create"),
+        ("SMSG_UPDATE_OBJECT", b"gameobject-create"),
+    ]
+    assert calls == ["SMSG_MOVE_SET_ACTIVE_MOVER", "SMSG_UPDATE_OBJECT_1773613176_0002"]
+    assert session.player_object_sent is True
 
 
 def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
@@ -72,7 +75,7 @@ def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> 
     )
     monkeypatch.setattr(
         login_handlers,
-        "run_replay_bootstrap",
+        "build_player_bootstrap_packets",
         lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
     )
     monkeypatch.setattr(
@@ -249,15 +252,24 @@ def test_active_mover_sends_mount_restore_after_known_spells(monkeypatch) -> Non
 
 def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
     """Queue a post-teleport spell sync so language/mount state survives world transfers."""
+    from server.modules.handlers.world import transport_runtime
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
     session = SimpleNamespace(
         loading_screen_done=False,
         post_loading_sent=False,
         teleport_pending=True,
         worldport_ack_pending=True,
         teleport_destination="test",
+        loaded_gameobjects={0x1FC00000000186A7},
+        loaded_transport_entries={0x1FC00000000186A7: 176495},
+        loaded_npcs={1234},
+        npc_flags_by_guid={1234: 0},
     )
     ctx = SimpleNamespace()
     state_changes: list[LoginState] = []
+    player_bootstrap_loaded_state: list[tuple[set[int], dict[int, int]]] = []
+    transport_refresh_state: list[tuple[set[int], dict[int, int]]] = []
 
     monkeypatch.setattr(
         login_handlers,
@@ -280,8 +292,26 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
     )
     monkeypatch.setattr(
         login_handlers,
-        "run_replay_bootstrap",
-        lambda _session: [("SMSG_UPDATE_OBJECT", b"create")],
+        "build_player_bootstrap_packets",
+        lambda _session: player_bootstrap_loaded_state.append(
+            (set(_session.loaded_gameobjects), dict(_session.loaded_transport_entries))
+        )
+        or _session.loaded_gameobjects.add(0x1FC00000000186A7)
+        or _session.loaded_transport_entries.update({0x1FC00000000186A7: {"entry": 176495}})
+        or [("SMSG_UPDATE_OBJECT", b"create")],
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "build_bootstrap_transport_value_updates",
+        lambda _session: transport_refresh_state.append(
+            (set(_session.loaded_gameobjects), dict(_session.loaded_transport_entries))
+        )
+        or [("SMSG_UPDATE_OBJECT", b"transport-values")],
+    )
+    monkeypatch.setattr(
+        movement_handlers,
+        "stream_world_objects_after_teleport",
+        lambda _session, *, context: [("SMSG_UPDATE_OBJECT", f"visible:{context}".encode("ascii"))],
     )
     monkeypatch.setattr(
         login_handlers.spells_handlers,
@@ -307,13 +337,63 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
     responses = login_handlers._queue_teleport_world_transition(session, ctx)
 
     assert state_changes == [LoginState.WORLD_BOOTSTRAP]
+    assert player_bootstrap_loaded_state == [(set(), {})]
+    assert transport_refresh_state == [
+        ({0x1FC00000000186A7}, {0x1FC00000000186A7: {"entry": 176495}})
+    ]
     assert ("SMSG_UPDATE_OBJECT", b"create") in responses
+    assert ("SMSG_UPDATE_OBJECT", b"transport-values") in responses
+    assert ("SMSG_UPDATE_OBJECT", b"visible:worldport-loading-complete") in responses
     assert ("SMSG_SEND_KNOWN_SPELLS", b"known-spells") in responses
     assert responses.index(("SMSG_SEND_KNOWN_SPELLS", b"known-spells")) > responses.index(
         ("SMSG_UPDATE_OBJECT", b"create")
+    )
+    assert responses.index(("SMSG_UPDATE_OBJECT", b"transport-values")) > responses.index(
+        ("SMSG_QUERY_TIME_RESPONSE", b"query-time")
+    )
+    assert responses.index(("SMSG_UPDATE_OBJECT", b"visible:worldport-loading-complete")) > responses.index(
+        ("SMSG_UPDATE_OBJECT", b"transport-values")
     )
     assert session.loading_screen_done is True
     assert session.post_loading_sent is True
     assert session.teleport_pending is False
     assert session.worldport_ack_pending is False
     assert session.teleport_destination is None
+
+
+def test_worldport_loading_completion_streams_world_objects_immediately(monkeypatch) -> None:
+    from server.modules.handlers.world import transport_runtime
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+    session = SimpleNamespace(
+        loading_screen_done=False,
+        post_loading_sent=False,
+        teleport_pending=True,
+        worldport_ack_pending=True,
+        teleport_destination="test",
+        loaded_gameobjects=set(),
+        loaded_transport_entries={},
+        loaded_npcs=set(),
+    )
+    ctx = SimpleNamespace()
+    calls: list[str] = []
+
+    monkeypatch.setattr(login_handlers, "_set_login_state", lambda _session, state: None)
+    monkeypatch.setattr(login_handlers, "refresh_region_weather", lambda _session: None)
+    monkeypatch.setattr(login_handlers, "build_login_packet", lambda opcode_name, _ctx: None)
+    monkeypatch.setattr(login_handlers, "build_player_bootstrap_packets", lambda _session: [])
+    monkeypatch.setattr(login_handlers.spells_handlers, "build_active_mover_spell_sync_responses", lambda _session: [])
+    monkeypatch.setattr(login_handlers, "build_login_inventory_sync_responses", lambda _session: [])
+    monkeypatch.setattr(login_handlers, "trigger_inventory_activation", lambda _session: [])
+    monkeypatch.setattr(login_handlers, "build_explored_zones_update_response", lambda _session: None)
+    monkeypatch.setattr(transport_runtime, "build_bootstrap_transport_value_updates", lambda _session: [])
+    monkeypatch.setattr(
+        movement_handlers,
+        "stream_world_objects_after_teleport",
+        lambda _session, *, context: calls.append(context) or [("SMSG_UPDATE_OBJECT", b"visible-now")],
+    )
+
+    responses = login_handlers._queue_teleport_world_transition(session, ctx)
+
+    assert calls == ["worldport-loading-complete"]
+    assert responses == [("SMSG_UPDATE_OBJECT", b"visible-now")]

@@ -153,6 +153,14 @@ class WorldSession:
     map_cheat_enabled: bool = False
     current_chair: Optional[int] = None
     current_seat: Optional[int] = None
+    bind_map_id: int = 0
+    bind_area_id: int = 0
+    bind_x: float = 0.0
+    bind_y: float = 0.0
+    bind_z: float = 0.0
+    bind_o: float = 0.0
+    gossip_npc_guid: Optional[int] = None
+    gossip_npc_flags: int = 0
     inventory_state: Any = None
     inventory_items: Dict[Any, Any] = field(default_factory=dict)
     inventory_by_guid: Dict[int, Any] = field(default_factory=dict)
@@ -206,9 +214,12 @@ class WorldSession:
     npc_auto_stream: bool = False
     loaded_npcs: set[int] = field(default_factory=set)
     npc_flags_by_guid: Dict[int, int] = field(default_factory=dict)
+    npc_positions_by_guid: Dict[int, tuple] = field(default_factory=dict)
+    npc_names_by_guid: Dict[int, str] = field(default_factory=dict)
     taxi_cheat_enabled: bool = False
     taxi_state: Any = None
     taxi_controls_locked: bool = False
+    player_travel_state: str = "NORMAL"
     last_gameobject_stream_at: float = 0.0
     last_npc_stream_at: float = 0.0
     last_position_save_at: float = 0.0

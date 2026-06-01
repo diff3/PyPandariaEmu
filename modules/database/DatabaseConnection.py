@@ -144,6 +144,7 @@ class DatabaseConnection:
     _cache_creatures_loaded = False
     _cache_gameobjects_by_map = {}
     _cache_gameobjects_loaded = False
+    _cache_spell_target_positions: dict[tuple[int, int], dict] = {}
     _account_data_tables_ready = False
     _addon_tables_ready = False
     _mount_state_table_ready = False
@@ -486,10 +487,10 @@ class DatabaseConnection:
                         WorldGameObjectTemplate.faction,
                         WorldGameObjectTemplate.flags,
                         WorldGameObjectTemplate.size,
-                        WorldGameObjectTemplate.data0,
-                        WorldGameObjectTemplate.data1,
-                        WorldGameObjectTemplate.data2,
-                        WorldGameObjectTemplate.data3,
+                        *[
+                            getattr(WorldGameObjectTemplate, f"data{index}")
+                            for index in range(24)
+                        ],
                     )
                     .join(WorldGameObjectTemplate, WorldGameObjectTemplate.entry == WorldGameObject.id)
                     .outerjoin(GameEventGameObject, GameEventGameObject.guid == WorldGameObject.guid)
@@ -930,6 +931,131 @@ class DatabaseConnection:
             session.rollback()
             Logger.warning(
                 f"[DB] save_character_position failed guid={char_guid} realm={realm_id}: {exc}"
+            )
+            return False
+
+    @staticmethod
+    def ensure_character_homebind_table() -> bool:
+        """Ensure the minimal homebind table used by innkeeper binding exists."""
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS character_homebind (
+                    guid INT UNSIGNED NOT NULL,
+                    mapId SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+                    zoneId SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+                    posX FLOAT NOT NULL DEFAULT 0,
+                    posY FLOAT NOT NULL DEFAULT 0,
+                    posZ FLOAT NOT NULL DEFAULT 0,
+                    orientation FLOAT NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guid)
+                )
+            """))
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning("[DB] character_homebind create failed: %s", exc)
+            return False
+
+        try:
+            session.execute(text(
+                "ALTER TABLE character_homebind "
+                "ADD COLUMN orientation FLOAT NOT NULL DEFAULT 0"
+            ))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        return True
+
+    @staticmethod
+    def load_character_homebind(char_guid: int, realm_id: int = 0) -> dict | None:
+        """Load a character homebind row if one exists."""
+        _ = int(realm_id or 0)
+        if int(char_guid or 0) <= 0:
+            return None
+
+        if not DatabaseConnection.ensure_character_homebind_table():
+            return None
+
+        session = DatabaseConnection.chars()
+        try:
+            row = session.execute(
+                text("""
+                    SELECT guid, mapId, zoneId, posX, posY, posZ, orientation
+                    FROM character_homebind
+                    WHERE guid = :guid
+                    LIMIT 1
+                """),
+                {"guid": int(char_guid)},
+            ).mappings().first()
+            if row is None:
+                return None
+            return dict(row)
+        except Exception as exc:
+            Logger.warning(
+                "[DB] load_character_homebind failed guid=%s realm=%s: %s",
+                int(char_guid),
+                int(realm_id or 0),
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def save_character_homebind(
+        char_guid: int,
+        realm_id: int,
+        *,
+        map_id: int,
+        zone_id: int,
+        x: float,
+        y: float,
+        z: float,
+        orientation: float,
+    ) -> bool:
+        """Persist the player's Hearthstone bind point."""
+        _ = int(realm_id or 0)
+        if int(char_guid or 0) <= 0:
+            return False
+
+        if not DatabaseConnection.ensure_character_homebind_table():
+            return False
+
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(
+                text("""
+                    INSERT INTO character_homebind
+                        (guid, mapId, zoneId, posX, posY, posZ, orientation)
+                    VALUES
+                        (:guid, :map_id, :zone_id, :x, :y, :z, :orientation)
+                    ON DUPLICATE KEY UPDATE
+                        mapId = VALUES(mapId),
+                        zoneId = VALUES(zoneId),
+                        posX = VALUES(posX),
+                        posY = VALUES(posY),
+                        posZ = VALUES(posZ),
+                        orientation = VALUES(orientation)
+                """),
+                {
+                    "guid": int(char_guid),
+                    "map_id": int(map_id or 0),
+                    "zone_id": int(zone_id or 0),
+                    "x": float(x or 0.0),
+                    "y": float(y or 0.0),
+                    "z": float(z or 0.0),
+                    "orientation": float(orientation or 0.0),
+                },
+            )
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(
+                "[DB] save_character_homebind failed guid=%s realm=%s: %s",
+                int(char_guid),
+                int(realm_id or 0),
+                exc,
             )
             return False
 
@@ -1812,10 +1938,10 @@ class DatabaseConnection:
                     WorldGameObjectTemplate.faction,
                     WorldGameObjectTemplate.flags,
                     WorldGameObjectTemplate.size,
-                    WorldGameObjectTemplate.data0,
-                    WorldGameObjectTemplate.data1,
-                    WorldGameObjectTemplate.data2,
-                    WorldGameObjectTemplate.data3,
+                    *[
+                        getattr(WorldGameObjectTemplate, f"data{index}")
+                        for index in range(24)
+                    ],
                 )
                 .join(WorldGameObjectTemplate, WorldGameObjectTemplate.entry == WorldGameObject.id)
                 .outerjoin(GameEventGameObject, GameEventGameObject.guid == WorldGameObject.guid)
@@ -1886,10 +2012,10 @@ class DatabaseConnection:
             "faction": int(getattr(row, "faction", 0) or 0),
             "flags": flags,
             "size": float(getattr(row, "size", 1.0) or 1.0),
-            "data0": int(getattr(row, "data0", 0) or 0),
-            "data1": int(getattr(row, "data1", 0) or 0),
-            "data2": int(getattr(row, "data2", 0) or 0),
-            "data3": int(getattr(row, "data3", 0) or 0),
+            **{
+                f"data{index}": int(getattr(row, f"data{index}", 0) or 0)
+                for index in range(24)
+            },
         }
 
     @staticmethod
@@ -2795,7 +2921,11 @@ class DatabaseConnection:
 
     @staticmethod
     def get_areatrigger_teleport(trigger_id: int) -> dict | None:
-        session = DatabaseConnection.world()
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning("[DB] areatrigger_teleport DB unavailable id=%s: %s", int(trigger_id), exc)
+            return None
 
         try:
             row = session.execute(text(
@@ -2816,6 +2946,164 @@ class DatabaseConnection:
 
             return dict(row) if row else None
 
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_areatrigger_teleports() -> list[dict]:
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning("[DB] areatrigger_teleport list DB unavailable: %s", exc)
+            return []
+
+        try:
+            rows = session.execute(text(
+                """
+                SELECT
+                    id,
+                    name,
+                    target_map,
+                    target_position_x,
+                    target_position_y,
+                    target_position_z,
+                    target_orientation
+                FROM areatrigger_teleport
+                """
+            )).mappings().all()
+            return [dict(row) for row in rows]
+        except Exception as exc:
+            Logger.warning("[DB] areatrigger_teleport list failed: %s", exc)
+            return []
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_spell_target_position(spell_id: int, effect_index: int = 0) -> dict | None:
+        spell = int(spell_id or 0)
+        eff_index = int(effect_index or 0)
+        if spell <= 0:
+            return None
+
+        cache_key = (spell, eff_index)
+        if cache_key in DatabaseConnection._cache_spell_target_positions:
+            return dict(DatabaseConnection._cache_spell_target_positions[cache_key])
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning("[DB] spell_target_position DB unavailable spell=%s: %s", spell, exc)
+            return None
+
+        try:
+            row = session.execute(
+                text(
+                    """
+                    SELECT
+                        id,
+                        effIndex,
+                        target_map,
+                        target_position_x,
+                        target_position_y,
+                        target_position_z,
+                        target_orientation
+                    FROM spell_target_position
+                    WHERE id = :id AND effIndex = :eff_index
+                    LIMIT 1
+                    """
+                ),
+                {"id": spell, "eff_index": eff_index},
+            ).mappings().first()
+            if row is None and eff_index != 0:
+                row = session.execute(
+                    text(
+                        """
+                        SELECT
+                            id,
+                            effIndex,
+                            target_map,
+                            target_position_x,
+                            target_position_y,
+                            target_position_z,
+                            target_orientation
+                        FROM spell_target_position
+                        WHERE id = :id AND effIndex = 0
+                        LIMIT 1
+                        """
+                    ),
+                    {"id": spell},
+                ).mappings().first()
+            if row is None:
+                row = session.execute(
+                    text(
+                        """
+                        SELECT
+                            id,
+                            effIndex,
+                            target_map,
+                            target_position_x,
+                            target_position_y,
+                            target_position_z,
+                            target_orientation
+                        FROM spell_target_position
+                        WHERE id = :id
+                        ORDER BY effIndex ASC
+                        LIMIT 1
+                        """
+                    ),
+                    {"id": spell},
+                ).mappings().first()
+            if row is None:
+                return None
+
+            result = dict(row)
+            DatabaseConnection._cache_spell_target_positions[
+                (spell, int(result.get("effIndex", eff_index) or 0))
+            ] = dict(result)
+            DatabaseConnection._cache_spell_target_positions[cache_key] = dict(result)
+            return result
+        except Exception as exc:
+            Logger.warning("[DB] spell_target_position lookup failed spell=%s: %s", spell, exc)
+            return None
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_gameobject_teleport(spawn_guid: int, entry: int) -> dict | None:
+        guid = int(spawn_guid or 0)
+        go_entry = int(entry or 0)
+        if guid <= 0 and go_entry <= 0:
+            return None
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception:
+            return None
+
+        try:
+            row = session.execute(
+                text(
+                    """
+                    SELECT
+                        COALESCE(name, '') AS name,
+                        target_map,
+                        target_position_x,
+                        target_position_y,
+                        target_position_z,
+                        target_orientation
+                    FROM gameobject_teleport
+                    WHERE
+                        (:guid > 0 AND guid = :guid)
+                        OR (:entry > 0 AND entry = :entry)
+                    ORDER BY CASE WHEN guid = :guid THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """
+                ),
+                {"guid": guid, "entry": go_entry},
+            ).mappings().first()
+            return dict(row) if row else None
+        except Exception:
+            return None
         finally:
             session.close()
 

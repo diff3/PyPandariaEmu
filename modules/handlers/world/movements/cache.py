@@ -262,6 +262,8 @@ def _load_taxi_path_templates() -> dict[int, MovementTemplate]:
                 y=float(row[5]),
                 z=float(row[6]),
                 time_ms=max(0, int(row[2])),
+                flags=int(row[7]),
+                delay=max(0, int(row[8])),
             )
 
         except (TypeError, ValueError, IndexError):
@@ -284,6 +286,10 @@ def _load_taxi_path_templates() -> dict[int, MovementTemplate]:
                 y=node.y,
                 z=node.z,
                 time_ms=int(node.time_ms),
+                station=int(getattr(node, "flags", 0) or 0) == 2,
+                transfer=int(getattr(node, "flags", 0) or 0) == 1,
+                flags=int(getattr(node, "flags", 0) or 0),
+                delay=int(getattr(node, "delay", 0) or 0),
             )
             for node in ordered_source_nodes
         )

@@ -37,7 +37,7 @@ from server.modules.handlers.world.account_data import (
     load_global_account_data,
 )
 from server.modules.handlers.world.achievement_service import initialize_session_achievements
-from server.modules.handlers.world.bootstrap import replay as bootstrap_replay
+from server.modules.handlers.world.bootstrap.gameobjects import build_database_gameobject_responses
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from DSL.modules.EncoderHandler import EncoderHandler
 from server.modules.handlers.world.constants.character_data import (
@@ -107,8 +107,6 @@ from server.modules.handlers.world.feature_config import (
     npcs_enabled,
     taxi_cheat_enabled as config_taxi_cheat_enabled,
 )
-
-USE_REPLAY_BOOTSTRAP = True
 
 
 def _resolve_session_ids(session) -> Tuple[Optional[int], Optional[int]]:
@@ -395,9 +393,7 @@ def _reset_loaded_world_object_state(session) -> None:
 
 
 def _build_world_login_context(session) -> WorldLoginContext:
-    ctx = WorldLoginContext.from_session(session)
-    ctx.exact_0002_mode = str(bootstrap_replay.UPDATE_OBJECT_1773613176_0002_MODE or "barncastle")
-    return ctx
+    return WorldLoginContext.from_session(session)
 
 
 def _resolve_opening_cinematic_id(race: int) -> int:
@@ -439,13 +435,22 @@ def _is_pre_player_login_state(state: Optional[LoginState]) -> bool:
     return state in {None, LoginState.AUTHED, LoginState.CHAR_SCREEN}
 
 
-def run_replay_bootstrap(session) -> list[tuple[str, bytes]]:
-    if USE_REPLAY_BOOTSTRAP:
-        Logger.info("[BOOTSTRAP] replay path")
-        return bootstrap_replay.replay_movement_focus_sequence(session)
+def build_player_bootstrap_packets(session) -> list[tuple[str, bytes]]:
+    """Build the player's initial world object packets from live session state."""
+    ctx = _build_world_login_context(session)
+    responses: list[tuple[str, bytes]] = []
 
-    Logger.info("[BOOTSTRAP] server path (future)")
-    return []
+    active_mover = build_login_packet("SMSG_MOVE_SET_ACTIVE_MOVER", ctx)
+    if active_mover is not None:
+        responses.append(("SMSG_MOVE_SET_ACTIVE_MOVER", active_mover))
+
+    player_create = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
+    if player_create is not None:
+        responses.append(("SMSG_UPDATE_OBJECT", player_create))
+        session.player_object_sent = True
+
+    responses.extend(build_database_gameobject_responses(session))
+    return responses
 
 
 def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[tuple[str, bytes]]:
@@ -463,7 +468,7 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
     pre_update_packets = build_pre_update_object_packets(ctx)
     update_packets: list[tuple[str, bytes]] = []
     if not getattr(session, "player_object_sent", False):
-        update_packets = run_replay_bootstrap(session)
+        update_packets = build_player_bootstrap_packets(session)
     post_update_packets = build_post_update_object_packets(ctx)
     bootstrap_packets = [
         (opcode_name, payload)
@@ -511,13 +516,16 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
 
     session.loading_screen_done = True
     session.post_loading_sent = True
-    Logger.info("[LOGIN] WORLD_BOOTSTRAP queued replayed UPDATE_OBJECT sequence + minimal bootstrap bundle")
+    Logger.info("[LOGIN] WORLD_BOOTSTRAP queued player create + minimal bootstrap bundle")
     return responses
 
 
 def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tuple[str, bytes]]:
     # TODO: Teleport bootstrap still shares movement replay/bootstrap helpers with legacy world init.
+    _reset_loaded_world_object_state(session)
     _set_login_state(session, LoginState.WORLD_BOOTSTRAP)
+    refresh_region_weather(session)
+    ctx.weather = dict(getattr(session, "weather", {}) or {})
 
     responses: list[tuple[str, bytes]] = []
 
@@ -532,7 +540,7 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         Logger.info(f"[Teleport] sending {opcode_name}")
         responses.append((opcode_name, payload))
 
-    responses.extend(run_replay_bootstrap(session))
+    responses.extend(build_player_bootstrap_packets(session))
 
     post_teleport_spell_packets = spells_handlers.build_active_mover_spell_sync_responses(session)
     if post_teleport_spell_packets:
@@ -568,6 +576,18 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
             continue
         Logger.info(f"[Teleport] sending {opcode_name}")
         responses.append((opcode_name, payload))
+
+    from server.modules.handlers.world.transport_runtime import build_bootstrap_transport_value_updates
+
+    responses.extend(build_bootstrap_transport_value_updates(session))
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+    responses.extend(
+        movement_handlers.stream_world_objects_after_teleport(
+            session,
+            context="worldport-loading-complete",
+        )
+    )
 
     session.loading_screen_done = True
     session.post_loading_sent = True
@@ -778,6 +798,10 @@ def handle_player_login(session, ctx: PacketContext):
         float(session.z),
         float(session.orientation),
     )
+
+    from server.modules.handlers.world.opcodes import npc_interaction
+
+    npc_interaction.restore_homebind_from_database(session)
 
     capture_persist_position_from_session(session)
     remember_saved_position(session)

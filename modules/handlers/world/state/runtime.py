@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import time
@@ -10,11 +11,13 @@ from typing import Iterable
 
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
+from shared.PathUtils import get_data_root
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.handlers.world.position.position_service import position_delta, position_from_session
 from server.modules.handlers.world.state.global_state import global_state
 from server.modules.handlers.world.state.player_visible_snapshot import build_player_visible_snapshot
 from server.modules.handlers.world.state.region_manager import region_manager
+from server.modules.handlers.world.state.weather_zone_registry import canonical_weather_zone_registry
 
 PLAYER_VISIBILITY_DISTANCE = 120.0
 _PLAYER_FIELD_EXPLORED_ZONES = (0x8 + 0x98) + 0x5BB
@@ -156,6 +159,211 @@ def compute_weather(global_time, map_id, seed, *, zone_id: int = 0, now: float |
     return states[phase]
 
 
+def weather_runtime_snapshot_rows() -> list[dict]:
+    _process_weather_runtime_commands()
+    configured_rows = {
+        int(row.get("zone", 0) or 0): dict(row)
+        for row in _configured_weather_rows()
+        if int(row.get("zone", 0) or 0) > 0
+    }
+    registry = canonical_weather_zone_registry(set(configured_rows))
+    if not registry:
+        registry = {
+            zone_id: type("WeatherZoneFallback", (), {
+                "zone_id": zone_id,
+                "parent_zone_id": 0,
+                "map_id": 0,
+                "name": f"Zone {zone_id}",
+                "normalized_name": f"zone {zone_id}",
+                "aliases": (),
+                "child_zone_ids": (),
+                "explicit_weather": True,
+            })()
+            for zone_id in configured_rows
+        }
+    season = _current_weather_season()
+    result: list[dict] = []
+    manual_weather = getattr(global_state, "manual_region_weather", None)
+    if not isinstance(manual_weather, dict):
+        manual_weather = {}
+
+    for zone in registry.values():
+        zone_id = int(zone.zone_id)
+        if zone_id <= 0:
+            continue
+        manual = manual_weather.get(zone_id)
+        if isinstance(manual, dict):
+            weather_state = dict(manual)
+            manual_active = True
+        else:
+            weather_key, density = compute_weather(
+                global_state.time,
+                0,
+                global_state.weather_seed,
+                zone_id=zone_id,
+            )
+            weather_state = _weather_state_from_key(weather_key, density, 0)
+            manual_active = False
+        row = configured_rows.get(zone_id, {})
+        result.append({
+            "zone": zone_id,
+            "parent_zone": int(zone.parent_zone_id),
+            "map_id": int(zone.map_id),
+            "canonical_name": str(zone.name),
+            "normalized_name": str(zone.normalized_name),
+            "search_aliases": list(zone.aliases),
+            "child_zones": list(zone.child_zone_ids),
+            "explicit_weather": bool(zone.explicit_weather),
+            "season": season,
+            "weather_type": int(weather_state.get("weather_type", 0) or 0),
+            "density": float(weather_state.get("density", 0.0) or 0.0),
+            "abrupt": int(weather_state.get("abrupt", 0) or 0),
+            "cycle_slot": int(_weather_cycle_slot()),
+            "cycle_seconds": int(_weather_cycle_seconds()),
+            "seed": int(global_state.weather_seed),
+            "manual": bool(manual_active),
+            "rain_chance": int(row.get(f"{season}_rain_chance", 0) or 0),
+            "snow_chance": int(row.get(f"{season}_snow_chance", 0) or 0),
+            "storm_chance": int(row.get(f"{season}_storm_chance", 0) or 0),
+        })
+
+    result.sort(key=lambda item: str(item.get("canonical_name", "")).lower())
+    return result
+
+
+def _process_weather_runtime_commands() -> None:
+    root = get_data_root() / "runtime" / "weather_commands"
+    if not root.exists():
+        return
+
+    for path in sorted(root.glob("*.json")):
+        try:
+            command = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(command, dict):
+                _apply_weather_runtime_command(command)
+            path.unlink(missing_ok=True)
+        except Exception as exc:
+            Logger.warning("[WeatherRuntime] command failed path=%s err=%s", path, exc)
+
+
+def _apply_weather_runtime_command(command: dict) -> None:
+    action = str(command.get("action") or "").strip().lower()
+    zone_id = int(command.get("zone", 0) or 0)
+    if zone_id <= 0:
+        return
+
+    if action == "override":
+        weather_key = str(command.get("weather") or "").strip().lower()
+        if weather_key == "heavy_rain":
+            weather_key = "rain"
+        density = float(command.get("density", 0.5) or 0.5)
+        weather_type = int(resolve_weather_type(weather_key, density))
+        if weather_type < 0:
+            return
+        _set_manual_weather_for_zone(zone_id, {
+            "weather_type": weather_type,
+            "density": 0.0 if weather_type == 0 else density,
+            "abrupt": 1,
+        })
+        return
+
+    if action == "reset":
+        manual_weather = getattr(global_state, "manual_region_weather", None)
+        if isinstance(manual_weather, dict):
+            manual_weather.pop(zone_id, None)
+        return
+
+    if action == "chance":
+        _apply_weather_chance_command(command, zone_id)
+
+
+def _set_manual_weather_for_zone(zone_id: int, weather_state: dict) -> None:
+    manual_weather = getattr(global_state, "manual_region_weather", None)
+    if not isinstance(manual_weather, dict):
+        global_state.manual_region_weather = {}
+        manual_weather = global_state.manual_region_weather
+    manual_weather[int(zone_id)] = dict(weather_state)
+
+    for session in iter_active_sessions(global_state):
+        if int(_resolve_weather_zone_id(session)) == int(zone_id):
+            setattr(session, "weather", dict(weather_state))
+
+
+def _apply_weather_chance_command(command: dict, zone_id: int) -> None:
+    kind = str(command.get("kind") or "").strip().lower()
+    season = str(command.get("season") or "").strip().lower()
+    if kind not in {"rain", "snow", "storm"} or season not in {"spring", "summer", "fall", "winter"}:
+        return
+
+    value = max(0, min(100, int(command.get("value", 0) or 0)))
+    column = f"{season}_{kind}_chance"
+    cached = getattr(_configured_weather_rows, "_rows", None)
+    if not isinstance(cached, list):
+        return
+    target = None
+    for row in cached:
+        if int(row.get("zone", 0) or 0) == int(zone_id):
+            target = row
+            break
+    if target is None:
+        target = {"zone": int(zone_id)}
+        for season_name in ("spring", "summer", "fall", "winter"):
+            for chance_kind in ("rain", "snow", "storm"):
+                target[f"{season_name}_{chance_kind}_chance"] = 0
+        cached.append(target)
+    target[column] = value
+
+
+def _configured_weather_rows() -> list[dict]:
+    cached = getattr(_configured_weather_rows, "_rows", None)
+    if isinstance(cached, list):
+        return [dict(row) for row in cached]
+
+    try:
+        from server.modules.database.DatabaseConnection import DatabaseConnection
+        from sqlalchemy import text
+
+        session = DatabaseConnection.world()
+        rows = list(session.execute(text(
+            """
+            SELECT
+                zone,
+                spring_rain_chance,
+                spring_snow_chance,
+                spring_storm_chance,
+                summer_rain_chance,
+                summer_snow_chance,
+                summer_storm_chance,
+                fall_rain_chance,
+                fall_snow_chance,
+                fall_storm_chance,
+                winter_rain_chance,
+                winter_snow_chance,
+                winter_storm_chance
+            FROM game_weather
+            ORDER BY zone
+            """
+        )).mappings())
+    except Exception as exc:
+        Logger.warning("[WeatherRuntime] game_weather snapshot lookup failed err=%s", exc)
+        rows = []
+
+    normalized = [dict(row) for row in rows]
+    setattr(_configured_weather_rows, "_rows", normalized)
+    return [dict(row) for row in normalized]
+
+
+def _current_weather_season() -> str:
+    month = int(time.localtime().tm_mon)
+    if month in (3, 4, 5):
+        return "spring"
+    if month in (6, 7, 8):
+        return "summer"
+    if month in (9, 10, 11):
+        return "fall"
+    return "winter"
+
+
 def _weather_state_from_key(weather_key: str, density: float = 0.5, abrupt: int = 0) -> dict[str, float | int]:
     normalized_density = 0.0 if str(weather_key).strip().lower() in ("clear", "fine", "sun", "sunny") else float(density)
     return {
@@ -171,19 +379,24 @@ def refresh_region_weather(target_session) -> bool:
     if state is None or region is None:
         return False
     previous_weather = dict(getattr(target_session, "weather", {}) or {})
+    zone_id = _resolve_weather_zone_id(target_session)
     manual_region_weather = getattr(state, "manual_region_weather", None)
     if isinstance(manual_region_weather, dict):
-        manual_weather = manual_region_weather.get(int(getattr(region, "map_id", 0) or 0))
+        manual_weather = manual_region_weather.get(int(zone_id))
         if isinstance(manual_weather, dict):
             region.weather = dict(manual_weather)
             region.weather_manual = True
+            region.weather_zone_id = int(zone_id)
             target_session.weather = dict(manual_weather)
             return dict(target_session.weather) != previous_weather
-    if bool(getattr(region, "weather_manual", False)) and isinstance(getattr(region, "weather", None), dict):
+    if (
+        bool(getattr(region, "weather_manual", False))
+        and int(getattr(region, "weather_zone_id", 0) or 0) == int(zone_id)
+        and isinstance(getattr(region, "weather", None), dict)
+    ):
         target_session.weather = dict(region.weather)
         return dict(target_session.weather) != previous_weather
 
-    zone_id = _resolve_weather_zone_id(target_session)
     weather_key, density = compute_weather(
         state.time,
         region.map_id,
@@ -261,7 +474,7 @@ def effective_explored_zones_for_client(session) -> list[int]:
 
 
 def build_explored_zones_update_response(session) -> tuple[str, bytes] | None:
-    from server.modules.handlers.world.bootstrap.replay import build_multi_u32_update_object_payload
+    from server.modules.handlers.world.bootstrap.playerobjects import build_multi_u32_update_object_payload
 
     guid = int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0)
     if guid <= 0:
@@ -423,6 +636,7 @@ def broadcast_system_message(
 def broadcast_region_weather(target_session, weather_type: int, density: float, abrupt: int = 0, *, announce: str | None = None) -> None:
     from server.modules.handlers.world.login.packets import build_login_packet
 
+    zone_id = _resolve_weather_zone_id(target_session)
     weather_state = {
         "weather_type": int(weather_type),
         "density": float(density),
@@ -446,13 +660,16 @@ def broadcast_region_weather(target_session, weather_type: int, density: float, 
     state = getattr(target_session, "global_state", None)
     region.weather = dict(weather_state)
     region.weather_manual = True
+    region.weather_zone_id = int(zone_id)
     if state is not None and isinstance(getattr(state, "manual_region_weather", None), dict):
-        state.manual_region_weather[int(getattr(region, "map_id", 0) or 0)] = dict(weather_state)
+        state.manual_region_weather[int(zone_id)] = dict(weather_state)
 
     if payload is not None:
         for player in iter_region_sessions(region=region):
-            player.weather = dict(weather_state)
-        broadcast_region_responses([("SMSG_WEATHER", payload)], region=region, exclude=[target_session])
+            if int(_resolve_weather_zone_id(player)) == int(zone_id):
+                player.weather = dict(weather_state)
+                if player is not target_session:
+                    dispatch_responses_to_sessions([player], [("SMSG_WEATHER", payload)])
 
     if announce:
         broadcast_system_message(str(announce), scope="region", region=region)
@@ -492,11 +709,10 @@ def _build_player_create_update_response(source_session) -> tuple[str, bytes] | 
         return None
 
     ctx = WorldLoginContext.from_session(source_session)
-    ctx.exact_0002_mode = "barncastle"
     ctx.exact_0002_remote_player = True
     ctx.exact_0002_map_id = int(getattr(source_session, "map_id", 0) or 0)
     ctx.exact_0002_low_guid = int(getattr(source_session, "char_guid", 0) or 0)
-    Logger.info("[CREATE PATH] remote=replay")
+    Logger.info("[CREATE PATH] remote=server-built")
     payload = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
     if payload is None:
         return None
@@ -513,7 +729,6 @@ def build_self_player_appearance_responses(source_session) -> list[tuple[str, by
 
     responses: list[tuple[str, bytes]] = []
     ctx = WorldLoginContext.from_session(source_session)
-    ctx.exact_0002_mode = "barncastle"
     ctx.exact_0002_map_id = int(getattr(source_session, "map_id", 0) or 0)
     ctx.exact_0002_low_guid = int(getattr(source_session, "char_guid", 0) or 0)
     Logger.info("[CREATE PATH] self=server-built")
@@ -542,8 +757,40 @@ def build_same_map_teleport_self_resync_responses(source_session) -> list[tuple[
     if payload_0006 is not None:
         responses.append(("SMSG_UPDATE_OBJECT", payload_0006))
     responses.extend(build_self_visible_item_update_responses(source_session))
+    responses.extend(build_same_map_teleport_world_object_resync_responses(source_session))
 
     source_session.player_object_sent = True
+    return responses
+
+
+def build_same_map_teleport_world_object_resync_responses(source_session) -> list[tuple[str, bytes]]:
+    if not (
+        bool(getattr(source_session, "gameobjects_visible", False))
+        or bool(getattr(source_session, "npc_auto_stream", False))
+    ):
+        return []
+
+    source_session.last_gameobject_stream_at = 0.0
+    source_session.last_npc_stream_at = 0.0
+
+    try:
+        from server.modules.handlers.world.opcodes import movement as movement_handlers
+    except Exception as exc:
+        Logger.warning("[Teleport] same-map object stream unavailable err=%s", exc)
+        return []
+
+    streamer = getattr(movement_handlers, "_maybe_stream_world_objects", None)
+    if not callable(streamer):
+        return []
+
+    responses = list(streamer(source_session) or [])
+    if responses:
+        Logger.info(
+            "[Teleport] same-map object stream responses=%s player=%s map=%s",
+            len(responses),
+            int(getattr(source_session, "char_guid", 0) or 0),
+            int(getattr(source_session, "map_id", 0) or 0),
+        )
     return responses
 
 
@@ -585,12 +832,31 @@ def _build_player_value_update_responses(source_session) -> list[tuple[str, byte
 
 
 def _build_player_move_response(source_session) -> tuple[str, bytes] | None:
+    cached = getattr(source_session, "_cached_player_move_response", None)
+    if cached is not None:
+        return cached
+
     from server.modules.handlers.world.opcodes.movement import build_smsg_player_move_payload
 
     payload = build_smsg_player_move_payload(source_session)
     if not payload:
         return None
     return ("SMSG_PLAYER_MOVE", payload)
+
+
+def _player_movement_debug_enabled() -> bool:
+    try:
+        from server.modules.handlers.world.feature_config import player_movement_debug_enabled
+
+        return bool(player_movement_debug_enabled())
+    except Exception:
+        return False
+
+
+def _movement_debug_log(message: str, *args) -> None:
+    if not _player_movement_debug_enabled():
+        return
+    Logger.info(message, *args)
 
 
 def _build_player_remove_update_response(
@@ -1008,6 +1274,11 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
     last_key = getattr(source_session, "_multiplayer_last_broadcast_key", None)
     last_at = float(getattr(source_session, "_multiplayer_last_broadcast_at", 0.0) or 0.0)
     if not force and key == last_key and (now - last_at) < 0.02:
+        _movement_debug_log(
+            "MOVE_DEBUG guid=Player-%s broadcast=false cadence_ms=%.1f reason=dedupe",
+            int(getattr(source_session, "char_guid", 0) or 0),
+            float((now - last_at) * 1000.0),
+        )
         return
 
     move_response = _build_player_move_response(source_session)
@@ -1067,6 +1338,18 @@ def broadcast_player_state_update(source_session, *, force: bool = False) -> Non
         source_session._multiplayer_last_resync_at = now
         source_session._multiplayer_last_resync_key = key
     source_session._multiplayer_removed = False
+    _movement_debug_log(
+        "MOVE_DEBUG guid=Player-%s broadcast=true cadence_ms=%.1f peers=%s "
+        "force=%s move_packet=%s created=%s updated=%s removed=%s",
+        int(getattr(source_session, "char_guid", 0) or 0),
+        float((now - last_at) * 1000.0) if last_at > 0.0 else 0.0,
+        int(len(peers)),
+        bool(force),
+        bool(move_response is not None),
+        int(created),
+        int(updated),
+        int(removed),
+    )
     if force or created or updated or removed:
         Logger.debug(
             f"[MULTI] update player={int(getattr(source_session, 'char_guid', 0) or 0)} "

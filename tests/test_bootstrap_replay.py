@@ -2,6 +2,7 @@ from pathlib import Path
 import importlib
 import math
 import sys
+import struct
 import types
 from types import SimpleNamespace
 
@@ -31,16 +32,32 @@ def _import_replay():
     return importlib.import_module("server.modules.handlers.world.bootstrap.replay")
 
 
-def test_static_update_object_capture_is_skipped_for_db_loader():
-    replay = _import_replay()
-    session = SimpleNamespace(map_id=1, zone=1637, x=1570.0, y=-4397.0)
-    path = Path("SMSG_UPDATE_OBJECT_1773613176_0003.json")
+def _import_gameobjects():
+    db_module = types.ModuleType("server.modules.database.DatabaseConnection")
+    db_module.DatabaseConnection = type(
+        "DatabaseConnection",
+        (),
+        {
+            "get_gameobjects_near": staticmethod(lambda *args, **kwargs: []),
+        },
+    )
+    sys.modules["server.modules.database.DatabaseConnection"] = db_module
 
-    assert replay._should_skip_static_update_object_capture(session, path) is True
+    transport_runtime_module = types.ModuleType("server.modules.handlers.world.transport_runtime")
+    transport_runtime_module.cached_transport_runtime_entry = lambda _session, entry, **kwargs: entry
+    transport_runtime_module.prepare_runtime_transport_entry = lambda entry, **kwargs: entry
+    transport_runtime_module.register_loaded_transport_entry = lambda *args, **kwargs: True
+    transport_runtime_module.synthetic_transport_entries_near = lambda *args, **kwargs: []
+    sys.modules["server.modules.handlers.world.transport_runtime"] = transport_runtime_module
+
+    sys.modules.pop("server.modules.handlers.world.bootstrap.gameobjects", None)
+    return importlib.import_module("server.modules.handlers.world.bootstrap.gameobjects")
 
 
 def test_build_gameobject_update_payload_uses_mo_transport_guid():
-    replay = _import_replay()
+    gameobjects = _import_gameobjects()
+    from server.modules.handlers.world.bootstrap.playerobjects import extract_first_update_object_guid_info
+
     entry = {
         "guid": 4,
         "entry": 175354,
@@ -61,15 +78,15 @@ def test_build_gameobject_update_payload_uses_mo_transport_guid():
         "faction": 0,
     }
 
-    payload = replay._build_gameobject_update_payload(map_id=1, entry=entry, realm_id=1)
+    payload = gameobjects._build_gameobject_update_payload(map_id=1, entry=entry, realm_id=1)
     update_type = payload[6]
-    packed_guid = replay.extract_first_update_object_guid_info(payload)[0]
+    packed_guid = extract_first_update_object_guid_info(payload)[0]
 
     assert update_type == 1
-    assert packed_guid == replay.MoTransportGuid.from_spawn_guid(4)
+    assert packed_guid == gameobjects.MoTransportGuid.from_spawn_guid(4)
 
 
-def test_build_gameobject_update_payload_uses_db_rotation(monkeypatch):
+def test_build_gameobject_update_payload_sanitizes_yaw_only_db_rotation(monkeypatch):
     from server.modules.handlers.world.bootstrap import gameobjects
 
     captured = {}
@@ -111,7 +128,45 @@ def test_build_gameobject_update_payload_uses_db_rotation(monkeypatch):
     assert captured["fields"]["stationary_orientation"] == gameobjects._stationary_orientation(entry)
     assert captured["fields"]["gameobject_rotation_packed"] == gameobjects._gameobject_rotation_packed(entry)
     assert captured["fields"]["gameobject_rotation_packed"] != 0
-    assert field_values[14] == gameobjects._u32_from_float(entry["rotation2"])
+    assert field_values[14] == gameobjects._u32_from_float(math.sin(entry["orientation"] * 0.5))
+    assert field_values[15] == gameobjects._u32_from_float(math.cos(entry["orientation"] * 0.5))
+
+
+def test_build_gameobject_update_payload_preserves_real_unit_quaternion(monkeypatch):
+    from server.modules.handlers.world.bootstrap import gameobjects
+
+    monkeypatch.setattr(
+        gameobjects.EncoderHandler,
+        "encode_packet",
+        lambda _opcode_name, _fields: b"payload",
+    )
+    entry = {
+        "guid": 4,
+        "entry": 175354,
+        "x": 1569.97,
+        "y": -4397.41,
+        "z": 16.05,
+        "orientation": 1.5,
+        "rotation0": 0.25,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": math.sqrt(1.0 - (0.25 * 0.25)),
+        "display_id": 3015,
+        "flags": 40,
+        "size": 1.0,
+        "type": 15,
+        "state": 1,
+        "animprogress": 255,
+        "faction": 0,
+    }
+
+    gameobjects._build_gameobject_update_payload(map_id=1, entry=entry, realm_id=1)
+    field_values = gameobjects._build_gameobject_field_values(
+        entry,
+        world_guid=gameobjects.MoTransportGuid.from_spawn_guid(4),
+    )
+
+    assert field_values[12] == gameobjects._u32_from_float(entry["rotation0"])
     assert field_values[15] == gameobjects._u32_from_float(entry["rotation3"])
 
 
@@ -158,7 +213,7 @@ def test_build_gameobject_update_payload_derives_upright_rotation_from_orientati
     assert field_values[15] == gameobjects._u32_from_float(math.cos(0.75))
 
 
-def test_gameobject_stationary_orientation_uses_db_quaternion_yaw():
+def test_gameobject_stationary_orientation_uses_db_orientation_not_quaternion_yaw():
     from server.modules.handlers.world.bootstrap import gameobjects
 
     entry = {
@@ -169,7 +224,7 @@ def test_gameobject_stationary_orientation_uses_db_quaternion_yaw():
         "rotation3": -0.67559,
     }
 
-    expected = math.fmod(2.0 * math.atan2(entry["rotation2"], entry["rotation3"]), math.tau)
+    expected = math.fmod(entry["orientation"], math.tau)
     if expected < 0.0:
         expected += math.tau
 
@@ -213,110 +268,8 @@ def test_gameobject_stationary_orientation_does_not_flip_other_identity_models()
     assert gameobjects._stationary_orientation(entry) == 0.383971
 
 
-def test_replay_movement_focus_sequence_appends_db_gameobjects():
-    replay = _import_replay()
-    session = SimpleNamespace(map_id=1, zone=1637, x=1570.0, y=-4397.0, realm_id=1)
-
-    replay.USE_SERVER_BUILT_MINIMAL_PLAYER = False
-    replay._build_dynamic_active_mover_packet = lambda _session: ("SMSG_MOVE_SET_ACTIVE_MOVER", b"ACTIVE")
-    replay._build_replayed_update_object_packet = (
-        lambda _session, opcode_name, path, update_index: (opcode_name, path.name.encode())
-    )
-    replay.build_database_gameobject_responses = lambda _session: [("SMSG_UPDATE_OBJECT", b"DBOBJ")]
-
-    responses = replay.replay_movement_focus_sequence(session)
-
-    assert responses[0] == ("SMSG_MOVE_SET_ACTIVE_MOVER", b"ACTIVE")
-    assert responses[-1] == ("SMSG_UPDATE_OBJECT", b"DBOBJ")
-
-
-def test_replay_movement_focus_sequence_appends_hybrid_player_value_update(monkeypatch):
-    replay = _import_replay()
-    session = SimpleNamespace(map_id=1, zone=1637, x=1570.0, y=-4397.0, realm_id=1)
-
-    monkeypatch.setattr(replay, "USE_SERVER_BUILT_MINIMAL_PLAYER", True)
-    monkeypatch.setattr(
-        replay,
-        "_build_world_login_context",
-        lambda _session: SimpleNamespace(map_id=1, world_guid=0x300010000000D),
-    )
-    monkeypatch.setattr(
-        replay,
-        "build_server_built_minimal_player_value_update",
-        lambda _ctx: b"VALUE",
-    )
-    monkeypatch.setattr(
-        replay,
-        "_build_dynamic_active_mover_packet",
-        lambda _session: ("SMSG_MOVE_SET_ACTIVE_MOVER", b"ACTIVE"),
-    )
-    monkeypatch.setattr(
-        replay,
-        "_build_replayed_update_object_packet",
-        lambda _session, opcode_name, path, update_index: (opcode_name, path.name.encode()),
-    )
-    monkeypatch.setattr(
-        replay,
-        "build_database_gameobject_responses",
-        lambda _session: [("SMSG_UPDATE_OBJECT", b"DBOBJ")],
-    )
-    monkeypatch.setattr(
-        replay,
-        "make_update_object_response",
-        lambda payload, update_index=None: ("SMSG_UPDATE_OBJECT", payload),
-    )
-
-    responses = replay.replay_movement_focus_sequence(session)
-
-    replay_index = responses.index(
-        ("SMSG_UPDATE_OBJECT", b"SMSG_UPDATE_OBJECT_1773613176_0002.json")
-    )
-    assert responses[replay_index + 1] == ("SMSG_UPDATE_OBJECT", b"VALUE")
-
-
-def test_replay_movement_focus_sequence_skips_hybrid_player_value_update_on_none(monkeypatch):
-    replay = _import_replay()
-    session = SimpleNamespace(map_id=1, zone=1637, x=1570.0, y=-4397.0, realm_id=1)
-
-    monkeypatch.setattr(replay, "USE_SERVER_BUILT_MINIMAL_PLAYER", True)
-    monkeypatch.setattr(
-        replay,
-        "_build_world_login_context",
-        lambda _session: SimpleNamespace(map_id=1, world_guid=0x300010000000D),
-    )
-    monkeypatch.setattr(
-        replay,
-        "build_server_built_minimal_player_value_update",
-        lambda _ctx: None,
-    )
-    monkeypatch.setattr(
-        replay,
-        "_build_dynamic_active_mover_packet",
-        lambda _session: ("SMSG_MOVE_SET_ACTIVE_MOVER", b"ACTIVE"),
-    )
-    monkeypatch.setattr(
-        replay,
-        "_build_replayed_update_object_packet",
-        lambda _session, opcode_name, path, update_index: (opcode_name, path.name.encode()),
-    )
-    monkeypatch.setattr(
-        replay,
-        "build_database_gameobject_responses",
-        lambda _session: [],
-    )
-    monkeypatch.setattr(
-        replay,
-        "make_update_object_response",
-        lambda payload, update_index=None: ("SMSG_UPDATE_OBJECT", payload),
-    )
-
-    responses = replay.replay_movement_focus_sequence(session)
-
-    assert ("SMSG_UPDATE_OBJECT", b"VALUE") not in responses
-
-
 def test_build_database_gameobject_responses_allows_map_zero(monkeypatch):
-    replay = _import_replay()
+    gameobjects = _import_gameobjects()
     session = SimpleNamespace(map_id=0, x=-8803.0, y=633.0, realm_id=1)
 
     db_module = sys.modules["server.modules.database.DatabaseConnection"]
@@ -326,47 +279,63 @@ def test_build_database_gameobject_responses_allows_map_zero(monkeypatch):
         staticmethod(lambda map_id, x, y, radius, limit: [{"guid": 4, "entry": 175354}]),
     )
     monkeypatch.setattr(
-        replay,
+        gameobjects,
         "_build_gameobject_update_payload",
         lambda **kwargs: b"payload",
     )
     monkeypatch.setattr(
-        replay,
+        gameobjects,
         "make_update_object_response",
         lambda payload: ("SMSG_UPDATE_OBJECT", payload),
     )
-
-    responses = replay.build_database_gameobject_responses(session)
+    responses = gameobjects.build_database_gameobject_responses(session)
 
     assert responses == [("SMSG_UPDATE_OBJECT", b"payload")]
 
 
-def test_build_creature_barncastle_payload_patches_only_map_and_position():
-    replay = _import_replay()
-    entry = {
-        "guid": 68,
-        "entry": 2457,
-        "x": -8903.01,
-        "y": 641.83,
-        "z": 99.62,
-        "orientation": 1.25,
-        "modelid": 1437,
-        "template": {"modelid1": 1437},
-    }
+def test_build_database_gameobject_responses_marks_bootstrap_creates_loaded(monkeypatch):
+    gameobjects = _import_gameobjects()
+    session = SimpleNamespace(map_id=1, x=-995.0, y=-3822.0, realm_id=1)
 
-    original = replay._load_npc_barncastle_template()
-    payload = replay._build_creature_barncastle_payload(map_id=0, entry=entry)
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_gameobjects_near",
+        staticmethod(
+            lambda map_id, x, y, radius, limit: [
+                {"guid": 4, "entry": 176495, "type": 15, "map": 1, "x": x, "y": y, "z": 0.0}
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        gameobjects,
+        "_build_gameobject_update_payload",
+        lambda **kwargs: b"transport-create",
+    )
+    monkeypatch.setattr(
+        gameobjects,
+        "make_update_object_response",
+        lambda payload: ("SMSG_UPDATE_OBJECT", payload),
+    )
 
-    assert len(payload) == 222
-    assert payload[0:2] == b"\x00\x00"
-    assert payload[2:48] == original[2:48]
-    assert payload[56:60] == original[56:60]
-    assert payload[64:83] == original[64:83]
-    assert payload[87:] == original[87:]
-    assert payload[48:52] != original[48:52]
-    assert payload[52:56] != original[52:56]
-    assert payload[60:64] != original[60:64]
-    assert payload[83:87] != original[83:87]
+    transport_runtime_module = sys.modules["server.modules.handlers.world.transport_runtime"]
+
+    def _fake_register_loaded_transport_entry(_session, entry, world_guid, map_id):
+        _session.loaded_transport_entries = {int(world_guid): dict(entry)}
+        return True
+
+    monkeypatch.setattr(
+        transport_runtime_module,
+        "register_loaded_transport_entry",
+        _fake_register_loaded_transport_entry,
+    )
+
+    responses = gameobjects.build_database_gameobject_responses(session)
+    expected_guid = int(gameobjects.MoTransportGuid.from_spawn_guid(4))
+
+    assert responses == [("SMSG_UPDATE_OBJECT", b"transport-create")]
+    assert session.loaded_gameobjects == {expected_guid}
+    assert expected_guid in session.loaded_transport_entries
 
 
 def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
@@ -487,6 +456,48 @@ def test_build_creature_update_payload_uses_create_object2():
     assert payload[0:2] == b"\x00\x00"
     assert payload[2:6] == b"\x01\x00\x00\x00"
     assert payload[6] == 2
+
+
+def test_build_creature_update_payload_normalizes_negative_orientation():
+    replay = _import_replay()
+    entry = {
+        "guid": 68,
+        "entry": 2457,
+        "x": -8903.01,
+        "y": 641.83,
+        "z": 99.62,
+        "orientation": -1.0,
+        "modelid": 1437,
+        "template": {"modelid1": 1437},
+    }
+
+    payload = replay._build_creature_update_payload(map_id=0, entry=entry, realm_id=1)
+    x_offset = payload.find(struct.pack("<f", entry["x"]))
+
+    assert x_offset >= 0
+    packet_orientation = struct.unpack_from("<f", payload, x_offset + 4)[0]
+    assert math.isclose(packet_orientation, math.tau - 1.0, rel_tol=0.0, abs_tol=0.000001)
+
+
+def test_build_creature_update_payload_normalizes_overrange_orientation():
+    replay = _import_replay()
+    entry = {
+        "guid": 68,
+        "entry": 2457,
+        "x": -8903.01,
+        "y": 641.83,
+        "z": 99.62,
+        "orientation": math.tau + 1.25,
+        "modelid": 1437,
+        "template": {"modelid1": 1437},
+    }
+
+    payload = replay._build_creature_update_payload(map_id=0, entry=entry, realm_id=1)
+    x_offset = payload.find(struct.pack("<f", entry["x"]))
+
+    assert x_offset >= 0
+    packet_orientation = struct.unpack_from("<f", payload, x_offset + 4)[0]
+    assert math.isclose(packet_orientation, 1.25, rel_tol=0.0, abs_tol=0.000001)
 
 
 def test_build_creature_field_values_uses_spawn_npc_flags():

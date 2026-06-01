@@ -66,7 +66,7 @@ _TAXI_MOUNT_DISPLAY_BY_CREATURE_ID: dict[int, int] = {
     32981: 28421,  # Riding Scourge Gryphon (Taxi)
 }
 _TAXI_PATH_FMT = "diii"
-_TAXI_RESAMPLE_DISTANCE_YARDS = 4.0
+_TAXI_RESAMPLE_DISTANCE_YARDS = 18.0
 
 
 def _payload(ctx) -> bytes:
@@ -537,6 +537,11 @@ def handle_gossip_hello(session, ctx):
         len(data),
     )
     if not is_taxi:
+        from server.modules.handlers.world.opcodes import npc_interaction
+
+        npc_responses = npc_interaction.handle_gossip_hello_for_npc(session, guid, data)
+        if npc_responses is not None:
+            return 0, npc_responses
         return 0, [("SMSG_GOSSIP_COMPLETE", b"")]
 
     return 0, [
@@ -593,6 +598,7 @@ def handle_activate_taxi(session, ctx):
 
     destination_map = int(destination[0])
     if destination_map != int(getattr(session, "map_id", 0) or 0):
+        # TODO: Add dedicated taxi map-transfer phase before enabling cross-continent routes.
         Logger.warning("[TAXI] cross-map taxi rejected destination=%s map=%s", int(destination_node), destination_map)
         return 0, responses
 
@@ -603,6 +609,7 @@ def handle_activate_taxi(session, ctx):
             path_points,
             destination_map=map_id,
             destination_node=destination_node,
+            source_node=source_node,
             mount_display_id=_taxi_mount_display_id_for_source(session, source_node),
         )
     )
@@ -637,6 +644,7 @@ def handle_activate_taxi_express(session, ctx):
 
     destination_map = int(destination[0])
     if destination_map != int(getattr(session, "map_id", 0) or 0):
+        # TODO: Add dedicated taxi map-transfer phase before enabling cross-continent routes.
         Logger.warning("[TAXI] cross-map taxi rejected destination=%s map=%s", int(destination_node), destination_map)
         return 0, responses
 
@@ -647,6 +655,7 @@ def handle_activate_taxi_express(session, ctx):
             path_points,
             destination_map=map_id,
             destination_node=destination_node,
+            source_node=source_node,
             mount_display_id=_taxi_mount_display_id_for_source(session, source_node),
         )
     )

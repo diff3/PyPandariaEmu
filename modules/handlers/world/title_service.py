@@ -116,7 +116,7 @@ def _persist_title_state(session) -> None:
 
 def build_title_update_responses(session) -> list[tuple[str, bytes]]:
     """Build the player value update for active and known title state."""
-    from server.modules.handlers.world.bootstrap.replay import build_multi_u32_update_object_payload
+    from server.modules.handlers.world.bootstrap.playerobjects import build_multi_u32_update_object_payload
 
     guid = _session_guid(session)
     if guid <= 0:
@@ -142,7 +142,7 @@ def build_title_update_responses(session) -> list[tuple[str, bytes]]:
 
 def build_active_title_update_responses(session) -> list[tuple[str, bytes]]:
     """Build the small value update used when the player selects a known title."""
-    from server.modules.handlers.world.bootstrap.replay import build_multi_u32_update_object_payload
+    from server.modules.handlers.world.bootstrap.playerobjects import build_multi_u32_update_object_payload
 
     guid = _session_guid(session)
     if guid <= 0:

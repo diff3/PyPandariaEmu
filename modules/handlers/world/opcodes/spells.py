@@ -14,7 +14,7 @@ from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.login.context import WorldLoginContext
 from server.modules.handlers.world.login.packets import build_login_packet
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
-from server.modules.handlers.world.bootstrap.replay import (
+from server.modules.handlers.world.bootstrap.playerobjects import (
     build_multi_u32_update_object_payload,
 )
 from server.modules.handlers.world.dispatcher import register
@@ -89,6 +89,7 @@ _UNIT_FIELD_FLAGS = 0x60
 _UNIT_FIELD_MOUNTDISPLAYID = 0x6A
 _MOUNT_SPEED_MULTIPLIER = 2.0
 _MOVEMENTFLAG_CAN_FLY = 0x00800000
+_MOVEMENTFLAG_FALLING = 0x00000800
 _MOVEMENTFLAG_FLYING = 0x01000000
 _MOVEMENTFLAG_ASCENDING = 0x00200000
 _MOVEMENTFLAG_DESCENDING = 0x00400000
@@ -426,6 +427,53 @@ def _apply_mount_movement_speeds(player) -> None:
     player.fly_back_speed = _DEFAULT_FLY_BACK_SPEED * _MOUNT_SPEED_MULTIPLIER
     player.turn_speed = _DEFAULT_TURN_SPEED
     player.pitch_speed = _DEFAULT_PITCH_SPEED
+
+
+def _log_mount_transport_state(player, action: str, phase: str) -> None:
+    state = getattr(player, "movement_state", None)
+    movement_flags = int(getattr(state, "flags", 0) or 0)
+    falling = bool(
+        movement_flags & _MOVEMENTFLAG_FALLING
+        or bool(getattr(state, "has_fall_data", False))
+    )
+    flying = bool(
+        getattr(player, "is_flying", False)
+        or getattr(player, "can_fly", False)
+        or movement_flags & (_MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING)
+    )
+    Logger.info(
+        "[MOUNT_TRANSPORT_AUDIT] action=%s phase=%s "
+        "session_pos=(%.3f %.3f %.3f) session_o=%.6f "
+        "movement_pos=(%.3f %.3f %.3f) movement_o=%.6f "
+        "transport_guid=0x%016X transport_offset=(%.3f %.3f %.3f) "
+        "transport_orientation=%.6f movement_flags=0x%08X "
+        "falling=%s has_fall_data=%s fall_time=%s flying=%s "
+        "can_fly=%s is_flying=%s ascending=%s descending=%s",
+        str(action),
+        str(phase),
+        float(getattr(player, "x", 0.0) or 0.0),
+        float(getattr(player, "y", 0.0) or 0.0),
+        float(getattr(player, "z", 0.0) or 0.0),
+        float(getattr(player, "orientation", 0.0) or 0.0),
+        float(getattr(state, "x", getattr(player, "x", 0.0)) or 0.0),
+        float(getattr(state, "y", getattr(player, "y", 0.0)) or 0.0),
+        float(getattr(state, "z", getattr(player, "z", 0.0)) or 0.0),
+        float(getattr(state, "orientation", getattr(player, "orientation", 0.0)) or 0.0),
+        int(getattr(state, "transport_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+        float(getattr(state, "transport_x", 0.0) or 0.0),
+        float(getattr(state, "transport_y", 0.0) or 0.0),
+        float(getattr(state, "transport_z", 0.0) or 0.0),
+        float(getattr(state, "transport_orientation", 0.0) or 0.0),
+        movement_flags & 0xFFFFFFFF,
+        bool(falling),
+        bool(getattr(state, "has_fall_data", False)),
+        int(getattr(state, "fall_time", 0) or 0),
+        bool(flying),
+        bool(getattr(player, "can_fly", False)),
+        bool(getattr(player, "is_flying", False)),
+        bool(getattr(state, "is_ascending", False)),
+        bool(getattr(state, "is_descending", False)),
+    )
 
 
 def set_custom_run_speed(player, run_speed: float) -> None:
@@ -919,16 +967,17 @@ def build_smsg_dismount_payload(session) -> bytes:
 
 
 def _set_flying_capability_state(session, enabled: bool) -> bool:
+    _log_mount_transport_state(
+        session,
+        "mount" if bool(enabled) else "dismount",
+        "flying_capability_enter",
+    )
     previous = bool(getattr(session, "can_fly", False))
     session.can_fly = bool(enabled)
     session.is_flying = bool(enabled)
 
     state = getattr(session, "movement_state", None)
     if state is not None:
-        state.x = float(getattr(session, "x", getattr(state, "x", 0.0)) or 0.0)
-        state.y = float(getattr(session, "y", getattr(state, "y", 0.0)) or 0.0)
-        state.z = float(getattr(session, "z", getattr(state, "z", 0.0)) or 0.0)
-        state.orientation = float(getattr(session, "orientation", getattr(state, "orientation", 0.0)) or 0.0)
         flags = int(getattr(state, "flags", 0) or 0)
         if enabled:
             flags |= _MOVEMENTFLAG_FLYING_CAPABILITY
@@ -947,6 +996,11 @@ def _set_flying_capability_state(session, enabled: bool) -> bool:
             state.is_descending = False
         state.flags = int(flags)
 
+    _log_mount_transport_state(
+        session,
+        "mount" if bool(enabled) else "dismount",
+        "flying_capability_exit",
+    )
     return previous != bool(enabled)
 
 
@@ -1031,29 +1085,37 @@ def build_raw_update_object(player, fields):
 
 
 def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
+    _log_mount_transport_state(player, "mount", "send_update_enter")
     responses: list[tuple[str, bytes]] = []
     display_id = get_mount_display_id(spell_id)
     responses.extend(apply_mount_aura(player, spell_id))
     if display_id > 0:
         responses.extend(build_mount_visual_responses(player, display_id))
+        _log_mount_transport_state(player, "mount", "after_visual")
         _broadcast_mount_visual_to_visible_peers(player, display_id)
     responses.extend(build_mount_flying_capability_responses(player, int(spell_id)))
+    _log_mount_transport_state(player, "mount", "after_flying_capability")
     responses.append(_build_run_speed_update_response(player))
     responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(player)))
     responses.extend(_notification_response(f"Mounted spell={int(spell_id)} speed={float(player.run_speed):.2f}"))
+    _log_mount_transport_state(player, "mount", "send_update_exit")
     return responses
 
 
 def send_dismount_update(player) -> list[tuple[str, bytes]]:
+    _log_mount_transport_state(player, "dismount", "send_update_enter")
     responses: list[tuple[str, bytes]] = list(remove_mount_aura(player))
     if int(getattr(player, "active_fly_aura_spell_id", 0) or 0):
         responses.extend(remove_fly_aura(player))
     responses.append(("SMSG_DISMOUNT", build_smsg_dismount_payload(player)))
     responses.extend(build_dismount_flying_capability_responses(player))
+    _log_mount_transport_state(player, "dismount", "after_flying_capability")
     responses.extend(build_mount_visual_responses(player, 0))
+    _log_mount_transport_state(player, "dismount", "after_visual")
     _broadcast_mount_visual_to_visible_peers(player, 0)
     responses.extend(_build_movement_speed_update_responses(player))
     responses.extend(_notification_response(f"Dismounted speed={float(player.run_speed):.2f}"))
+    _log_mount_transport_state(player, "dismount", "send_update_exit")
     return responses
 
 
@@ -1180,6 +1242,7 @@ def mount_direct(player, display_id: int, run_speed: float | None = None) -> lis
 
 def handle_mount(player, spell_id: int):
     spell_id = int(spell_id)
+    _log_mount_transport_state(player, "mount", "handle_enter")
     active_mount_spell = int(getattr(player, "mount_spell", 0) or 0)
     if active_mount_spell == spell_id and bool(getattr(player, "is_mounted", False)):
         Logger.info(
@@ -1193,12 +1256,15 @@ def handle_mount(player, spell_id: int):
     player.mount_spell = spell_id
     player.active_mount_aura_slot = int(getattr(player, "active_mount_aura_slot", 0) or 0)
     _apply_mount_movement_speeds(player)
+    _log_mount_transport_state(player, "mount", "after_state_set")
     responses = send_mount_update(player, spell_id)
     _persist_current_mount_state(player)
+    _log_mount_transport_state(player, "mount", "handle_exit")
     return responses
 
 
 def dismount(player) -> list[tuple[str, bytes]]:
+    _log_mount_transport_state(player, "dismount", "handle_enter")
     clear_persisted_mount_state(player)
     player.is_mounted = False
     player.mount_spell = None
@@ -1218,13 +1284,32 @@ def dismount(player) -> list[tuple[str, bytes]]:
         )
         state.flags = int(flags)
     _restore_default_movement_speeds(player)
-    return send_dismount_update(player)
+    _log_mount_transport_state(player, "dismount", "after_state_clear")
+    responses = send_dismount_update(player)
+    _log_mount_transport_state(player, "dismount", "handle_exit")
+    return responses
 
 
 @register("CMSG_CAST_SPELL")
 def handle_cast_spell(session, ctx: PacketContext):
     Logger.debug(f"[SPELL] opcode={ctx.name}")
+    try:
+        from server.modules.handlers.world.taxi_runtime import is_taxi_active
+    except Exception:
+        is_taxi_active = None
+    if callable(is_taxi_active) and is_taxi_active(session):
+        Logger.warning(
+            "[TAXI] blocked spellcast while in flight player=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+        return 0, None
+
     packet_spell_id = _extract_packet_spell_id(ctx)
+    if packet_spell_id == 8690:
+        from server.modules.handlers.world.opcodes import npc_interaction
+
+        return 0, npc_interaction.handle_hearthstone_cast(session)
+
     if packet_spell_id and is_mount_spell(packet_spell_id):
         Logger.debug(f"[SPELL] packet mount spell_id={int(packet_spell_id)}")
         pending_cancel_spell = int(getattr(session, "pending_mount_cancel_spell", 0) or 0)
@@ -1249,6 +1334,11 @@ def handle_cast_spell(session, ctx: PacketContext):
         return 0, None
 
     Logger.debug(f"[SPELL] cast spell_id={int(spell_id)}")
+    if int(spell_id) == 8690:
+        from server.modules.handlers.world.opcodes import npc_interaction
+
+        return 0, npc_interaction.handle_hearthstone_cast(session)
+
     if not is_mount_spell(int(spell_id)):
         if battle_pet_by_spell(int(spell_id)) is not None:
             from server.modules.handlers.world.opcodes import pets as pet_handlers

@@ -30,6 +30,7 @@ from server.modules.handlers.world.opcodes import inventory as _inventory  # noq
 from server.modules.handlers.world.opcodes import login as _login  # noqa: F401
 from server.modules.handlers.world.opcodes import misc as _misc  # noqa: F401
 from server.modules.handlers.world.opcodes import movement as _movement  # noqa: F401
+from server.modules.handlers.world.opcodes import npc_interaction as _npc_interaction  # noqa: F401
 from server.modules.handlers.world.opcodes import pets as _pets  # noqa: F401
 from server.modules.handlers.world.opcodes import spells as _spells  # noqa: F401
 from server.modules.handlers.world.opcodes import taxi as _taxi  # noqa: F401

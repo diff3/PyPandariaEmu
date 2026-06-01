@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-"""Player UPDATE_OBJECT notes for the future server-built implementation.
+"""Player UPDATE_OBJECT notes for the native server-built implementation.
 
 Known state:
-- This module does not build the full player CREATE_OBJECT or full player 0002.
-- The current login/bootstrap player object still depends on replay/exact builders
-  elsewhere in the world login flow.
 - This module currently owns two things:
-  1. Small server-built value-update payloads for player fields.
-  2. Debug helpers that inspect replayed player UPDATE_OBJECT payloads.
+  1. Server-built player CREATE_OBJECT and value-update payloads.
+  2. Debug helpers that inspect captured player UPDATE_OBJECT payloads.
+- The player create movement block is still an exact byte block and is the
+  remaining non-native part of the current 0002 builder.
 
 What is already understood:
 - Packed GUID extraction for the first UPDATE_OBJECT entry works well enough for
@@ -16,7 +15,7 @@ What is already understood:
 - A minimal value-update packet can be built server-side with:
   map_id, update_count, update_type, packed guid, update mask, field values,
   and a trailing zero byte.
-- The player replay path contains a living movement block that can be detected
+- Captured player creates contain a living movement block that can be detected
   heuristically from a 13-float sequence. The currently recognized values are:
   fly_speed, turn_speed, swim_speed, pitch_speed, x, orientation, walk_speed,
   y, fly_back_speed, run_back_speed, run_speed, swim_back_speed, z.
@@ -41,7 +40,7 @@ Known field specification:
 - Known gaps in the current server-built value-update layout:
   - There are no known padding gaps between the sections listed above.
   - The only variable-size regions are packed guid, update mask, and field_bytes.
-- Replayed player UPDATE_OBJECT guid parsing, in wire order:
+- Captured player UPDATE_OBJECT guid parsing, in wire order:
   1. map_id: uint16, 2 bytes
   2. update_count: uint32, 4 bytes
   3. update_type: uint8, 1 byte
@@ -73,8 +72,8 @@ Known field specification:
   - Known gaps in this verified create packet:
     - the movement block is not fully decoded yet
     - some bytes inside the movement region are still unidentified
-- Replayed living movement block:
-  - This block is currently identified heuristically inside the replayed player
+- Captured living movement block:
+  - This block is currently identified heuristically inside the captured player
     payload, not from a full formal packet definition.
   - Observed order and size:
     1. fly_speed: float, 4 bytes
@@ -93,7 +92,7 @@ Known field specification:
   - Total observed size: 52 bytes
   - Known gap status:
     - no internal gaps are assumed inside this 13-float block
-    - any bytes before or after this block inside the full replayed player
+    - any bytes before or after this block inside the captured player
       object are still unknown
 - Verified field indices from the SkyFire player create capture:
   - object fields:
@@ -155,24 +154,10 @@ Known field specification:
     - any undocumented bytes inside the movement region
     - any inferred field names not listed explicitly above
 
-Known gaps in field specification:
-- The full player CREATE_OBJECT body layout is still unknown.
-- The exact field index map for the replayed player 0002 value block is not yet
-  documented here.
-- The mandatory create flags, movement flags, and object-type-specific layout
-  bits for a fully server-built player object are still unresolved.
-
-What is not yet established:
-- A full server-built player CREATE_OBJECT layout.
-- A complete field map for the player 0002 payload.
-- Which player fields are mandatory for a valid first world snapshot versus
-  optional follow-up value updates.
-- A clean DSL definition for a full player object packet.
-
-Working assumption for the next phase:
-- Keep using this module as the place to document confirmed player packet
-  structure until the replayed player object can be replaced with a fully
-  server-built payload.
+Known remaining gap:
+- The player create movement block is still carried as exact bytes. Replacing it
+  requires decoding the unidentified movement-region bytes without changing the
+  current packet identity.
 """
 
 import math
@@ -182,10 +167,6 @@ from shared.Logger import Logger
 from server.modules.game.guid import GuidHelper
 from server.session.runtime import session as runtime_session
 
-USE_SERVER_BUILT_MINIMAL_PLAYER = False
-USE_SERVER_BUILT_PLAYER_CREATE = True
-USE_SERVER_BUILT_PLAYER_CREATE_DIRECT = True
-
 _PLAYER_CREATE_GUID_MASK_OFFSET = 7
 _PLAYER_CREATE_GUID_VALUE_OFFSET = 8
 _PLAYER_CREATE_MOVEMENT_BLOCK_START = 10
@@ -194,6 +175,8 @@ _PLAYER_CREATE_MOVEMENT_X_OFFSET = 29
 _PLAYER_CREATE_MOVEMENT_O_OFFSET = 33
 _PLAYER_CREATE_MOVEMENT_Y_OFFSET = 41
 _PLAYER_CREATE_MOVEMENT_Z_OFFSET = 62
+_PLAYER_CREATE_REMOTE_SELF_FLAG_OFFSET = 14
+_PLAYER_CREATE_REMOTE_SELF_FLAG = 0x40
 _PLAYER_CREATE_OBJECT_TYPE = 4
 _PLAYER_CREATE_UPDATE_COUNT = 1
 _PLAYER_CREATE_UPDATE_TYPE = 2
@@ -235,41 +218,57 @@ _SKILL_RIDING_RANK = 375
 _LANGUAGE_MASK_COMMON = (1 << 7).to_bytes(4, "little")
 _LANGUAGE_MASK_ORCISH = (1 << 1).to_bytes(4, "little")
 
-_VERIFIED_PLAYER_REFERENCE_FIELDS = {
+_PLAYER_CREATE_NAMED_DEFAULT_FIELDS = {
     6: 0,
     26: 0,
     27: 0,
     28: 0,
-    30: 16780036,
+    64: 2000,
+    65: 2000,
+    66: 2000,
+    81: 1065353216,
+    82: 1065353216,
+    83: 1065353216,
+    84: 1065353216,
+    961: 1,
+    1152: 400,
+}
+
+_PLAYER_CREATE_POWER_REGEN_DEFAULT_FIELDS = {
     36: 100,
-    40: 40,
     41: 1000,
     42: 100,
     43: 100,
     45: 1066639324,
     50: 1042536202,
-    64: 2000,
-    65: 2000,
-    66: 2000,
-    72: 1074341010,
-    73: 1078535314,
-    81: 1065353216,
-    82: 1065353216,
-    83: 1065353216,
-    84: 1065353216,
+}
+
+_PLAYER_CREATE_UNIT_MISC_DEFAULT_FIELDS = {
+    154: 1065353216,
+}
+
+_PLAYER_CREATE_BASE_STAT_FIELDS = {
     90: 18,
     91: 25,
     92: 19,
     93: 22,
     94: 22,
+}
+
+_PLAYER_CREATE_BASE_POWER_HEALTH_FIELDS = {
     126: 40,
     127: 83,
-    129: 8,
-    137: 1065353216,
-    138: 1073741824,
-    154: 1065353216,
-    961: 1,
-    1152: 400,
+}
+
+_PLAYER_CREATE_EXPLORATION_DEFAULT_FIELDS = {
+    1648: 8,
+}
+
+_PLAYER_CREATE_RESTED_DEFAULT_FIELDS = {
+    1827: 65,
+}
+
+_PLAYER_CREATE_LANGUAGE_RIDING_DEFAULT_FIELDS = {
     1153: 6225974,
     1154: 7405666,
     1155: 10485896,
@@ -291,6 +290,28 @@ _VERIFIED_PLAYER_REFERENCE_FIELDS = {
     1413: 65541,
     1414: 327681,
     1415: 5,
+}
+
+_PLAYER_CREATE_COMBAT_DEFAULT_FIELDS = {
+    72: 1074341010,
+    73: 1078535314,
+    129: 8,
+    137: 1065353216,
+    138: 1073741824,
+    1842: 1065353216,
+    1843: 1065353216,
+    1844: 1065353216,
+    1845: 1065353216,
+    1846: 1065353216,
+    1847: 1065353216,
+    1848: 1065353216,
+    1850: 1065353216,
+    1851: 1065353216,
+    1853: 1065353216,
+    1856: 1065353216,
+}
+
+_PLAYER_CREATE_RATING_DEFAULT_FIELDS = {
     1610: 1095173714,
     1612: 1093282693,
     1613: 1093282693,
@@ -303,26 +324,19 @@ _VERIFIED_PLAYER_REFERENCE_FIELDS = {
     1621: 1084224438,
     1622: 30,
     1624: 1090519040,
-    1648: 8,
-    1827: 65,
+}
+
+_PLAYER_CREATE_MODIFIER_DEFAULT_FIELDS = {
     1829: 12,
     1830: 12,
     1831: 12,
     1832: 12,
     1833: 12,
     1834: 12,
-    1842: 1065353216,
-    1843: 1065353216,
-    1844: 1065353216,
-    1845: 1065353216,
-    1846: 1065353216,
-    1847: 1065353216,
-    1848: 1065353216,
     1849: 12,
-    1850: 1065353216,
-    1851: 1065353216,
-    1853: 1065353216,
-    1856: 1065353216,
+}
+
+_PLAYER_CREATE_GLYPH_SLOT_DEFAULT_FIELDS = {
     1952: 21,
     1953: 22,
     1954: 23,
@@ -331,9 +345,12 @@ _VERIFIED_PLAYER_REFERENCE_FIELDS = {
     1957: 26,
 }
 
+_PLAYER_CREATE_REFERENCE_DERIVED_FIELDS = {}
+
 _PLAYER_OBJECT_TYPE = 25
 _PLAYER_SCALE_X = 1.0
 _PLAYER_FLAGS = 8
+_PLAYER_FLAGS_MOUNTED = 0x08000000
 _PLAYER_FLAGS_2 = 2048
 _PLAYER_BOUNDING_RADIUS = 0.389
 _PLAYER_COMBAT_REACH = 1.5
@@ -503,7 +520,7 @@ def _resolve_player_team(ctx) -> str | None:
 def _patch_language_mask_bytes(payload: bytes, ctx) -> bytes:
     """Keep server-built player-create payload bytes stable.
 
-    The old replay path used a raw payload byte-replace for language masks, but
+    The legacy path used a raw payload byte-replace for language masks, but
     doing that here can mutate unrelated sections such as the update mask. The
     server-built path already patches language/riding values through
     _patch_language_skill_fields(), so the payload itself must remain untouched.
@@ -517,7 +534,7 @@ def _apply_legacy_language_riding_skill_block(
     primary_language: int,
     racial_language: int,
 ) -> None:
-    """Mirror the old working barncastle language/riding skill block exactly."""
+    """Build the legacy-compatible language/riding skill block exactly."""
     field_values[1153] = _u32_from_two_u16(primary_language, _SKILL_RIDING)
     field_values[1154] = _u32_from_two_u16(racial_language, 0)
     field_values[1155] = 0
@@ -567,6 +584,10 @@ def locate_update_field_region(payload: bytes) -> dict[str, int]:
     if len(payload) < 10:
         raise ValueError("payload is too short to contain player CREATE_OBJECT data")
 
+    exact_region = _locate_server_built_create_field_region(payload)
+    if exact_region is not None:
+        return exact_region
+
     body_offset = 10
     candidates: list[dict[str, int]] = []
 
@@ -612,6 +633,59 @@ def locate_update_field_region(payload: bytes) -> dict[str, int]:
 
     candidates.sort(key=lambda item: (-item["field_count"], item["mask_offset"]))
     return candidates[0]
+
+
+def _locate_server_built_create_field_region(payload: bytes) -> dict[str, int] | None:
+    """Locate the field region from the known server-built CREATE_OBJECT layout."""
+    if len(payload) < 9:
+        return None
+
+    try:
+        update_type = payload[6]
+        if update_type != _PLAYER_CREATE_UPDATE_TYPE:
+            return None
+
+        offset = 7
+        guid_mask = payload[offset]
+        offset += 1 + guid_mask.bit_count()
+        if offset >= len(payload):
+            return None
+
+        offset += 1
+        mask_offset = offset + len(_PLAYER_CREATE_CONST_MOVEMENT_BLOCK)
+        if mask_offset >= len(payload):
+            return None
+
+        mask_blocks = int(payload[mask_offset])
+        if mask_blocks <= 0:
+            return None
+
+        mask_start = mask_offset + 1
+        mask_end = mask_start + (mask_blocks * 4)
+        if mask_end >= len(payload):
+            return None
+
+        field_bytes_size = len(payload) - mask_end - 1
+        if field_bytes_size < 0 or field_bytes_size % 4 != 0:
+            return None
+
+        mask_bytes = payload[mask_start:mask_end]
+        enabled_bits = sum(byte.bit_count() for byte in mask_bytes)
+        field_count = field_bytes_size // 4
+        if enabled_bits != field_count:
+            return None
+
+        return {
+            "mask_offset": mask_offset,
+            "mask_blocks": mask_blocks,
+            "mask_start": mask_start,
+            "mask_end": mask_end,
+            "field_start": mask_end,
+            "field_end": mask_end + field_bytes_size,
+            "field_count": field_count,
+        }
+    except (IndexError, struct.error, ValueError):
+        return None
 
 
 def locate_field_region(payload: bytes) -> tuple[int, int]:
@@ -761,8 +835,24 @@ def build_player_field_values(ctx) -> dict[int, int]:
     max_level = int(getattr(ctx, "max_level", _PLAYER_MAX_LEVEL_DEFAULT) or _PLAYER_MAX_LEVEL_DEFAULT)
     money = int(getattr(ctx, "money", 0) or 0) & 0xFFFFFFFFFFFFFFFF
     chosen_title = int(getattr(ctx, "chosen_title", 0) or 0)
+    mount_display_id = int(getattr(ctx, "mount_display_id", _PLAYER_MOUNT_DISPLAY_ID) or _PLAYER_MOUNT_DISPLAY_ID)
+    unit_flags = _PLAYER_FLAGS
+    if mount_display_id > 0:
+        unit_flags |= _PLAYER_FLAGS_MOUNTED
 
-    field_values = dict(_VERIFIED_PLAYER_REFERENCE_FIELDS)
+    field_values = dict(_PLAYER_CREATE_REFERENCE_DERIVED_FIELDS)
+    field_values.update(_PLAYER_CREATE_NAMED_DEFAULT_FIELDS)
+    field_values.update(_PLAYER_CREATE_POWER_REGEN_DEFAULT_FIELDS)
+    field_values.update(_PLAYER_CREATE_UNIT_MISC_DEFAULT_FIELDS)
+    field_values.update(_PLAYER_CREATE_BASE_STAT_FIELDS)
+    field_values.update(_PLAYER_CREATE_BASE_POWER_HEALTH_FIELDS)
+    field_values.update(_PLAYER_CREATE_EXPLORATION_DEFAULT_FIELDS)
+    field_values.update(_PLAYER_CREATE_RESTED_DEFAULT_FIELDS)
+    field_values.update(_PLAYER_CREATE_LANGUAGE_RIDING_DEFAULT_FIELDS)
+    field_values.update(_PLAYER_CREATE_COMBAT_DEFAULT_FIELDS)
+    field_values.update(_PLAYER_CREATE_RATING_DEFAULT_FIELDS)
+    field_values.update(_PLAYER_CREATE_MODIFIER_DEFAULT_FIELDS)
+    field_values.update(_PLAYER_CREATE_GLYPH_SLOT_DEFAULT_FIELDS)
     field_values.update(
         {
             _OBJECT_FIELD_GUID_LOW: int(guid) & 0xFFFFFFFF,
@@ -775,13 +865,13 @@ def build_player_field_values(ctx) -> dict[int, int]:
             40: max_power,
             _UNIT_FIELD_LEVEL: level,
             _UNIT_FIELD_FACTION_TEMPLATE: int(getattr(ctx, "faction_template", faction) or faction),
-            _UNIT_FIELD_FLAGS: _PLAYER_FLAGS,
+            _UNIT_FIELD_FLAGS: unit_flags,
             _UNIT_FIELD_FLAGS_2: _PLAYER_FLAGS_2,
             _UNIT_FIELD_BOUNDING_RADIUS: _u32_from_float(_PLAYER_BOUNDING_RADIUS),
             _UNIT_FIELD_COMBAT_REACH: _u32_from_float(_PLAYER_COMBAT_REACH),
             _UNIT_FIELD_DISPLAY_ID: display_id,
             _UNIT_FIELD_NATIVE_DISPLAY_ID: display_id,
-            _UNIT_FIELD_MOUNT_DISPLAY_ID: _PLAYER_MOUNT_DISPLAY_ID,
+            _UNIT_FIELD_MOUNT_DISPLAY_ID: mount_display_id,
             _PLAYER_BYTES: player_bytes,
             _PLAYER_BYTES_2: player_bytes_2,
             _PLAYER_BYTES_3: player_bytes_3,
@@ -853,6 +943,13 @@ def build_full_player_create(ctx) -> bytes | None:
         payload += field_bytes
         payload += struct.pack("<B", 0)
         built_payload = _patch_language_mask_bytes(bytes(payload), ctx)
+        if bool(getattr(ctx, "exact_0002_remote_player", False)):
+            remote_payload = bytearray(built_payload)
+            if len(remote_payload) > _PLAYER_CREATE_REMOTE_SELF_FLAG_OFFSET:
+                remote_payload[_PLAYER_CREATE_REMOTE_SELF_FLAG_OFFSET] &= (
+                    ~_PLAYER_CREATE_REMOTE_SELF_FLAG
+                ) & 0xFF
+            built_payload = bytes(remote_payload)
         assert isinstance(built_payload, (bytes, bytearray))
         assert len(built_payload) > 0
         _verify_player_level_field_in_payload(

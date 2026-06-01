@@ -9,6 +9,8 @@ import time
 
 from shared.Logger import Logger
 
+from server.modules.handlers.world.feature_config import transport_movement_debug_enabled
+
 from .cache import get_movement_cache
 from .evaluator import evaluate_template
 from .types import (
@@ -22,6 +24,27 @@ from .types import (
     PassengerAttachment,
     PassengerTransferState,
 )
+
+def transport_time_ms() -> int:
+    """
+    Absolute global transport clock.
+
+    IMPORTANT:
+    Must survive process restarts and remain
+    stable across world/map servers.
+    """
+    return int(time.time() * 1000.0)
+
+
+def monotonic_time_ms() -> int:
+    """
+    Local monotonic process clock.
+
+    IMPORTANT:
+    Only use for local timers, scheduler deltas,
+    retry logic and session-scoped systems.
+    """
+    return int(time.monotonic() * 1000.0)
 
 
 class MovementManager:
@@ -103,7 +126,8 @@ class MovementManager:
         instance = MovementInstance(
             instance_id=instance_key,
             template_id=template_key,
-            started_at_ms=int(time.monotonic() * 1000.0),
+            # started_at_ms=int(time.monotonic() * 1000.0),
+            started_at_ms=transport_time_ms(),
             phase_offset_ms=int(phase_offset_ms),
         )
         self.instances[instance_key] = MovementRuntimeState(
@@ -128,6 +152,17 @@ class MovementManager:
         self.tick_instance(instance_key)
         return instance
 
+    def transport_time_ms() -> int:
+        """
+        Global deterministic transport clock.
+
+        IMPORTANT:
+        Must remain stable across process restarts
+        and world server sessions.
+        """
+        return int(time.time() * 1000.0)
+
+
     def evaluate(
         self,
         template: MovementTemplate,
@@ -135,10 +170,20 @@ class MovementManager:
         server_time_ms: int | None = None,
         phase_offset_ms: int = 0,
     ) -> MovementTransform:
-        now = int(time.monotonic() * 1000.0) if server_time_ms is None else int(server_time_ms)
-        return evaluate_template(template, now, phase_offset_ms=int(phase_offset_ms))
 
-    def evaluate_instance(
+        now = (
+            transport_time_ms()
+            if server_time_ms is None
+            else int(server_time_ms)
+        )
+
+        return evaluate_template(
+            template,
+            now,
+            phase_offset_ms=int(phase_offset_ms),
+        )
+
+    def evaluate_instance_old(
         self,
         instance_id: int,
         *,
@@ -160,7 +205,40 @@ class MovementManager:
             server_time_ms=server_time_ms,
             phase_offset_ms=int(state.instance.phase_offset_ms),
         )
+    
+    def evaluate_instance(
+        self,
+        instance_id: int,
+        *,
+        server_time_ms: int | None = None,
+    ) -> MovementTransform | None:
 
+        state = self.instances.get(int(instance_id))
+
+        if state is None:
+            return None
+
+        template = self.templates.get(
+            str(state.instance.template_id)
+        )
+
+        if template is None:
+            return None
+
+        now = (
+            transport_time_ms()
+            if server_time_ms is None
+            else int(server_time_ms)
+        )
+
+        return evaluate_template(
+            template,
+            now,
+            phase_offset_ms=int(
+                state.instance.phase_offset_ms
+            ),
+        )
+    
     def tick_instance(
         self,
         instance_id: int,
@@ -373,7 +451,9 @@ class MovementManager:
             local_y=float(attachment.local_y),
             local_z=float(attachment.local_z),
             local_o=float(attachment.local_o),
-            started_at_ms=int(time.monotonic() * 1000.0),
+            # started_at_ms=int(time.monotonic() * 1000.0),
+            started_at_ms=transport_time_ms(),
+
         )
         source.pending_transfers[int(passenger_id)] = transfer
         Logger.info(
@@ -602,15 +682,16 @@ class MovementManager:
         )
         state.lifecycle_events = (*state.lifecycle_events[-15:], event)
         self.event_history[int(state.instance.instance_id)] = state.lifecycle_events
-        Logger.info(
-            "[MovementEvent] instance=0x%016X event=%s phase=%s node=%s target_map=%s %s",
-            int(state.instance.instance_id) & 0xFFFFFFFFFFFFFFFF,
-            event.event_type.value,
-            int(event.phase_ms),
-            int(event.node_index),
-            "none" if event.target_map_id is None else int(event.target_map_id),
-            str(event.message),
-        )
+        if transport_movement_debug_enabled():
+            Logger.info(
+                "[MovementEvent] instance=0x%016X event=%s phase=%s node=%s target_map=%s %s",
+                int(state.instance.instance_id) & 0xFFFFFFFFFFFFFFFF,
+                event.event_type.value,
+                int(event.phase_ms),
+                int(event.node_index),
+                "none" if event.target_map_id is None else int(event.target_map_id),
+                str(event.message),
+            )
 
     def _validate_lifecycle_transition(
         self,

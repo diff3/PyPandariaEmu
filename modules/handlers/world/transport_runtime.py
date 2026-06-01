@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
 import struct
 import threading
@@ -11,11 +12,16 @@ import time
 from typing import Any
 
 from shared.Logger import Logger
+from shared.PathUtils import get_data_root
 from server.modules.handlers.world.feature_config import (
     elevators_enabled,
     moving_transports_enabled,
+    transport_movement_debug_enabled,
 )
-from server.modules.handlers.world.bootstrap.gameobjects import _build_gameobject_update_payload
+from server.modules.handlers.world.bootstrap.gameobjects import (
+    _build_gameobject_update_payload,
+    _build_gameobject_values_update_payload,
+)
 from server.modules.game.guid import GuidHelper, MoTransportGuid
 from server.modules.handlers.world.bootstrap.playerobjects import make_update_object_response
 from server.modules.handlers.world.movements.cache import get_movement_cache
@@ -64,7 +70,7 @@ _THUNDER_BLUFF_ELEVATOR_ENTRIES = frozenset({
 
 })
 _TRANSPORT_CROSS_MAP_HOLD_SECONDS = 15.0
-_TRANSPORT_CROSS_MAP_DISTANCE = _DEFAULT_ROUTE_SPEED * _TRANSPORT_CROSS_MAP_HOLD_SECONDS
+_TRANSPORT_CROSS_MAP_DISTANCE = 0.0
 _WORLD_DB_TRANSPORT_VISIBILITY_RADIUS = 900.0
 _DEEPRUN_TRAM_MAP_ID = 369
 _DEEPRUN_TRAM_ENTRY = 194675
@@ -79,6 +85,7 @@ class TransportRouteNode:
     z: float
     wait_time: float = 0.0
     time_ms: int = 0
+    transfer: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,6 +111,8 @@ class TransportTaxiPathNode:
     x: float
     y: float
     z: float
+    flags: int = 0
+    delay: int = 0
 
 
 @dataclass
@@ -128,6 +137,7 @@ class RuntimeTransportState:
     timed_route: bool = False
     route_period_ms: int = 0
     shared_clock_key: str = ""
+    affinity_map_id: int = -1
 
 
 class WorldTransportManager:
@@ -137,6 +147,7 @@ class WorldTransportManager:
         self._running = False
         self._thread: threading.Thread | None = None
         self._last_tick_log: float = 0.0
+        self._last_snapshot_write: float = 0.0
 
     def start(self) -> None:
         with self._lock:
@@ -261,10 +272,13 @@ class WorldTransportManager:
         return _runtime_transport_states().get(int(world_guid))
 
     def visibility_state_for_guid(self, world_guid: int) -> str:
-        return _movement_visibility_state(int(world_guid))
+        return _effective_transport_visibility_state(int(world_guid))
 
     def is_visible(self, world_guid: int) -> bool:
-        return get_movement_manager().is_visible(int(world_guid))
+        return self.visibility_state_for_guid(int(world_guid)) in (
+            TRANSPORT_VISIBILITY_ACTIVE,
+            TRANSPORT_VISIBILITY_WAITING,
+        )
 
     def can_attach(self, session: Any, world_guid: int) -> bool:
         world_guid = int(world_guid)
@@ -362,16 +376,49 @@ class WorldTransportManager:
         *,
         loaded_guids: set[int] | None = None,
         radius: float = _TRANSPORT_VISIBILITY_RADIUS,
+        context: str = "discovery",
     ) -> list[dict[str, Any]]:
         session_map = int(getattr(session, "map_id", 0) or 0)
         session_x = float(getattr(session, "x", 0.0) or 0.0)
         session_y = float(getattr(session, "y", 0.0) or 0.0)
+        session_z = float(getattr(session, "z", 0.0) or 0.0)
         entries: list[dict[str, Any]] = []
+        considered = 0
+        visible_guids: list[int] = []
+        rejected_guids: list[int] = []
         with self._lock:
             source_entries = list(self.entries.items())
 
         for world_guid, entry in source_entries:
+            considered += 1
+            state = _runtime_transport_states().get(int(world_guid))
+            transport_entry = int(entry.get("entry", 0) or 0)
+            visibility_state = self.visibility_state_for_guid(int(world_guid))
             if isinstance(loaded_guids, set) and int(world_guid) in loaded_guids:
+                _log_transport_discovery_decision(
+                    session,
+                    world_guid=int(world_guid),
+                    entry=transport_entry,
+                    transport_map=int(getattr(state, "map_id", entry.get("map", session_map)) or session_map),
+                    transport_x=float(getattr(state, "x", entry.get("x", 0.0)) or 0.0),
+                    transport_y=float(getattr(state, "y", entry.get("y", 0.0)) or 0.0),
+                    transport_z=float(getattr(state, "z", entry.get("z", 0.0)) or 0.0),
+                    phase_ms=int(getattr(state, "phase_ms", entry.get("transport_path_progress", 0)) or 0),
+                    state=_movement_lifecycle_state(int(world_guid)),
+                    visibility_state=visibility_state,
+                    distance=_transport_distance(
+                        session_x,
+                        session_y,
+                        session_z,
+                        float(getattr(state, "x", entry.get("x", 0.0)) or 0.0),
+                        float(getattr(state, "y", entry.get("y", 0.0)) or 0.0),
+                        float(getattr(state, "z", entry.get("z", 0.0)) or 0.0),
+                    ),
+                    visible=False,
+                    reason="already_loaded",
+                    context=context,
+                )
+                rejected_guids.append(int(world_guid))
                 continue
             if not self.is_visible(int(world_guid)):
                 Logger.debug(
@@ -379,21 +426,128 @@ class WorldTransportManager:
                     int(world_guid) & 0xFFFFFFFFFFFFFFFF,
                     self.visibility_state_for_guid(int(world_guid)),
                 )
+                _log_transport_discovery_decision(
+                    session,
+                    world_guid=int(world_guid),
+                    entry=transport_entry,
+                    transport_map=int(getattr(state, "map_id", entry.get("map", session_map)) or session_map),
+                    transport_x=float(getattr(state, "x", entry.get("x", 0.0)) or 0.0),
+                    transport_y=float(getattr(state, "y", entry.get("y", 0.0)) or 0.0),
+                    transport_z=float(getattr(state, "z", entry.get("z", 0.0)) or 0.0),
+                    phase_ms=int(getattr(state, "phase_ms", entry.get("transport_path_progress", 0)) or 0),
+                    state=_movement_lifecycle_state(int(world_guid)),
+                    visibility_state=visibility_state,
+                    distance=_transport_distance(
+                        session_x,
+                        session_y,
+                        session_z,
+                        float(getattr(state, "x", entry.get("x", 0.0)) or 0.0),
+                        float(getattr(state, "y", entry.get("y", 0.0)) or 0.0),
+                        float(getattr(state, "z", entry.get("z", 0.0)) or 0.0),
+                    ),
+                    visible=False,
+                    reason="runtime_missing" if state is None else "visibility_filter",
+                    context=context,
+                )
+                rejected_guids.append(int(world_guid))
                 continue
             home_map = entry.get("home_map")
             if home_map is not None and int(home_map) != session_map:
+                _log_transport_discovery_decision(
+                    session,
+                    world_guid=int(world_guid),
+                    entry=transport_entry,
+                    transport_map=int(getattr(state, "map_id", entry.get("map", session_map)) or session_map),
+                    transport_x=float(getattr(state, "x", entry.get("x", 0.0)) or 0.0),
+                    transport_y=float(getattr(state, "y", entry.get("y", 0.0)) or 0.0),
+                    transport_z=float(getattr(state, "z", entry.get("z", 0.0)) or 0.0),
+                    phase_ms=int(getattr(state, "phase_ms", entry.get("transport_path_progress", 0)) or 0),
+                    state=_movement_lifecycle_state(int(world_guid)),
+                    visibility_state=visibility_state,
+                    distance=_transport_distance(
+                        session_x,
+                        session_y,
+                        session_z,
+                        float(getattr(state, "x", entry.get("x", 0.0)) or 0.0),
+                        float(getattr(state, "y", entry.get("y", 0.0)) or 0.0),
+                        float(getattr(state, "z", entry.get("z", 0.0)) or 0.0),
+                    ),
+                    visible=False,
+                    reason="map_mismatch",
+                    context=context,
+                )
+                rejected_guids.append(int(world_guid))
                 continue
             moved_entry = cached_transport_runtime_entry(session, entry)
             moved_map = moved_entry.get("map", session_map)
             if moved_map is None:
                 moved_map = session_map
             if int(moved_map) != session_map:
+                _log_transport_discovery_decision(
+                    session,
+                    world_guid=int(world_guid),
+                    entry=transport_entry,
+                    transport_map=int(moved_map),
+                    transport_x=float(moved_entry.get("x", 0.0) or 0.0),
+                    transport_y=float(moved_entry.get("y", 0.0) or 0.0),
+                    transport_z=float(moved_entry.get("z", 0.0) or 0.0),
+                    phase_ms=int(moved_entry.get("transport_path_progress", 0) or 0),
+                    state=_movement_lifecycle_state(int(world_guid)),
+                    visibility_state=visibility_state,
+                    distance=_transport_distance(
+                        session_x,
+                        session_y,
+                        session_z,
+                        float(moved_entry.get("x", 0.0) or 0.0),
+                        float(moved_entry.get("y", 0.0) or 0.0),
+                        float(moved_entry.get("z", 0.0) or 0.0),
+                    ),
+                    visible=False,
+                    reason="map_mismatch",
+                    context=context,
+                )
+                rejected_guids.append(int(world_guid))
                 continue
             dx = float(moved_entry.get("x", 0.0) or 0.0) - session_x
             dy = float(moved_entry.get("y", 0.0) or 0.0) - session_y
-            if math.hypot(dx, dy) > float(radius):
+            distance = math.hypot(dx, dy)
+            if distance > float(radius):
+                _log_transport_discovery_decision(
+                    session,
+                    world_guid=int(world_guid),
+                    entry=transport_entry,
+                    transport_map=int(moved_map),
+                    transport_x=float(moved_entry.get("x", 0.0) or 0.0),
+                    transport_y=float(moved_entry.get("y", 0.0) or 0.0),
+                    transport_z=float(moved_entry.get("z", 0.0) or 0.0),
+                    phase_ms=int(moved_entry.get("transport_path_progress", 0) or 0),
+                    state=_movement_lifecycle_state(int(world_guid)),
+                    visibility_state=visibility_state,
+                    distance=distance,
+                    visible=False,
+                    reason="distance",
+                    context=context,
+                )
+                rejected_guids.append(int(world_guid))
                 continue
             entries.append(moved_entry)
+            visible_guids.append(int(world_guid))
+            _log_transport_discovery_decision(
+                session,
+                world_guid=int(world_guid),
+                entry=transport_entry,
+                transport_map=int(moved_map),
+                transport_x=float(moved_entry.get("x", 0.0) or 0.0),
+                transport_y=float(moved_entry.get("y", 0.0) or 0.0),
+                transport_z=float(moved_entry.get("z", 0.0) or 0.0),
+                phase_ms=int(moved_entry.get("transport_path_progress", 0) or 0),
+                state=_movement_lifecycle_state(int(world_guid)),
+                visibility_state=visibility_state,
+                distance=distance,
+                visible=True,
+                reason="accepted",
+                context=context,
+            )
             Logger.debug(
                 "[TransportStream] streamed transport=0x%016X player=%s phase=%s node=%s state=%s map=%s",
                 int(world_guid) & 0xFFFFFFFFFFFFFFFF,
@@ -403,6 +557,13 @@ class WorldTransportManager:
                 _movement_lifecycle_state(int(world_guid)),
                 int(session_map),
             )
+        _log_transport_discovery_summary(
+            session,
+            considered=considered,
+            visible_guids=visible_guids,
+            rejected_guids=rejected_guids,
+            context=context,
+        )
         return entries
 
     def _run_loop(self) -> None:
@@ -411,13 +572,26 @@ class WorldTransportManager:
                 if not self._running:
                     return
                 states = list(_runtime_transport_states().items())
-            get_movement_manager().tick(_transport_manager_server_time_ms(states))
             for _world_guid, state in states:
+                get_movement_manager().tick_instance(
+                    int(_world_guid),
+                    server_time_ms=_transport_server_time_ms(state),
+                )
                 _sync_transport_state_from_movement_cache(state)
+            self._maybe_write_runtime_snapshot(states)
             self._log_tick(states)
             time.sleep(_TRANSPORT_TICK_SECONDS)
 
+    def _maybe_write_runtime_snapshot(self, states: list[tuple[int, RuntimeTransportState]]) -> None:
+        now = time.monotonic()
+        if now < self._last_snapshot_write + 2.0:
+            return
+        self._last_snapshot_write = now
+        write_world_runtime_snapshot(states)
+
     def _log_tick(self, states: list[tuple[int, RuntimeTransportState]]) -> None:
+        if not transport_movement_debug_enabled():
+            return
         now = time.monotonic()
         if now < self._last_tick_log + 5.0:
             return
@@ -681,10 +855,92 @@ def clear_loaded_transport_entries(session: Any) -> None:
         loaded_transports.clear()
 
 
+def _transport_distance(
+    player_x: float,
+    player_y: float,
+    player_z: float,
+    transport_x: float,
+    transport_y: float,
+    transport_z: float,
+) -> float:
+    _ = float(player_z), float(transport_z)
+    return math.hypot(float(transport_x) - float(player_x), float(transport_y) - float(player_y))
+
+
+def _format_transport_guid_list(guids: list[int]) -> str:
+    return "[" + ",".join(f"0x{int(guid) & 0xFFFFFFFFFFFFFFFF:016X}" for guid in guids) + "]"
+
+
+def _log_transport_discovery_decision(
+    session: Any,
+    *,
+    world_guid: int,
+    entry: int,
+    transport_map: int,
+    transport_x: float,
+    transport_y: float,
+    transport_z: float,
+    phase_ms: int,
+    state: str,
+    visibility_state: str,
+    distance: float,
+    visible: bool,
+    reason: str,
+    context: str,
+) -> None:
+    Logger.info(
+        "[TRANSPORT_DISCOVERY] context=%s player_guid=%s player_map=%s "
+        "player_pos=(%.3f %.3f %.3f) transport_guid=0x%016X entry=%s "
+        "transport_map=%s transport_pos=(%.3f %.3f %.3f) phase_ms=%s "
+        "state=%s visibility_state=%s distance=%.3f visible=%s reason=%s",
+        str(context or "unknown"),
+        int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0),
+        int(getattr(session, "map_id", 0) or 0),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(entry),
+        int(transport_map),
+        float(transport_x),
+        float(transport_y),
+        float(transport_z),
+        int(phase_ms),
+        str(state or "unknown"),
+        str(visibility_state or "unknown"),
+        float(distance),
+        "yes" if bool(visible) else "no",
+        str(reason or "unknown"),
+    )
+
+
+def _log_transport_discovery_summary(
+    session: Any,
+    *,
+    considered: int,
+    visible_guids: list[int],
+    rejected_guids: list[int],
+    context: str,
+) -> None:
+    Logger.info(
+        "[TRANSPORT_DISCOVERY_SUMMARY] context=%s player_guid=%s "
+        "transports_considered=%s transports_visible=%s transports_rejected=%s "
+        "visible_guids=%s rejected_guids=%s",
+        str(context or "unknown"),
+        int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0),
+        int(considered),
+        len(visible_guids),
+        len(rejected_guids),
+        _format_transport_guid_list(visible_guids),
+        _format_transport_guid_list(rejected_guids),
+    )
+
+
 def synthetic_transport_entries_near(
     session: Any,
     *,
     loaded_guids: set[int] | None = None,
+    context: str = "discovery",
 ) -> list[dict[str, Any]]:
     """Return server-owned route transports near the current player."""
     if not bool(getattr(session, "gameobjects_visible", True)):
@@ -697,6 +953,7 @@ def synthetic_transport_entries_near(
         session,
         loaded_guids=loaded_guids,
         radius=max(_TRANSPORT_VISIBILITY_RADIUS, _WORLD_DB_TRANSPORT_VISIBILITY_RADIUS),
+        context=context,
     )
     return entries
 
@@ -708,7 +965,12 @@ def _same_map_transport_spawn_guid(transport_guid: int, *, map_id: int) -> int:
 def _shared_route_phase_ms(clock_key: str, period_ms: int) -> int:
     _ = str(clock_key or "")
     period = max(1, int(period_ms or 1))
-    return int(time.monotonic() * 1000.0) % period
+    return _transport_epoch_ms() % period
+
+
+def _transport_epoch_ms() -> int:
+    """Authoritative wall-clock transport epoch shared by runtime observers."""
+    return int(time.time() * 1000.0)
 
 
 def linked_transport_world_guid(entry: dict[str, Any], *, map_id: int) -> int:
@@ -788,6 +1050,65 @@ def build_linked_transport_destination_entry(
     entry["use_transport_guid"] = True
     entry["world_db_transport"] = bool(entry.get("world_db_transport", False))
     return entry
+
+
+def ensure_linked_transport_destination_entry(
+    source_entry: dict[str, Any],
+    *,
+    destination_map: int,
+    source_state: RuntimeTransportState | None = None,
+) -> dict[str, Any]:
+    """Ensure the destination-side transport instance exists before passenger reattach."""
+    # TODO: Move destination-side transport ownership into WorldTransportManager once
+    # map-local transport streaming no longer has to bridge legacy loaded GO state.
+    destination_entry = build_linked_transport_destination_entry(
+        source_entry,
+        destination_map=int(destination_map),
+    )
+    if source_state is not None:
+        destination_entry.setdefault("runtime_route", [
+            (
+                int(node.map_id),
+                float(node.x),
+                float(node.y),
+                float(node.z),
+                float(node.wait_time),
+                int(node.time_ms),
+            )
+            for node in getattr(source_state, "route", ()) or ()
+        ])
+        destination_entry.setdefault(
+            "transport_period",
+            int(getattr(source_state, "route_period_ms", 0) or 0),
+        )
+        destination_entry.setdefault(
+            "shared_route_clock_key",
+            str(getattr(source_state, "shared_clock_key", "") or ""),
+        )
+
+    state = get_world_transport_manager().register_transport(
+        destination_entry,
+        source="transfer-destination",
+    )
+    if state is not None:
+        _sync_transport_state_from_movement_cache(state)
+        Logger.info(
+            "[TransportTransfer] destination ready transport=0x%016X map=%s "
+            "phase=%s node=%s passengers=%s",
+            int(destination_entry.get("world_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+            int(destination_map),
+            int(getattr(state, "path_progress_ms", 0) or 0),
+            int(getattr(state, "node_index", 0) or 0),
+            _movement_passenger_count(int(destination_entry.get("world_guid", 0) or 0)),
+        )
+    else:
+        Logger.warning(
+            "[TransportTransfer] destination registration failed transport=0x%016X map=%s entry=%s",
+            int(destination_entry.get("world_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+            int(destination_map),
+            int(destination_entry.get("entry", 0) or 0),
+        )
+    return destination_entry
 
 
 def _entry_from_world_db_transport_spec(
@@ -880,18 +1201,35 @@ def cached_transport_runtime_entry(session: Any, entry: dict[str, Any]) -> dict[
     world_guid = int(entry.get("world_guid", 0) or 0)
     state = _runtime_transport_states().get(int(world_guid))
     if state is None:
-        return entry
+        missed_entry = dict(entry)
+        missed_entry.setdefault("_transport_create_source_path", "database")
+        missed_entry["_transport_runtime_state_found"] = False
+        return missed_entry
 
     transform = get_movement_manager().get_transform(world_guid)
-    moved_entry = dict(entry)
-    moved_entry["map"] = int(transform.map_id if transform is not None else state.map_id)
-    moved_entry["x"] = float(transform.x if transform is not None else state.x)
-    moved_entry["y"] = float(transform.y if transform is not None else state.y)
-    moved_entry["z"] = float(transform.z if transform is not None else state.z)
-    moved_entry["orientation"] = float(
-        transform.orientation if transform is not None else state.orientation
+    visible_transfer_node = (
+        _visible_transfer_destination_node(state, transform)
+        if transform is not None
+        else None
     )
+    moved_entry = dict(entry)
+    if visible_transfer_node is not None:
+        moved_entry["map"] = int(visible_transfer_node.map_id)
+        moved_entry["x"] = float(visible_transfer_node.x)
+        moved_entry["y"] = float(visible_transfer_node.y)
+        moved_entry["z"] = float(visible_transfer_node.z)
+        moved_entry["orientation"] = float(transform.orientation)
+    else:
+        moved_entry["map"] = int(transform.map_id if transform is not None else state.map_id)
+        moved_entry["x"] = float(transform.x if transform is not None else state.x)
+        moved_entry["y"] = float(transform.y if transform is not None else state.y)
+        moved_entry["z"] = float(transform.z if transform is not None else state.z)
+        moved_entry["orientation"] = float(
+            transform.orientation if transform is not None else state.orientation
+        )
     moved_entry["world_guid"] = world_guid
+    moved_entry["_transport_create_source_path"] = "runtime"
+    moved_entry["_transport_runtime_state_found"] = True
     moved_entry["transport_path_progress"] = int(
         transform.phase_ms if transform is not None else state.path_progress_ms
     ) & 0xFFFFFFFF
@@ -952,21 +1290,68 @@ def _transport_runtime_loop(session: Any) -> None:
 def _build_visible_transport_updates(
     session: Any,
     entries: dict[int, dict[str, Any]],
+    *,
+    force: bool = False,
+    context: str = "runtime_update",
 ) -> list[tuple[str, bytes]]:
     if not bool(getattr(session, "gameobjects_visible", True)):
+        _log_transport_discovery_summary(
+            session,
+            considered=0,
+            visible_guids=[],
+            rejected_guids=[],
+            context=f"{context}_session_filter",
+        )
         return []
 
     session_map = int(getattr(session, "map_id", 0) or 0)
     session_x = float(getattr(session, "x", 0.0) or 0.0)
     session_y = float(getattr(session, "y", 0.0) or 0.0)
+    session_z = float(getattr(session, "z", 0.0) or 0.0)
     realm_id = int(getattr(session, "realm_id", 1) or 1)
     responses: list[tuple[str, bytes]] = []
+    considered = 0
+    visible_guids: list[int] = []
+    rejected_guids: list[int] = []
 
     for world_guid, entry in list(entries.items()):
+        considered += 1
         state = _runtime_transport_states().get(int(world_guid))
         if state is not None:
             _sync_transport_state_from_movement_cache(state)
         if not get_world_transport_manager().is_visible(int(world_guid)):
+            _log_transport_discovery_decision(
+                session,
+                world_guid=int(world_guid),
+                entry=int(entry.get("entry", 0) or 0),
+                transport_map=int(getattr(state, "map_id", entry.get("map", session_map)) or session_map),
+                transport_x=float(getattr(state, "x", entry.get("x", 0.0)) or 0.0),
+                transport_y=float(getattr(state, "y", entry.get("y", 0.0)) or 0.0),
+                transport_z=float(getattr(state, "z", entry.get("z", 0.0)) or 0.0),
+                phase_ms=int(getattr(state, "phase_ms", entry.get("transport_path_progress", 0)) or 0),
+                state=_movement_lifecycle_state(int(world_guid)),
+                visibility_state=get_world_transport_manager().visibility_state_for_guid(int(world_guid)),
+                distance=_transport_distance(
+                    session_x,
+                    session_y,
+                    session_z,
+                    float(getattr(state, "x", entry.get("x", 0.0)) or 0.0),
+                    float(getattr(state, "y", entry.get("y", 0.0)) or 0.0),
+                    float(getattr(state, "z", entry.get("z", 0.0)) or 0.0),
+                ),
+                visible=False,
+                reason="runtime_missing" if state is None else "visibility_filter",
+                context=context,
+            )
+            rejected_guids.append(int(world_guid))
+            transfer_responses = _maybe_start_passenger_transport_transfer(
+                session,
+                int(world_guid),
+                reason="visibility",
+            )
+            if transfer_responses:
+                responses.extend(transfer_responses)
+                continue
             responses.extend(
                 _despawn_loaded_transport(
                     session,
@@ -979,9 +1364,65 @@ def _build_visible_transport_updates(
             continue
 
         moved_entry = cached_transport_runtime_entry(session, entry)
-        if state is not None and not _should_send_transport_update(state):
+        if state is not None and not force and not _should_send_transport_update(state):
+            _log_transport_discovery_decision(
+                session,
+                world_guid=int(world_guid),
+                entry=int(moved_entry.get("entry", entry.get("entry", 0)) or 0),
+                transport_map=int(moved_entry.get("map", session_map) or session_map),
+                transport_x=float(moved_entry.get("x", 0.0) or 0.0),
+                transport_y=float(moved_entry.get("y", 0.0) or 0.0),
+                transport_z=float(moved_entry.get("z", 0.0) or 0.0),
+                phase_ms=int(moved_entry.get("transport_path_progress", 0) or 0),
+                state=_movement_lifecycle_state(int(world_guid)),
+                visibility_state=get_world_transport_manager().visibility_state_for_guid(int(world_guid)),
+                distance=_transport_distance(
+                    session_x,
+                    session_y,
+                    session_z,
+                    float(moved_entry.get("x", 0.0) or 0.0),
+                    float(moved_entry.get("y", 0.0) or 0.0),
+                    float(moved_entry.get("z", 0.0) or 0.0),
+                ),
+                visible=False,
+                reason="not_streamable",
+                context=context,
+            )
+            rejected_guids.append(int(world_guid))
             continue
         if int(moved_entry.get("map", session_map) or session_map) != session_map:
+            _log_transport_discovery_decision(
+                session,
+                world_guid=int(world_guid),
+                entry=int(moved_entry.get("entry", entry.get("entry", 0)) or 0),
+                transport_map=int(moved_entry.get("map", session_map) or session_map),
+                transport_x=float(moved_entry.get("x", 0.0) or 0.0),
+                transport_y=float(moved_entry.get("y", 0.0) or 0.0),
+                transport_z=float(moved_entry.get("z", 0.0) or 0.0),
+                phase_ms=int(moved_entry.get("transport_path_progress", 0) or 0),
+                state=_movement_lifecycle_state(int(world_guid)),
+                visibility_state=get_world_transport_manager().visibility_state_for_guid(int(world_guid)),
+                distance=_transport_distance(
+                    session_x,
+                    session_y,
+                    session_z,
+                    float(moved_entry.get("x", 0.0) or 0.0),
+                    float(moved_entry.get("y", 0.0) or 0.0),
+                    float(moved_entry.get("z", 0.0) or 0.0),
+                ),
+                visible=False,
+                reason="map_mismatch",
+                context=context,
+            )
+            rejected_guids.append(int(world_guid))
+            transfer_responses = _maybe_start_passenger_transport_transfer(
+                session,
+                int(world_guid),
+                reason="map",
+            )
+            if transfer_responses:
+                responses.extend(transfer_responses)
+                continue
             responses.extend(
                 _despawn_loaded_transport(
                     session,
@@ -995,20 +1436,192 @@ def _build_visible_transport_updates(
 
         dx = float(moved_entry.get("x", 0.0) or 0.0) - session_x
         dy = float(moved_entry.get("y", 0.0) or 0.0) - session_y
-        if math.hypot(dx, dy) > _TRANSPORT_VISIBILITY_RADIUS:
+        distance = math.hypot(dx, dy)
+        if distance > _TRANSPORT_VISIBILITY_RADIUS:
+            _log_transport_discovery_decision(
+                session,
+                world_guid=int(world_guid),
+                entry=int(moved_entry.get("entry", entry.get("entry", 0)) or 0),
+                transport_map=int(moved_entry.get("map", session_map) or session_map),
+                transport_x=float(moved_entry.get("x", 0.0) or 0.0),
+                transport_y=float(moved_entry.get("y", 0.0) or 0.0),
+                transport_z=float(moved_entry.get("z", 0.0) or 0.0),
+                phase_ms=int(moved_entry.get("transport_path_progress", 0) or 0),
+                state=_movement_lifecycle_state(int(world_guid)),
+                visibility_state=get_world_transport_manager().visibility_state_for_guid(int(world_guid)),
+                distance=distance,
+                visible=False,
+                reason="distance",
+                context=context,
+            )
+            rejected_guids.append(int(world_guid))
             continue
 
-        payload = _build_gameobject_update_payload(
-            map_id=session_map,
-            entry=moved_entry,
-            realm_id=realm_id,
-        )
+        loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
+        already_loaded = isinstance(loaded_gameobjects, set) and int(world_guid) in loaded_gameobjects
+        if already_loaded:
+            payload = _build_gameobject_values_update_payload(
+                map_id=session_map,
+                entry=moved_entry,
+                realm_id=realm_id,
+            )
+        else:
+            payload = _build_gameobject_update_payload(
+                map_id=session_map,
+                entry=moved_entry,
+                realm_id=realm_id,
+            )
+            if isinstance(loaded_gameobjects, set):
+                loaded_gameobjects.add(int(world_guid))
         responses.append(make_update_object_response(payload))
+        visible_guids.append(int(world_guid))
+        _log_transport_discovery_decision(
+            session,
+            world_guid=int(world_guid),
+            entry=int(moved_entry.get("entry", entry.get("entry", 0)) or 0),
+            transport_map=int(moved_entry.get("map", session_map) or session_map),
+            transport_x=float(moved_entry.get("x", 0.0) or 0.0),
+            transport_y=float(moved_entry.get("y", 0.0) or 0.0),
+            transport_z=float(moved_entry.get("z", 0.0) or 0.0),
+            phase_ms=int(moved_entry.get("transport_path_progress", 0) or 0),
+            state=_movement_lifecycle_state(int(world_guid)),
+            visibility_state=get_world_transport_manager().visibility_state_for_guid(int(world_guid)),
+            distance=distance,
+            visible=True,
+            reason="accepted",
+            context=context,
+        )
         if state is not None:
             _mark_transport_update_sent(state)
         _maybe_log_transport_tick(int(world_guid), moved_entry)
 
+    _log_transport_discovery_summary(
+        session,
+        considered=considered,
+        visible_guids=visible_guids,
+        rejected_guids=rejected_guids,
+        context=context,
+    )
     return responses
+
+
+def build_bootstrap_transport_value_updates(
+    session: Any,
+    *,
+    context: str = "worldport_bootstrap",
+) -> list[tuple[str, bytes]]:
+    entries = getattr(session, "loaded_transport_entries", None)
+    if not isinstance(entries, dict) or not entries:
+        Logger.info(
+            "[WORLDPORT_TRANSPORT] context=%s player_guid=0x%X map=%s x=%.3f y=%.3f z=%.3f transports=0",
+            str(context),
+            int(getattr(session, "world_guid", 0) or 0),
+            int(getattr(session, "map_id", 0) or 0),
+            float(getattr(session, "x", 0.0) or 0.0),
+            float(getattr(session, "y", 0.0) or 0.0),
+            float(getattr(session, "z", 0.0) or 0.0),
+        )
+        return []
+
+    loaded_before = set(getattr(session, "loaded_gameobjects", set()) or set())
+    responses = _build_visible_transport_updates(
+        session,
+        entries,
+        force=True,
+        context=context,
+    )
+    loaded_after = set(getattr(session, "loaded_gameobjects", set()) or set())
+    for world_guid, entry in sorted(entries.items()):
+        state = _runtime_transport_states().get(int(world_guid))
+        Logger.info(
+            "[WORLDPORT_TRANSPORT] context=%s player_guid=0x%X map=%s x=%.3f y=%.3f z=%.3f "
+            "transport_guid=0x%016X entry=%s phase=%s position=(%.3f %.3f %.3f) "
+            "loaded_before=%s loaded_after=%s",
+            str(context),
+            int(getattr(session, "world_guid", 0) or 0),
+            int(getattr(session, "map_id", 0) or 0),
+            float(getattr(session, "x", 0.0) or 0.0),
+            float(getattr(session, "y", 0.0) or 0.0),
+            float(getattr(session, "z", 0.0) or 0.0),
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(entry.get("entry", 0) or 0) if isinstance(entry, dict) else 0,
+            int(getattr(state, "phase_ms", entry.get("transport_path_progress", 0)) or 0)
+            if isinstance(entry, dict)
+            else int(getattr(state, "phase_ms", 0) or 0),
+            float(getattr(state, "x", entry.get("x", 0.0)) or 0.0)
+            if isinstance(entry, dict)
+            else float(getattr(state, "x", 0.0) or 0.0),
+            float(getattr(state, "y", entry.get("y", 0.0)) or 0.0)
+            if isinstance(entry, dict)
+            else float(getattr(state, "y", 0.0) or 0.0),
+            float(getattr(state, "z", entry.get("z", 0.0)) or 0.0)
+            if isinstance(entry, dict)
+            else float(getattr(state, "z", 0.0) or 0.0),
+            int(world_guid) in loaded_before,
+            int(world_guid) in loaded_after,
+        )
+    return responses
+
+
+def _maybe_start_passenger_transport_transfer(
+    session: Any,
+    world_guid: int,
+    *,
+    reason: str,
+) -> list[tuple[str, bytes]]:
+    attached = _session_is_transport_passenger(session, int(world_guid))
+    movement_state = getattr(session, "movement_state", None)
+    Logger.info(
+        "[ORIENTATION_WRITE_AUDIT] event=transport_transfer_check reason=%s "
+        "player=%s transport=0x%016X player_attached_to_transport=%s "
+        "session_orientation=%.6f movement_orientation=%.6f "
+        "transport_offset=(%.3f %.3f %.3f) transport_orientation=%.6f attach_state=%s",
+        str(reason),
+        int(getattr(session, "char_guid", 0) or 0),
+        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+        bool(attached),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+        float(getattr(movement_state, "orientation", getattr(session, "orientation", 0.0)) or 0.0),
+        float(getattr(movement_state, "transport_x", 0.0) or 0.0),
+        float(getattr(movement_state, "transport_y", 0.0) or 0.0),
+        float(getattr(movement_state, "transport_z", 0.0) or 0.0),
+        float(getattr(movement_state, "transport_orientation", 0.0) or 0.0),
+        str(getattr(session, "transport_attach_state", "") or ""),
+    )
+    if not attached:
+        return []
+    try:
+        from server.modules.handlers.world.opcodes.movement import _maybe_start_transport_route_transfer
+    except Exception as exc:
+        Logger.warning("[TransportTransfer] auto-transfer unavailable reason=%s err=%s", reason, exc)
+        return []
+
+    responses = _maybe_start_transport_route_transfer(
+        session,
+        f"TRANSPORT_RUNTIME_{str(reason).upper()}",
+    )
+    if responses:
+        Logger.info(
+            "[TransportTransfer] auto-transfer player=%s transport=0x%016X reason=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            str(reason),
+        )
+    return responses
+
+
+def _session_is_transport_passenger(session: Any, world_guid: int) -> bool:
+    movement_state = getattr(session, "movement_state", None)
+    if int(getattr(movement_state, "transport_guid", 0) or 0) == int(world_guid):
+        return True
+
+    passenger_id = int(getattr(session, "char_guid", 0) or 0)
+    if passenger_id <= 0:
+        return False
+    try:
+        return get_movement_manager().passenger_attachment(int(world_guid), passenger_id) is not None
+    except Exception:
+        return False
 
 
 def _despawn_loaded_transport(
@@ -1046,13 +1659,6 @@ def _build_transport_out_of_range_payload(*, map_id: int, world_guid: int) -> by
     payload += struct.pack("<I", 1)
     payload += GuidHelper.pack(int(world_guid) & 0xFFFFFFFFFFFFFFFF)
     return bytes(payload)
-
-
-def _transport_manager_server_time_ms(states: list[tuple[int, RuntimeTransportState]]) -> int:
-    for _world_guid, state in states:
-        if str(getattr(state, "shared_clock_key", "") or ""):
-            return _transport_server_time_ms(state)
-    return int(time.monotonic() * 1000.0)
 
 
 def _should_send_transport_update(state: RuntimeTransportState) -> bool:
@@ -1150,23 +1756,29 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
         route_period_ms=route_period_ms,
         path_progress_ms=path_progress_ms,
         shared_clock_key=shared_clock_key,
+        affinity_map_id=_transport_affinity_map_id(entry, int(first.map_id)),
+    )
+    get_movement_manager().tick_instance(
+        int(world_guid),
+        server_time_ms=_transport_server_time_ms(state),
     )
     _sync_transport_state_from_movement_cache(state)
     states[world_guid] = state
-    Logger.info(
-        "[WorldTransport] route load world_guid=0x%016X entry=%s display=%s "
-        "map=%s nodes=%s period=%sms timed=%s start=(%.2f %.2f %.2f)",
-        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-        int(state.entry),
-        int(state.display_id),
-        int(state.map_id),
-        len(route),
-        int(state.route_period_ms),
-        bool(state.timed_route),
-        float(state.x),
-        float(state.y),
-        float(state.z),
-    )
+    if transport_movement_debug_enabled():
+        Logger.info(
+            "[WorldTransport] route load world_guid=0x%016X entry=%s display=%s "
+            "map=%s nodes=%s period=%sms timed=%s start=(%.2f %.2f %.2f)",
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(state.entry),
+            int(state.display_id),
+            int(state.map_id),
+            len(route),
+            int(state.route_period_ms),
+            bool(state.timed_route),
+            float(state.x),
+            float(state.y),
+            float(state.z),
+        )
     return state
 
 
@@ -1179,6 +1791,8 @@ def _movement_template_from_route(entry: dict[str, Any], route: list[TransportRo
             z=float(node.z),
             time_ms=int(node.time_ms),
             station=bool(float(node.wait_time) > 0.0),
+            transfer=bool(node.transfer),
+            delay=max(0, int(round(float(node.wait_time) * 1000.0))),
         )
         for node in route
     )
@@ -1217,6 +1831,69 @@ def _runtime_transport_states() -> dict[int, RuntimeTransportState]:
         states = {}
         setattr(_runtime_transport_states, "_states", states)
     return states
+
+
+def runtime_transport_snapshot_rows(
+    states: list[tuple[int, RuntimeTransportState]] | None = None,
+) -> list[dict[str, Any]]:
+    state_items = states
+    if state_items is None:
+        state_items = list(_runtime_transport_states().items())
+
+    result: list[dict[str, Any]] = []
+    for world_guid, state in state_items:
+        movement_state = get_movement_manager().get_state(int(world_guid))
+        transform = getattr(movement_state, "evaluated_transform", None)
+        passengers = getattr(movement_state, "passengers", None)
+        pending_transfers = getattr(movement_state, "pending_transfers", None)
+        result.append({
+            "world_guid": int(world_guid),
+            "entry": int(state.entry),
+            "spawn_guid": int(state.spawn_guid),
+            "display_id": int(state.display_id),
+            "map_id": int(getattr(transform, "map_id", state.map_id)),
+            "x": float(getattr(transform, "x", state.x)),
+            "y": float(getattr(transform, "y", state.y)),
+            "z": float(getattr(transform, "z", state.z)),
+            "orientation": float(getattr(transform, "orientation", state.orientation)),
+            "phase_ms": int(getattr(transform, "phase_ms", state.path_progress_ms)),
+            "period_ms": int(state.route_period_ms),
+            "node_index": int(getattr(transform, "node_index", state.node_index)),
+            "next_node_index": int(getattr(transform, "next_node_index", state.node_index)),
+            "lifecycle_state": str(getattr(movement_state, "lifecycle_state", TRANSPORT_STATE_ACTIVE)),
+            "visibility_state": _effective_transport_visibility_state(int(world_guid)),
+            "event": str(getattr(transform, "event", "")),
+            "transfer_active": bool(getattr(movement_state, "transfer_active", False)),
+            "transfer_destination_map": getattr(movement_state, "transfer_destination_map", None),
+            "passenger_count": len(passengers) if isinstance(passengers, dict) else 0,
+            "pending_transfer_count": len(pending_transfers) if isinstance(pending_transfers, dict) else 0,
+            "route_points": len(state.route),
+            "shared_clock_key": str(state.shared_clock_key or ""),
+        })
+    result.sort(key=lambda row: (int(row["map_id"]), int(row["entry"]), int(row["world_guid"])))
+    return result
+
+
+def write_world_runtime_snapshot(
+    states: list[tuple[int, RuntimeTransportState]] | None = None,
+) -> None:
+    try:
+        from server.modules.handlers.world.state.runtime import weather_runtime_snapshot_rows
+
+        root = get_data_root() / "runtime"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "world_state.json"
+        temporary = root / "world_state.json.tmp"
+        payload = {
+            "generated_at": int(time.time()),
+            "transport_epoch_ms": int(_transport_epoch_ms()),
+            "transports": runtime_transport_snapshot_rows(states),
+            "weather": weather_runtime_snapshot_rows(),
+        }
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+    except Exception as exc:
+        Logger.warning("[RuntimeSnapshot] write failed err=%s", exc)
 
 
 def _movement_lifecycle_state(world_guid: int) -> str:
@@ -1459,6 +2136,8 @@ def _transport_taxi_path_nodes_by_path() -> dict[int, tuple[TransportTaxiPathNod
                     x=float(node.x),
                     y=float(node.y),
                     z=float(node.z),
+                    flags=int(getattr(node, "flags", 0) or 0),
+                    delay=int(getattr(node, "delay", 0) or 0),
                 )
             )
         if len(nodes) >= 2:
@@ -1471,55 +2150,111 @@ def _transport_taxi_path_nodes_by_path() -> dict[int, tuple[TransportTaxiPathNod
     )
     return paths
 
+
 def _build_timed_taxi_transport_route(path_id: int, *, period_ms: int) -> list[TransportRouteNode]:
     nodes = _transport_taxi_path_nodes_by_path().get(int(path_id), ())
     if len(nodes) < 2:
         return []
 
-    distances: list[float] = [0.0]
-    total = 0.0
-    previous = nodes[0]
-    for node in nodes[1:]:
-        if int(previous.map_id) == int(node.map_id):
-            total += math.sqrt(
-                ((float(node.x) - float(previous.x)) ** 2)
-                + ((float(node.y) - float(previous.y)) ** 2)
-                + ((float(node.z) - float(previous.z)) ** 2)
-            )
-        else:
-            total += float(_TRANSPORT_CROSS_MAP_DISTANCE)
-        distances.append(total)
-        previous = node
-
+    # TODO: Model TrinityCore-style arrival/departure acceleration curves once
+    # packet timing and client-side transport interpolation are fully mapped.
     period = max(1, int(period_ms or _DEFAULT_MO_TRANSPORT_PERIOD_MS))
-    if total <= 0.0:
-        step = period / max(1, len(nodes) - 1)
-        return [
-            TransportRouteNode(
-                int(node.map_id),
-                float(node.x),
-                float(node.y),
-                float(node.z),
-                0.0,
-                int(min(period, round(index * step))),
+    delay_ms_by_index = {
+        index: max(0, int(node.delay)) * 1000
+        for index, node in enumerate(nodes)
+        if int(node.flags) == 2 and int(node.delay) > 0
+    }
+    total_delay_ms = sum(delay_ms_by_index.values())
+
+    segment_distances: list[float] = []
+    total_distance = 0.0
+    for index, current in enumerate(nodes[:-1]):
+        target = nodes[index + 1]
+        if int(current.map_id) != int(target.map_id) or int(current.flags) == 1:
+            distance = float(_TRANSPORT_CROSS_MAP_DISTANCE)
+        else:
+            distance = math.sqrt(
+                ((float(target.x) - float(current.x)) ** 2)
+                + ((float(target.y) - float(current.y)) ** 2)
+                + ((float(target.z) - float(current.z)) ** 2)
             )
-            for index, node in enumerate(nodes)
+        segment_distances.append(float(distance))
+        total_distance += float(distance)
+
+    travel_period = max(1, int(period) - int(total_delay_ms))
+    if total_distance <= 0.0:
+        segment_times = [
+            max(1, int(round(travel_period / max(1, len(nodes) - 1))))
+            for _node in nodes[:-1]
+        ]
+    else:
+        segment_times = [
+            max(1, int(round((float(distance) / total_distance) * float(travel_period))))
+            for distance in segment_distances
         ]
 
-    route: list[TransportRouteNode] = []
-    for index, node in enumerate(nodes):
-        time_ms = int(round((float(distances[index]) / total) * float(period)))
-        if index == 0:
-            time_ms = 0
+    route: list[TransportRouteNode] = [
+        TransportRouteNode(
+            int(nodes[0].map_id),
+            float(nodes[0].x),
+            float(nodes[0].y),
+            float(nodes[0].z),
+            0.0,
+            0,
+            transfer=bool(int(nodes[0].flags) == 1),
+        )
+    ]
+    current_time = 0
+    for index, current in enumerate(nodes[:-1]):
+        delay_ms = int(delay_ms_by_index.get(index, 0))
+        if delay_ms > 0:
+            route[-1] = TransportRouteNode(
+                route[-1].map_id,
+                route[-1].x,
+                route[-1].y,
+                route[-1].z,
+                float(delay_ms) / 1000.0,
+                int(route[-1].time_ms),
+                transfer=bool(route[-1].transfer),
+            )
+            current_time += delay_ms
+            route.append(
+                TransportRouteNode(
+                    int(current.map_id),
+                    float(current.x),
+                    float(current.y),
+                    float(current.z),
+                    0.0,
+                    int(min(period, current_time)),
+                    transfer=bool(int(current.flags) == 1),
+                )
+            )
+        current_time += int(segment_times[index])
+        target = nodes[index + 1]
         route.append(
             TransportRouteNode(
-                int(node.map_id),
-                float(node.x),
-                float(node.y),
-                float(node.z),
+                int(target.map_id),
+                float(target.x),
+                float(target.y),
+                float(target.z),
                 0.0,
-                min(period, max(0, time_ms)),
+                int(min(period, current_time)),
+                transfer=bool(
+                    int(current.flags) == 1
+                    or int(current.map_id) != int(target.map_id)
+                ),
             )
+        )
+
+    if route[-1].time_ms < period:
+        route[-1] = TransportRouteNode(
+            route[-1].map_id,
+            route[-1].x,
+            route[-1].y,
+            route[-1].z,
+            route[-1].wait_time,
+            int(period),
+            transfer=bool(route[-1].transfer),
         )
     return route
 
@@ -1542,7 +2277,7 @@ def _build_default_route(entry: dict[str, Any]) -> list[TransportRouteNode]:
                 )
             )
         if len(route) >= 2:
-            return route
+            return _expand_route_wait_nodes(route)
 
     dbc_route = _build_dbc_animation_route(entry)
     if dbc_route:
@@ -1595,16 +2330,78 @@ def _build_dbc_animation_route(entry: dict[str, Any]) -> list[TransportRouteNode
         )
 
     if len(route) >= 2:
-        Logger.info(
-            "[WorldTransport] DBC route entry=%s nodes=%s period=%sms base=(%.2f %.2f %.2f)",
-            int(animation.entry),
-            len(route),
-            int(animation.period_ms),
-            float(base_x),
-            float(base_y),
-            float(base_z),
-        )
+        if transport_movement_debug_enabled():
+            Logger.info(
+                "[WorldTransport] DBC route entry=%s nodes=%s period=%sms base=(%.2f %.2f %.2f)",
+                int(animation.entry),
+                len(route),
+                int(animation.period_ms),
+                float(base_x),
+                float(base_y),
+                float(base_z),
+            )
     return route
+
+
+def _expand_route_wait_nodes(route: list[TransportRouteNode]) -> list[TransportRouteNode]:
+    """Convert route wait_time values into same-position timed wait nodes."""
+
+    if len(route) < 2:
+        return route
+
+    expanded: list[TransportRouteNode] = []
+    accumulated_delay = 0
+
+    for index, node in enumerate(route):
+        adjusted_time = int(node.time_ms) + int(accumulated_delay)
+        adjusted = TransportRouteNode(
+            int(node.map_id),
+            float(node.x),
+            float(node.y),
+            float(node.z),
+            float(node.wait_time),
+            int(adjusted_time),
+            transfer=bool(node.transfer),
+        )
+        expanded.append(adjusted)
+
+        delay_ms = max(0, int(round(float(node.wait_time) * 1000.0)))
+        if delay_ms <= 0:
+            continue
+
+        next_node = route[index + 1] if index + 1 < len(route) else None
+        wait_end_time = int(adjusted.time_ms) + int(delay_ms)
+
+        if (
+            next_node is not None
+            and _same_route_position(node, next_node)
+            and int(next_node.time_ms) + int(accumulated_delay) >= wait_end_time
+        ):
+            continue
+
+        expanded.append(
+            TransportRouteNode(
+                int(adjusted.map_id),
+                float(adjusted.x),
+                float(adjusted.y),
+                float(adjusted.z),
+                0.0,
+                int(wait_end_time),
+                transfer=bool(adjusted.transfer),
+            )
+        )
+        accumulated_delay += int(delay_ms)
+
+    return expanded
+
+
+def _same_route_position(a: TransportRouteNode, b: TransportRouteNode) -> bool:
+    return bool(
+        int(a.map_id) == int(b.map_id)
+        and abs(float(a.x) - float(b.x)) <= 0.000001
+        and abs(float(a.y) - float(b.y)) <= 0.000001
+        and abs(float(a.z) - float(b.z)) <= 0.000001
+    )
 
 
 def _is_timed_route(route: list[TransportRouteNode]) -> bool:
@@ -1641,13 +2438,29 @@ def _sync_transport_state_from_movement_cache(state: RuntimeTransportState) -> N
     transform = get_movement_manager().get_transform(int(state.guid))
     if transform is None:
         return
-    state.node_index = int(transform.node_index)
-    state.map_id = int(transform.map_id)
-    state.x = float(transform.x)
-    state.y = float(transform.y)
-    state.z = float(transform.z)
-    state.orientation = float(transform.orientation)
+    visible_transfer_node = _visible_transfer_destination_node(state, transform)
+    if visible_transfer_node is not None:
+        state.node_index = int(transform.next_node_index)
+        state.map_id = int(visible_transfer_node.map_id)
+        state.x = float(visible_transfer_node.x)
+        state.y = float(visible_transfer_node.y)
+        state.z = float(visible_transfer_node.z)
+        state.orientation = float(transform.orientation)
+    else:
+        state.node_index = int(transform.node_index)
+        state.map_id = int(transform.map_id)
+        state.x = float(transform.x)
+        state.y = float(transform.y)
+        state.z = float(transform.z)
+        state.orientation = float(transform.orientation)
     state.path_progress_ms = float(transform.phase_ms)
+
+
+def _transport_affinity_map_id(entry: dict[str, Any], fallback: int) -> int:
+    for key in ("home_map", "map", "map_id"):
+        if key in entry and entry.get(key) is not None:
+            return int(entry.get(key))
+    return int(fallback)
 
 
 def _transport_server_time_ms(state: RuntimeTransportState) -> int:
@@ -1669,7 +2482,57 @@ def _ensure_movement_instance_for_state(state: RuntimeTransportState) -> None:
     template = _movement_template_from_route(entry, list(state.route))
     if template is None:
         return
-    get_movement_manager().register_instance(int(state.guid), template)
+    instance = get_movement_manager().register_instance(int(state.guid), template)
+    if instance is None:
+        return
+    get_movement_manager().tick_instance(
+        int(state.guid),
+        server_time_ms=_transport_server_time_ms(state),
+    )
+    Logger.info(
+        "[TRANSPORT_DEBUG] rehydrate guid=0x%016X entry=%s map=%s phase=%s node=%s",
+        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
+        int(state.entry),
+        int(state.map_id),
+        int(state.path_progress_ms) & 0xFFFFFFFF,
+        int(state.node_index),
+    )
+
+
+def _movement_template_for_state(state: RuntimeTransportState):
+    movement_state = get_movement_manager().get_state(int(state.guid))
+    if movement_state is None:
+        return None
+    return get_movement_manager().templates.get(str(movement_state.instance.template_id))
+
+
+def _visible_transfer_destination_node(
+    state: RuntimeTransportState,
+    transform: Any,
+):
+    if str(getattr(transform, "event", "") or "") != "transfer":
+        return None
+    template = _movement_template_for_state(state)
+    next_index = int(getattr(transform, "next_node_index", -1) or -1)
+    if template is None or next_index < 0 or next_index >= len(template.nodes):
+        return None
+    destination = template.nodes[next_index]
+    if int(getattr(state, "affinity_map_id", -1)) != int(destination.map_id):
+        return None
+    return destination
+
+
+def _effective_transport_visibility_state(world_guid: int) -> str:
+    visibility = _movement_visibility_state(int(world_guid))
+    if visibility != MovementVisibilityState.TRANSFERRING.value:
+        return visibility
+    state = _runtime_transport_states().get(int(world_guid))
+    movement_state = get_movement_manager().get_state(int(world_guid))
+    transform = getattr(movement_state, "evaluated_transform", None)
+    if state is not None and transform is not None:
+        if _visible_transfer_destination_node(state, transform) is not None:
+            return TRANSPORT_VISIBILITY_ACTIVE
+    return visibility
 
 
 def _orientation_between(
@@ -1719,15 +2582,19 @@ def _maybe_log_transport_tick(world_guid: int, entry: dict[str, Any]) -> None:
             0,
         )
     else:
-        Logger.debug(
-            "[WorldTransport] tick world_guid=0x%016X entry=%s map=%s "
-            "node=%s pos=(%.2f %.2f %.2f) o=%.3f",
-            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-            int(entry.get("entry", 0) or 0),
-            int(entry.get("map", 0) or 0),
-            int(state.node_index),
-            float(entry.get("x", 0.0) or 0.0),
-            float(entry.get("y", 0.0) or 0.0),
-            float(entry.get("z", 0.0) or 0.0),
-            float(entry.get("orientation", 0.0) or 0.0),
-        )
+        if transport_movement_debug_enabled():
+            Logger.debug(
+                "[TRANSPORT_DEBUG] transport=0x%016X entry=%s map=%s "
+                "phase=%s node=%s passengers=%s transfer=%s pos=(%.2f %.2f %.2f) o=%.3f",
+                int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+                int(entry.get("entry", 0) or 0),
+                int(entry.get("map", 0) or 0),
+                int(state.path_progress_ms) & 0xFFFFFFFF,
+                int(state.node_index),
+                _movement_passenger_count(int(world_guid)),
+                str(_movement_lifecycle_state(int(world_guid)) == TRANSPORT_STATE_TRANSFER_PENDING).lower(),
+                float(entry.get("x", 0.0) or 0.0),
+                float(entry.get("y", 0.0) or 0.0),
+                float(entry.get("z", 0.0) or 0.0),
+                float(entry.get("orientation", 0.0) or 0.0),
+            )

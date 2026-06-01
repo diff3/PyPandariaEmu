@@ -425,8 +425,10 @@ def cmd_gps(session, args: list[str]) -> list[tuple[str, bytes]]:
 def cmd_spawngo(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Load nearby gameobjects from the world database for the current player."""
     from server.modules.game.guid import GameObjectGuid, MoTransportGuid
-    from server.modules.handlers.world.bootstrap.replay import (
+    from server.modules.handlers.world.bootstrap.gameobjects import (
         _build_gameobject_update_payload,
+    )
+    from server.modules.handlers.world.bootstrap.playerobjects import (
         make_update_object_response,
     )
 
@@ -461,6 +463,8 @@ def cmd_spawngo(session, args: list[str]) -> list[tuple[str, bytes]]:
             float(entry.get("z", 0.0) or 0.0),
         )
         entry["world_guid"] = world_guid
+        if int(entry.get("type", 0) or 0) == 15:
+            entry["_transport_create_source_path"] = "database"
         responses.append(
             make_update_object_response(
                 _build_gameobject_update_payload(map_id=map_id, entry=entry, realm_id=realm_id)
@@ -513,7 +517,7 @@ def _hide_loaded_gameobjects(session) -> list[tuple[str, bytes]]:
 
 
 def _show_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.bootstrap.replay import build_database_gameobject_responses
+    from server.modules.handlers.world.bootstrap.gameobjects import build_database_gameobject_responses
 
     loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
     if not isinstance(loaded_gameobjects, set):
@@ -1095,7 +1099,7 @@ import re
 
 @register_command("addmoney", ".addmoney", allow_args=True)
 def cmd_addmoney(session, args: list[str]):
-    from server.modules.handlers.world.bootstrap.replay import build_multi_u32_update_object_payload
+    from server.modules.handlers.world.bootstrap.playerobjects import build_multi_u32_update_object_payload
     from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 
     def msg(text: str):
@@ -2035,6 +2039,25 @@ def cmd_server(session, args):
     return handler(session, sub_args)
 
 
+@register_command("time", ".time")
+def cmd_time(session, args: list[str]) -> list[tuple[str, bytes]]:
+    unix_ms = int(time.time() * 1000.0)
+    monotonic_ms = int(time.monotonic() * 1000.0)
+
+    message = (
+        f"unix_ms={unix_ms} "
+        f"monotonic_ms={monotonic_ms}"
+    )
+
+    broadcast_system_message(
+        message,
+        scope="world"
+    )
+
+    return []
+
+
+  
 
 # Real commands live here for quick scanning.
 PRIMARY_COMMANDS = {
@@ -2067,6 +2090,7 @@ PRIMARY_COMMANDS = {
     "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
     "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),
     "taxi": Command(handler=cmd_taxi, usage=".taxi <on|off|status>"),
+    "time": Command(handler=cmd_time, usage=".time", allow_args=False),
     "title": Command(handler=cmd_title, usage=".title <bitIndex|explorer|off>", require_args=True),
     "world": Command(handler=cmd_world, usage=".world <go|npc|lift|boat> <hide|show|status|on|off|test|clear>"),
     # "telxyz": Command(handler=cmd_telxyz, usage=".telxyz <map> <x> <y> <z> <orientation>"),

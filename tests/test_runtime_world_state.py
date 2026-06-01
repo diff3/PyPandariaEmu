@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from server.modules.handlers.world.state.global_state import GlobalState
 from server.modules.handlers.world.state.region_manager import region_manager
 from server.modules.handlers.world.state import runtime
+from server.modules.handlers.world.state import weather_zone_registry
+from server.modules.handlers.world.state.weather_zone_registry import AreaTableEntry, WeatherZoneEntry
 from server.session.world_session import WorldSession
 
 
@@ -53,7 +55,7 @@ def test_world_time_persists_for_new_sessions_until_restart(monkeypatch):
     assert float(newcomer.time_speed) == float(test_state.time_speed)
 
 
-def test_manual_weather_persists_per_map_for_new_sessions_until_restart(monkeypatch):
+def test_manual_weather_persists_per_zone_for_new_sessions_until_restart(monkeypatch):
     _stub_login_modules()
 
     test_state = GlobalState()
@@ -61,18 +63,118 @@ def test_manual_weather_persists_per_map_for_new_sessions_until_restart(monkeypa
     region_manager.regions.clear()
 
     source = _make_session(name="Alice", guid=1, map_id=1, state=test_state)
+    source.zone = 1637
     runtime.attach_session_to_world_state(source, map_id=1)
+    source.zone = 1637
 
     runtime.broadcast_region_weather(source, 5, 0.8, 1)
 
     expected = {"weather_type": 5, "density": 0.8, "abrupt": 1}
-    assert test_state.manual_region_weather[1] == expected
+    assert test_state.manual_region_weather[1637] == expected
 
-    newcomer_same_map = _make_session(name="Bob", guid=2, map_id=1, state=test_state)
-    runtime.attach_session_to_world_state(newcomer_same_map, map_id=1)
+    newcomer_same_zone = _make_session(name="Bob", guid=2, map_id=1, state=test_state)
+    newcomer_same_zone.zone = 1637
+    runtime.attach_session_to_world_state(newcomer_same_zone, map_id=1)
+    newcomer_same_zone.zone = 1637
+    runtime.refresh_region_weather(newcomer_same_zone)
 
-    assert newcomer_same_map.weather == expected
+    newcomer_other_zone = _make_session(name="Clara", guid=3, map_id=1, state=test_state)
+    newcomer_other_zone.zone = 1
+    runtime.attach_session_to_world_state(newcomer_other_zone, map_id=1)
+    newcomer_other_zone.zone = 1
+    runtime.refresh_region_weather(newcomer_other_zone)
+
+    assert newcomer_same_zone.weather == expected
+    assert newcomer_other_zone.weather != expected
     assert region_manager.get_region(1).weather_manual is True
+
+
+def test_admin_weather_override_command_updates_runtime_state(monkeypatch):
+    test_state = GlobalState()
+    monkeypatch.setattr(runtime, "global_state", test_state)
+
+    runtime._apply_weather_runtime_command({
+        "action": "override",
+        "zone": 1637,
+        "weather": "heavy_rain",
+        "density": 0.8,
+    })
+
+    assert test_state.manual_region_weather[1637] == {
+        "weather_type": 5,
+        "density": 0.8,
+        "abrupt": 1,
+    }
+
+
+def test_admin_weather_chance_command_updates_runtime_cache(monkeypatch):
+    cached_rows = [{"zone": 148, "spring_rain_chance": 10}]
+    monkeypatch.setattr(runtime._configured_weather_rows, "_rows", cached_rows, raising=False)
+
+    runtime._apply_weather_runtime_command({
+        "action": "chance",
+        "zone": 148,
+        "kind": "rain",
+        "season": "spring",
+        "value": 80,
+    })
+
+    assert cached_rows[0]["spring_rain_chance"] == 80
+
+
+def test_weather_zone_registry_collapses_child_zones_without_explicit_weather(monkeypatch):
+    monkeypatch.setattr(weather_zone_registry.area_table_entries, "_cache", {
+        12: AreaTableEntry(12, 0, 0, "Elwynn Forest"),
+        87: AreaTableEntry(87, 12, 0, "Goldshire"),
+        40: AreaTableEntry(40, 0, 0, "Westfall"),
+    }, raising=False)
+
+    registry = weather_zone_registry.canonical_weather_zone_registry(set())
+
+    assert 12 in registry
+    assert 87 not in registry
+    assert "Goldshire" in registry[12].aliases
+
+
+def test_weather_zone_registry_keeps_explicit_child_weather(monkeypatch):
+    monkeypatch.setattr(weather_zone_registry.area_table_entries, "_cache", {
+        12: AreaTableEntry(12, 0, 0, "Elwynn Forest"),
+        87: AreaTableEntry(87, 12, 0, "Goldshire"),
+    }, raising=False)
+
+    registry = weather_zone_registry.canonical_weather_zone_registry({87})
+
+    assert 12 in registry
+    assert 87 in registry
+    assert registry[87].explicit_weather is True
+    assert "Goldshire" not in registry[12].aliases
+
+
+def test_weather_snapshot_uses_canonical_registry_not_only_game_weather(monkeypatch):
+    test_state = GlobalState()
+    monkeypatch.setattr(runtime, "global_state", test_state)
+    monkeypatch.setattr(runtime, "_process_weather_runtime_commands", lambda: None)
+    monkeypatch.setattr(runtime, "_current_weather_season", lambda: "spring")
+    monkeypatch.setattr(runtime, "_weather_cycle_seconds", lambda: 600)
+    monkeypatch.setattr(runtime, "_weather_cycle_slot", lambda now=None: 0)
+    monkeypatch.setattr(runtime, "_configured_weather_rows", lambda: [{
+        "zone": 148,
+        "spring_rain_chance": 15,
+        "spring_snow_chance": 0,
+        "spring_storm_chance": 20,
+    }])
+    monkeypatch.setattr(runtime, "canonical_weather_zone_registry", lambda explicit: {
+        148: WeatherZoneEntry(148, 0, 0, "Darkshore", "darkshore", ("Auberdine",), (465,)),
+        440: WeatherZoneEntry(440, 0, 1, "Tanaris", "tanaris", (), ()),
+    })
+
+    rows = runtime.weather_runtime_snapshot_rows()
+    names = {row["canonical_name"]: row for row in rows}
+
+    assert set(names) == {"Darkshore", "Tanaris"}
+    assert names["Darkshore"]["rain_chance"] == 15
+    assert names["Tanaris"]["rain_chance"] == 0
+    assert names["Darkshore"]["search_aliases"] == ["Auberdine"]
 
 
 def test_refresh_region_weather_uses_snow_in_snow_zone(monkeypatch):
@@ -192,6 +294,37 @@ def test_same_map_teleport_self_resync_includes_visible_item_update(monkeypatch)
         ("SMSG_UPDATE_OBJECT", b"visible-items"),
     ]
     assert captured == [("SMSG_UPDATE_OBJECT_1773613185_0006", [111, 0, 222, 0])]
+
+
+def test_same_map_teleport_world_object_resync_streams_immediately(monkeypatch):
+    calls = []
+    movement_module = types.ModuleType("server.modules.handlers.world.opcodes.movement")
+
+    def _fake_stream(session):
+        calls.append(
+            (
+                session,
+                float(getattr(session, "last_gameobject_stream_at", -1.0)),
+                float(getattr(session, "last_npc_stream_at", -1.0)),
+            )
+        )
+        return [("SMSG_UPDATE_OBJECT", b"world-objects")]
+
+    movement_module._maybe_stream_world_objects = _fake_stream
+    monkeypatch.setitem(sys.modules, "server.modules.handlers.world.opcodes.movement", movement_module)
+
+    session = WorldSession()
+    session.char_guid = 7
+    session.map_id = 1
+    session.gameobjects_visible = True
+    session.npc_auto_stream = True
+    session.last_gameobject_stream_at = 123.0
+    session.last_npc_stream_at = 456.0
+
+    responses = runtime.build_same_map_teleport_world_object_resync_responses(session)
+
+    assert responses == [("SMSG_UPDATE_OBJECT", b"world-objects")]
+    assert calls == [(session, 0.0, 0.0)]
 
 
 def test_self_player_appearance_keeps_equipment_cache_when_morphed(monkeypatch):

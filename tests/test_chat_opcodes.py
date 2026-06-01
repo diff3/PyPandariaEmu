@@ -62,12 +62,19 @@ def _import_chat_handlers():
     stub_modules = {
         "server.modules.handlers.world.bootstrap.replay": {
             "load_sniff_payload": lambda path: b"",
+            "send_raw_packet": lambda *args, **kwargs: ("SMSG_MESSAGECHAT", b""),
+            "build_database_creature_responses": lambda session, loaded_guids=None: [],
+        },
+        "server.modules.handlers.world.bootstrap.playerobjects": {
             "build_multi_u32_update_object_payload": lambda **fields: b"",
             "build_single_u32_update_object_payload": lambda **fields: b"",
-            "send_raw_packet": lambda *args, **kwargs: ("SMSG_MESSAGECHAT", b""),
-            "_build_gameobject_update_payload": lambda **kwargs: b"go-payload",
-            "build_database_creature_responses": lambda session, loaded_guids=None: [],
             "make_update_object_response": lambda payload, **kwargs: ("SMSG_UPDATE_OBJECT", payload),
+        },
+        "server.modules.handlers.world.bootstrap.gameobjects": {
+            "_build_gameobject_update_payload": lambda **kwargs: b"go-payload",
+            "build_database_gameobject_responses": (
+                lambda session, loaded_guids=None: []
+            ),
         },
         "server.modules.database.DatabaseConnection": {
             "DatabaseConnection": type("DatabaseConnection", (), {}),
@@ -1919,7 +1926,7 @@ def test_spawngo_loads_nearby_gameobjects_and_tracks_loaded_guids(monkeypatch):
 
 def test_addmoney_updates_player_coinage_fields(monkeypatch):
     captured = {}
-    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    playerobjects_module = sys.modules["server.modules.handlers.world.bootstrap.playerobjects"]
 
     def _fake_build_multi_u32_update_object_payload(*, map_id, guid, field_updates):
         captured["map_id"] = int(map_id)
@@ -1928,7 +1935,7 @@ def test_addmoney_updates_player_coinage_fields(monkeypatch):
         return b"money-update"
 
     monkeypatch.setattr(
-        replay_module,
+        playerobjects_module,
         "build_multi_u32_update_object_payload",
         _fake_build_multi_u32_update_object_payload,
         raising=False,
@@ -1962,7 +1969,7 @@ def test_title_command_grants_and_activates_title_bit(monkeypatch):
     import server.modules.handlers.world.title_service as title_service
 
     captured = {}
-    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    playerobjects_module = sys.modules["server.modules.handlers.world.bootstrap.playerobjects"]
 
     def _fake_build_multi_u32_update_object_payload(*, map_id, guid, field_updates):
         captured["map_id"] = int(map_id)
@@ -1971,7 +1978,7 @@ def test_title_command_grants_and_activates_title_bit(monkeypatch):
         return b"title-update"
 
     monkeypatch.setattr(
-        replay_module,
+        playerobjects_module,
         "build_multi_u32_update_object_payload",
         _fake_build_multi_u32_update_object_payload,
         raising=False,
@@ -2072,9 +2079,9 @@ def test_world_go_show_spawns_nearby_gameobjects(monkeypatch):
         lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
     )
 
-    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    gameobjects_module = sys.modules["server.modules.handlers.world.bootstrap.gameobjects"]
     monkeypatch.setattr(
-        replay_module,
+        gameobjects_module,
         "build_database_gameobject_responses",
         lambda session, loaded_guids=None: [("SMSG_UPDATE_OBJECT", b"go-1"), ("SMSG_UPDATE_OBJECT", b"go-2")],
         raising=False,
@@ -2160,9 +2167,9 @@ def test_world_lift_on_loads_nearby_elevator_gameobjects(monkeypatch):
         raising=False,
     )
 
-    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    gameobjects_module = sys.modules["server.modules.handlers.world.bootstrap.gameobjects"]
     monkeypatch.setattr(
-        replay_module,
+        gameobjects_module,
         "_build_gameobject_update_payload",
         lambda **kwargs: f"lift-{kwargs['entry']['entry']}".encode(),
         raising=False,
@@ -2841,13 +2848,6 @@ def test_forced_inventory_slot_resend_uses_dsl_player_values_update():
 
 
 def test_fixplayer_default_returns_values_then_speed_then_movement(monkeypatch):
-    bootstrap_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
-    monkeypatch.setattr(
-        bootstrap_module,
-        "_build_dynamic_active_mover_packet",
-        lambda session: ("SMSG_MOVE_SET_ACTIVE_MOVER", b"active-mover"),
-        raising=False,
-    )
     monkeypatch.setattr(
         chat_handlers,
         "build_login_packet",
@@ -2906,7 +2906,7 @@ def test_fixplayer_default_returns_values_then_speed_then_movement(monkeypatch):
     alice.y = 2.0
     alice.z = 3.0
 
-    responses = chat_handlers._handle_chat_command(alice, ".fixplayer")
+    responses = chat_handlers._build_fixplayer_responses(alice, mode=0)
 
     assert responses == [
         ("SMSG_UPDATE_OBJECT", b"values-1"),
@@ -2916,18 +2916,10 @@ def test_fixplayer_default_returns_values_then_speed_then_movement(monkeypatch):
         ("SMSG_MOVE_SET_SWIM_SPEED", b"SMSG_MOVE_SET_SWIM_SPEED|4.70"),
         ("SMSG_MOVE_SET_FLIGHT_SPEED", b"SMSG_MOVE_SET_FLIGHT_SPEED|7.00"),
         ("SMSG_PLAYER_MOVE", b"player-move"),
-        ("SMSG_MESSAGECHAT", b"system|[FixPlayer] mode=0 resync sent"),
     ]
 
 
 def test_fixplayer_teleport_returns_bootstrap_like_sequence(monkeypatch):
-    bootstrap_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
-    monkeypatch.setattr(
-        bootstrap_module,
-        "_build_dynamic_active_mover_packet",
-        lambda session: ("SMSG_MOVE_SET_ACTIVE_MOVER", b"active-mover"),
-        raising=False,
-    )
     monkeypatch.setattr(
         chat_handlers,
         "build_login_packet",
@@ -3002,13 +2994,14 @@ def test_fixplayer_teleport_returns_bootstrap_like_sequence(monkeypatch):
     alice.swim_speed = 4.7
     alice.fly_speed = 7.0
 
-    responses = chat_handlers._handle_chat_command(alice, ".fixplayer orgrimmar")
+    assert chat_handlers._apply_fixplayer_destination(alice, "orgrimmar") == "orgrimmar"
+    responses = chat_handlers._build_fixplayer_responses(alice, mode=2)
 
     assert responses == [
         ("SMSG_LOGIN_VERIFY_WORLD", b"SMSG_LOGIN_VERIFY_WORLD|pkt"),
         ("SMSG_LOGIN_SET_TIME_SPEED", b"SMSG_LOGIN_SET_TIME_SPEED|pkt"),
         ("SMSG_BIND_POINT_UPDATE", b"SMSG_BIND_POINT_UPDATE|pkt"),
-        ("SMSG_MOVE_SET_ACTIVE_MOVER", b"active-mover"),
+        ("SMSG_MOVE_SET_ACTIVE_MOVER", b"SMSG_MOVE_SET_ACTIVE_MOVER|pkt"),
         ("SMSG_UPDATE_OBJECT", b"create"),
         ("SMSG_UPDATE_OBJECT", b"values-1"),
         ("SMSG_UPDATE_OBJECT", b"values-2"),
@@ -3023,7 +3016,6 @@ def test_fixplayer_teleport_returns_bootstrap_like_sequence(monkeypatch):
         ("SMSG_MOVE_SET_SWIM_SPEED", b"SMSG_MOVE_SET_SWIM_SPEED|4.70"),
         ("SMSG_MOVE_SET_FLIGHT_SPEED", b"SMSG_MOVE_SET_FLIGHT_SPEED|7.00"),
         ("SMSG_PLAYER_MOVE", b"player-move"),
-        ("SMSG_MESSAGECHAT", b"system|[FixPlayer] destination=orgrimmar"),
     ]
     assert alice.map_id == 1
     assert alice.x == 123.0
@@ -3050,11 +3042,7 @@ def test_fixplayer_unknown_teleport_returns_feedback(monkeypatch):
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
 
-    responses = chat_handlers._handle_chat_command(alice, ".fixplayer nowhere")
-
-    assert responses == [
-        ("SMSG_MESSAGECHAT", b"system|Teleport not found"),
-    ]
+    assert chat_handlers._apply_fixplayer_destination(alice, "nowhere") is None
 
 
 def test_fixspeed_queues_same_map_teleport_resync(monkeypatch):

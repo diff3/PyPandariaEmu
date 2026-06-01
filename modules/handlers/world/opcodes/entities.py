@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 import math
@@ -12,8 +15,12 @@ from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.dispatcher import register
 from server.modules.game.guid import GameObjectGuid, GuidHelper
-from server.modules.handlers.world.bootstrap.replay import build_single_u32_update_object_payload
+from server.modules.handlers.world.bootstrap.playerobjects import build_single_u32_update_object_payload
 from server.modules.handlers.world.opcodes.movement import build_same_map_teleport_payload
+from server.modules.handlers.world.teleport.gameobject_teleport import (
+    activate_gameobject_teleport,
+    resolve_gameobject_teleport_destination,
+)
 
 
 MAX_CREATURE_QUEST_ITEMS = 6
@@ -25,6 +32,8 @@ UNIT_STAND_STATE_STAND = 0
 UNIT_STAND_STATE_SIT_LOW_CHAIR = 4
 UNIT_STAND_STATE_SIT_HIGH_CHAIR = 6
 CHAIR_USE_RADIUS = 10.0
+GAMEOBJECT_USE_LOOKUP_RADIUS = 60.0
+GAMEOBJECT_NEAREST_TELEPORT_RADIUS = 35.0
 
 
 def _get_realm_name() -> str:
@@ -62,27 +71,26 @@ def _player_guid(session) -> int:
     )
 
 
-def _decode_gameobject_use_guid(payload: bytes, decoded: dict[str, Any] | None = None) -> Optional[int]:
-    decoded = decoded or {}
-    for key in ("guid", "object_guid", "gameobject_guid", "go_guid", "target_guid"):
-        guid = _parse_guid(decoded.get(key))
-        if guid is not None:
-            return guid
-
+def _decode_packed_gameobject_guid(
+    payload: bytes,
+    *,
+    bit_order: tuple[int, ...],
+    byte_order: tuple[int, ...],
+) -> Optional[int]:
     payload = bytes(payload or b"")
-    if len(payload) < 9:
+    if len(payload) < 1:
         return None
 
     raw_guid = [0] * 8
     byte_pos = 0
     bit_pos = 0
-    for index in (6, 1, 3, 4, 0, 5, 7, 2):
+    for index in bit_order:
         raw_guid[index], byte_pos, bit_pos = BitInterPreter.read_bit(payload, byte_pos, bit_pos)
 
     if bit_pos:
         byte_pos += 1
 
-    for index in (0, 1, 6, 2, 3, 4, 5, 7):
+    for index in byte_order:
         if not raw_guid[index]:
             continue
         if byte_pos >= len(payload):
@@ -91,6 +99,47 @@ def _decode_gameobject_use_guid(payload: bytes, decoded: dict[str, Any] | None =
         byte_pos += 1
 
     return int.from_bytes(bytes(raw_guid), "little", signed=False)
+
+
+def _decode_gameobject_use_guid(
+    payload: bytes,
+    decoded: dict[str, Any] | None = None,
+    opcode_name: str | None = None,
+) -> Optional[int]:
+    decoded = decoded or {}
+    for key in ("guid", "object_guid", "gameobject_guid", "go_guid", "target_guid"):
+        guid = _parse_guid(decoded.get(key))
+        if guid is not None:
+            return guid
+
+    payload = bytes(payload or b"")
+    if not payload:
+        return None
+
+    opcode = str(opcode_name or "").upper()
+    decode_orders: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+    if opcode == "CMSG_GAME_OBJ_USE":
+        decode_orders.append(((4, 7, 5, 3, 6, 1, 2, 0), (7, 1, 6, 5, 0, 3, 2, 4)))
+    elif opcode == "CMSG_GAME_OBJ_REPORT_USE":
+        decode_orders.append(((6, 1, 3, 4, 0, 5, 7, 2), (0, 1, 6, 2, 3, 4, 5, 7)))
+
+    decode_orders.extend(
+        (
+            ((4, 7, 5, 3, 6, 1, 2, 0), (7, 1, 6, 5, 0, 3, 2, 4)),
+            ((6, 1, 3, 4, 0, 5, 7, 2), (0, 1, 6, 2, 3, 4, 5, 7)),
+        )
+    )
+
+    seen: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
+    for bit_order, byte_order in decode_orders:
+        key = (bit_order, byte_order)
+        if key in seen:
+            continue
+        seen.add(key)
+        guid = _decode_packed_gameobject_guid(payload, bit_order=bit_order, byte_order=byte_order)
+        if guid:
+            return guid
+    return None
 
 
 def _find_visible_gameobject(session, world_guid: int) -> Optional[dict]:
@@ -108,8 +157,8 @@ def _find_visible_gameobject(session, world_guid: int) -> Optional[dict]:
         int(getattr(session, "map_id", 0) or 0),
         float(getattr(session, "x", 0.0) or 0.0),
         float(getattr(session, "y", 0.0) or 0.0),
-        radius=CHAIR_USE_RADIUS,
-        limit=80,
+        radius=GAMEOBJECT_USE_LOOKUP_RADIUS,
+        limit=180,
     )
     for entry in entries:
         entry_spawn_guid = int(entry.get("guid", 0) or 0)
@@ -120,6 +169,85 @@ def _find_visible_gameobject(session, world_guid: int) -> Optional[dict]:
             result["world_guid"] = entry_world_guid
             return result
     return None
+
+
+def _find_nearest_teleport_gameobject(session) -> Optional[dict]:
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
+    player_x = float(getattr(session, "x", 0.0) or 0.0)
+    player_y = float(getattr(session, "y", 0.0) or 0.0)
+    entries = DatabaseConnection.get_gameobjects_near(
+        int(getattr(session, "map_id", 0) or 0),
+        player_x,
+        player_y,
+        radius=GAMEOBJECT_NEAREST_TELEPORT_RADIUS,
+        limit=120,
+    )
+
+    best = None
+    best_dist = float("inf")
+    for entry in entries:
+        if resolve_gameobject_teleport_destination(entry) is None:
+            continue
+
+        dx = float(entry.get("x", 0.0) or 0.0) - player_x
+        dy = float(entry.get("y", 0.0) or 0.0) - player_y
+        dist = (dx * dx) + (dy * dy)
+        if dist > best_dist:
+            continue
+
+        result = dict(entry)
+        result["realm_id"] = realm_id
+        result["world_guid"] = int(GameObjectGuid.from_spawn_guid(
+            int(result.get("guid", 0) or 0),
+            realm_id,
+        ))
+        best = result
+        best_dist = dist
+
+    if best is not None:
+        Logger.info(
+            "[GAMEOBJECT_USE] using nearest teleport guid=%s entry=%s type=%s name=%r distance=%.3f",
+            int(best.get("guid", 0) or 0),
+            int(best.get("entry", 0) or 0),
+            int(best.get("type", 0) or 0),
+            str(best.get("name", "") or ""),
+            math.sqrt(best_dist),
+        )
+    return best
+
+
+def _find_nearest_chair(session) -> Optional[dict]:
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
+    entries = DatabaseConnection.get_gameobjects_near(
+        int(getattr(session, "map_id", 0) or 0),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        radius=CHAIR_USE_RADIUS,
+        limit=80,
+    )
+
+    best = None
+    best_dist = float("inf")
+    for entry in entries:
+        if int(entry.get("type", 0) or 0) != GAMEOBJECT_TYPE_CHAIR:
+            continue
+
+        dx = float(entry.get("x", 0.0) or 0.0) - float(getattr(session, "x", 0.0) or 0.0)
+        dy = float(entry.get("y", 0.0) or 0.0) - float(getattr(session, "y", 0.0) or 0.0)
+        dist = (dx * dx) + (dy * dy)
+        if dist > best_dist:
+            continue
+
+        result = dict(entry)
+        result["realm_id"] = realm_id
+        result["world_guid"] = int(GameObjectGuid.from_spawn_guid(
+            int(result.get("guid", 0) or 0),
+            realm_id,
+        ))
+        best = result
+        best_dist = dist
+
+    return best
 
 
 def _chair_key(entry: dict) -> int:
@@ -304,15 +432,35 @@ def _sit_on_chair(session, entry: dict) -> list[tuple[str, bytes]]:
 @register("CMSG_GAME_OBJ_REPORT_USE")
 @register("CMSG_GAME_OBJ_USE")
 def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
-    guid = _decode_gameobject_use_guid(bytes(ctx.payload or b""), ctx.decoded or {})
+    opcode_name = str(ctx.name or "")
+    guid = _decode_gameobject_use_guid(bytes(ctx.payload or b""), ctx.decoded or {}, opcode_name)
     if guid is None:
-        Logger.warning("[GAMEOBJECT_USE] failed to decode guid payload=%s", bytes(ctx.payload or b"").hex())
-        return 0, None
+        Logger.warning(
+            "[GAMEOBJECT_USE] failed to decode guid payload=%s; trying nearest teleport/chair",
+            bytes(ctx.payload or b"").hex(),
+        )
+        entry = _find_nearest_teleport_gameobject(session)
+        if entry is None:
+            entry = _find_nearest_chair(session)
+        if entry is None:
+            return 0, None
+        teleport_responses = activate_gameobject_teleport(session, entry)
+        if teleport_responses is not None:
+            return 0, (teleport_responses or None)
+        responses = _sit_on_chair(session, entry)
+        return 0, (responses or None)
 
     entry = _find_visible_gameobject(session, int(guid))
     if entry is None:
-        Logger.debug("[GAMEOBJECT_USE] missing visible gameobject guid=0x%016X", int(guid))
-        return 0, None
+        Logger.info(
+            "[GAMEOBJECT_USE] missing visible gameobject guid=0x%016X; trying nearest teleport/chair",
+            int(guid),
+        )
+        entry = _find_nearest_teleport_gameobject(session)
+        if entry is None:
+            entry = _find_nearest_chair(session)
+        if entry is None:
+            return 0, None
 
     Logger.debug(
         "[GAMEOBJECT_USE] guid=0x%016X entry=%s type=%s name=%r",
@@ -321,6 +469,10 @@ def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[li
         int(entry.get("type", 0) or 0),
         str(entry.get("name", "") or ""),
     )
+
+    teleport_responses = activate_gameobject_teleport(session, entry)
+    if teleport_responses is not None:
+        return 0, (teleport_responses or None)
 
     if int(entry.get("type", 0) or 0) != GAMEOBJECT_TYPE_CHAIR:
         return 0, None

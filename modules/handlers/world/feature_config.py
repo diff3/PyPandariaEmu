@@ -10,22 +10,28 @@ from shared.Logger import Logger
 
 CONFIG_ENABLE_ELEVATORS = "Transport.EnableElevators"
 CONFIG_ENABLE_MOVING_TRANSPORTS = "Transport.EnableMovingTransports"
+CONFIG_DEBUG_TRANSPORT_MOVEMENT = "Transport.DebugMovement"
 CONFIG_ENABLE_FLIGHT_PATHS = "Taxi.EnableFlightPaths"
 CONFIG_ENABLE_MAP_CHEAT = "Player.EnableMapExploreCheat"
 CONFIG_ENABLE_TAXI_CHEAT = "Player.EnableTaxiCheat"
 CONFIG_ENABLE_GAMEOBJECTS = "World.EnableGameObjects"
 CONFIG_ENABLE_NPCS = "World.EnableNPCs"
 CONFIG_ENABLE_NPC_AUTO_STREAM = "World.EnableNPCAutoStream"
+CONFIG_DEBUG_NPC_ORIENTATION = "World.DebugNPCOrientation"
+CONFIG_DEBUG_PLAYER_MOVEMENT = "World.DebugMovement"
 
 _DEFAULTS: dict[str, bool] = {
     CONFIG_ENABLE_ELEVATORS: True,
     CONFIG_ENABLE_MOVING_TRANSPORTS: True,
+    CONFIG_DEBUG_TRANSPORT_MOVEMENT: False,
     CONFIG_ENABLE_FLIGHT_PATHS: True,
     CONFIG_ENABLE_MAP_CHEAT: False,
     CONFIG_ENABLE_TAXI_CHEAT: False,
     CONFIG_ENABLE_GAMEOBJECTS: True,
     CONFIG_ENABLE_NPCS: False,
     CONFIG_ENABLE_NPC_AUTO_STREAM: False,
+    CONFIG_DEBUG_NPC_ORIENTATION: False,
+    CONFIG_DEBUG_PLAYER_MOVEMENT: False,
 }
 
 
@@ -72,6 +78,10 @@ def moving_transports_enabled() -> bool:
     return feature_enabled(CONFIG_ENABLE_MOVING_TRANSPORTS)
 
 
+def transport_movement_debug_enabled() -> bool:
+    return feature_enabled(CONFIG_DEBUG_TRANSPORT_MOVEMENT)
+
+
 def flight_paths_enabled() -> bool:
     return feature_enabled(CONFIG_ENABLE_FLIGHT_PATHS)
 
@@ -96,12 +106,32 @@ def npc_auto_stream_enabled() -> bool:
     return npcs_enabled() and feature_enabled(CONFIG_ENABLE_NPC_AUTO_STREAM)
 
 
+def npc_orientation_debug_enabled() -> bool:
+    return feature_enabled(CONFIG_DEBUG_NPC_ORIENTATION)
+
+
+def player_movement_debug_enabled() -> bool:
+    return feature_enabled(CONFIG_DEBUG_PLAYER_MOVEMENT)
+
+
 def log_effective_world_feature_config() -> None:
     Logger.info("[Config] Elevators: %s", "enabled" if elevators_enabled() else "disabled")
     Logger.info("[Config] Moving transports: %s", "enabled" if moving_transports_enabled() else "disabled")
+    Logger.info(
+        "[Config] Transport movement debug: %s",
+        "enabled" if transport_movement_debug_enabled() else "disabled",
+    )
     Logger.info("[Config] Flight paths: %s", "enabled" if flight_paths_enabled() else "disabled")
     Logger.info("[Config] Map cheat: %s", "enabled" if map_cheat_enabled() else "disabled")
     Logger.info("[Config] Taxi cheat: %s", "enabled" if taxi_cheat_enabled() else "disabled")
     Logger.info("[Config] GameObjects: %s", "enabled" if gameobjects_enabled() else "disabled")
     Logger.info("[Config] NPCs: %s", "enabled" if npcs_enabled() else "disabled")
     Logger.info("[Config] NPC auto stream: %s", "enabled" if npc_auto_stream_enabled() else "disabled")
+    Logger.info(
+        "[Config] NPC orientation debug: %s",
+        "enabled" if npc_orientation_debug_enabled() else "disabled",
+    )
+    Logger.info(
+        "[Config] Player movement debug: %s",
+        "enabled" if player_movement_debug_enabled() else "disabled",
+    )

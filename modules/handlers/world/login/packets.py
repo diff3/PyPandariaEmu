@@ -27,7 +27,7 @@ from shared.Logger import Logger
 
 from server.modules.handlers.world.constants.login import RACES_MOP, CLASSES_MOP
 from server.modules.handlers.world.addons import addon_public_key_bytes
-from shared.PathUtils import get_captures_root, get_debug_root
+from shared.PathUtils import get_captures_root
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.game.equipment import _parse_equipment_cache
 from server.modules.game.player import _decode_player_bytes
@@ -35,9 +35,6 @@ from server.modules.game.guid import _guid_bytes_and_masks, GuidHelper, HighGuid
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
 from server.modules.handlers.world.mount.mount_service import (
-    MOUNT_SUPPORT_SPELLS,
-    MOUNT_RIDING_SKILL_ID,
-    MOUNT_RIDING_SKILL_VALUE,
     granted_mount_spells,
 )
 from server.modules.handlers.world.pet.pet_service import (
@@ -45,10 +42,7 @@ from server.modules.handlers.world.pet.pet_service import (
     build_battle_pet_journal_payload,
     granted_battle_pet_spells,
 )
-from server.modules.handlers.world.bootstrap.playerobjects import (
-    USE_SERVER_BUILT_PLAYER_CREATE,
-    build_server_built_player_create,
-)
+from server.modules.handlers.world.bootstrap.playerobjects import build_server_built_player_create
 
 DEBUG_UPDATE_OBJECT_0002 = str(os.getenv("PP_DEBUG_UPDATE_OBJECT_0002", "")).strip().lower() in {
     "1",
@@ -667,100 +661,6 @@ def build_SMSG_LOGIN_VERIFY_WORLD(_ctx=None) -> bytes:
 _EXACT_UPDATE_OBJECT_1773613181_0005_DEFAULT = bytes.fromhex(
     "01000100000001C104C01F0500000003004035D696C3000000005A62B640A33B71C56C314204000000000000000001F38C0E00040000000000C01F2100000067B002000000D6820000803FC70B0000280000000000803FCB820300010F0000000000FF00"
 )
-_EXACT_UPDATE_OBJECT_1773613176_0003_DEFAULT_ENTRIES = (
-    {
-        "guid": 0x1FC0000000000006,
-        "object_type": 5,
-        "create_flags": bytes.fromhex("000000030040"),
-        "stationary_y": -4391.54443359375,
-        "stationary_z": 152.76785278320312,
-        "stationary_orientation": 0.8706339597702026,
-        "stationary_x": 1833.5076904296875,
-        "unk472": 71438445,
-        "gameobject_rotation": 0,
-        "mask_bytes": bytes.fromhex("f38c0e00"),
-        "field_bytes": bytes.fromhex("060000000000c01f21000000078402000000f4500000803fd70b0000280000000000803f0ee70300010f0000000000ff"),
-        "dynamic_mask_blocks": 0,
-    },
-    {
-        "guid": 0x1FC0000000000007,
-        "object_type": 5,
-        "create_flags": bytes.fromhex("000000030040"),
-        "stationary_y": -3840.890869140625,
-        "stationary_z": 0.0,
-        "stationary_orientation": 2.0869128704071045,
-        "stationary_x": -1006.944580078125,
-        "unk472": 71441778,
-        "gameobject_rotation": 0,
-        "mask_bytes": bytes.fromhex("f38c0e00"),
-        "field_bytes": bytes.fromhex("070000000000c01f21000000485100000000ac1e0000803fc70b0000280000000000803fc6860300010f0000000000ff"),
-        "dynamic_mask_blocks": 0,
-    },
-    {
-        "guid": 0x1FC0000000000008,
-        "object_type": 5,
-        "create_flags": bytes.fromhex("000000030040"),
-        "stationary_y": 2441.197265625,
-        "stationary_z": 0.0,
-        "stationary_orientation": 4.662179946899414,
-        "stationary_x": -4352.34814453125,
-        "unk472": 71408350,
-        "gameobject_rotation": 0,
-        "mask_bytes": bytes.fromhex("f38c0e00"),
-        "field_bytes": bytes.fromhex("080000000000c01f2100000051b402000000ac310000803faf1b0000280000000000803ff7df0300010f0000000000ff"),
-        "dynamic_mask_blocks": 0,
-    },
-    {
-        "guid": 0x1FC0000000000014,
-        "object_type": 5,
-        "create_flags": bytes.fromhex("000000030040"),
-        "stationary_y": -738.1724243164062,
-        "stationary_z": 210.6576385498047,
-        "stationary_orientation": 6.201721668243408,
-        "stationary_x": -691.3047485351562,
-        "unk472": 71408350,
-        "gameobject_rotation": 0,
-        "mask_bytes": bytes.fromhex("f38c0e00"),
-        "field_bytes": bytes.fromhex("140000000000c01f2100000055e802000000a1fa0000803fd70b0000280000000000803fa5010900010f0000000000ff"),
-        "dynamic_mask_blocks": 0,
-    },
-    {
-        "guid": 0x1FC0000000000017,
-        "object_type": 5,
-        "create_flags": bytes.fromhex("000000030040"),
-        "stationary_y": -5189.60791015625,
-        "stationary_z": 7.580000400543213,
-        "stationary_orientation": 3.7290494441986084,
-        "stationary_x": 1200.232177734375,
-        "unk472": 71431843,
-        "gameobject_rotation": 0,
-        "mask_bytes": bytes.fromhex("f38c0e00"),
-        "field_bytes": bytes.fromhex("170000000000c01f21000000ca1a0300000018de0000803f3e250000280000000000803f9f060500010f0000000000ff"),
-        "dynamic_mask_blocks": 0,
-    },
-    {
-        "guid": 0x1FC0000000000018,
-        "object_type": 5,
-        "create_flags": bytes.fromhex("000000030040"),
-        "stationary_y": -5900.0,
-        "stationary_z": 325.0880126953125,
-        "stationary_orientation": 1.9386810064315796,
-        "stationary_x": 3356.68994140625,
-        "unk472": 71423130,
-        "gameobject_rotation": 0,
-        "mask_bytes": bytes.fromhex("f38c0e00"),
-        "field_bytes": bytes.fromhex("180000000000c01f210000006a1b030000000ffc0000803f7a1d0000280000000000803fee310800010f0000000000ff"),
-        "dynamic_mask_blocks": 0,
-    },
-)
-_FIRST_LOGIN_UPDATE_OBJECT_CAPTURE_NAME = "SMSG_UPDATE_OBJECT_1773613176_0002.json"
-DEFAULT_EXACT_UPDATE_OBJECT_1773613176_0002_MODE = "barncastle"
-_MINIMAL_UPDATE_OBJECT_1773613176_0002_ENTRY_OFFSET = 477
-_MINIMAL_UPDATE_OBJECT_1773613176_0002_OFFSET_ADJUST = (
-    _MINIMAL_UPDATE_OBJECT_1773613176_0002_ENTRY_OFFSET - 6
-)
-_UNIT_FLAG_MOUNT = 0x08000000
-_PLAYER_MOUNT_STATE_FLAGS_BASE = 0x00000008
 _PLAYER_DISPLAY_IDS = {
     1: {0: 49, 1: 50},
     2: {0: 51, 1: 52},
@@ -778,47 +678,6 @@ _PLAYER_DISPLAY_IDS = {
     25: {0: 38551, 1: 38552},
     26: {0: 38551, 1: 38552},
 }
-_PLAYER_FACTION_TEMPLATE_IDS = {
-    1: 1,
-    2: 2,
-    3: 3,
-    4: 4,
-    5: 5,
-    6: 6,
-    7: 115,
-    8: 116,
-    9: 2204,
-    10: 1610,
-    11: 1629,
-    12: 1,
-    13: 1,
-    14: 1,
-    15: 1,
-    16: 1,
-    17: 1,
-    18: 1,
-    19: 1,
-    20: 1,
-    21: 1,
-    22: 2203,
-    23: 1,
-    24: 2395,
-    25: 2401,
-    26: 2402,
-}
-_EXACT_UPDATE_OBJECT_1773613176_0002_MOVEMENT_TEMPLATE = bytes.fromhex(
-    "200000004009080000080000490000e040e00f494000009040c3f54840ec8f7d46c7c28a4000002040608b7e460000904003000020400000e040711c9740b5b7fd41"
-)
-_EXACT_UPDATE_OBJECT_1773613176_0002_MASK_BYTES = bytes.fromhex(
-    "d10000dc8a028062ff0f1e7c0002008022060004c02900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a200800202601e007800780000000000000000000000000000000080ff010000000000000000000000000000fe010000000000000000000000000000fe0100000000000000000000000000000000000000000000007c7f01000001000010000000000000000000000000000000000000e807fc2f0100000008000000000080003f00000000000000"
-)
-_EXACT_UPDATE_OBJECT_1773613176_0002_FIELD_TEMPLATE = bytes.fromhex(
-    "0200000019000000000000000000803f0000000000000000000000000a0400010300000067000000640000006700000064000000010000004a06000008000000000800006c07000040060000d0070000022bc73e0000c03f733c0000733c000000000000c82df740a88322418e265040587c85400000803f0000803f0000803f0000803f12000000190000001400000018000000130000002100000053000000260000001000000025495240922489400000803f01070300080000010100000085200000020000007ee30000a0510000a2510000f151000089c30000010000000e00000000000040100000000000004012000000000000400c00000000000040140000000000004016000000000000402100000000000040c8000000900100002b002c002d002e0036005f006d0076008900a200ad00e2009e019f01d90199030100010001000100010001002c0101002c0101000100010001000100010005000500050005000500050005002c0105002c01050005000500010001000500050051f896410000a040553e2e41553e2e41553e2e4152491d3b52491d3b52491d3b52491d3b52491d3b52491d3b1e0000000000004108000000004000002c0100000e0000000e0000000e0000000e0000000e0000000e0000000000803f0000803f0000803f0000803f0000803f0000803f0000803f0e0000000000803f0000803f0000803f0000803fffffffff5a00000015000000160000001700000018000000190000001a000000"
-)
-_EXACT_UPDATE_OBJECT_1773613176_0002_DYNAMIC_MASK_BLOCKS = 0
-_EXACT_UPDATE_OBJECT_1773613176_0004_DEFAULT = bytes.fromhex(
-    "0100010000000001023F4000001C00000080E00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000733C0000733C00000000000000"
-)
 _EXACT_UPDATE_OBJECT_1773613185_0006_DEFAULT = bytes.fromhex(
     "0100010000000001023F4000001C00000020E0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008000400733C0000733C0000000000000100000000"
 )
@@ -956,45 +815,6 @@ _EXACT_UPDATE_OBJECT_1775665925_0006_DEFAULT = bytes.fromhex(
     "1283C84160E51840CDC87E4669E10E000000000001F38C0D00B9570800250010F121000000250000000000FFFFC3F5A83F1300000000000000000080"
     "3F0A070000010900FF0000006400"
 )
-_EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS = {
-    "object_guid_low_u32": 800,
-    "last_entry_packed_guid_low": 479,
-    "fly_speed": 494,
-    "turn_speed": 498,
-    "swim_speed": 502,
-    "pitch_speed": 506,
-    "pos_x": 510,
-    "orientation": 514,
-    "walk_speed": 518,
-    "pos_y": 522,
-    "fly_back_speed": 526,
-    "run_back_speed": 531,
-    "run_speed": 535,
-    "swim_back_speed": 539,
-    "pos_z": 543,
-    "guid1_0": 530,
-    "display_power": 832,
-    "faction_template": 856,
-    "mount_state_flags": 860,
-    "display_id": 888,
-    "native_display_id": 892,
-    "mount_display_id": 896,
-    "health": 836,
-    "power_primary": 840,
-    "max_health": 844,
-    "max_power_primary": 848,
-    "level": 852,
-    "appearance_block": 828,
-    "player_bytes": 980,
-    "player_bytes2": 984,
-    "equipment_slot_8": 1000,
-    "equipment_slot_12": 1004,
-    "equipment_slot_14": 1008,
-    "equipment_slot_30": 1012,
-    "equipment_slot_32": 1016,
-}
-
-
 def _build_update_object_packet_prefix(map_id: int, update_count: int) -> bytes:
     return struct.pack("<HI", int(map_id), int(update_count))
 
@@ -1118,6 +938,42 @@ def _build_exact_fixed_u32_field_block(
     return bytes(mask), bytes(field_bytes), ordered_bits
 
 
+_PLAYER_VALUE_UPDATE_MASK_BLOCKS = 63
+_PLAYER_VALUE_UPDATE_DYNAMIC_MASK_BLOCKS = 1
+_PLAYER_VALUE_UPDATE_DYNAMIC_MASK_BYTES = b"\x00" * 4
+
+_OBJECT_FIELD_DYNAMIC_FLAGS = 6
+_UNIT_FIELD_DISPLAY_ID = 69
+_UNIT_FIELD_NATIVE_DISPLAY_ID = 70
+_UNIT_FIELD_MOUNT_DISPLAY_ID = 71
+_PLAYER_FIELD_PLAYER_FLAGS = 162
+
+_PLAYER_VALUE_UPDATE_DYNAMIC_FLAGS = 0
+_PLAYER_VALUE_UPDATE_MOUNT_DISPLAY_ID = 0
+
+
+def _player_visual_value_update_fields(ctx: Any) -> dict[int, int]:
+    display_id = int(
+        getattr(
+            ctx,
+            "display_id",
+            _resolve_player_display_id(
+                int(getattr(ctx, "race", 0) or 0),
+                int(getattr(ctx, "gender", 0) or 0),
+                15476,
+            ),
+        )
+        or 15476
+    )
+    return {
+        _OBJECT_FIELD_DYNAMIC_FLAGS: _PLAYER_VALUE_UPDATE_DYNAMIC_FLAGS,
+        _UNIT_FIELD_DISPLAY_ID: display_id,
+        _UNIT_FIELD_NATIVE_DISPLAY_ID: display_id,
+        _UNIT_FIELD_MOUNT_DISPLAY_ID: _PLAYER_VALUE_UPDATE_MOUNT_DISPLAY_ID,
+        _PLAYER_FIELD_PLAYER_FLAGS: int(getattr(ctx, "player_flags", 0) or 0),
+    }
+
+
 def _build_exact_update_object_1773613181_0005_body(
     *,
     stationary_y: float,
@@ -1228,31 +1084,11 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
     map_id = _ctx_int_preserve_zero(ctx, "exact_0004_map_id", int(getattr(ctx, "map_id", 1)))
     guid = _resolve_player_value_update_guid(ctx, "exact_0004_guid")
-    display_id = int(
-        getattr(
-            ctx,
-            "display_id",
-            _resolve_player_display_id(
-                int(getattr(ctx, "race", 0) or 0),
-                int(getattr(ctx, "gender", 0) or 0),
-                15476,
-            ),
-        )
-        or 15476
+    base_fields = _player_visual_value_update_fields(ctx)
+    mask_bytes, field_bytes, set_bits = _build_exact_fixed_u32_field_block(
+        base_fields,
+        mask_blocks=_PLAYER_VALUE_UPDATE_MASK_BLOCKS,
     )
-    base_fields = {
-        6: 0,
-        69: display_id,
-        70: display_id,
-        71: 0,
-        162: int(getattr(ctx, "player_flags", 0) or 0),
-    }
-    extra_fields = getattr(ctx, "exact_0004_extra_u32_fields", None)
-    if extra_fields:
-        base_fields.update({int(field_index): int(field_value) for field_index, field_value in extra_fields.items()})
-    mask_bytes, field_bytes, set_bits = _build_exact_fixed_u32_field_block(base_fields, mask_blocks=63)
-    dynamic_mask_blocks = int(getattr(ctx, "exact_0004_dynamic_mask_blocks", 1))
-    dynamic_mask_bytes = bytes(getattr(ctx, "exact_0004_dynamic_mask_bytes", b"\x00" * (dynamic_mask_blocks * 4)))
 
     payload = bytearray()
     payload += _build_update_object_packet_prefix(map_id, 1)
@@ -1260,8 +1096,8 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
         guid=guid,
         mask_bytes=mask_bytes,
         field_bytes=field_bytes,
-        dynamic_mask_blocks=dynamic_mask_blocks,
-        dynamic_mask_bytes=dynamic_mask_bytes,
+        dynamic_mask_blocks=_PLAYER_VALUE_UPDATE_DYNAMIC_MASK_BLOCKS,
+        dynamic_mask_bytes=_PLAYER_VALUE_UPDATE_DYNAMIC_MASK_BYTES,
     )
     built = bytes(payload)
     Logger.info(
@@ -1278,41 +1114,8 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
     Logger.info(
         "[UPDATE_OBJECT DEBUG] 0004 set_fields=%s dynamic_mask_blocks=%s dynamic_mask_bytes=%s",
         set_bits,
-        dynamic_mask_blocks,
-        dynamic_mask_bytes.hex(),
-    )
-    return built
-
-
-def build_SMSG_UPDATE_OBJECT_1773613176_0003(_ctx=None) -> bytes:
-    ctx = _ctx or type("Ctx", (), {})()
-    map_id = _ctx_int_preserve_zero(ctx, "exact_0003_map_id", int(getattr(ctx, "map_id", 1)))
-    entries = tuple(getattr(ctx, "exact_0003_entries", _EXACT_UPDATE_OBJECT_1773613176_0003_DEFAULT_ENTRIES))
-
-    payload = bytearray()
-    payload += _build_update_object_packet_prefix(map_id, len(entries))
-    for entry in entries:
-        payload += _build_exact_update_object_create_entry(
-            guid=int(entry["guid"]),
-            object_type=int(entry.get("object_type", 5)),
-            create_flags=bytes(entry.get("create_flags", bytes.fromhex("000000030040"))),
-            body=_build_exact_update_object_1773613181_0005_body(
-                stationary_y=float(entry["stationary_y"]),
-                stationary_z=float(entry["stationary_z"]),
-                stationary_orientation=float(entry["stationary_orientation"]),
-                stationary_x=float(entry["stationary_x"]),
-                unk472=int(entry.get("unk472", 0)),
-                gameobject_rotation=int(entry.get("gameobject_rotation", 0)),
-                mask_bytes=bytes(entry.get("mask_bytes", bytes.fromhex("f38c0e00"))),
-                field_bytes=bytes(entry["field_bytes"]),
-                dynamic_mask_blocks=int(entry.get("dynamic_mask_blocks", 0)),
-            ),
-        )
-
-    built = bytes(payload)
-    Logger.info(
-        f"[UPDATE_OBJECT BUILD] 0003 map_id={map_id} entries={len(entries)} "
-        f"packet_size={len(built)}"
+        _PLAYER_VALUE_UPDATE_DYNAMIC_MASK_BLOCKS,
+        _PLAYER_VALUE_UPDATE_DYNAMIC_MASK_BYTES.hex(),
     )
     return built
 
@@ -1320,50 +1123,16 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0003(_ctx=None) -> bytes:
 def build_SMSG_UPDATE_OBJECT_1773613176_0002(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
     is_remote_player = bool(getattr(ctx, "exact_0002_remote_player", False))
-    if USE_SERVER_BUILT_PLAYER_CREATE and not hasattr(ctx, "exact_0002_payload") and not is_remote_player:
-        built = build_server_built_player_create(ctx)
-        if built is None:
-            raise RuntimeError("[PLAYER CREATE] server-built create returned no payload")
+    built = build_server_built_player_create(ctx)
+    if built is None:
+        raise RuntimeError("[PLAYER CREATE] server-built create returned no payload")
 
-        map_id = struct.unpack_from("<H", built, 0)[0]
-        Logger.info("[PLAYER CREATE] server-built only")
-        Logger.info(
-            f"[UPDATE_OBJECT BUILD] 0002 mode=server-built map_id={map_id} packet_size={len(built)}"
-        )
-        return built
-
-    mode = str(
-        getattr(
-            ctx,
-            "exact_0002_mode",
-            DEFAULT_EXACT_UPDATE_OBJECT_1773613176_0002_MODE,
-        )
-        or DEFAULT_EXACT_UPDATE_OBJECT_1773613176_0002_MODE
-    ).strip().lower()
-    if hasattr(ctx, "exact_0002_payload"):
-        built = bytearray(bytes(getattr(ctx, "exact_0002_payload")))
-        default_map_id = int(getattr(ctx, "map_id", struct.unpack_from("<H", built, 0)[0]))
-        map_id = _ctx_int_preserve_zero(ctx, "exact_0002_map_id", default_map_id)
-        struct.pack_into("<H", built, 0, map_id)
-        built = bytes(built)
-        active_mode = "custom"
-    if mode == "barncastle":
-        built = _build_barncastle_update_object_1773613176_0002_payload(ctx)
-        map_id = struct.unpack_from("<H", built, 0)[0]
-        active_mode = "barncastle"
-    else:
-        built = _build_live_update_object_1773613176_0002_payload(ctx)
-        map_id = struct.unpack_from("<H", built, 0)[0]
-        active_mode = "full-capture"
-    if is_remote_player:
-        patched = bytearray(built)
-        _patch_update_object_1773613176_0002_remote_flags(patched)
-        built = bytes(patched)
-        active_mode = f"{active_mode}-remote"
+    map_id = struct.unpack_from("<H", built, 0)[0]
+    Logger.info("[PLAYER CREATE] server-built only")
     Logger.info(
-        f"[UPDATE_OBJECT BUILD] 0002 mode={active_mode} map_id={map_id} packet_size={len(built)}"
+        f"[UPDATE_OBJECT BUILD] 0002 mode=server-built "
+        f"remote={int(is_remote_player)} map_id={map_id} packet_size={len(built)}"
     )
-    _debug_log_update_object_0002(built, mode=active_mode)
     return built
 
 
@@ -1430,18 +1199,6 @@ def _debug_log_update_object_0002(payload: bytes, *, mode: str) -> None:
     )
 
 
-def _patch_u32(payload: bytearray, offset: int, value: int) -> None:
-    struct.pack_into("<I", payload, int(offset), int(value) & 0xFFFFFFFF)
-
-
-def _patch_f32(payload: bytearray, offset: int, value: float) -> None:
-    struct.pack_into("<f", payload, int(offset), float(value))
-
-
-def _patch_u16(payload: bytearray, offset: int, value: int) -> None:
-    struct.pack_into("<H", payload, int(offset), int(value) & 0xFFFF)
-
-
 def _ctx_int_preserve_zero(ctx: Any, primary_key: str, fallback: int) -> int:
     value = getattr(ctx, primary_key, None)
     if value is None:
@@ -1454,479 +1211,6 @@ def _resolve_player_display_id(race: int, gender: int, fallback: int = 15475) ->
     if not gender_map:
         return int(fallback)
     return int(gender_map.get(int(gender) or 0, fallback))
-
-
-def _resolve_player_faction_template(race: int, fallback: int = 1610) -> int:
-    return int(_PLAYER_FACTION_TEMPLATE_IDS.get(int(race) or 0, fallback))
-
-
-def _patch_mount_skill_block_1773613176_0002_fields(
-    payload: bytearray,
-    offsets: dict[str, int],
-    ctx: Any,
-) -> None:
-    """
-    Rebuild the entire 16-slot skill block.
-
-    This fixes:
-    - missing language selection
-    - client not sending chat CMSG
-    - inconsistent skill state from template
-
-    Layout (per slot):
-        ids   @ base + 288
-        value @ base + 320
-        max   @ base + 352
-    """
-
-    field_base = int(offsets["object_guid_low_u32"])
-
-    # --- constants ---
-    LANG_COMMON = 98
-    LANG_ORCISH = 109
-
-    race = int(getattr(ctx, "race", 0) or 0)
-
-    # --- clear all slots ---
-    for i in range(16):
-        _patch_u16(payload, field_base + 288 + (i * 2), 0)
-        _patch_u16(payload, field_base + 320 + (i * 2), 0)
-        _patch_u16(payload, field_base + 352 + (i * 2), 0)
-
-    # --- slot 0: primary language ---
-    if race in (1, 3, 4, 7, 11):  # alliance
-        lang = LANG_COMMON
-    else:
-        lang = LANG_ORCISH
-
-    _patch_u16(payload, field_base + 288 + (0 * 2), lang)
-    _patch_u16(payload, field_base + 320 + (0 * 2), 300)
-    _patch_u16(payload, field_base + 352 + (0 * 2), 300)
-
-    # --- slot 1: riding (mount usability) ---
-    _patch_u16(payload, field_base + 288 + (1 * 2), int(MOUNT_RIDING_SKILL_ID))
-    _patch_u16(payload, field_base + 320 + (1 * 2), int(MOUNT_RIDING_SKILL_VALUE))
-    _patch_u16(payload, field_base + 352 + (1 * 2), int(MOUNT_RIDING_SKILL_VALUE))
-
-    # --- optional: racial language (slot 2) ---
-    # Example mapping (expand later if needed)
-    RACIAL_LANG = {
-        1: 113,  # Human -> Common (same, harmless)
-        3: 111,  # Dwarf -> Dwarven
-        4: 113,  # Night Elf -> Darnassian
-        7: 115,  # Gnome -> Gnomish
-        11: 113, # Draenei -> Draenei
-        2: 109,  # Orc -> Orcish
-        5: 110,  # Undead -> Gutterspeak
-        6: 114,  # Tauren -> Taurahe
-        8: 116,  # Troll -> Troll
-        10: 139, # Blood Elf -> Thalassian
-        24: 109, # Neutral Pandaren -> Orcish fallback
-    }
-
-    racial = RACIAL_LANG.get(race)
-    if racial:
-        _patch_u16(payload, field_base + 288 + (2 * 2), racial)
-        _patch_u16(payload, field_base + 320 + (2 * 2), 300)
-        _patch_u16(payload, field_base + 352 + (2 * 2), 300)
-
-
-def _patch_live_update_object_1773613176_0002_fields(ctx: Any, payload: bytearray, *, offset_adjust: int = 0) -> None:
-    offsets = {key: value - offset_adjust for key, value in _EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS.items()}
-    low_guid = int(getattr(ctx, "exact_0002_low_guid", getattr(ctx, "char_guid", 2)) or 2) & 0xFF
-    if offsets["object_guid_low_u32"] >= 0:
-        _patch_u32(payload, offsets["object_guid_low_u32"], low_guid)
-    payload[offsets["last_entry_packed_guid_low"]] = low_guid
-    payload[offsets["guid1_0"]] = low_guid ^ 0x01
-
-    dynamic_floats = {
-        "fly_speed": float(getattr(ctx, "fly_speed", 7.0) or 7.0),
-        "turn_speed": float(getattr(ctx, "turn_speed", 3.1415926) or 3.1415926),
-        "swim_speed": float(getattr(ctx, "swim_speed", 4.5) or 4.5),
-        "pitch_speed": float(getattr(ctx, "pitch_speed", 3.1415926) or 3.1415926),
-        "pos_x": float(getattr(ctx, "x", 0.0) or 0.0),
-        "orientation": float(getattr(ctx, "orientation", 0.0) or 0.0),
-        "walk_speed": float(getattr(ctx, "walk_speed", 2.5) or 2.5),
-        "pos_y": float(getattr(ctx, "y", 0.0) or 0.0),
-        "fly_back_speed": float(getattr(ctx, "fly_back_speed", 4.5) or 4.5),
-        "run_back_speed": float(getattr(ctx, "run_back_speed", 4.5) or 4.5),
-        "run_speed": float(getattr(ctx, "run_speed", 7.0) or 7.0),
-        "swim_back_speed": float(getattr(ctx, "swim_back_speed", 2.5) or 2.5),
-        "pos_z": float(getattr(ctx, "z", 0.0) or 0.0),
-    }
-    for key, value in dynamic_floats.items():
-        _patch_f32(payload, offsets[key], value)
-
-    display_power = int(getattr(ctx, "display_power", 0) or 0)
-    current_health = int(getattr(ctx, "health", 103) or 103)
-    max_health = int(getattr(ctx, "max_health", current_health) or current_health)
-    primary_power = int(getattr(ctx, "power_primary", 100) or 100)
-    max_primary_power = int(getattr(ctx, "max_power_primary", primary_power) or primary_power)
-    level = int(getattr(ctx, "level", 1) or 1)
-    player_bytes = int(getattr(ctx, "player_bytes", 198401) or 198401)
-    player_bytes2 = int(getattr(ctx, "player_bytes2", 16777224) or 16777224)
-
-    _patch_u32(payload, offsets["display_power"], display_power)
-    _patch_u32(payload, offsets["health"], current_health)
-    _patch_u32(payload, offsets["power_primary"], primary_power)
-    _patch_u32(payload, offsets["max_health"], max_health)
-    _patch_u32(payload, offsets["max_power_primary"], max_primary_power)
-    race = int(getattr(ctx, "race", 0) or 0)
-    class_id = int(getattr(ctx, "class_id", 0) or 0)
-    gender = int(getattr(ctx, "gender", 0) or 0)
-    faction_template = int(
-        getattr(
-            ctx,
-            "faction_template",
-            _resolve_player_faction_template(race),
-        )
-        or _resolve_player_faction_template(race)
-    )
-    display_id = int(
-        getattr(
-            ctx,
-            "display_id",
-            _resolve_player_display_id(race, gender),
-        )
-        or _resolve_player_display_id(race, gender)
-    )
-    payload[offsets["appearance_block"]:offsets["appearance_block"]+4] = bytes((race & 0xFF, class_id & 0xFF, 0x00, gender & 0xFF))
-    _patch_u32(payload, offsets["faction_template"], faction_template)
-    _patch_u32(payload, offsets["display_id"], display_id)
-    _patch_u32(payload, offsets["native_display_id"], display_id)
-    mount_display_id = int(getattr(ctx, "mount_display_id", 0) or 0)
-    if mount_display_id > 0:
-        mount_state_flags = _PLAYER_MOUNT_STATE_FLAGS_BASE | _UNIT_FLAG_MOUNT
-        _patch_u32(payload, offsets["mount_state_flags"], mount_state_flags)
-        _patch_u32(payload, offsets["mount_display_id"], mount_display_id)
-
-    _patch_u32(payload, offsets["level"], level)
-    
-    _patch_u32(payload, offsets["player_bytes"], player_bytes)
-    _patch_u32(payload, offsets["player_bytes2"], player_bytes2)
-    # TEMP TEST: assume next slot
-    #known_lang_offset = offsets["player_bytes2"] + 4
-    #_patch_u32(payload, known_lang_offset, getattr(ctx, "known_languages_mask", 1))
-    
-
-    # These sparse player fields in the Barncastle 0002 template were still
-    # carrying Selene's raw equipment cache values. Patch them from the
-    # logged-in character's own equipmentCache so visible login gear follows
-    # the selected character instead of the template character.
-    equipment_cache_raw = list(getattr(ctx, "equipment_cache_raw", []) or [])
-    equipment_field_map = {
-        "equipment_slot_8": 8,
-        "equipment_slot_12": 12,
-        "equipment_slot_14": 14,
-        "equipment_slot_30": 30,
-        "equipment_slot_32": 32,
-    }
-    for offset_key, raw_index in equipment_field_map.items():
-        if raw_index < len(equipment_cache_raw):
-            _patch_u32(payload, offsets[offset_key], int(equipment_cache_raw[raw_index]) & 0xFFFFFFFF)
-
-    _patch_mount_skill_block_1773613176_0002_fields(payload, offsets, ctx)
-
-
-def _build_barncastle_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
-    """
-    Build a player-create UPDATE_OBJECT from fixed MoP templates plus live data.
-
-    This is the active working login path for 0002.
-    """
-    map_id = _ctx_int_preserve_zero(
-        ctx,
-        "exact_0002_map_id",
-        int(getattr(ctx, "map_id", 0) or 0),
-    )
-    low_guid = int(getattr(ctx, "exact_0002_low_guid", getattr(ctx, "char_guid", 2)) or 2) & 0xFF
-
-    entry = bytearray()
-    entry.append(2)  # player create/update_type
-    entry += GuidHelper.pack(low_guid)
-    entry.append(4)  # object_type = Player
-    entry += _EXACT_UPDATE_OBJECT_1773613176_0002_MOVEMENT_TEMPLATE
-    entry.append(len(_EXACT_UPDATE_OBJECT_1773613176_0002_MASK_BYTES) // 4)
-    entry += _EXACT_UPDATE_OBJECT_1773613176_0002_MASK_BYTES
-    entry += _EXACT_UPDATE_OBJECT_1773613176_0002_FIELD_TEMPLATE
-    entry.append(_EXACT_UPDATE_OBJECT_1773613176_0002_DYNAMIC_MASK_BLOCKS)
-
-    payload = bytearray()
-    payload += _build_update_object_packet_prefix(map_id, 1)
-    payload += entry
-    _patch_live_update_object_1773613176_0002_fields(
-        ctx,
-        payload,
-        offset_adjust=_MINIMAL_UPDATE_OBJECT_1773613176_0002_OFFSET_ADJUST,
-    )
-    return bytes(payload)
-
-def _patch_update_object_1773613176_0002_remote_flags(payload: bytearray) -> None:
-    """
-    Multiplayer reuses the 0002 player-create template for remote characters.
-    That template is originally tuned for the locally controlled player, and one
-    top-level bit causes the receiving client to treat the other player as
-    locally owned/active. Clear that bit for remote players only.
-    """
-    remote_flag_offset = 14
-    remote_self_bit = 0x40
-    if len(payload) <= remote_flag_offset:
-        return
-    payload[remote_flag_offset] &= (~remote_self_bit) & 0xFF
-
-
-def _build_live_update_object_1773613176_0002_payload(ctx: Any) -> bytes:
-    payload = bytearray(load_first_login_update_object_capture())
-    offsets = _EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS
-
-    default_map_id = int(getattr(ctx, "map_id", struct.unpack_from("<H", payload, 0)[0]))
-    map_id = _ctx_int_preserve_zero(ctx, "exact_0002_map_id", default_map_id)
-    struct.pack_into("<H", payload, 0, map_id)
-
-    _patch_live_update_object_1773613176_0002_fields(ctx, payload)
-
-    return bytes(payload)
-
-
-def load_first_login_update_object_capture() -> bytes:
-    path = get_captures_root(focus=True) / "debug" / _FIRST_LOGIN_UPDATE_OBJECT_CAPTURE_NAME
-    payload = _load_payload_from_path(path)
-    if payload is None:
-        raise RuntimeError(f"Missing capture payload for {_FIRST_LOGIN_UPDATE_OBJECT_CAPTURE_NAME}")
-    return payload
-
-
-def decode_first_login_update_object_capture() -> dict[str, Any]:
-    payload = load_first_login_update_object_capture()
-    decoded = to_safe_json(dsl_decode("SMSG_UPDATE_OBJECT", payload, silent=True) or {})
-    entries: list[dict[str, Any]] = []
-    updates = list(decoded.get("updates") or [])
-    for index, update in enumerate(updates, start=1):
-        mask_info = update.get("mask") or {}
-        raw_fields = update.get("fields") or {}
-        entry: dict[str, Any] = {
-            "index": index,
-            "update_type": int(update.get("update_type", 0) or 0),
-            "object_type": int(update.get("object_type", 0) or 0),
-            "packed_guid": f"mask={update.get('guid_mask')} guid={update.get('guid')}",
-            "guid": str(update.get("guid") or "0x0"),
-            "movement": None,
-            "update_mask_bits": list(mask_info.get("set_bits") or []),
-            "update_mask_hex": str(mask_info.get("hex") or ""),
-            "update_fields_hex": str(raw_fields.get("hex") or ""),
-            "update_fields_u32": list(raw_fields.get("u32") or []),
-            "dynamic_sources": {},
-            "constant_fields": [],
-            "notes": [],
-        }
-
-        if entry["update_type"] == 1 and entry["object_type"] == 1:
-            entry["constant_fields"] = [
-                "guid",
-                "object_type",
-                "mask",
-                "fields",
-            ]
-
-        if index == len(updates):
-            entry["movement"] = {
-                "x": float(update.get("pos_x") or 0.0),
-                "y": float(update.get("pos_y") or 0.0),
-                "z": float(update.get("pos_z") or 0.0),
-                "orientation": float(update.get("orientation") or 0.0),
-                "walk_speed": float(update.get("walk_speed") or 0.0),
-                "run_speed": float(update.get("run_speed") or 0.0),
-                "run_back_speed": float(update.get("run_back_speed") or 0.0),
-                "fly_speed": float(update.get("fly_speed") or 0.0),
-                "fly_back_speed": float(update.get("fly_back_speed") or 0.0),
-                "swim_speed": float(update.get("swim_speed") or 0.0),
-                "swim_back_speed": float(update.get("swim_back_speed") or 0.0),
-                "turn_speed": float(update.get("turn_speed") or 0.0),
-                "pitch_speed": float(update.get("pitch_speed") or 0.0),
-            }
-            entry["dynamic_sources"] = {
-                "guid(low)": "session.char_guid (inferred)",
-                "x": "session.x",
-                "y": "session.y",
-                "z": "session.z",
-                "orientation": "session.orientation",
-                "walk_speed": "session.walk_speed",
-                "run_speed": "session.run_speed",
-                "run_back_speed": "session.run_back_speed",
-                "fly_speed": "session.fly_speed",
-                "fly_back_speed": "session.fly_back_speed",
-                "swim_speed": "session.swim_speed",
-                "swim_back_speed": "session.swim_back_speed",
-                "turn_speed": "session.turn_speed",
-                "pitch_speed": "session.pitch_speed",
-                "race/class/gender/level/health/player_flags": "update_fields (partially unresolved offsets)",
-            }
-            entry["constant_fields"] = [
-                "object_type",
-                "movement flag layout",
-                "update mask",
-                "field ordering",
-            ]
-            entry["notes"] = [
-                "The player-like entry uses guid=0x02, not session.world_guid.",
-                "Race/class/gender/level/health are present inside update_fields but not yet offset-mapped individually.",
-            ]
-
-        entries.append(entry)
-
-    return {
-        "capture_name": _FIRST_LOGIN_UPDATE_OBJECT_CAPTURE_NAME,
-        "map_id": int(decoded.get("map_id", 0) or 0),
-        "update_count": int(decoded.get("update_count", 0) or 0),
-        "entry_count_detected": len(entries),
-        "entries": entries,
-    }
-
-
-def format_first_login_update_object_capture() -> str:
-    decoded = decode_first_login_update_object_capture()
-    lines = [
-        "UPDATE_OBJECT",
-        f"  capture: {decoded['capture_name']}",
-        f"  map_id: {decoded['map_id']}",
-        f"  update_count: {decoded['update_count']}",
-        f"  entry_count_detected: {decoded['entry_count_detected']}",
-    ]
-    for entry in decoded["entries"]:
-        lines.extend(
-            [
-                f"  entry {entry['index']}:",
-                f"    update_type: {entry['update_type']}",
-                f"    object_type: {entry['object_type']}",
-                f"    packed_guid: {entry['packed_guid']}",
-                f"    guid: {entry['guid']}",
-            ]
-        )
-        movement = entry.get("movement")
-        if movement:
-            lines.extend(
-                [
-                    "    movement:",
-                    f"      x: {movement['x']}",
-                    f"      y: {movement['y']}",
-                    f"      z: {movement['z']}",
-                    f"      orientation: {movement['orientation']}",
-                    f"      fly_speed: {movement['fly_speed']}",
-                    f"      walk_speed: {movement['walk_speed']}",
-                    f"      run_speed: {movement['run_speed']}",
-                    f"      turn_speed: {movement['turn_speed']}",
-                    f"      run_back_speed: {movement['run_back_speed']}",
-                ]
-            )
-        if entry.get("update_mask_bits"):
-            lines.append(f"    update_mask bits: {entry['update_mask_bits']}")
-        if entry.get("update_fields_u32"):
-            lines.append(f"    update_fields(u32): {entry['update_fields_u32'][:24]}")
-        for field, source in (entry.get("dynamic_sources") or {}).items():
-            lines.append(f"    source: {field} -> {source}")
-        for field in (entry.get("constant_fields") or []):
-            lines.append(f"    constant: {field}")
-        notes = entry.get("notes") or []
-        for note in notes:
-            lines.append(f"    note: {note}")
-    return "\n".join(lines)
-
-
-def build_update_object_player_create(session: Any) -> bytes:
-    """
-    Migration helper for the first login UPDATE_OBJECT capture.
-
-    The first replayed packet is not a clean player-create packet; it is an
-    object-create bundle. The function name is kept for the migration work,
-    while the payload currently mirrors the first replay packet structure.
-    """
-    return build_SMSG_UPDATE_OBJECT_1773613176_0002(session)
-
-
-def diff_update_object_player_create(session: Any) -> list[dict[str, int]]:
-    raw = load_first_login_update_object_capture()
-    generated = build_update_object_player_create(session)
-    length = max(len(raw), len(generated))
-    diffs: list[dict[str, int]] = []
-    for offset in range(length):
-        raw_byte = raw[offset] if offset < len(raw) else -1
-        generated_byte = generated[offset] if offset < len(generated) else -1
-        if raw_byte == generated_byte:
-            continue
-        diffs.append({
-            "offset": offset,
-            "raw": raw_byte,
-            "generated": generated_byte,
-        })
-    return diffs
-
-
-def format_update_object_player_create_diff(session: Any, *, limit: int = 64) -> str:
-    diffs = diff_update_object_player_create(session)
-    if not diffs:
-        return "offset | raw | generated\n(no differences)"
-
-    lines = ["offset | raw | generated"]
-    for diff in diffs[:limit]:
-        raw_byte = "EOF" if diff["raw"] < 0 else f"{diff['raw']:02X}"
-        generated_byte = "EOF" if diff["generated"] < 0 else f"{diff['generated']:02X}"
-        lines.append(f"{diff['offset']:04d} | {raw_byte} | {generated_byte}")
-    if len(diffs) > limit:
-        lines.append(f"... {len(diffs) - limit} more differences")
-    return "\n".join(lines)
-
-
-def expected_update_object_player_create_dynamic_offsets() -> list[int]:
-    offsets = _EXACT_UPDATE_OBJECT_1773613176_0002_OFFSETS
-    expected: list[int] = [0, 1, offsets["last_entry_packed_guid_low"], offsets["guid1_0"]]
-    for key in (
-        "fly_speed",
-        "turn_speed",
-        "swim_speed",
-        "pitch_speed",
-        "pos_x",
-        "orientation",
-        "walk_speed",
-        "pos_y",
-        "fly_back_speed",
-        "run_back_speed",
-        "run_speed",
-        "swim_back_speed",
-        "pos_z",
-        "health",
-        "power_primary",
-        "max_health",
-        "max_power_primary",
-        "level",
-        "player_bytes",
-        "player_bytes2",
-    ):
-        base = offsets[key]
-        expected.extend(range(base, base + 4))
-    return sorted(set(expected))
-
-
-def format_update_object_player_create_diff_with_expected(session: Any, *, limit: int = 96) -> str:
-    diffs = diff_update_object_player_create(session)
-    expected_offsets = set(expected_update_object_player_create_dynamic_offsets())
-    unexpected = [diff for diff in diffs if diff["offset"] not in expected_offsets]
-
-    lines = [
-        "offset | raw | generated | expected_dynamic",
-    ]
-    if not diffs:
-        lines.append("(no differences)")
-        return "\n".join(lines)
-
-    for diff in diffs[:limit]:
-        raw_byte = "EOF" if diff["raw"] < 0 else f"{diff['raw']:02X}"
-        generated_byte = "EOF" if diff["generated"] < 0 else f"{diff['generated']:02X}"
-        expected = "yes" if diff["offset"] in expected_offsets else "no"
-        lines.append(f"{diff['offset']:04d} | {raw_byte} | {generated_byte} | {expected}")
-    if len(diffs) > limit:
-        lines.append(f"... {len(diffs) - limit} more differences")
-    lines.append(f"unexpected_differences={len(unexpected)}")
-    return "\n".join(lines)
 
 
 def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:

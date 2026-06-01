@@ -50,6 +50,8 @@ class MovementNode:
     yaw: float | None = None
     station: bool = False
     transfer: bool = False
+    flags: int = 0
+    delay: int = 0
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ class MovementTemplate:
     interpolation_mode: InterpolationMode = InterpolationMode.SPLINE
     transfer_nodes: tuple[int, ...] = ()
     station_nodes: tuple[int, ...] = ()
+    phase_distances: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)

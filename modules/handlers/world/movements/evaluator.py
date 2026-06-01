@@ -29,8 +29,11 @@ def evaluate_template(
     """Evaluate immutable movement template."""
 
     period = max(1, int(template.period_ms))
-    phase = (int(server_time_ms) + int(phase_offset_ms)) % period
-
+    phase = (
+        int(server_time_ms)
+        + int(phase_offset_ms)
+        - 11500
+    ) % period
     node_index, next_index, segment_ratio = _segment_for_phase(
         template,
         phase,
@@ -62,6 +65,18 @@ def evaluate_template(
     if node_index in template.station_nodes:
         state = STATE_DOCKED
         event = "station"
+        return MovementTransform(
+            map_id=int(node.map_id),
+            x=float(node.x),
+            y=float(node.y),
+            z=float(node.z),
+            orientation=float(node.yaw or 0.0),
+            phase_ms=int(phase),
+            node_index=int(node_index),
+            next_node_index=int(next_index),
+            state=state,
+            event=event,
+        )
 
     if template.interpolation_mode == InterpolationMode.SPLINE:
         return _evaluate_spline(
@@ -103,6 +118,53 @@ def _smooth_angle(
 
     return current + (delta * factor)
 
+
+def _distance_for_phase(
+    template: MovementTemplate,
+    phase_ms: int,
+) -> float:
+    """
+    Resolve deterministic movement distance for phase.
+
+    IMPORTANT:
+    Station/wait nodes consume time without
+    consuming movement distance.
+    """
+
+    node_index, next_index, ratio = _segment_for_phase(
+        template,
+        phase_ms,
+    )
+
+    start_distance = float(
+        template.phase_distances[node_index]
+    )
+
+    end_distance = float(
+        template.phase_distances[next_index]
+    )
+
+    #
+    # Dock/wait segment.
+    #
+    if node_index in template.station_nodes:
+        return start_distance
+
+    #
+    # Cross-map transfer segment.
+    #
+    if (
+        int(template.nodes[node_index].map_id)
+        != int(template.nodes[next_index].map_id)
+    ):
+        return start_distance
+
+    return start_distance + (
+        (end_distance - start_distance)
+        * float(ratio)
+    )
+
+
 def _evaluate_spline(
     template: MovementTemplate,
     phase: int,
@@ -115,9 +177,9 @@ def _evaluate_spline(
 ) -> MovementTransform:
     """Evaluate spline-based movement."""
 
-    target_distance = (
-        float(template.total_length)
-        * (float(phase) / float(period))
+    target_distance = _distance_for_phase(
+        template,
+        phase,
     )
 
     sample = sample_by_distance(
@@ -244,7 +306,7 @@ def _segment_for_phase(
         start = int(nodes[index].time_ms)
         end = int(nodes[index + 1].time_ms)
 
-        if start <= int(phase_ms) <= end:
+        if start <= int(phase_ms) < end:
             duration = max(1, end - start)
 
             ratio = (
@@ -258,7 +320,11 @@ def _segment_for_phase(
                 max(0.0, min(1.0, ratio)),
             )
 
-    return len(nodes) - 1, 0, 1.0
+    return (
+        len(nodes) - 2,
+        len(nodes) - 1,
+        1.0,
+    )
 
 
 def _stable_axis_value(

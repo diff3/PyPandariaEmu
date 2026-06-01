@@ -12,7 +12,7 @@ from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.login.packets import build_login_packet
 from server.modules.game.guid import GuidHelper
-from server.modules.handlers.world.bootstrap.replay import (
+from server.modules.handlers.world.bootstrap.playerobjects import (
     build_multi_u32_update_object_payload,
     build_single_u32_update_object_payload,
 )
@@ -1067,7 +1067,6 @@ def _resolve_chat_mount_spell_id() -> int:
 
 
 def _build_fixplayer_responses(session, mode: int = 0) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.bootstrap import replay as bootstrap_replay
     from server.modules.handlers.world.state.runtime import (
         _build_player_create_update_response,
         _build_player_move_response,
@@ -1103,7 +1102,9 @@ def _build_fixplayer_responses(session, mode: int = 0) -> list[tuple[str, bytes]
                 continue
             responses.append((opcode_name, payload))
 
-        responses.append(bootstrap_replay._build_dynamic_active_mover_packet(session))
+        active_mover = build_login_packet("SMSG_MOVE_SET_ACTIVE_MOVER", ctx)
+        if active_mover is not None:
+            responses.append(("SMSG_MOVE_SET_ACTIVE_MOVER", active_mover))
         create_response = _build_player_create_update_response(session)
         if create_response is not None:
             responses.append(create_response)
@@ -1126,7 +1127,10 @@ def _build_fixplayer_responses(session, mode: int = 0) -> list[tuple[str, bytes]
                 continue
             responses.append((opcode_name, payload))
     elif normalized_mode == 1:
-        responses.append(bootstrap_replay._build_dynamic_active_mover_packet(session))
+        ctx = login_handlers._build_world_login_context(session)
+        active_mover = build_login_packet("SMSG_MOVE_SET_ACTIVE_MOVER", ctx)
+        if active_mover is not None:
+            responses.append(("SMSG_MOVE_SET_ACTIVE_MOVER", active_mover))
         create_response = _build_player_create_update_response(session)
         if create_response is not None:
             responses.append(create_response)

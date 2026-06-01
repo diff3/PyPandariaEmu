@@ -23,8 +23,8 @@ sys.modules.setdefault("server.modules.database.DatabaseConnection", database_mo
 replay_module = types.ModuleType("server.modules.handlers.world.bootstrap.replay")
 replay_module.build_single_u32_update_object_payload = lambda **kwargs: b""
 replay_module.build_multi_u32_update_object_payload = lambda **kwargs: b""
-replay_module.build_database_gameobject_responses = lambda session, loaded_guids=None: []
-replay_module.build_database_creature_responses = lambda session, loaded_guids=None: []
+replay_module.build_database_gameobject_responses = lambda session, loaded_guids=None, **kwargs: []
+replay_module.build_database_creature_responses = lambda session, loaded_guids=None, **kwargs: []
 sys.modules["server.modules.handlers.world.bootstrap.replay"] = replay_module
 
 sys.modules.pop("server.modules.handlers.world.opcodes.movement", None)
@@ -226,6 +226,52 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
         ("broadcast", True),
         ("visibility", "near-teleport-ack"),
     ]
+
+
+def test_same_map_teleport_ack_streams_world_objects_immediately(monkeypatch):
+    session = _FakeSession()
+    calls: list[str] = []
+
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
+    monkeypatch.setattr(movement, "_save_session_position", lambda target, **kwargs: None)
+    monkeypatch.setattr(movement, "_post_teleport_multiplayer_resync", lambda target, **kwargs: [])
+    monkeypatch.setattr(movement, "build_same_map_teleport_self_resync_responses", lambda target: [])
+    monkeypatch.setattr(movement, "encode_skyfire_messagechat_system_payload", lambda message: message.encode("utf-8"))
+    monkeypatch.setattr(
+        movement,
+        "stream_world_objects_after_teleport",
+        lambda target, *, context: calls.append(context) or [("SMSG_UPDATE_OBJECT", b"post-teleport-visible")],
+    )
+
+    status, responses = movement.handle_move_teleport_ack(session, None)
+
+    assert status == 0
+    assert calls == ["near-teleport-ack"]
+    assert ("SMSG_UPDATE_OBJECT", b"post-teleport-visible") in responses
+
+
+def test_post_teleport_visibility_stream_bypasses_movement_throttle(monkeypatch):
+    session = _FakeSession()
+    session.loaded_gameobjects = set()
+    session.loaded_transport_entries = {}
+    session.loaded_npcs = set()
+    session.last_gameobject_stream_at = 999999.0
+    session.last_npc_stream_at = 999999.0
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        movement,
+        "_maybe_stream_world_objects",
+        lambda target: calls.append("stream") or [("SMSG_UPDATE_OBJECT", b"visible-without-move")],
+    )
+
+    responses = movement.stream_world_objects_after_teleport(session, context="test")
+
+    assert responses == [("SMSG_UPDATE_OBJECT", b"visible-without-move")]
+    assert calls == ["stream"]
+    assert session.last_gameobject_stream_at == 0.0
+    assert session.last_npc_stream_at == 0.0
 
 
 def test_same_map_teleport_ack_refreshes_mounted_state(monkeypatch):
@@ -566,7 +612,7 @@ def test_stream_nearby_gameobjects_spawns_new_and_despawns_far(monkeypatch):
     monkeypatch.setattr(
         movement,
         "build_database_gameobject_responses",
-        lambda target, loaded_guids=None: (
+        lambda target, loaded_guids=None, **kwargs: (
             loaded_guids.add(new_world_guid) if isinstance(loaded_guids, set) else None
         ) or [("SMSG_UPDATE_OBJECT", b"spawn-go")],
     )
@@ -592,7 +638,7 @@ def test_stream_nearby_gameobjects_allows_map_zero(monkeypatch):
     monkeypatch.setattr(
         movement,
         "build_database_gameobject_responses",
-        lambda target, loaded_guids=None: [("SMSG_UPDATE_OBJECT", b"spawn-go")],
+        lambda target, loaded_guids=None, **kwargs: [("SMSG_UPDATE_OBJECT", b"spawn-go")],
     )
     monkeypatch.setattr(
         movement.DatabaseConnection,

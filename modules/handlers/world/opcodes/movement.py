@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import math
 import struct
-import threading
 import time
-from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
 from DSL.modules.EncoderHandler import EncoderHandler
@@ -12,10 +10,8 @@ from DSL.modules.bitsHandler import BitInterPreter, BitWriter
 # from modules.handlers.world.opcodes.chat import _append_feedback_response
 from shared.Logger import Logger
 from server.modules.game.guid import CreatureGuid, GameObjectGuid, GuidHelper, MoTransportGuid
-from server.modules.handlers.world.bootstrap.replay import (
-    build_database_gameobject_responses,
-    build_single_u32_update_object_payload,
-)
+from server.modules.handlers.world.bootstrap.gameobjects import build_database_gameobject_responses
+from server.modules.handlers.world.bootstrap.playerobjects import build_single_u32_update_object_payload
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
@@ -41,7 +37,9 @@ from server.modules.handlers.world.state.runtime import (
     build_same_map_teleport_self_resync_responses,
     dispatch_responses_to_sessions,
     force_bilateral_visibility_resync,
+    refresh_region_weather,
 )
+from server.modules.handlers.world.login.packets import build_login_packet
 
 
 def _append_guid_byte_seq(payload: bytearray, raw_guid: bytes, order: tuple[int, ...]) -> None:
@@ -71,6 +69,7 @@ _MOVEMENTFLAG_TURN_RIGHT = 0x00000020
 _MOVEMENTFLAG_LEFT = _MOVEMENTFLAG_TURN_LEFT
 _MOVEMENTFLAG_RIGHT = _MOVEMENTFLAG_TURN_RIGHT
 _MOVEMENTFLAG_FALLING = 0x00000800
+_MOVEMENTFLAG_SWIMMING = 0x00100000
 _MOVEMENTFLAG_ASCENDING = 0x00200000
 _MOVEMENTFLAG_DESCENDING = 0x00400000
 _MOVEMENTFLAG_CAN_FLY = 0x00800000
@@ -868,7 +867,37 @@ def _movement_state(session):
     state.x = float(getattr(state, "x", getattr(session, "x", 0.0)) or 0.0)
     state.y = float(getattr(state, "y", getattr(session, "y", 0.0)) or 0.0)
     state.z = float(getattr(state, "z", getattr(session, "z", 0.0)) or 0.0)
-    state.orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
+    previous_orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
+    ensured_orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
+    Logger.info(
+        "[ORIENTATION_WRITE] writer=_movement_state target=movement_state.orientation "
+        "reason=ensure_state_defaults old=%.6f new=%.6f player_attached_to_transport=%s "
+        "session_pos=(%.3f %.3f %.3f) session_orientation=%.6f "
+        "movement_pos=(%.3f %.3f %.3f) movement_orientation=%.6f "
+        "transport_guid=0x%016X transport_offset=(%.3f %.3f %.3f) "
+        "transport_orientation=%.6f attach_state=%s",
+        float(previous_orientation),
+        float(ensured_orientation),
+        bool(
+            int(getattr(state, "transport_guid", 0) or 0)
+            or str(getattr(session, "transport_attach_state", "") or "") in {"ATTACHED", "TRANSFERRING"}
+        ),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+        float(getattr(state, "x", 0.0) or 0.0),
+        float(getattr(state, "y", 0.0) or 0.0),
+        float(getattr(state, "z", 0.0) or 0.0),
+        float(previous_orientation),
+        int(getattr(state, "transport_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+        float(getattr(state, "transport_x", 0.0) or 0.0),
+        float(getattr(state, "transport_y", 0.0) or 0.0),
+        float(getattr(state, "transport_z", 0.0) or 0.0),
+        float(getattr(state, "transport_orientation", 0.0) or 0.0),
+        str(getattr(session, "transport_attach_state", "") or ""),
+    )
+    state.orientation = ensured_orientation
     state.flags = int(getattr(state, "flags", 0) or 0)
     state.flags2 = int(getattr(state, "flags2", 0) or 0)
     state.timestamp_ms = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
@@ -907,8 +936,10 @@ def _wrap_pitch(value: float) -> float:
 
 
 def _movement_is_flying(session) -> bool:
-    state = _movement_state(session)
+    state = getattr(session, "movement_state", None)
     state_flags = int(getattr(state, "flags", 0) or 0)
+    if state_flags & _MOVEMENTFLAG_SWIMMING:
+        return False
     return bool(
         getattr(session, "is_flying", False)
         or getattr(session, "can_fly", False)
@@ -922,6 +953,10 @@ def _has_active_flying_mount(session) -> bool:
     Login restore can race with stale client fall packets.  Keep this check
     small and explicit so landing handling cannot accidentally confirm those.
     """
+    state = getattr(session, "movement_state", None)
+    state_flags = int(getattr(state, "flags", 0) or 0)
+    if state_flags & _MOVEMENTFLAG_SWIMMING:
+        return False
     return bool(getattr(session, "can_fly", False)) and int(getattr(session, "mount_spell", 0) or 0) > 0
 
 
@@ -1429,8 +1464,64 @@ def _sync_session_from_movement_state(session) -> None:
     session.x = float(state.x)
     session.y = float(state.y)
     session.z = float(state.z)
+    _log_orientation_write(
+        session,
+        writer="_sync_session_from_movement_state",
+        target="session.orientation",
+        old_value=float(getattr(session, "orientation", 0.0) or 0.0),
+        new_value=float(state.orientation),
+        reason="sync_from_movement_state",
+    )
     session.orientation = float(state.orientation)
     _remember_valid_orientation(session, state.orientation)
+
+
+def _player_attached_to_transport(session) -> bool:
+    state = _movement_state(session)
+    return bool(
+        int(getattr(state, "transport_guid", 0) or 0)
+        or str(getattr(session, "transport_attach_state", "") or "") in {"ATTACHED", "TRANSFERRING"}
+    )
+
+
+def _log_orientation_write(
+    session,
+    *,
+    writer: str,
+    target: str,
+    old_value: float,
+    new_value: float,
+    reason: str,
+) -> None:
+    state = _movement_state(session)
+    Logger.info(
+        "[ORIENTATION_WRITE] writer=%s target=%s reason=%s "
+        "old=%.6f new=%.6f player_attached_to_transport=%s "
+        "session_pos=(%.3f %.3f %.3f) session_orientation=%.6f "
+        "movement_pos=(%.3f %.3f %.3f) movement_orientation=%.6f "
+        "transport_guid=0x%016X transport_offset=(%.3f %.3f %.3f) "
+        "transport_orientation=%.6f attach_state=%s",
+        str(writer),
+        str(target),
+        str(reason),
+        float(old_value),
+        float(new_value),
+        bool(_player_attached_to_transport(session)),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+        float(getattr(state, "x", 0.0) or 0.0),
+        float(getattr(state, "y", 0.0) or 0.0),
+        float(getattr(state, "z", 0.0) or 0.0),
+        float(getattr(state, "orientation", 0.0) or 0.0),
+        int(getattr(state, "transport_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+        float(getattr(state, "transport_x", 0.0) or 0.0),
+        float(getattr(state, "transport_y", 0.0) or 0.0),
+        float(getattr(state, "transport_z", 0.0) or 0.0),
+        float(getattr(state, "transport_orientation", 0.0) or 0.0),
+        str(getattr(session, "transport_attach_state", "") or ""),
+    )
 
 
 def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[str, Any]) -> None:
@@ -1693,7 +1784,7 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
     try:
         from server.modules.handlers.world.transport_runtime import (
             cached_transport_runtime_entry,
-            build_linked_transport_destination_entry,
+            ensure_linked_transport_destination_entry,
             linked_transport_world_guid,
             runtime_transport_state_for_guid,
             transport_transfer_destination_map_for_guid,
@@ -1737,7 +1828,11 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
     local_y = float(passenger_transfer.local_y)
     local_z = float(passenger_transfer.local_z)
     local_o = float(passenger_transfer.local_o)
-    destination_entry = build_linked_transport_destination_entry(entry, destination_map=destination_map)
+    destination_entry = ensure_linked_transport_destination_entry(
+        entry,
+        destination_map=destination_map,
+        source_state=runtime_state,
+    )
     destination_entry = cached_transport_runtime_entry(session, destination_entry)
     destination_node = _transport_route_node_for_map(runtime_state, destination_map)
     if destination_node is not None:
@@ -1814,6 +1909,14 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
     session.x = float(player_x)
     session.y = float(player_y)
     session.z = float(player_z)
+    _log_orientation_write(
+        session,
+        writer="_maybe_start_transport_route_transfer",
+        target="session.orientation",
+        old_value=float(getattr(session, "orientation", 0.0) or 0.0),
+        new_value=float(player_o),
+        reason="route_transition_begin_worldport",
+    )
     session.orientation = float(player_o)
     session.persist_map_id = int(destination_map)
     session.persist_x = float(player_x)
@@ -1833,6 +1936,14 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
     state.x = float(player_x)
     state.y = float(player_y)
     state.z = float(player_z)
+    _log_orientation_write(
+        session,
+        writer="_maybe_start_transport_route_transfer",
+        target="movement_state.orientation",
+        old_value=float(getattr(state, "orientation", 0.0) or 0.0),
+        new_value=float(player_o),
+        reason="route_transition_begin_worldport",
+    )
     state.orientation = float(player_o)
 
     Logger.info(
@@ -1852,6 +1963,18 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
         local_o,
         destination_guid & 0xFFFFFFFFFFFFFFFF,
         int(getattr(runtime_state, "path_progress_ms", 0) or 0),
+    )
+    Logger.info(
+        "[TRANSPORT_PASSENGER] player=%s transport=0x%016X relative_x=%.3f "
+        "relative_y=%.3f relative_z=%.3f relative_o=%.3f reattached=false map_transition=%s->%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        destination_guid & 0xFFFFFFFFFFFFFFFF,
+        local_x,
+        local_y,
+        local_z,
+        local_o,
+        source_map,
+        destination_map,
     )
     Logger.info(
         "[TransportTransfer] worldport player=%s map=%s pos=(%.2f %.2f %.2f %.2f)",
@@ -1957,6 +2080,16 @@ def _complete_pending_transport_transfer(session) -> None:
             float(state.transport_z),
             float(state.transport_orientation),
         )
+        Logger.info(
+            "[TRANSPORT_PASSENGER] player=%s transport=0x%016X relative_x=%.3f "
+            "relative_y=%.3f relative_z=%.3f relative_o=%.3f reattached=true",
+            int(getattr(session, "char_guid", 0) or 0),
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+            float(state.transport_x),
+            float(state.transport_y),
+            float(state.transport_z),
+            float(state.transport_orientation),
+        )
     Logger.info(
         "[TransportTransfer] completed player=%s source_map=%s dest_map=%s node=%s route_phase=%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -2018,6 +2151,12 @@ def _movement_timestamp_ms(session) -> int:
 
 def _outbound_movement_timestamp_ms(session) -> int:
     state = _movement_state(session)
+    override = getattr(session, "_taxi_movement_timestamp_override_ms", None)
+    if override is not None:
+        timestamp = int(override) & 0xFFFFFFFF
+        state.server_movement_timestamp_ms = timestamp
+        return timestamp
+
     existing = int(getattr(state, "server_movement_timestamp_ms", 0) or 0)
     now_ms = int(time.time() * 1000.0) & 0xFFFFFFFF
     if existing <= 0:
@@ -2447,8 +2586,24 @@ def _consume_pending_teleport_on_movement(session, opcode_name: str) -> None:
     Logger.debug("[Teleport] movement resumed on %s while teleport ack is pending", str(opcode_name))
 
 
+def _player_movement_debug_enabled() -> bool:
+    try:
+        from server.modules.handlers.world.feature_config import player_movement_debug_enabled
+
+        return bool(player_movement_debug_enabled())
+    except Exception:
+        return False
+
+
+def _movement_debug_log(session, message: str, *args) -> None:
+    if not _player_movement_debug_enabled():
+        return
+    Logger.info(message, *args)
+
+
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
 _MAX_MOVEMENT_Z_DELTA = 100.0
+_STALE_MOVEMENT_TIMESTAMP_REJECT_MS = 10000
 _POSITION_SAVE_INTERVAL_SECONDS = 30.0
 _STATIONARY_EPSILON = 0.01
 _SIM_TURN_RATE_RAD_PER_SEC = math.pi
@@ -2457,24 +2612,6 @@ _GAMEOBJECT_STREAM_UNLOAD_RADIUS = 150.0
 _GAMEOBJECT_STREAM_INTERVAL_SECONDS = 0.5
 _NPC_STREAM_UNLOAD_RADIUS = 150.0
 _NPC_STREAM_INTERVAL_SECONDS = 0.5
-_JUMP_PEER_INTERPOLATION_ENABLED = True
-_JUMP_PEER_INTERPOLATION_INTERVAL_SECONDS = 0.016
-_JUMP_PEER_INTERPOLATION_MAX_SECONDS = 1.25
-_JUMP_GRAVITY = 19.291105
-_DEFAULT_JUMP_VERTICAL_SPEED = 7.955547
-_FLY_PEER_INTERPOLATION_ENABLED = True
-_FLY_PEER_INTERPOLATION_INTERVAL_SECONDS = 0.016
-_FLY_PEER_INTERPOLATION_MAX_SECONDS = 60.0
-_FLY_PITCH_PEER_INTERPOLATION_MAX_SECONDS = 0.75
-_FLY_PITCH_EPSILON = 0.02
-
-# TODO:
-# - Move replay_movement_focus_sequence* and related UPDATE_OBJECT replay helpers
-#   into dedicated bootstrap/runtime modules once login packet builders are disentangled.
-# - Move teleport-specific movement replay/broadcast helpers after the login
-#   extraction phase so movement owns all movement-focused world transitions.
-
-
 def _player_guid(session) -> int:
     return int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
 
@@ -2499,405 +2636,6 @@ def _visible_peer_targets(session) -> list:
             continue
         targets.append(target)
     return targets
-
-
-def _send_jump_interpolation_snapshot(
-    session,
-    *,
-    x: float,
-    y: float,
-    z: float,
-    orientation: float,
-    fall_time_ms: int,
-    counter: int,
-) -> None:
-    state = _movement_state(session)
-    synthetic_state = SimpleNamespace(
-        x=float(x),
-        y=float(y),
-        z=float(z),
-        orientation=float(orientation),
-        flags=(int(getattr(state, "flags", 0) or 0) | _MOVEMENTFLAG_FALLING),
-        flags2=int(getattr(state, "flags2", 0) or 0),
-        timestamp_ms=int(getattr(state, "timestamp_ms", 0) or 0),
-        client_timestamp_ms=int(getattr(state, "client_timestamp_ms", 0) or 0),
-        server_movement_timestamp_ms=int(getattr(state, "server_movement_timestamp_ms", 0) or 0),
-        last_valid_orientation=float(getattr(state, "last_valid_orientation", orientation) or orientation),
-        counter=int(counter) & 0xFFFFFFFF,
-        pitch=float(getattr(state, "pitch", 0.0) or 0.0),
-        has_fall_data=True,
-        fall_time=int(fall_time_ms) & 0xFFFFFFFF,
-        fall_vertical_speed=float(getattr(state, "fall_vertical_speed", 0.0) or 0.0),
-        fall_horizontal_speed=float(getattr(state, "fall_horizontal_speed", 0.0) or 0.0),
-        fall_sin_angle=float(getattr(state, "fall_sin_angle", 0.0) or 0.0),
-        fall_cos_angle=float(getattr(state, "fall_cos_angle", 0.0) or 0.0),
-        is_ascending=False,
-        is_descending=False,
-    )
-    synthetic_session = SimpleNamespace(
-        char_guid=int(getattr(session, "char_guid", 0) or 0),
-        world_guid=int(getattr(session, "world_guid", 0) or 0),
-        player_guid=int(getattr(session, "player_guid", 0) or 0),
-        can_fly=False,
-        is_flying=False,
-        movement_state=synthetic_state,
-    )
-    payload = build_smsg_player_move_payload(synthetic_session)
-    if not payload:
-        return
-
-    targets = _visible_peer_targets(session)
-    if not targets:
-        return
-
-    dispatch_responses_to_sessions(targets, [("SMSG_PLAYER_MOVE", payload)])
-
-    Logger.debug(
-        "[JUMP_INTERP] player=%s peers=%s t=%sms pos=(%.3f, %.3f, %.3f)",
-        int(getattr(session, "char_guid", 0) or 0),
-        len(targets),
-        int(fall_time_ms),
-        float(x),
-        float(y),
-        float(z),
-    )
-
-
-def _start_jump_peer_interpolation(session) -> None:
-    if not _JUMP_PEER_INTERPOLATION_ENABLED:
-        return
-    if not _visible_peer_targets(session):
-        return
-
-    state = _movement_state(session)
-    start_x = float(getattr(state, "x", getattr(session, "x", 0.0)) or 0.0)
-    start_y = float(getattr(state, "y", getattr(session, "y", 0.0)) or 0.0)
-    start_z = float(getattr(state, "z", getattr(session, "z", 0.0)) or 0.0)
-    orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
-    vertical_speed = abs(float(getattr(state, "fall_vertical_speed", 0.0) or 0.0))
-    if vertical_speed <= 0.01:
-        vertical_speed = _DEFAULT_JUMP_VERTICAL_SPEED
-
-    horizontal_speed = abs(float(getattr(state, "fall_horizontal_speed", 0.0) or 0.0))
-    flags = int(getattr(state, "flags", 0) or 0)
-    if horizontal_speed <= 0.01 and flags & (
-        _MOVEMENTFLAG_FORWARD
-        | _MOVEMENTFLAG_BACKWARD
-        | _MOVEMENTFLAG_STRAFE_LEFT
-        | _MOVEMENTFLAG_STRAFE_RIGHT
-    ):
-        horizontal_speed = float(getattr(session, "run_speed", 7.0) or 7.0)
-
-    direction = orientation
-    if flags & _MOVEMENTFLAG_BACKWARD:
-        direction = _normalize_orientation(direction + math.pi) or direction
-    elif flags & _MOVEMENTFLAG_STRAFE_LEFT:
-        direction = _normalize_orientation(direction + (math.pi / 2.0)) or direction
-    elif flags & _MOVEMENTFLAG_STRAFE_RIGHT:
-        direction = _normalize_orientation(direction - (math.pi / 2.0)) or direction
-
-    generation = int(getattr(session, "_jump_interpolation_generation", 0) or 0) + 1
-    session._jump_interpolation_generation = generation
-    base_counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
-    start_monotonic = time.monotonic()
-
-    def _worker() -> None:
-        step = 0
-        while True:
-            next_tick = start_monotonic + ((step + 1) * _JUMP_PEER_INTERPOLATION_INTERVAL_SECONDS)
-            sleep_seconds = next_tick - time.monotonic()
-            if sleep_seconds > 0.0:
-                time.sleep(sleep_seconds)
-            if int(getattr(session, "_jump_interpolation_generation", 0) or 0) != generation:
-                return
-
-            live_state = _movement_state(session)
-            if not _movement_is_airborne(session):
-                return
-
-            elapsed = time.monotonic() - start_monotonic
-            if elapsed <= 0.0:
-                continue
-            if elapsed > _JUMP_PEER_INTERPOLATION_MAX_SECONDS:
-                return
-
-            z = start_z + (vertical_speed * elapsed) - (0.5 * _JUMP_GRAVITY * elapsed * elapsed)
-            if z <= start_z and elapsed > 0.25:
-                return
-
-            x = start_x + (math.cos(direction) * horizontal_speed * elapsed)
-            y = start_y + (math.sin(direction) * horizontal_speed * elapsed)
-            _send_jump_interpolation_snapshot(
-                session,
-                x=x,
-                y=y,
-                z=z,
-                orientation=float(getattr(live_state, "orientation", orientation) or orientation),
-                fall_time_ms=int(elapsed * 1000.0),
-                counter=(base_counter + step + 1) & 0xFFFFFFFF,
-            )
-            step += 1
-
-    threading.Thread(
-        target=_worker,
-        name=f"jump-interp-{int(getattr(session, 'char_guid', 0) or 0)}",
-        daemon=True,
-    ).start()
-
-
-def _stop_jump_peer_interpolation(session) -> None:
-    session._jump_interpolation_generation = int(getattr(session, "_jump_interpolation_generation", 0) or 0) + 1
-
-
-def _send_fly_interpolation_snapshot(
-    session,
-    *,
-    x: float,
-    y: float,
-    z: float,
-    orientation: float,
-    pitch: float,
-    counter: int,
-    ascending: bool,
-    descending: bool,
-) -> None:
-    state = _movement_state(session)
-    flags = int(getattr(state, "flags", 0) or 0)
-    flags |= _MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING
-    flags &= ~(_MOVEMENTFLAG_ASCENDING | _MOVEMENTFLAG_DESCENDING)
-    if ascending:
-        flags |= _MOVEMENTFLAG_ASCENDING
-    elif descending:
-        flags |= _MOVEMENTFLAG_DESCENDING
-
-    synthetic_state = SimpleNamespace(
-        x=float(x),
-        y=float(y),
-        z=float(z),
-        orientation=float(orientation),
-        flags=int(flags),
-        flags2=int(getattr(state, "flags2", 0) or 0),
-        timestamp_ms=int(getattr(state, "timestamp_ms", 0) or 0),
-        client_timestamp_ms=int(getattr(state, "client_timestamp_ms", 0) or 0),
-        server_movement_timestamp_ms=int(getattr(state, "server_movement_timestamp_ms", 0) or 0),
-        last_valid_orientation=float(getattr(state, "last_valid_orientation", orientation) or orientation),
-        counter=int(counter) & 0xFFFFFFFF,
-        pitch=float(pitch),
-        has_fall_data=False,
-        fall_time=0,
-        fall_vertical_speed=0.0,
-        fall_horizontal_speed=0.0,
-        fall_sin_angle=0.0,
-        fall_cos_angle=0.0,
-        is_ascending=bool(ascending),
-        is_descending=bool(descending),
-    )
-    synthetic_session = SimpleNamespace(
-        char_guid=int(getattr(session, "char_guid", 0) or 0),
-        world_guid=int(getattr(session, "world_guid", 0) or 0),
-        player_guid=int(getattr(session, "player_guid", 0) or 0),
-        can_fly=True,
-        is_flying=True,
-        movement_state=synthetic_state,
-    )
-    payload = build_smsg_player_move_payload(synthetic_session)
-    if not payload:
-        return
-
-    targets = _visible_peer_targets(session)
-    if not targets:
-        return
-
-    dispatch_responses_to_sessions(targets, [("SMSG_PLAYER_MOVE", payload)])
-
-    Logger.debug(
-        "[FLY_INTERP] player=%s peers=%s pos=(%.3f, %.3f, %.3f) pitch=%.3f asc=%s desc=%s",
-        int(getattr(session, "char_guid", 0) or 0),
-        len(targets),
-        float(x),
-        float(y),
-        float(z),
-        float(pitch),
-        bool(ascending),
-        bool(descending),
-    )
-
-
-def _start_fly_peer_interpolation(session, vertical_sign: int) -> None:
-    if not _FLY_PEER_INTERPOLATION_ENABLED:
-        return
-    if int(vertical_sign) == 0:
-        return
-    if not _visible_peer_targets(session):
-        return
-
-    state = _movement_state(session)
-    start_x = float(getattr(state, "x", getattr(session, "x", 0.0)) or 0.0)
-    start_y = float(getattr(state, "y", getattr(session, "y", 0.0)) or 0.0)
-    start_z = float(getattr(state, "z", getattr(session, "z", 0.0)) or 0.0)
-    orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
-    vertical_speed = abs(float(getattr(session, "fly_speed", 0.0) or 0.0))
-    if vertical_speed <= 0.01:
-        vertical_speed = abs(float(getattr(session, "run_speed", 7.0) or 7.0)) * 3.2
-    if vertical_speed <= 0.01:
-        vertical_speed = 14.0
-
-    generation = int(getattr(session, "_fly_interpolation_generation", 0) or 0) + 1
-    session._fly_interpolation_generation = generation
-    base_counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
-    start_monotonic = time.monotonic()
-
-    def _worker() -> None:
-        step = 0
-        while True:
-            next_tick = start_monotonic + ((step + 1) * _FLY_PEER_INTERPOLATION_INTERVAL_SECONDS)
-            sleep_seconds = next_tick - time.monotonic()
-            if sleep_seconds > 0.0:
-                time.sleep(sleep_seconds)
-            if int(getattr(session, "_fly_interpolation_generation", 0) or 0) != generation:
-                return
-
-            live_state = _movement_state(session)
-            if not _movement_is_flying(session):
-                return
-
-            ascending = bool(getattr(live_state, "is_ascending", False))
-            descending = bool(getattr(live_state, "is_descending", False))
-            if vertical_sign > 0 and not ascending:
-                return
-            if vertical_sign < 0 and not descending:
-                return
-
-            elapsed = time.monotonic() - start_monotonic
-            if elapsed <= 0.0:
-                continue
-            if elapsed > _FLY_PEER_INTERPOLATION_MAX_SECONDS:
-                return
-
-            z = start_z + (float(vertical_sign) * vertical_speed * elapsed)
-            _send_fly_interpolation_snapshot(
-                session,
-                x=float(getattr(live_state, "x", start_x) or start_x),
-                y=float(getattr(live_state, "y", start_y) or start_y),
-                z=z,
-                orientation=float(getattr(live_state, "orientation", orientation) or orientation),
-                pitch=float(getattr(live_state, "pitch", 0.0) or 0.0),
-                counter=(base_counter + step + 1) & 0xFFFFFFFF,
-                ascending=ascending,
-                descending=descending,
-            )
-            step += 1
-
-    threading.Thread(
-        target=_worker,
-        name=f"fly-interp-{int(getattr(session, 'char_guid', 0) or 0)}",
-        daemon=True,
-    ).start()
-
-
-def _stop_fly_peer_interpolation(session) -> None:
-    session._fly_interpolation_generation = int(getattr(session, "_fly_interpolation_generation", 0) or 0) + 1
-
-
-def _start_fly_pitch_peer_interpolation(session) -> None:
-    if not _FLY_PEER_INTERPOLATION_ENABLED:
-        return
-    if not _visible_peer_targets(session):
-        return
-
-    state = _movement_state(session)
-    flags = int(getattr(state, "flags", 0) or 0)
-    if flags & (_MOVEMENTFLAG_ASCENDING | _MOVEMENTFLAG_DESCENDING):
-        return
-    moving_forward = bool(flags & _MOVEMENTFLAG_FORWARD)
-    moving_backward = bool(flags & _MOVEMENTFLAG_BACKWARD)
-    if not (moving_forward or moving_backward):
-        return
-
-    pitch = float(getattr(state, "pitch", 0.0) or 0.0)
-    if abs(pitch) < _FLY_PITCH_EPSILON:
-        return
-
-    fly_speed = abs(float(getattr(session, "fly_speed", 0.0) or 0.0))
-    if fly_speed <= 0.01:
-        fly_speed = abs(float(getattr(session, "run_speed", 7.0) or 7.0)) * 3.2
-    if fly_speed <= 0.01:
-        fly_speed = 14.0
-
-    start_x = float(getattr(state, "x", getattr(session, "x", 0.0)) or 0.0)
-    start_y = float(getattr(state, "y", getattr(session, "y", 0.0)) or 0.0)
-    start_z = float(getattr(state, "z", getattr(session, "z", 0.0)) or 0.0)
-    orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
-    direction = orientation
-    if moving_backward:
-        direction = _normalize_orientation(direction + math.pi) or direction
-
-    horizontal_speed = fly_speed * max(0.0, math.cos(pitch))
-    vertical_speed = -fly_speed * math.sin(pitch)
-    if moving_backward:
-        vertical_speed = -vertical_speed
-
-    generation = int(getattr(session, "_fly_interpolation_generation", 0) or 0) + 1
-    session._fly_interpolation_generation = generation
-    base_counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
-    start_monotonic = time.monotonic()
-
-    Logger.debug(
-        "[FLY_PITCH_INTERP_START] player=%s pos=(%.3f, %.3f, %.3f) pitch=%.3f vertical_speed=%.3f",
-        int(getattr(session, "char_guid", 0) or 0),
-        float(start_x),
-        float(start_y),
-        float(start_z),
-        float(pitch),
-        float(vertical_speed),
-    )
-
-    def _worker() -> None:
-        step = 0
-        while True:
-            next_tick = start_monotonic + ((step + 1) * _FLY_PEER_INTERPOLATION_INTERVAL_SECONDS)
-            sleep_seconds = next_tick - time.monotonic()
-            if sleep_seconds > 0.0:
-                time.sleep(sleep_seconds)
-            if int(getattr(session, "_fly_interpolation_generation", 0) or 0) != generation:
-                return
-
-            live_state = _movement_state(session)
-            if not _movement_is_flying(session):
-                return
-            live_flags = int(getattr(live_state, "flags", 0) or 0)
-            if live_flags & (_MOVEMENTFLAG_ASCENDING | _MOVEMENTFLAG_DESCENDING):
-                return
-            if not (live_flags & (_MOVEMENTFLAG_FORWARD | _MOVEMENTFLAG_BACKWARD)):
-                return
-
-            elapsed = time.monotonic() - start_monotonic
-            if elapsed <= 0.0:
-                continue
-            if elapsed > _FLY_PITCH_PEER_INTERPOLATION_MAX_SECONDS:
-                return
-
-            x = start_x + (math.cos(direction) * horizontal_speed * elapsed)
-            y = start_y + (math.sin(direction) * horizontal_speed * elapsed)
-            z = start_z + (vertical_speed * elapsed)
-            _send_fly_interpolation_snapshot(
-                session,
-                x=x,
-                y=y,
-                z=z,
-                orientation=float(getattr(live_state, "orientation", orientation) or orientation),
-                pitch=float(getattr(live_state, "pitch", pitch) or pitch),
-                counter=(base_counter + step + 1) & 0xFFFFFFFF,
-                ascending=False,
-                descending=False,
-            )
-            step += 1
-
-    threading.Thread(
-        target=_worker,
-        name=f"fly-pitch-interp-{int(getattr(session, 'char_guid', 0) or 0)}",
-        daemon=True,
-    ).start()
 
 
 def _broadcast_same_map(session, responses) -> None:
@@ -2939,7 +2677,13 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
     x = float(getattr(session, "x", 0.0) or 0.0)
     y = float(getattr(session, "y", 0.0) or 0.0)
 
-    responses = list(build_database_gameobject_responses(session, loaded_guids=loaded_gameobjects))
+    responses = list(
+        build_database_gameobject_responses(
+            session,
+            loaded_guids=loaded_gameobjects,
+            discovery_context="proximity_stream",
+        )
+    )
 
     keep_entries = DatabaseConnection.get_gameobjects_near(
         map_id,
@@ -2966,7 +2710,7 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
 
         keep_guids.update(
             int(entry.get("world_guid", 0) or 0)
-            for entry in synthetic_transport_entries_near(session)
+            for entry in synthetic_transport_entries_near(session, context="proximity_keep")
             if int(entry.get("world_guid", 0) or 0) > 0
         )
     except Exception as exc:
@@ -3091,6 +2835,42 @@ def _maybe_stream_world_objects(session) -> list[tuple[str, bytes]]:
     return responses
 
 
+def stream_world_objects_after_teleport(
+    session,
+    *,
+    context: str,
+) -> list[tuple[str, bytes]]:
+    before_gameobjects = set(getattr(session, "loaded_gameobjects", set()) or set())
+    before_npcs = set(getattr(session, "loaded_npcs", set()) or set())
+    before_transports = set((getattr(session, "loaded_transport_entries", {}) or {}).keys())
+
+    session.last_gameobject_stream_at = 0.0
+    session.last_npc_stream_at = 0.0
+    responses = _maybe_stream_world_objects(session)
+
+    after_gameobjects = set(getattr(session, "loaded_gameobjects", set()) or set())
+    after_npcs = set(getattr(session, "loaded_npcs", set()) or set())
+    after_transports = set((getattr(session, "loaded_transport_entries", {}) or {}).keys())
+    transports_sent = len(after_transports - before_transports)
+    gameobjects_sent = len((after_gameobjects - before_gameobjects) - after_transports)
+    npcs_sent = len(after_npcs - before_npcs)
+
+    Logger.info(
+        "[TELEPORT_VISIBILITY_STREAM] context=%s player_guid=%s map=%s "
+        "pos=(%.3f,%.3f,%.3f) gameobjects_sent=%s npcs_sent=%s transports_sent=%s",
+        str(context),
+        int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0),
+        int(getattr(session, "map_id", 0) or 0),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        int(gameobjects_sent),
+        int(npcs_sent),
+        int(transports_sent),
+    )
+    return responses
+
+
 def _maybe_move_companion_pet(session) -> list[tuple[str, bytes]]:
     if int(getattr(session, "summoned_companion_world_guid", 0) or 0) <= 0:
         return []
@@ -3118,27 +2898,42 @@ def _maybe_move_companion_pet_for_opcode(session, opcode_name: str) -> list[tupl
     return _maybe_move_companion_pet(session)
 
 
-def _clear_dance_emote_state_on_move(session) -> None:
+_CHAIR_CANCEL_MOVEMENT_OPCODES = {
+    "MSG_MOVE_START_FORWARD",
+    "MSG_MOVE_START_BACKWARD",
+    "MSG_MOVE_START_STRAFE_LEFT",
+    "MSG_MOVE_START_STRAFE_RIGHT",
+    "MSG_MOVE_JUMP",
+    "MSG_MOVE_FALL_LAND",
+    "MSG_MOVE_START_ASCEND",
+    "MSG_MOVE_START_DESCEND",
+}
+
+
+def _clear_dance_emote_state_on_move(session, opcode_name: str | None = None) -> None:
     responses = []
 
     if int(getattr(session, "player_stand_state", 0) or 0) != 0:
-        try:
-            from server.modules.handlers.world.opcodes.entities import release_current_chair
-            release_current_chair(session, reason="movement")
-        except Exception as exc:
-            Logger.debug("[CHAIR] release on movement failed: %s", exc)
-        setattr(session, "player_stand_state", 0)
-        responses.append(
-            (
-                "SMSG_UPDATE_OBJECT",
-                build_single_u32_update_object_payload(
-                    map_id=int(getattr(session, "map_id", 0) or 0),
-                    guid=int(getattr(session, "char_guid", 0) or _player_guid(session) or 0),
-                    field_index=0x4C,
-                    value=0,
-                ),
+        current_chair = int(getattr(session, "current_chair", 0) or 0)
+        should_clear = current_chair <= 0 or str(opcode_name or "") in _CHAIR_CANCEL_MOVEMENT_OPCODES
+        if should_clear:
+            try:
+                from server.modules.handlers.world.opcodes.entities import release_current_chair
+                release_current_chair(session, reason="movement")
+            except Exception as exc:
+                Logger.debug("[CHAIR] release on movement failed: %s", exc)
+            setattr(session, "player_stand_state", 0)
+            responses.append(
+                (
+                    "SMSG_UPDATE_OBJECT",
+                    build_single_u32_update_object_payload(
+                        map_id=int(getattr(session, "map_id", 0) or 0),
+                        guid=int(getattr(session, "char_guid", 0) or _player_guid(session) or 0),
+                        field_index=0x4C,
+                        value=0,
+                    ),
+                )
             )
-        )
 
     if int(getattr(session, "npc_emote_state", 0) or 0) == 10:
         setattr(session, "npc_emote_state", 0)
@@ -3341,10 +3136,9 @@ def _apply_movement_flags(state, opcode_name: str) -> None:
         flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
     elif opcode_name == "MSG_MOVE_JUMP":
         flags |= _MOVEMENTFLAG_FALLING
-        flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
+        flags &= ~_MOVEMENTFLAG_SWIMMING
     elif opcode_name == "MSG_MOVE_FALL_LAND":
         flags &= ~_MOVEMENTFLAG_FALLING
-        flags &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
         flags &= ~(
             _MOVEMENTFLAG_FLYING
             | _MOVEMENTFLAG_ASCENDING
@@ -3352,6 +3146,24 @@ def _apply_movement_flags(state, opcode_name: str) -> None:
         )
         state.is_ascending = False
         state.is_descending = False
+    elif opcode_name == "MSG_MOVE_START_SWIM":
+        flags |= _MOVEMENTFLAG_SWIMMING
+        flags &= ~(
+            _MOVEMENTFLAG_FALLING
+            | _MOVEMENTFLAG_FLYING
+            | _MOVEMENTFLAG_ASCENDING
+            | _MOVEMENTFLAG_DESCENDING
+        )
+        state.has_fall_data = False
+        state.fall_time = 0
+        state.fall_vertical_speed = 0.0
+        state.fall_horizontal_speed = 0.0
+        state.fall_sin_angle = 0.0
+        state.fall_cos_angle = 0.0
+        state.is_ascending = False
+        state.is_descending = False
+    elif opcode_name == "MSG_MOVE_STOP_SWIM":
+        flags &= ~_MOVEMENTFLAG_SWIMMING
     elif opcode_name == "MSG_MOVE_START_ASCEND":
         state.is_ascending = True
         state.is_descending = False
@@ -3426,31 +3238,6 @@ def _clear_strafe_state(state) -> bool:
     return int(state.flags) != previous_flags
 
 
-def _clear_landed_movement_state(state) -> bool:
-    previous_flags = int(getattr(state, "flags", 0) or 0)
-    previous_moving = bool(
-        previous_flags
-        & (
-            _MOVEMENTFLAG_FORWARD
-            | _MOVEMENTFLAG_BACKWARD
-            | _MOVEMENTFLAG_STRAFE_LEFT
-            | _MOVEMENTFLAG_STRAFE_RIGHT
-            | _MOVEMENTFLAG_TURN_LEFT
-            | _MOVEMENTFLAG_TURN_RIGHT
-        )
-    )
-    changed = _clear_jump_fall_state(state)
-    state.flags = int(getattr(state, "flags", 0) or 0) & ~(
-        _MOVEMENTFLAG_FORWARD
-        | _MOVEMENTFLAG_BACKWARD
-        | _MOVEMENTFLAG_STRAFE_LEFT
-        | _MOVEMENTFLAG_STRAFE_RIGHT
-        | _MOVEMENTFLAG_TURN_LEFT
-        | _MOVEMENTFLAG_TURN_RIGHT
-    )
-    return changed or previous_moving
-
-
 def _apply_post_parse_movement_cleanup(
     session,
     state,
@@ -3466,11 +3253,7 @@ def _apply_post_parse_movement_cleanup(
     elif opcode_name == "MSG_MOVE_STOP_TURN":
         flags_after &= ~(_MOVEMENTFLAG_TURN_LEFT | _MOVEMENTFLAG_TURN_RIGHT)
     elif opcode_name == "MSG_MOVE_FALL_LAND":
-        flags_after &= ~(
-            _MOVEMENTFLAG_FORWARD
-            | _MOVEMENTFLAG_BACKWARD
-            | _MOVEMENTFLAG_FALLING
-        )
+        flags_after &= ~_MOVEMENTFLAG_FALLING
 
     if flags_after != flags_before:
         state.flags = int(flags_after)
@@ -3518,9 +3301,9 @@ def _apply_early_movement_cleanup(session, opcode_name: str) -> None:
             or bool(int(getattr(state, "flags", 0) or 0) & _MOVEMENTFLAG_FALLING)
         )
         if has_fall_state:
-            if _clear_landed_movement_state(state):
+            if _clear_jump_fall_state(state):
                 Logger.debug(
-                    "[POST_JUMP_RESET] opcode=%s cleared fall/turn state flags=0x%X",
+                    "[POST_JUMP_RESET] opcode=%s cleared fall state flags=0x%X",
                     opcode_name,
                     int(getattr(state, "flags", 0) or 0),
                 )
@@ -3592,7 +3375,33 @@ def _is_stale_client_timestamp(current_timestamp_ms: int, incoming_timestamp_ms:
         return False
     if incoming >= current:
         return False
-    return (current - incoming) < 60000
+    delta = current - incoming
+    if delta >= 60000:
+        return False
+    return delta > _STALE_MOVEMENT_TIMESTAMP_REJECT_MS
+
+
+def _store_client_movement_timestamp(state, incoming_timestamp_ms: int | None) -> None:
+    if incoming_timestamp_ms is None:
+        existing = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
+        now_ms = int(time.time() * 1000.0) & 0xFFFFFFFF
+        if existing > 0 and now_ms <= existing:
+            now_ms = (existing + 1) & 0xFFFFFFFF
+        state.timestamp_ms = now_ms
+        return
+
+    incoming = int(incoming_timestamp_ms) & 0xFFFFFFFF
+    state.client_timestamp_ms = incoming
+    current = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
+    if current <= 0 or incoming >= current:
+        state.timestamp_ms = incoming
+        return
+
+    # TODO: replace this soft monotonic clamp with a Trinity/SkyFire-style
+    # client-time-delay model once all movement opcodes expose MovementInfo.time
+    # through one parser path. For now, never let small packet reordering move
+    # server-side movement time backwards.
+    state.timestamp_ms = (current + 1) & 0xFFFFFFFF
 
 
 def _extract_movement_from_payload(session, payload: bytes) -> Optional[tuple[float, float, float, float]]:
@@ -4043,6 +3852,12 @@ def _accept_movement_update(
     orientation: float,
 ) -> bool:
     if not all(math.isfinite(value) for value in (x, y, z)):
+        _movement_debug_log(
+            session,
+            "MOVE_DEBUG guid=Player-%s opcode=%s rejection=nonfinite_position",
+            int(getattr(session, "char_guid", 0) or 0),
+            opcode_name,
+        )
         return False
 
     current_x = float(getattr(session, "x", 0.0) or 0.0)
@@ -4060,6 +3875,16 @@ def _accept_movement_update(
         log(
             f"[Movement] ignoring implausible {opcode_name} update "
             f"dx={x - current_x:.3f} dy={y - current_y:.3f} dz={z - current_z:.3f}"
+        )
+        _movement_debug_log(
+            session,
+            "MOVE_DEBUG guid=Player-%s opcode=%s dx=%.3f dy=%.3f dz=%.3f "
+            "correction=false rejection=implausible_delta",
+            int(getattr(session, "char_guid", 0) or 0),
+            opcode_name,
+            float(x - current_x),
+            float(y - current_y),
+            float(z - current_z),
         )
         return False
 
@@ -4129,10 +3954,7 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
         state.is_ascending = bool(int(state.flags) & _MOVEMENTFLAG_ASCENDING)
         state.is_descending = bool(int(state.flags) & _MOVEMENTFLAG_DESCENDING)
         _store_transport_state_from_parsed(session, opcode_name, parsed_flying)
-        if parsed_flying["timestamp"] is not None:
-            state.timestamp_ms = int(parsed_flying["timestamp"]) & 0xFFFFFFFF
-        else:
-            state.timestamp_ms = _movement_timestamp_ms(session)
+        _store_client_movement_timestamp(state, parsed_flying["timestamp"])
         Logger.debug(
             "[MOVE_FLAGS] opcode=%s parser=%s authoritative flags=0x%X flags2=0x%X "
             "pitch=%.6f orientation=%.6f",
@@ -4164,6 +3986,8 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
             state.fall_cos_angle = float(fall_data["fall_cos_angle"])
     elif opcode_name == "MSG_MOVE_FALL_LAND":
         _clear_jump_fall_state(state)
+    elif opcode_name == "MSG_MOVE_START_SWIM":
+        setattr(session, "is_flying", False)
     elif opcode_name == "MSG_MOVE_SET_PITCH":
         pitch = _extract_pitch_from_payload(payload)
         if pitch is not None:
@@ -4175,10 +3999,7 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
             )
     if parsed_flying is None:
         timestamp = _extract_packet_timestamp(opcode_name, payload)
-        if timestamp is not None:
-            state.timestamp_ms = int(timestamp) & 0xFFFFFFFF
-        else:
-            state.timestamp_ms = _movement_timestamp_ms(session)
+        _store_client_movement_timestamp(state, timestamp)
     # Keep the same-map teleport counter in step with accepted client movement.
     state.counter = (int(getattr(state, "counter", 0) or 0) + 1) & 0xFFFFFFFF
     return None
@@ -4201,7 +4022,32 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
             float(getattr(state, "orientation", 0.0) or 0.0),
             bool(getattr(state, "has_fall_data", False)),
         )
+        _movement_debug_log(
+            session,
+            "MOVE_DEBUG guid=Player-%s opcode=%s client_ts=%u server_ts=%u "
+            "correction=false rejection=stale_timestamp",
+            int(getattr(session, "char_guid", 0) or 0),
+            opcode_name,
+            int(incoming_timestamp) & 0xFFFFFFFF,
+            int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF,
+        )
         return False
+    previous_timestamp = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
+    older_movement_packet = False
+    if incoming_timestamp is not None and previous_timestamp > 0:
+        incoming = int(incoming_timestamp) & 0xFFFFFFFF
+        if incoming < previous_timestamp and (previous_timestamp - incoming) < 60000:
+            older_movement_packet = True
+            _movement_debug_log(
+                session,
+                "MOVE_DEBUG guid=Player-%s opcode=%s client_ts=%u server_ts=%u "
+                "timestamp_backstep_ms=%u correction=false rejection=false",
+                int(getattr(session, "char_guid", 0) or 0),
+                opcode_name,
+                int(incoming),
+                int(previous_timestamp),
+                int(previous_timestamp - incoming),
+            )
     _record_movement_packet_state(session, opcode_name, payload)
     _apply_post_parse_movement_cleanup(session, state, opcode_name)
     active_flying_mount = _has_active_flying_mount(session)
@@ -4226,13 +4072,7 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
         state.is_ascending = False
         state.is_descending = False
         state.flags &= ~(
-            _MOVEMENTFLAG_FORWARD
-            | _MOVEMENTFLAG_BACKWARD
-            | _MOVEMENTFLAG_STRAFE_LEFT
-            | _MOVEMENTFLAG_STRAFE_RIGHT
-            | _MOVEMENTFLAG_TURN_LEFT
-            | _MOVEMENTFLAG_TURN_RIGHT
-            | _MOVEMENTFLAG_FLYING
+            _MOVEMENTFLAG_FLYING
             | _MOVEMENTFLAG_ASCENDING
             | _MOVEMENTFLAG_DESCENDING
             | _MOVEMENTFLAG_FALLING
@@ -4244,6 +4084,17 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
         state.fall_sin_angle = 0.0
         state.fall_cos_angle = 0.0
         state.pitch = 0.0
+    elif opcode_name == "MSG_MOVE_START_SWIM":
+        setattr(session, "is_flying", False)
+        state.is_ascending = False
+        state.is_descending = False
+        state.flags &= ~(
+            _MOVEMENTFLAG_FALLING
+            | _MOVEMENTFLAG_FLYING
+            | _MOVEMENTFLAG_ASCENDING
+            | _MOVEMENTFLAG_DESCENDING
+        )
+        state.flags |= _MOVEMENTFLAG_SWIMMING
     elif opcode_name in {"MSG_MOVE_START_ASCEND", "MSG_MOVE_START_DESCEND"}:
         setattr(session, "is_flying", True)
     elif active_flying_mount:
@@ -4273,11 +4124,19 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
             int(getattr(state, "timestamp_ms", 0) or 0),
             int(getattr(state, "server_movement_timestamp_ms", 0) or 0),
         )
-    if movement is not None:
+    if movement is not None and not older_movement_packet:
         x, y, z, orientation = movement
         state.x = float(x)
         state.y = float(y)
         state.z = float(z)
+        _log_orientation_write(
+            session,
+            writer="_store_authoritative_movement",
+            target="movement_state.orientation",
+            old_value=float(getattr(state, "orientation", 0.0) or 0.0),
+            new_value=float(orientation),
+            reason=str(opcode_name),
+        )
         state.orientation = float(orientation)
     _sync_session_from_movement_state(session)
     return True
@@ -4366,6 +4225,62 @@ def _capture_persist_position_from_session(session) -> None:
             format_position(position),
             type(source).__name__,
         )
+
+
+def _maybe_refresh_weather_for_zone_change(
+    session,
+    previous_zone: int,
+) -> list[tuple[str, bytes]]:
+    current_zone = int(getattr(session, "zone", 0) or 0)
+    if current_zone <= 0 or current_zone == int(previous_zone):
+        return []
+
+    if not bool(refresh_region_weather(session)):
+        return []
+
+    payload = build_login_packet(
+        "SMSG_WEATHER",
+        type("Ctx", (), dict(getattr(session, "weather", {}) or {}))(),
+    )
+    if payload is None:
+        return []
+
+    Logger.info(
+        "[Weather] zone change player=%s zone=%s weather=%s density=%.2f",
+        int(getattr(session, "char_guid", 0) or 0),
+        int(current_zone),
+        int(dict(getattr(session, "weather", {}) or {}).get("weather_type", 0) or 0),
+        float(dict(getattr(session, "weather", {}) or {}).get("density", 0.0) or 0.0),
+    )
+    return [("SMSG_WEATHER", payload)]
+
+
+def _build_current_weather_response(
+    session,
+    *,
+    reason: str,
+) -> list[tuple[str, bytes]]:
+    if getattr(session, "region", None) is None or getattr(session, "global_state", None) is None:
+        return []
+
+    refresh_region_weather(session)
+    weather = dict(getattr(session, "weather", {}) or {})
+    payload = build_login_packet(
+        "SMSG_WEATHER",
+        type("Ctx", (), weather)(),
+    )
+    if payload is None:
+        return []
+
+    Logger.info(
+        "[Weather] teleport refresh player=%s reason=%s zone=%s weather=%s density=%.2f",
+        int(getattr(session, "char_guid", 0) or 0),
+        str(reason),
+        int(getattr(session, "zone", 0) or 0),
+        int(weather.get("weather_type", 0) or 0),
+        float(weather.get("density", 0.0) or 0.0),
+    )
+    return [("SMSG_WEATHER", payload)]
 
 
 def _remember_saved_position(session, now: float | None = None) -> None:
@@ -4539,6 +4454,8 @@ def _maybe_periodic_position_save(
 @register("MSG_MOVE_STOP")
 @register("MSG_MOVE_HEARTBEAT")
 @register("MSG_MOVE_JUMP")
+@register("MSG_MOVE_START_SWIM")
+@register("MSG_MOVE_STOP_SWIM")
 @register("MSG_MOVE_START_ASCEND")
 @register("MSG_MOVE_STOP_ASCEND")
 @register("MSG_MOVE_START_DESCEND")
@@ -4550,9 +4467,10 @@ def _maybe_periodic_position_save(
 @register("MSG_MOVE_FALL_LAND")
 def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     opcode_name = str(ctx.name or f"0x{int(ctx.opcode):04X}")
+    server_receive_ts = int(time.time() * 1000.0) & 0xFFFFFFFF
     Logger.debug(f"[MOVE] opcode={opcode_name}")
     _consume_pending_teleport_on_movement(session, opcode_name)
-    _clear_dance_emote_state_on_move(session)
+    _clear_dance_emote_state_on_move(session, opcode_name)
     _apply_early_movement_cleanup(session, opcode_name)
     movement_responses: list[tuple[str, bytes]] = []
     was_flying = _movement_is_flying(session)
@@ -4566,6 +4484,8 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             "MSG_MOVE_START_STRAFE_RIGHT",
             "MSG_MOVE_STOP_STRAFE",
             "MSG_MOVE_STOP",
+            "MSG_MOVE_START_SWIM",
+            "MSG_MOVE_STOP_SWIM",
             "MSG_MOVE_START_ASCEND",
             "MSG_MOVE_STOP_ASCEND",
             "MSG_MOVE_START_DESCEND",
@@ -4576,13 +4496,20 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         }:
             if not _store_authoritative_movement(session, opcode_name, ctx.payload, None):
                 return 0, None
-            if opcode_name in {"MSG_MOVE_STOP", "MSG_MOVE_STOP_ASCEND", "MSG_MOVE_STOP_DESCEND"}:
-                _stop_fly_peer_interpolation(session)
+            state = _movement_state(session)
+            client_timestamp = int(getattr(state, "client_timestamp_ms", 0) or 0) & 0xFFFFFFFF
+            _movement_debug_log(
+                session,
+                "MOVE_DEBUG guid=Player-%s opcode=%s client_ts=%s server_ts=%u "
+                "dx=0.000 dy=0.000 dz=0.000 delta=0.000 correction=false "
+                "rejected=false state_only=true flags=0x%X",
+                int(getattr(session, "char_guid", 0) or 0),
+                opcode_name,
+                "none" if client_timestamp <= 0 else str(client_timestamp),
+                int(server_receive_ts),
+                int(getattr(state, "flags", 0) or 0),
+            )
             broadcast_player_state_update(session, force=True)
-            if opcode_name == "MSG_MOVE_START_ASCEND":
-                _start_fly_peer_interpolation(session, 1)
-            elif opcode_name == "MSG_MOVE_START_DESCEND":
-                _start_fly_peer_interpolation(session, -1)
             Logger.debug(
                 "[Movement] state-only %s guid=0x%X pos=(%.3f, %.3f, %.3f) facing=%.3f flags=0x%X",
                 opcode_name,
@@ -4627,7 +4554,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     enter_response = _flying_speed_enter_response(session, was_flying)
     if enter_response is not None:
         movement_responses.append(enter_response)
-    if opcode_name == "MSG_MOVE_FALL_LAND" and not _has_active_flying_mount(session):
+    if opcode_name == "MSG_MOVE_FALL_LAND" and was_flying and not _has_active_flying_mount(session):
         movement_responses.append(_landing_speed_restore_response(session))
 
     is_flying_movement = _movement_is_flying(session)
@@ -4766,11 +4693,27 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     state.z = float(z)
     if is_flying_movement:
         session.pitch = float(getattr(state, "pitch", 0.0) or 0.0)
+        _log_orientation_write(
+            session,
+            writer="handle_movement_packet",
+            target="movement_state.orientation",
+            old_value=float(getattr(state, "orientation", 0.0) or 0.0),
+            new_value=float(normalized_orientation),
+            reason=f"{opcode_name}:flying",
+        )
         state.orientation = float(normalized_orientation)
         _remember_valid_orientation(session, state.orientation)
         session.x = float(state.x)
         session.y = float(state.y)
         session.z = float(state.z)
+        _log_orientation_write(
+            session,
+            writer="handle_movement_packet",
+            target="session.orientation",
+            old_value=float(getattr(session, "orientation", 0.0) or 0.0),
+            new_value=float(state.orientation),
+            reason=f"{opcode_name}:flying",
+        )
         session.orientation = float(state.orientation)
         Logger.debug(
             "[FLY_PITCH] pitch=%.6f z=%.6f flags=0x%X",
@@ -4779,16 +4722,65 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             int(getattr(state, "flags", 0) or 0),
         )
     else:
+        _log_orientation_write(
+            session,
+            writer="handle_movement_packet",
+            target="movement_state.orientation",
+            old_value=float(getattr(state, "orientation", 0.0) or 0.0),
+            new_value=float(normalized_orientation),
+            reason=str(opcode_name),
+        )
         state.orientation = float(normalized_orientation)
         _remember_valid_orientation(session, state.orientation)
         _sync_session_from_movement_state(session)
+    client_timestamp = int(getattr(state, "client_timestamp_ms", 0) or 0) & 0xFFFFFFFF
+    movement_delta = math.sqrt(
+        ((float(session.x) - previous_x) ** 2)
+        + ((float(session.y) - previous_y) ** 2)
+        + ((float(session.z) - previous_z) ** 2)
+    )
+    _movement_debug_log(
+        session,
+        "MOVE_DEBUG guid=Player-%s opcode=%s client_ts=%s server_ts=%u "
+        "dx=%.3f dy=%.3f dz=%.3f delta=%.3f correction=false rejected=false "
+        "flags=0x%X",
+        int(getattr(session, "char_guid", 0) or 0),
+        opcode_name,
+        "none" if client_timestamp <= 0 else str(client_timestamp),
+        int(server_receive_ts),
+        float(session.x) - previous_x,
+        float(session.y) - previous_y,
+        float(session.z) - previous_z,
+        float(movement_delta),
+        int(getattr(state, "flags", 0) or 0),
+    )
+    previous_zone_for_weather = int(getattr(session, "zone", 0) or 0)
     _capture_persist_position_from_session(session)
+    movement_responses.extend(
+        _maybe_refresh_weather_for_zone_change(session, previous_zone_for_weather)
+    )
     _mark_position_dirty(session)
     discovery_responses = _maybe_discover_current_area(session)
     if discovery_responses:
         movement_responses.extend(discovery_responses)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _maybe_periodic_position_save(session)
+    try:
+        from server.modules.handlers.world.teleport.area_trigger import (
+            check_movement_segment_for_area_triggers,
+        )
+
+        area_trigger_responses = check_movement_segment_for_area_triggers(
+            session,
+            (float(previous_x), float(previous_y), float(previous_z)),
+            (float(session.x), float(session.y), float(session.z)),
+        )
+    except Exception as exc:
+        Logger.debug("[AREATRIGGER] movement check failed: %s", exc)
+        area_trigger_responses = None
+    if area_trigger_responses:
+        movement_responses.extend(area_trigger_responses)
+        return 0, movement_responses
     force_broadcast = opcode_name in {
         "MSG_MOVE_HEARTBEAT",
         "MSG_MOVE_JUMP",
@@ -4806,18 +4798,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             int(getattr(state, "fall_time", 0) or 0),
             bool(force_broadcast),
         )
-    if opcode_name == "MSG_MOVE_FALL_LAND":
-        _stop_jump_peer_interpolation(session)
-        _stop_fly_peer_interpolation(session)
-    elif opcode_name in {"MSG_MOVE_STOP", "MSG_MOVE_SET_PITCH", "MSG_MOVE_STOP_ASCEND", "MSG_MOVE_STOP_DESCEND"}:
-        _stop_fly_peer_interpolation(session)
     broadcast_player_state_update(session, force=force_broadcast)
-    if opcode_name == "MSG_MOVE_JUMP":
-        _start_jump_peer_interpolation(session)
-    elif opcode_name == "MSG_MOVE_START_ASCEND":
-        _start_fly_peer_interpolation(session, 1)
-    elif opcode_name == "MSG_MOVE_START_DESCEND":
-        _start_fly_peer_interpolation(session, -1)
 
     Logger.debug(
         f"[MOVE] guid=0x{_player_guid(session):X} "
@@ -4842,7 +4823,7 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
     if len(payload) < 4:
         Logger.warning("[Movement] MSG_MOVE_SET_FACING payload too short")
         return 0, None
-    _clear_dance_emote_state_on_move(session)
+    _clear_dance_emote_state_on_move(session, "MSG_MOVE_SET_FACING")
 
     try:
         orientation = struct.unpack_from("<f", payload, len(payload) - 4)[0]
@@ -4858,6 +4839,14 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
         return 0, None
 
     state = _movement_state(session)
+    _log_orientation_write(
+        session,
+        writer="handle_msg_move_set_facing",
+        target="movement_state.orientation",
+        old_value=float(getattr(state, "orientation", 0.0) or 0.0),
+        new_value=float(normalized_orientation),
+        reason="MSG_MOVE_SET_FACING",
+    )
     state.orientation = float(normalized_orientation)
     _sync_session_from_movement_state(session)
     _capture_persist_position_from_session(session)
@@ -4869,7 +4858,6 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
         f"[MOVE] opcode=MSG_MOVE_SET_FACING guid=0x{_player_guid(session):X} "
         f"facing={session.orientation:.3f}"
     )
-    _stop_fly_peer_interpolation(session)
     broadcast_player_state_update(session, force=True)
     stream_responses = _maybe_stream_world_objects(session)
     responses = []
@@ -4954,6 +4942,8 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
     ]
     responses.extend(self_resync_responses)
     responses.extend(post_teleport_responses)
+    responses.extend(stream_world_objects_after_teleport(session, context="near-teleport-ack"))
+    responses.extend(_build_current_weather_response(session, reason="near-teleport-ack"))
     if fixspeed_pending:
         for opcode_name, speed_value in (
             ("SMSG_MOVE_SET_WALK_SPEED", float(getattr(session, "walk_speed", 2.5) or 2.5)),
@@ -5014,6 +5004,7 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
         )
     ]
     responses.extend(post_teleport_responses)
+    responses.extend(_build_current_weather_response(session, reason="worldport-ack"))
     return 0, responses
 @register("CMSG_MOVE_FORCE_RUN_SPEED_CHANGE_ACK")
 def handle_move_force_run_speed_change_ack(session, _ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
@@ -5080,19 +5071,10 @@ def handle_areatrigger(session, ctx: PacketContext):
         return 0, None
 
     trigger_id = int.from_bytes(ctx.payload[:4], "little")
+    from server.modules.handlers.world.teleport.area_trigger import activate_area_trigger
 
-    current_map_id = int(getattr(session, "map_id", 0) or 0)
-    px = float(getattr(session, "x", 0.0) or 0.0)
-    py = float(getattr(session, "y", 0.0) or 0.0)
-    pz = float(getattr(session, "z", 0.0) or 0.0)
-
-    Logger.info(
-        "[AREATRIGGER] id=%s map=%s pos=(%.2f %.2f %.2f)",
-        trigger_id, current_map_id, px, py, pz
-    )
-
-    row = DatabaseConnection.get_areatrigger_teleport(trigger_id)
-    if not row:
+    responses = activate_area_trigger(session, trigger_id, source="client")
+    if responses is None:
         return 0, [
             (
                 "SMSG_MESSAGECHAT",
@@ -5101,48 +5083,4 @@ def handle_areatrigger(session, ctx: PacketContext):
                 ),
             )
         ]
-
-    target_map = int(row["target_map"])
-    x = float(row["target_position_x"])
-    y = float(row["target_position_y"])
-    z = float(row["target_position_z"])
-    o = float(row.get("target_orientation", 0.0) or 0.0)
-
-    same_map = (current_map_id == target_map)
-    session.teleport_destination = f"areatrigger:{trigger_id}"
-
-    Logger.debug(
-        "[AREATRIGGER] target map=%s pos=(%.2f %.2f %.2f %.2f)",
-        target_map, x, y, z, o
-    )
-
-    # --- IMPORTANT: set flags BEFORE teleport ---
-    session.near_teleport_pending = same_map
-    session.teleport_pending = not same_map
-    session.worldport_ack_pending = not same_map
-
-    # Lazy import (avoid circular import)
-    from server.modules.handlers.world.opcodes import chat as chat_handlers
-
-    responses = chat_handlers.apply_player_state_change(
-        session,
-        position=(x, y, z, o),
-        map_id=target_map,
-    )
-
-    # --- DO NOT reset flags here ---
-
-    if same_map:
-        msg = (
-            f"[Teleport] near start -> {session.teleport_destination} "
-            f"({x:.1f} {y:.1f} {z:.1f})"
-        )
-    else:
-        msg = (
-            f"[Teleport] transfer start -> {session.teleport_destination} "
-            f"map={target_map} ({x:.1f} {y:.1f} {z:.1f})"
-        )
-
-    responses = _append_feedback_response(responses, msg)
-
-    return 0, responses
+    return 0, (responses or None)

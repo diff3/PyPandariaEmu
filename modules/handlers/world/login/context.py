@@ -91,6 +91,10 @@ class WorldLoginContext:
 
     bind_map_id: int = 0
     bind_area_id: int = 0
+    bind_x: float = 0.0
+    bind_y: float = 0.0
+    bind_z: float = 0.0
+    bind_o: float = 0.0
 
     x: float = 0.0
     y: float = 0.0
@@ -179,6 +183,12 @@ class WorldLoginContext:
             map_id=session.map_id,
             zone=session.zone,
             instance_id=session.instance_id,
+            bind_map_id=int(getattr(session, "bind_map_id", 0) or 0),
+            bind_area_id=int(getattr(session, "bind_area_id", 0) or 0),
+            bind_x=float(getattr(session, "bind_x", getattr(session, "x", 0.0)) or 0.0),
+            bind_y=float(getattr(session, "bind_y", getattr(session, "y", 0.0)) or 0.0),
+            bind_z=float(getattr(session, "bind_z", getattr(session, "z", 0.0)) or 0.0),
+            bind_o=float(getattr(session, "bind_o", getattr(session, "orientation", 0.0)) or 0.0),
 
             x=session.x,
             y=session.y,
