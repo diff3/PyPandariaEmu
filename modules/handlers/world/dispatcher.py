@@ -32,7 +32,10 @@ def dispatch(session, opcode: str, data):
         Logger.warning(f"Unhandled opcode: {opcode}")
         return 0, None
 
-    if str(opcode).startswith("MSG_MOVE") or str(opcode).startswith("CMSG_MOVE"):
+    if (
+        (str(opcode).startswith("MSG_MOVE") or str(opcode).startswith("CMSG_MOVE"))
+        and str(opcode) != "CMSG_MOVE_SPLINE_DONE"
+    ):
         try:
             from server.modules.handlers.world.taxi_runtime import is_taxi_active
         except Exception:

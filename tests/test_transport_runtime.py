@@ -12,6 +12,9 @@ replay_module.build_database_gameobject_responses = lambda *args, **kwargs: []
 replay_module.build_multi_u32_update_object_payload = lambda *args, **kwargs: b""
 replay_module.build_single_u32_update_object_payload = lambda *args, **kwargs: b""
 sys.modules.setdefault("server.modules.handlers.world.bootstrap.replay", replay_module)
+creatures_module = types.ModuleType("server.modules.handlers.world.bootstrap.creatures")
+creatures_module.build_database_creature_responses = lambda *args, **kwargs: []
+sys.modules.setdefault("server.modules.handlers.world.bootstrap.creatures", creatures_module)
 
 database_module = types.ModuleType("server.modules.database.DatabaseConnection")
 database_module.DatabaseConnection = type("DatabaseConnection", (), {})

@@ -43,6 +43,9 @@ from server.modules.handlers.world.pet.pet_service import (
     granted_battle_pet_spells,
 )
 from server.modules.handlers.world.bootstrap.playerobjects import build_server_built_player_create
+from server.modules.handlers.world.protocol.update_object.serializers import (
+    build_fixed_u32_field_block,
+)
 
 DEBUG_UPDATE_OBJECT_0002 = str(os.getenv("PP_DEBUG_UPDATE_OBJECT_0002", "")).strip().lower() in {
     "1",
@@ -920,22 +923,11 @@ def _build_exact_fixed_u32_field_block(
     if not normalized_fields:
         return (b"\x00" * (int(mask_blocks) * 4), b"", [])
 
-    mask = bytearray(int(mask_blocks) * 4)
-    field_bytes = bytearray()
     ordered_bits = sorted(normalized_fields)
-
-    for field_index in ordered_bits:
-        if field_index < 0:
-            continue
-        word_index = field_index // 32
-        bit_index = field_index % 32
-        if word_index >= int(mask_blocks):
-            raise ValueError(f"field index {field_index} exceeds fixed mask block count {mask_blocks}")
-        current_word = struct.unpack_from("<I", mask, word_index * 4)[0]
-        struct.pack_into("<I", mask, word_index * 4, current_word | (1 << bit_index))
-        field_bytes += struct.pack("<I", normalized_fields[field_index])
-
-    return bytes(mask), bytes(field_bytes), ordered_bits
+    if ordered_bits and ordered_bits[-1] // 32 >= int(mask_blocks):
+        raise ValueError(f"field index {ordered_bits[-1]} exceeds fixed mask block count {mask_blocks}")
+    mask, field_bytes = build_fixed_u32_field_block(normalized_fields, mask_blocks=mask_blocks)
+    return mask, field_bytes, ordered_bits
 
 
 _PLAYER_VALUE_UPDATE_MASK_BLOCKS = 63

@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
 from server.modules.handlers.world.feature_config import flight_paths_enabled
+from server.modules.handlers.world.protocol.movement.spline import (
+    TAXI_SPLINE_FLAGS,
+    SplineVector,
+    build_basic_spline_move,
+)
 from server.modules.handlers.world.state.runtime import broadcast_player_state_update
 
 
@@ -49,6 +54,21 @@ _MOVEMENTFLAG_FLYING = 0x01000000
 _MOVEMENTFLAG_ASCENDING = 0x00200000
 _MOVEMENTFLAG_DESCENDING = 0x00400000
 _MOVEMENTFLAG_FORWARD = 0x00000001
+_MOVEMENTFLAG_BACKWARD = 0x00000002
+_MOVEMENTFLAG_STRAFE_LEFT = 0x00000004
+_MOVEMENTFLAG_STRAFE_RIGHT = 0x00000008
+_MOVEMENTFLAG_TURN_LEFT = 0x00000010
+_MOVEMENTFLAG_TURN_RIGHT = 0x00000020
+_MOVEMENTFLAG_TAXI_STOP_MASK = (
+    _MOVEMENTFLAG_FORWARD
+    | _MOVEMENTFLAG_BACKWARD
+    | _MOVEMENTFLAG_STRAFE_LEFT
+    | _MOVEMENTFLAG_STRAFE_RIGHT
+    | _MOVEMENTFLAG_TURN_LEFT
+    | _MOVEMENTFLAG_TURN_RIGHT
+    | _MOVEMENTFLAG_ASCENDING
+    | _MOVEMENTFLAG_DESCENDING
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +143,10 @@ class TaxiFlightSession:
     last_packet_at: float | None = None
     cancelled: bool = False
     cancel_reason: str = ""
+    route_nodes: tuple[int, ...] = ()
+    current_leg_index: int = 0
+    spline_id: int = 0
+    destination_landing_point: TaxiPathPoint | None = None
 
     @property
     def path_points(self) -> list[TaxiPathPoint]:
@@ -186,6 +210,9 @@ def start_taxi_flight(
     speed: float = DEFAULT_TAXI_SPEED,
     mount_display_id: int = DEFAULT_TAXI_MOUNT_DISPLAY_ID,
     source_node: int = 0,
+    route_nodes: tuple[int, ...] = (),
+    current_leg_index: int = 0,
+    destination_landing_point: TaxiPathPoint | None = None,
 ) -> list[tuple[str, bytes]]:
     if is_taxi_active(session):
         Logger.warning(
@@ -232,6 +259,10 @@ def start_taxi_flight(
         original_run_speed=float(getattr(session, "run_speed", 7.0) or 7.0),
         original_fly_speed=float(getattr(session, "fly_speed", 7.0) or 7.0),
         original_fly_back_speed=float(getattr(session, "fly_back_speed", 4.5) or 4.5),
+        route_nodes=tuple(int(node) for node in route_nodes),
+        current_leg_index=int(current_leg_index),
+        spline_id=_next_taxi_spline_id(session, generation),
+        destination_landing_point=destination_landing_point,
     )
     session.taxi_state = state
     session.taxi_controls_locked = True
@@ -244,9 +275,9 @@ def start_taxi_flight(
     state.last_applied_z = float(first.z)
     state.last_tick_at = float(state.started_at)
     state.movement_timestamp_ms = _initial_taxi_movement_timestamp_ms(session)
-    initial_move_response = _build_self_movement_response(session)
-    if initial_move_response is not None:
-        responses.append(initial_move_response)
+    spline_response = _build_taxi_spline_response(session, state)
+    if spline_response is not None:
+        responses.append(spline_response)
     broadcast_player_state_update(session, force=True)
 
     Logger.info(
@@ -261,16 +292,99 @@ def start_taxi_flight(
         float(path.total_length),
     )
     _taxi_debug(
-        "[TAXI_DEBUG] speed player=%s base=%.2f length=%.2f estimated_seconds=%.2f tick=%.3f packet_cadence=per_tick",
+        "[TAXI_DEBUG] speed player=%s base=%.2f length=%.2f estimated_seconds=%.2f packet_cadence=spline",
         int(getattr(session, "char_guid", 0) or 0),
         float(state.speed),
         float(path.total_length),
         float(path.total_length) / max(0.001, float(state.speed)),
-        float(TAXI_TICK_SECONDS),
     )
     _log_taxi_path_measurements(path)
-    _start_taxi_thread(session, generation)
     return responses
+
+
+def continue_taxi_flight(
+    session,
+    path_points: list[TaxiPathPoint],
+    *,
+    destination_map: int,
+    destination_node: int,
+    source_node: int,
+    destination_landing_point: TaxiPathPoint | None = None,
+) -> list[tuple[str, bytes]]:
+    state = getattr(session, "taxi_state", None)
+    if state is None or bool(getattr(state, "completed", False)):
+        return []
+
+    sync_taxi_to_current_destination(session)
+    path = build_taxi_path(
+        list(path_points),
+        source_node=int(source_node),
+        destination_node=int(destination_node),
+        source_map=int(getattr(session, "map_id", 0) or 0),
+        destination_map=int(destination_map),
+    )
+    if path is None:
+        cancel_taxi_flight(session, "invalid_continuation_path")
+        return []
+
+    state.path = path
+    state.current_segment = 0
+    state.segment_progress = 0.0
+    state.total_progress = 0.0
+    state.destination_map = int(destination_map)
+    state.destination_node = int(destination_node)
+    state.destination_landing_point = destination_landing_point
+    state.started_at = time.monotonic()
+    state.last_node_logged = -1
+    state.last_applied_z = float(path.points[0].z)
+    state.last_target_z = None
+    state.last_traveled = 0.0
+    state.last_tick_at = float(state.started_at)
+    state.traveled_distance = 0.0
+    state.tick_index = 0
+    state.current_sample_index = 0
+    state.sample_progress = 0.0
+    state.current_sample_spacing = 0.0
+    state.max_z_delta_observed = 0.0
+    state.last_elapsed_seconds = 0.0
+    state.last_packet_at = None
+    state.current_leg_index += 1
+    state.spline_id = _next_taxi_spline_id(session, int(getattr(session, "_taxi_generation", 0) or 0))
+    session.player_travel_state = TAXI_STATE_FLIGHT
+
+    first = path.points[0]
+    second = path.points[1]
+    _apply_taxi_position(session, first, _segment_orientation(first, second))
+    response = _build_taxi_spline_response(session, state)
+    broadcast_player_state_update(session, force=True)
+    return [response] if response is not None else []
+
+
+def complete_taxi_spline(session) -> None:
+    state = getattr(session, "taxi_state", None)
+    if state is None:
+        return
+    _complete_taxi(session, state)
+
+
+def complete_taxi_for_disconnect(session) -> bool:
+    state = getattr(session, "taxi_state", None)
+    if state is None or bool(getattr(state, "completed", False)):
+        return False
+
+    _finish_taxi_state(session, state, send_updates=False)
+    return True
+
+
+def sync_taxi_to_current_destination(session) -> None:
+    state = getattr(session, "taxi_state", None)
+    if state is None:
+        return
+    final_point = state.path.points[-1]
+    orientation = final_point.orientation
+    if orientation is None and len(state.path.points) >= 2:
+        orientation = _segment_orientation(state.path.points[-2], final_point)
+    _apply_taxi_position(session, final_point, float(orientation or 0.0))
 
 
 def taxi_tick(session, *, now: float | None = None) -> bool:
@@ -394,6 +508,13 @@ def cancel_taxi_flight(session, reason: str = "cancelled") -> None:
     session.taxi_state = None
 
 
+def _taxi_arrival_point(state: TaxiFlightSession) -> TaxiPathPoint:
+    landing_point = getattr(state, "destination_landing_point", None)
+    if landing_point is not None:
+        return landing_point
+    return state.path.points[-1]
+
+
 def _start_taxi_thread(session, generation: int) -> None:
     session._taxi_last_tick_at = time.monotonic()
 
@@ -461,7 +582,66 @@ def _advance_taxi_movement_timestamp(state: TaxiFlightSession) -> int:
     return int(state.movement_timestamp_ms)
 
 
+def _next_taxi_spline_id(session, generation: int) -> int:
+    current = int(getattr(session, "_taxi_spline_id", 0) or 0)
+    if current <= 0:
+        current = int(generation) & 0xFFFFFFFF
+    current = (current + 1) & 0xFFFFFFFF
+    if current <= 0:
+        current = 1
+    session._taxi_spline_id = int(current)
+    return int(current)
+
+
+def _build_taxi_spline_response(session, state: TaxiFlightSession) -> tuple[str, bytes] | None:
+    guid = int(
+        getattr(session, "char_guid", 0)
+        or getattr(session, "world_guid", 0)
+        or getattr(session, "player_guid", 0)
+        or 0
+    )
+    if guid <= 0:
+        Logger.warning("[TAXI] spline build failed reason=no_player_guid")
+        return None
+
+    points = tuple(state.path.points)
+    if len(points) < 2:
+        Logger.warning("[TAXI] spline build failed reason=insufficient_points")
+        return None
+
+    duration_ms = max(
+        1,
+        int(round((float(state.path.total_length) / max(0.001, float(state.speed))) * 1000.0)),
+    )
+    payload = build_basic_spline_move(
+        mover_guid=guid,
+        spline_id=int(state.spline_id or _next_taxi_spline_id(session, state.generation)),
+        start_position=_spline_vector(points[0]),
+        destination_position=_spline_vector(points[-1]),
+        path_points=tuple(_spline_vector(point) for point in points[1:-1]),
+        spline_flags=TAXI_SPLINE_FLAGS,
+        duration_ms=duration_ms,
+    )
+    Logger.info(
+        "[TAXI] spline player=%s spline=%s points=%s duration_ms=%s length=%.2f",
+        guid,
+        int(state.spline_id),
+        len(points),
+        int(duration_ms),
+        float(state.path.total_length),
+    )
+    return "SMSG_ON_MONSTER_MOVE", payload
+
+
+def _spline_vector(point: TaxiPathPoint) -> SplineVector:
+    return SplineVector(float(point.x), float(point.y), float(point.z))
+
+
 def _complete_taxi(session, state: TaxiFlightSession) -> None:
+    _finish_taxi_state(session, state, send_updates=True)
+
+
+def _finish_taxi_state(session, state: TaxiFlightSession, *, send_updates: bool) -> None:
     if state.completed:
         return
     state.completed = True
@@ -471,17 +651,20 @@ def _complete_taxi(session, state: TaxiFlightSession) -> None:
     session.player_travel_state = TAXI_STATE_ARRIVAL
     session._taxi_generation = int(getattr(session, "_taxi_generation", 0) or 0) + 1
 
-    final_point = state.path.points[-1]
-    orientation = final_point.orientation
+    final_point = _taxi_arrival_point(state)
+    path_final_point = state.path.points[-1]
+    orientation = path_final_point.orientation
     if orientation is None and len(state.path.points) >= 2:
-        orientation = _segment_orientation(state.path.points[-2], final_point)
+        orientation = _segment_orientation(state.path.points[-2], path_final_point)
     _apply_taxi_position(session, final_point, float(orientation or 0.0))
     state.last_applied_z = float(final_point.z)
     _restore_pre_taxi_state(session, state)
-    _send_self_movement(session)
-    broadcast_player_state_update(session, force=True)
-    _send_self_responses(session, _build_mount_visual_responses(session, int(getattr(session, "mount_display_id", 0) or 0)))
-    _broadcast_mount_visual(session, int(getattr(session, "mount_display_id", 0) or 0))
+    _stop_taxi_movement_state(session)
+    if send_updates:
+        _send_self_movement(session)
+        broadcast_player_state_update(session, force=True)
+        _send_self_responses(session, _build_mount_visual_responses(session, int(getattr(session, "mount_display_id", 0) or 0)))
+        _broadcast_mount_visual(session, int(getattr(session, "mount_display_id", 0) or 0))
 
     Logger.info(
         "[TAXI] arrive player=%s destination=%s map=%s pos=(%.3f, %.3f, %.3f)",
@@ -684,6 +867,23 @@ def _restore_pre_taxi_state(session, state: TaxiFlightSession) -> None:
         movement_state.flags = int(flags)
         movement_state.is_ascending = False
         movement_state.is_descending = False
+
+
+def _stop_taxi_movement_state(session) -> None:
+    movement_state = getattr(session, "movement_state", None)
+    if movement_state is None:
+        return
+
+    flags = int(getattr(movement_state, "flags", 0) or 0)
+    movement_state.flags = int(flags & ~_MOVEMENTFLAG_TAXI_STOP_MASK)
+    movement_state.is_ascending = False
+    movement_state.is_descending = False
+    movement_state.has_fall_data = False
+    movement_state.fall_time = 0
+    movement_state.fall_vertical_speed = 0.0
+    movement_state.fall_horizontal_speed = 0.0
+    movement_state.fall_sin_angle = 0.0
+    movement_state.fall_cos_angle = 0.0
 
 
 def _apply_taxi_position(session, point: TaxiPathPoint, orientation: float) -> None:

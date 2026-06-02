@@ -7,7 +7,7 @@ import types
 from types import SimpleNamespace
 
 
-def _import_replay():
+def _import_creatures():
     packets_module = types.ModuleType("server.modules.handlers.world.login.packets")
     packets_module.build_login_packet = lambda *args, **kwargs: b""
     sys.modules["server.modules.handlers.world.login.packets"] = packets_module
@@ -28,8 +28,8 @@ def _import_replay():
     runtime_module.session = SimpleNamespace()
     sys.modules["server.session.runtime"] = runtime_module
 
-    sys.modules.pop("server.modules.handlers.world.bootstrap.replay", None)
-    return importlib.import_module("server.modules.handlers.world.bootstrap.replay")
+    sys.modules.pop("server.modules.handlers.world.bootstrap.creatures", None)
+    return importlib.import_module("server.modules.handlers.world.bootstrap.creatures")
 
 
 def _import_gameobjects():
@@ -339,7 +339,7 @@ def test_build_database_gameobject_responses_marks_bootstrap_creates_loaded(monk
 
 
 def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
-    replay = _import_replay()
+    creatures = _import_creatures()
     session = SimpleNamespace(
         npcs_visible=True,
         map_id=1,
@@ -382,10 +382,10 @@ def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
         captured["realm_id"] = realm_id
         return b"npc"
 
-    monkeypatch.setattr(replay, "_build_creature_update_payload", _fake_build)
-    monkeypatch.setattr(replay, "make_update_object_response", lambda payload: ("SMSG_UPDATE_OBJECT", payload))
+    monkeypatch.setattr(creatures, "_build_creature_update_payload", _fake_build)
+    monkeypatch.setattr(creatures, "make_update_object_response", lambda payload: ("SMSG_UPDATE_OBJECT", payload))
 
-    responses = replay.build_database_creature_responses(session)
+    responses = creatures.build_database_creature_responses(session)
 
     assert responses == [("SMSG_UPDATE_OBJECT", b"npc")]
     assert captured["map_id"] == 1
@@ -400,7 +400,7 @@ def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
 
 
 def test_build_database_creature_responses_tracks_loaded_world_guid(monkeypatch):
-    replay = _import_replay()
+    creatures = _import_creatures()
     session = SimpleNamespace(
         npcs_visible=True,
         map_id=1,
@@ -426,20 +426,20 @@ def test_build_database_creature_responses_tracks_loaded_world_guid(monkeypatch)
         "get_creature_template",
         staticmethod(lambda entry: {"modelid1": 1437}),
     )
-    monkeypatch.setattr(replay, "_build_creature_update_payload", lambda **kwargs: b"npc")
-    monkeypatch.setattr(replay, "make_update_object_response", lambda payload: ("SMSG_UPDATE_OBJECT", payload))
+    monkeypatch.setattr(creatures, "_build_creature_update_payload", lambda **kwargs: b"npc")
+    monkeypatch.setattr(creatures, "make_update_object_response", lambda payload: ("SMSG_UPDATE_OBJECT", payload))
 
     loaded_guids = set()
-    first = replay.build_database_creature_responses(session, loaded_guids=loaded_guids)
-    second = replay.build_database_creature_responses(session, loaded_guids=loaded_guids)
+    first = creatures.build_database_creature_responses(session, loaded_guids=loaded_guids)
+    second = creatures.build_database_creature_responses(session, loaded_guids=loaded_guids)
 
     assert first == [("SMSG_UPDATE_OBJECT", b"npc")]
     assert second == []
-    assert replay.CreatureGuid.from_spawn_guid(68, 1) in loaded_guids
+    assert creatures.CreatureGuid.from_spawn_guid(68, 1) in loaded_guids
 
 
 def test_build_creature_update_payload_uses_create_object2():
-    replay = _import_replay()
+    creatures = _import_creatures()
     entry = {
         "guid": 68,
         "entry": 2457,
@@ -451,7 +451,7 @@ def test_build_creature_update_payload_uses_create_object2():
         "template": {"modelid1": 1437},
     }
 
-    payload = replay._build_creature_update_payload(map_id=0, entry=entry, realm_id=1)
+    payload = creatures._build_creature_update_payload(map_id=0, entry=entry, realm_id=1)
 
     assert payload[0:2] == b"\x00\x00"
     assert payload[2:6] == b"\x01\x00\x00\x00"
@@ -459,7 +459,7 @@ def test_build_creature_update_payload_uses_create_object2():
 
 
 def test_build_creature_update_payload_normalizes_negative_orientation():
-    replay = _import_replay()
+    creatures = _import_creatures()
     entry = {
         "guid": 68,
         "entry": 2457,
@@ -471,7 +471,7 @@ def test_build_creature_update_payload_normalizes_negative_orientation():
         "template": {"modelid1": 1437},
     }
 
-    payload = replay._build_creature_update_payload(map_id=0, entry=entry, realm_id=1)
+    payload = creatures._build_creature_update_payload(map_id=0, entry=entry, realm_id=1)
     x_offset = payload.find(struct.pack("<f", entry["x"]))
 
     assert x_offset >= 0
@@ -480,7 +480,7 @@ def test_build_creature_update_payload_normalizes_negative_orientation():
 
 
 def test_build_creature_update_payload_normalizes_overrange_orientation():
-    replay = _import_replay()
+    creatures = _import_creatures()
     entry = {
         "guid": 68,
         "entry": 2457,
@@ -492,7 +492,7 @@ def test_build_creature_update_payload_normalizes_overrange_orientation():
         "template": {"modelid1": 1437},
     }
 
-    payload = replay._build_creature_update_payload(map_id=0, entry=entry, realm_id=1)
+    payload = creatures._build_creature_update_payload(map_id=0, entry=entry, realm_id=1)
     x_offset = payload.find(struct.pack("<f", entry["x"]))
 
     assert x_offset >= 0
@@ -501,8 +501,8 @@ def test_build_creature_update_payload_normalizes_overrange_orientation():
 
 
 def test_build_creature_field_values_uses_spawn_npc_flags():
-    replay = _import_replay()
-    world_guid = replay.CreatureGuid.from_spawn_guid(68, 1)
+    creatures = _import_creatures()
+    world_guid = creatures.CreatureGuid.from_spawn_guid(68, 1)
     entry = {
         "guid": 68,
         "entry": 3310,
@@ -510,14 +510,14 @@ def test_build_creature_field_values_uses_spawn_npc_flags():
         "template": {"modelid1": 1437},
     }
 
-    fields = replay._build_creature_field_values(entry, world_guid=world_guid)
+    fields = creatures._build_creature_field_values(entry, world_guid=world_guid)
 
     assert fields[87] == 0x00002000
 
 
 def test_build_creature_field_values_uses_template_npc_flags():
-    replay = _import_replay()
-    world_guid = replay.CreatureGuid.from_spawn_guid(68, 1)
+    creatures = _import_creatures()
+    world_guid = creatures.CreatureGuid.from_spawn_guid(68, 1)
     entry = {
         "guid": 68,
         "entry": 3310,
@@ -525,13 +525,13 @@ def test_build_creature_field_values_uses_template_npc_flags():
         "template": {"modelid1": 1437, "npcflag": 0x00002003},
     }
 
-    fields = replay._build_creature_field_values(entry, world_guid=world_guid)
+    fields = creatures._build_creature_field_values(entry, world_guid=world_guid)
 
     assert fields[87] == 0x00002003
 
 
 def test_build_database_creature_responses_skips_dnd_triggers(monkeypatch):
-    replay = _import_replay()
+    creatures = _import_creatures()
     session = SimpleNamespace(
         npcs_visible=True,
         map_id=1,
@@ -558,4 +558,4 @@ def test_build_database_creature_responses_skips_dnd_triggers(monkeypatch):
         staticmethod(lambda entry: {"name": "[DND] Shaker - Small", "modelid1": 21955}),
     )
 
-    assert replay.build_database_creature_responses(session) == []
+    assert creatures.build_database_creature_responses(session) == []

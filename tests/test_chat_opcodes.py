@@ -63,6 +63,8 @@ def _import_chat_handlers():
         "server.modules.handlers.world.bootstrap.replay": {
             "load_sniff_payload": lambda path: b"",
             "send_raw_packet": lambda *args, **kwargs: ("SMSG_MESSAGECHAT", b""),
+        },
+        "server.modules.handlers.world.bootstrap.creatures": {
             "build_database_creature_responses": lambda session, loaded_guids=None: [],
         },
         "server.modules.handlers.world.bootstrap.playerobjects": {
@@ -2290,9 +2292,9 @@ def test_world_npc_show_enables_visibility(monkeypatch):
         "_notification_response",
         lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
     )
-    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    creatures_module = sys.modules["server.modules.handlers.world.bootstrap.creatures"]
     monkeypatch.setattr(
-        replay_module,
+        creatures_module,
         "build_database_creature_responses",
         lambda session, loaded_guids=None: [("SMSG_UPDATE_OBJECT", b"npc-1"), ("SMSG_UPDATE_OBJECT", b"npc-2")],
         raising=False,
@@ -2327,7 +2329,7 @@ def test_world_npc_show_refreshes_stale_loaded_npcs(monkeypatch):
         lambda *, map_id, guid: f"oor|map={map_id}|guid={guid}".encode(),
         raising=False,
     )
-    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    creatures_module = sys.modules["server.modules.handlers.world.bootstrap.creatures"]
 
     def _fake_build_database_creature_responses(session, loaded_guids=None):
         assert loaded_guids == set()
@@ -2335,7 +2337,7 @@ def test_world_npc_show_refreshes_stale_loaded_npcs(monkeypatch):
         return [("SMSG_UPDATE_OBJECT", b"npc-303")]
 
     monkeypatch.setattr(
-        replay_module,
+        creatures_module,
         "build_database_creature_responses",
         _fake_build_database_creature_responses,
         raising=False,
@@ -2393,9 +2395,9 @@ def test_world_npc_on_enables_auto_streaming(monkeypatch):
         "_notification_response",
         lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
     )
-    replay_module = sys.modules["server.modules.handlers.world.bootstrap.replay"]
+    creatures_module = sys.modules["server.modules.handlers.world.bootstrap.creatures"]
     monkeypatch.setattr(
-        replay_module,
+        creatures_module,
         "build_database_creature_responses",
         lambda session, loaded_guids=None: [("SMSG_UPDATE_OBJECT", b"npc-1")],
         raising=False,

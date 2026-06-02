@@ -26,6 +26,9 @@ replay_module.build_multi_u32_update_object_payload = lambda **kwargs: b""
 replay_module.build_database_gameobject_responses = lambda session, loaded_guids=None, **kwargs: []
 replay_module.build_database_creature_responses = lambda session, loaded_guids=None, **kwargs: []
 sys.modules["server.modules.handlers.world.bootstrap.replay"] = replay_module
+creatures_module = types.ModuleType("server.modules.handlers.world.bootstrap.creatures")
+creatures_module.build_database_creature_responses = lambda session, loaded_guids=None, **kwargs: []
+sys.modules["server.modules.handlers.world.bootstrap.creatures"] = creatures_module
 
 sys.modules.pop("server.modules.handlers.world.opcodes.movement", None)
 from server.modules.handlers.world.opcodes import movement
@@ -662,7 +665,7 @@ def test_stream_nearby_npcs_spawns_new_and_despawns_far(monkeypatch):
     new_world_guid = movement.CreatureGuid.from_spawn_guid(4, 1)
 
     monkeypatch.setattr(
-        replay_module,
+        creatures_module,
         "build_database_creature_responses",
         lambda target, loaded_guids=None: (
             loaded_guids.add(new_world_guid) if isinstance(loaded_guids, set) else None

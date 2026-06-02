@@ -2780,7 +2780,7 @@ def _stream_nearby_npcs(session) -> list[tuple[str, bytes]]:
         loaded_npcs = set()
         session.loaded_npcs = loaded_npcs
 
-    from server.modules.handlers.world.bootstrap.replay import build_database_creature_responses
+    from server.modules.handlers.world.bootstrap.creatures import build_database_creature_responses
 
     realm_id = int(getattr(session, "realm_id", 1) or 1)
     x = float(getattr(session, "x", 0.0) or 0.0)

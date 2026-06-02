@@ -9,6 +9,61 @@ from server.modules.handlers.world import taxi_runtime
 from server.session.world_session import MovementState
 
 
+def _taxi_session():
+    return SimpleNamespace(
+        char_guid=7,
+        world_guid=7,
+        map_id=1,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        movement_state=MovementState(),
+        can_fly=False,
+        is_flying=False,
+        is_mounted=False,
+        mount_spell=None,
+        mount_display_id=0,
+        unit_flags=0,
+        run_speed=7.0,
+        fly_speed=7.0,
+        fly_back_speed=4.5,
+    )
+
+
+def test_start_taxi_flight_emits_native_spline_without_snapshot_thread(monkeypatch):
+    thread_starts = []
+    broadcasts = []
+    monkeypatch.setattr(taxi_runtime, "_start_taxi_thread", lambda session, generation: thread_starts.append(generation))
+    monkeypatch.setattr(taxi_runtime, "_build_mount_visual_responses", lambda session, display_id: [])
+    monkeypatch.setattr(taxi_runtime, "_broadcast_mount_visual", lambda session, display_id: None)
+    monkeypatch.setattr(taxi_runtime, "broadcast_player_state_update", lambda session, force=False: broadcasts.append(force))
+
+    session = _taxi_session()
+
+    responses = taxi_runtime.start_taxi_flight(
+        session,
+        [
+            taxi_runtime.TaxiPathPoint(0.0, 0.0, 0.0),
+            taxi_runtime.TaxiPathPoint(10.0, 0.0, 0.0),
+        ],
+        destination_map=1,
+        destination_node=2,
+        speed=5.0,
+        mount_display_id=6851,
+        source_node=1,
+        route_nodes=(1, 2),
+    )
+
+    assert [opcode for opcode, _payload in responses] == ["SMSG_ON_MONSTER_MOVE"]
+    assert thread_starts == []
+    assert session.taxi_state.active is True
+    assert session.taxi_controls_locked is True
+    assert session.can_fly is True
+    assert session.is_flying is True
+    assert broadcasts
+
+
 def test_taxi_tick_linearly_interpolates_and_sets_flying_flags(monkeypatch):
     sent = []
     broadcasts = []
@@ -113,6 +168,148 @@ def test_taxi_arrival_restores_controls_and_original_state(monkeypatch):
     assert session.is_flying is False
     assert session.is_mounted is False
     assert session.mount_display_id == 0
+
+
+def test_taxi_arrival_sends_stopped_movement_state_for_short_and_long_routes(monkeypatch):
+    monkeypatch.setattr(taxi_runtime, "_start_taxi_thread", lambda session, generation: None)
+    monkeypatch.setattr(taxi_runtime, "_build_mount_visual_responses", lambda session, display_id: [])
+    monkeypatch.setattr(taxi_runtime, "_broadcast_mount_visual", lambda session, display_id: None)
+    monkeypatch.setattr(taxi_runtime, "broadcast_player_state_update", lambda session, force=False: None)
+
+    routes = (
+        (
+            taxi_runtime.TaxiPathPoint(0.0, 0.0, 0.0),
+            taxi_runtime.TaxiPathPoint(10.0, 0.0, 0.0, orientation=1.25),
+        ),
+        (
+            taxi_runtime.TaxiPathPoint(0.0, 0.0, 0.0),
+            taxi_runtime.TaxiPathPoint(140.0, 60.0, 25.0),
+            taxi_runtime.TaxiPathPoint(260.0, 120.0, 10.0, orientation=1.25),
+        ),
+    )
+
+    for points in routes:
+        sent_flags = []
+        monkeypatch.setattr(
+            taxi_runtime,
+            "_send_self_movement",
+            lambda session: sent_flags.append(int(session.movement_state.flags)),
+        )
+        session = _taxi_session()
+
+        taxi_runtime.start_taxi_flight(
+            session,
+            list(points),
+            destination_map=1,
+            destination_node=2,
+            speed=20.0,
+            mount_display_id=6851,
+        )
+
+        assert session.movement_state.flags & taxi_runtime._MOVEMENTFLAG_FORWARD
+
+        taxi_runtime.complete_taxi_spline(session)
+
+        assert sent_flags
+        assert sent_flags[-1] & taxi_runtime._MOVEMENTFLAG_FORWARD == 0
+        assert sent_flags[-1] & taxi_runtime._MOVEMENTFLAG_CAN_FLY == 0
+        assert sent_flags[-1] & taxi_runtime._MOVEMENTFLAG_FLYING == 0
+        assert sent_flags[-1] & taxi_runtime._MOVEMENTFLAG_ASCENDING == 0
+        assert sent_flags[-1] & taxi_runtime._MOVEMENTFLAG_DESCENDING == 0
+        assert session.movement_state.flags == sent_flags[-1]
+        assert session.x == points[-1].x
+        assert session.orientation == 1.25
+        assert session.taxi_state is None
+
+
+def test_taxi_arrival_uses_destination_landing_height(monkeypatch):
+    sent_positions = []
+    monkeypatch.setattr(taxi_runtime, "_start_taxi_thread", lambda session, generation: None)
+    monkeypatch.setattr(taxi_runtime, "_build_mount_visual_responses", lambda session, display_id: [])
+    monkeypatch.setattr(taxi_runtime, "_broadcast_mount_visual", lambda session, display_id: None)
+    monkeypatch.setattr(
+        taxi_runtime,
+        "_send_self_movement",
+        lambda session: sent_positions.append((session.x, session.y, session.z, session.orientation)),
+    )
+    monkeypatch.setattr(taxi_runtime, "broadcast_player_state_update", lambda session, force=False: None)
+
+    session = _taxi_session()
+    spline_endpoint = taxi_runtime.TaxiPathPoint(-8833.164, 479.763, 112.096)
+    landing_point = taxi_runtime.TaxiPathPoint(-8841.060, 489.656, 109.607, None, 0)
+
+    taxi_runtime.start_taxi_flight(
+        session,
+        [
+            taxi_runtime.TaxiPathPoint(-9000.0, 400.0, 130.0),
+            spline_endpoint,
+        ],
+        destination_map=0,
+        destination_node=2,
+        speed=20.0,
+        mount_display_id=6851,
+        destination_landing_point=landing_point,
+    )
+
+    assert session.taxi_state.path.points[-1].z == spline_endpoint.z
+    assert round(session.taxi_state.path.points[-1].z - landing_point.z, 3) == 2.489
+
+    taxi_runtime.complete_taxi_spline(session)
+
+    assert sent_positions[-1][0:3] == (landing_point.x, landing_point.y, landing_point.z)
+    assert session.x == landing_point.x
+    assert session.y == landing_point.y
+    assert session.z == landing_point.z
+    assert session.movement_state.z == landing_point.z
+    assert session.taxi_state is None
+
+
+def test_taxi_disconnect_completion_persists_destination_without_packets(monkeypatch):
+    sent_positions = []
+    broadcasts = []
+    monkeypatch.setattr(taxi_runtime, "_start_taxi_thread", lambda session, generation: None)
+    monkeypatch.setattr(taxi_runtime, "_build_mount_visual_responses", lambda session, display_id: [])
+    monkeypatch.setattr(taxi_runtime, "_broadcast_mount_visual", lambda session, display_id: None)
+    monkeypatch.setattr(
+        taxi_runtime,
+        "_send_self_movement",
+        lambda session: sent_positions.append((session.x, session.y, session.z)),
+    )
+    monkeypatch.setattr(taxi_runtime, "broadcast_player_state_update", lambda session, force=False: broadcasts.append(force))
+
+    session = _taxi_session()
+    landing_point = taxi_runtime.TaxiPathPoint(50.0, 60.0, 7.0, None, 1)
+
+    taxi_runtime.start_taxi_flight(
+        session,
+        [
+            taxi_runtime.TaxiPathPoint(0.0, 0.0, 0.0),
+            taxi_runtime.TaxiPathPoint(50.0, 60.0, 10.0),
+        ],
+        destination_map=1,
+        destination_node=2,
+        speed=20.0,
+        mount_display_id=6851,
+        destination_landing_point=landing_point,
+    )
+    sent_positions.clear()
+    broadcasts.clear()
+
+    assert taxi_runtime.complete_taxi_for_disconnect(session) is True
+
+    assert sent_positions == []
+    assert broadcasts == []
+    assert session.x == landing_point.x
+    assert session.y == landing_point.y
+    assert session.z == landing_point.z
+    assert session.movement_state.z == landing_point.z
+    assert session.taxi_state is None
+    assert session.taxi_controls_locked is False
+    assert session.player_travel_state == taxi_runtime.TAXI_STATE_NORMAL
+    assert session.can_fly is False
+    assert session.is_flying is False
+    assert session.is_mounted is False
+    assert session.movement_state.flags & taxi_runtime._MOVEMENTFLAG_FORWARD == 0
 
 
 def test_taxi_z_curve_is_monotone_between_altitude_nodes():

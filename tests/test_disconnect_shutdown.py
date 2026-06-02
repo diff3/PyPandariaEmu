@@ -91,3 +91,61 @@ def test_handle_disconnect_session_persists_inventory(monkeypatch):
     assert session not in state.sessions
     assert session not in state.chat_channels["world"]
     assert session not in region.players
+
+
+def test_handle_disconnect_session_finalizes_taxi_before_position_save(monkeypatch):
+    _install_lifecycle_test_stubs()
+    taxi_module = types.ModuleType("server.modules.handlers.world.taxi_runtime")
+    sys.modules["server.modules.handlers.world.taxi_runtime"] = taxi_module
+    sys.modules.pop("server.modules.handlers.world.runtime.lifecycle", None)
+    from server.modules.handlers.world.runtime import lifecycle
+
+    calls = []
+
+    def _complete_taxi_for_disconnect(session):
+        calls.append(("taxi", session.x, session.y, session.z))
+        session.x = 50.0
+        session.y = 60.0
+        session.z = 7.0
+        session.taxi_state = None
+        session.taxi_controls_locked = False
+        session.player_travel_state = "NORMAL"
+        return True
+
+    taxi_module.complete_taxi_for_disconnect = _complete_taxi_for_disconnect
+    monkeypatch.setattr(lifecycle, "broadcast_player_remove", lambda session: calls.append(("remove", session.x, session.y, session.z)))
+    monkeypatch.setattr(
+        lifecycle,
+        "save_current_position_like_command",
+        lambda session, **kwargs: calls.append(("position", session.x, session.y, session.z, kwargs)) or True,
+    )
+    monkeypatch.setattr(lifecycle, "persist_session_inventory", lambda session: calls.append(("inventory", session)) or True)
+    monkeypatch.setattr(lifecycle.login_handlers, "_reset_login_flow_state", lambda session: None)
+
+    session = SimpleNamespace(
+        _disconnect_handled=False,
+        char_guid=42,
+        global_state=SimpleNamespace(chat_channels={"world": set()}, sessions=set()),
+        region=None,
+        send_response=lambda responses: None,
+        visible_guids=set(),
+        near_teleport_pending=False,
+        worldport_ack_pending=False,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        taxi_state=object(),
+        taxi_controls_locked=True,
+        player_travel_state="TAXI_FLIGHT",
+    )
+
+    lifecycle.handle_disconnect_session(session)
+
+    assert calls[0] == ("taxi", 0.0, 0.0, 0.0)
+    assert calls[1] == ("remove", 50.0, 60.0, 7.0)
+    assert calls[2][0:4] == ("position", 50.0, 60.0, 7.0)
+    assert calls[2][4]["reason"] == "disconnect"
+    assert calls[2][4]["online"] == 0
+    assert session.taxi_state is None
+    assert session.taxi_controls_locked is False
+    assert session.player_travel_state == "NORMAL"

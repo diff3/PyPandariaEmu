@@ -22,7 +22,10 @@ from server.modules.handlers.world.feature_config import (
 from server.modules.handlers.world.movements.cache import get_movement_cache
 from server.modules.handlers.world.taxi_runtime import (
     TaxiPathPoint,
+    complete_taxi_spline,
+    continue_taxi_flight,
     start_taxi_flight,
+    sync_taxi_to_current_destination,
 )
 from server.modules.protocol.PacketContext import PacketContext
 
@@ -417,6 +420,19 @@ def _taxi_destination_position(node_id: int) -> tuple[int, float, float, float, 
     return int(node.map_id), float(node.x), float(node.y), float(node.z), 0.0
 
 
+def _taxi_destination_landing_point(node_id: int) -> TaxiPathPoint | None:
+    destination = _taxi_destination_position(int(node_id))
+    if destination is None:
+        return None
+    return TaxiPathPoint(
+        float(destination[1]),
+        float(destination[2]),
+        float(destination[3]),
+        None,
+        int(destination[0]),
+    )
+
+
 def _taxi_path_points_from_nodes(session, node_ids: tuple[int, ...]) -> tuple[int, list[TaxiPathPoint]]:
     nodes = _load_taxi_nodes()
     map_id = int(getattr(session, "map_id", 0) or 0)
@@ -537,11 +553,14 @@ def handle_gossip_hello(session, ctx):
         len(data),
     )
     if not is_taxi:
-        from server.modules.handlers.world.opcodes import npc_interaction
+        try:
+            from server.modules.handlers.world.opcodes import npc_interaction
 
-        npc_responses = npc_interaction.handle_gossip_hello_for_npc(session, guid, data)
-        if npc_responses is not None:
-            return 0, npc_responses
+            npc_responses = npc_interaction.handle_gossip_hello_for_npc(session, guid, data)
+            if npc_responses is not None:
+                return 0, npc_responses
+        except Exception as exc:
+            Logger.warning("[Taxi] NPC gossip fallback unavailable err=%s", exc)
         return 0, [("SMSG_GOSSIP_COMPLETE", b"")]
 
     return 0, [
@@ -611,6 +630,8 @@ def handle_activate_taxi(session, ctx):
             destination_node=destination_node,
             source_node=source_node,
             mount_display_id=_taxi_mount_display_id_for_source(session, source_node),
+            route_nodes=(source_node, destination_node),
+            destination_landing_point=_taxi_destination_landing_point(destination_node),
         )
     )
     return 0, responses
@@ -638,25 +659,67 @@ def handle_activate_taxi_express(session, ctx):
     if destination_node <= 0:
         return 0, responses
 
-    destination = _taxi_destination_position(destination_node)
+    first_destination_node = int(nodes[1]) if len(nodes) > 1 else destination_node
+    destination = _taxi_destination_position(first_destination_node)
     if destination is None:
         return 0, responses
 
     destination_map = int(destination[0])
     if destination_map != int(getattr(session, "map_id", 0) or 0):
         # TODO: Add dedicated taxi map-transfer phase before enabling cross-continent routes.
-        Logger.warning("[TAXI] cross-map taxi rejected destination=%s map=%s", int(destination_node), destination_map)
+        Logger.warning("[TAXI] cross-map taxi rejected destination=%s map=%s", int(first_destination_node), destination_map)
         return 0, responses
 
-    map_id, path_points = _taxi_path_points_from_nodes(session, tuple(int(node_id) for node_id in nodes))
+    route_nodes = tuple(int(node_id) for node_id in nodes)
+    map_id, path_points = _taxi_path_points_from_nodes(session, route_nodes[:2])
     responses.extend(
         start_taxi_flight(
             session,
             path_points,
             destination_map=map_id,
-            destination_node=destination_node,
+            destination_node=first_destination_node,
             source_node=source_node,
             mount_display_id=_taxi_mount_display_id_for_source(session, source_node),
+            route_nodes=route_nodes,
+            destination_landing_point=_taxi_destination_landing_point(first_destination_node),
         )
     )
     return 0, responses
+
+
+@register("CMSG_MOVE_SPLINE_DONE")
+def handle_move_spline_done(session, ctx):
+    state = getattr(session, "taxi_state", None)
+    if state is None or not bool(getattr(state, "active", False)):
+        return 0, None
+
+    route_nodes = tuple(int(node) for node in getattr(state, "route_nodes", ()) or ())
+    current_leg_index = int(getattr(state, "current_leg_index", 0) or 0)
+    next_source_index = current_leg_index + 1
+    next_destination_index = current_leg_index + 2
+    if route_nodes and next_destination_index < len(route_nodes):
+        source_node = int(route_nodes[next_source_index])
+        destination_node = int(route_nodes[next_destination_index])
+        destination = _taxi_destination_position(destination_node)
+        if destination is None:
+            complete_taxi_spline(session)
+            return 0, None
+        destination_map = int(destination[0])
+        if destination_map != int(getattr(session, "map_id", 0) or 0):
+            Logger.warning("[TAXI] cross-map taxi continuation rejected destination=%s map=%s", destination_node, destination_map)
+            complete_taxi_spline(session)
+            return 0, None
+        sync_taxi_to_current_destination(session)
+        map_id, path_points = _taxi_path_points_from_nodes(session, (source_node, destination_node))
+        responses = continue_taxi_flight(
+            session,
+            path_points,
+            destination_map=map_id,
+            destination_node=destination_node,
+            source_node=source_node,
+            destination_landing_point=_taxi_destination_landing_point(destination_node),
+        )
+        return 0, responses
+
+    complete_taxi_spline(session)
+    return 0, None

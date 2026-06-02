@@ -108,6 +108,19 @@ def handle_disconnect_session(target_session) -> None:
     except Exception as exc:
         Logger.debug("[CHAIR] release on disconnect failed: %s", exc)
 
+    try:
+        from server.modules.handlers.world.taxi_runtime import complete_taxi_for_disconnect
+        if complete_taxi_for_disconnect(target_session):
+            Logger.info(
+                "[DISCONNECT] taxi finalized guid=%s pos=(%.3f, %.3f, %.3f)",
+                guid,
+                float(getattr(target_session, "x", 0.0) or 0.0),
+                float(getattr(target_session, "y", 0.0) or 0.0),
+                float(getattr(target_session, "z", 0.0) or 0.0),
+            )
+    except Exception as exc:
+        Logger.warning(f"[DISCONNECT] taxi finalize failed: {exc}")
+
     # --- Remove from world (broadcast) ---
     try:
         broadcast_player_remove(target_session)

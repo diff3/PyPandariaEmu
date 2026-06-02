@@ -11,45 +11,18 @@ from typing import Any, Mapping
 from DSL.modules.EncoderHandler import EncoderHandler
 from server.modules.game.guid import GameObjectGuid, GuidHelper, MoTransportGuid
 from server.modules.handlers.world.bootstrap.playerobjects import make_update_object_response
+from server.modules.handlers.world.protocol.update_object import gameobject as gameobject_defs
+from server.modules.handlers.world.protocol.update_object.serializers import (
+    build_fixed_u32_field_block,
+    u32_from_float,
+)
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
 
-_GAMEOBJECT_VISIBILITY_RADIUS = 120.0
-_GAMEOBJECT_PACKET_LIMIT = 200
-_GAMEOBJECT_CREATE_FLAGS = bytes.fromhex("000000030040")
-_GAMEOBJECT_UPDATE_COUNT = 1
-_GAMEOBJECT_UPDATE_TYPE = 1
-_GAMEOBJECT_VALUES_UPDATE_TYPE = 0
-_GAMEOBJECT_OBJECT_TYPE = 5
-_GAMEOBJECT_MASK_BLOCKS = 1
-_GAMEOBJECT_DYNAMIC_MASK_BLOCKS = 0
-_GAMEOBJECT_MOVEMENT_BLOCK_UINT32 = 0
+for _definition_name in gameobject_defs.__all__:
+    globals()[f"_{_definition_name}"] = getattr(gameobject_defs, _definition_name)
 
-_OBJECT_FIELD_GUID_LOW = 0
-_OBJECT_FIELD_GUID_HIGH = 1
-_OBJECT_FIELD_TYPE = 4
-_OBJECT_FIELD_ENTRY = 5
-_OBJECT_FIELD_DYNAMIC_FLAGS = 6
-_OBJECT_FIELD_SCALE = 7
-_GAMEOBJECT_FIELD_DISPLAY_ID = 10
-_GAMEOBJECT_FIELD_FLAGS = 11
-_GAMEOBJECT_FIELD_ROTATION_START = 12
-_GAMEOBJECT_FIELD_FACTION = 16
-_GAMEOBJECT_FIELD_LEVEL = 17
-_GAMEOBJECT_FIELD_PERCENT_HEALTH = 18
-_GAMEOBJECT_FIELD_STATE_SPELL_VISUAL_ID = 19
-_GAMEOBJECT_ROTATION_COMPONENT_KEYS = ("rotation0", "rotation1", "rotation2", "rotation3")
-_PACKED_QUATERNION_X_SCALE = 2_097_152
-_PACKED_QUATERNION_YZ_SCALE = 1_048_576
-_QUATERNION_EPSILON = 0.000001
-_QUATERNION_UNIT_EPSILON = 0.00001
-
-_GAMEOBJECT_TYPE_TRANSPORT = 11
-_GAMEOBJECT_TYPE_MO_TRANSPORT = 15
-_GO_FLAG_TRANSPORT = 0x00000008
-_GO_STATE_ACTIVE = 0
-_GO_STATE_READY = 1
-_GO_HEALTH_FULL = 0xFF
+_OBJECT_FIELD_SCALE = gameobject_defs.OBJECT_FIELD_SCALE_X
 
 
 def _entry_int(entry: Mapping[str, Any], key: str, default: int = 0) -> int:
@@ -64,7 +37,7 @@ def _entry_float(entry: Mapping[str, Any], key: str, default: float = 0.0) -> fl
 
 def _u32_from_float(value: float) -> int:
     """Pack a float into a little-endian uint32 value."""
-    return struct.unpack("<I", struct.pack("<f", float(value)))[0]
+    return u32_from_float(value)
 
 
 def _normalize_orientation(orientation: float) -> float:
@@ -288,18 +261,7 @@ def _pack_gameobject_state_spell_visual_id(entry: Mapping[str, Any]) -> int:
 
 def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1) -> tuple[bytes, bytes]:
     """Build a fixed-size update mask and packed uint32 field payload."""
-    if not fields:
-        return (b"\x00" * (int(mask_blocks) * 4), b"")
-
-    mask = bytearray(int(mask_blocks) * 4)
-    field_bytes = bytearray()
-    for field_index in sorted(int(index) for index in fields):
-        word_index = field_index // 32
-        bit_index = field_index % 32
-        current_word = struct.unpack_from("<I", mask, word_index * 4)[0]
-        struct.pack_into("<I", mask, word_index * 4, current_word | (1 << bit_index))
-        field_bytes += struct.pack("<I", int(fields[field_index]) & 0xFFFFFFFF)
-    return bytes(mask), bytes(field_bytes)
+    return build_fixed_u32_field_block(fields, mask_blocks=mask_blocks)
 
 
 def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:

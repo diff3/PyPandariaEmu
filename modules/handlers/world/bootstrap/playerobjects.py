@@ -165,307 +165,21 @@ import struct
 
 from shared.Logger import Logger
 from server.modules.game.guid import GuidHelper
+from server.modules.handlers.world.protocol.update_object import player as player_update_defs
+from server.modules.handlers.world.protocol.update_object.serializers import (
+    build_fixed_u32_field_block,
+    u32_from_float,
+)
 from server.session.runtime import session as runtime_session
 
-_PLAYER_CREATE_GUID_MASK_OFFSET = 7
-_PLAYER_CREATE_GUID_VALUE_OFFSET = 8
-_PLAYER_CREATE_MOVEMENT_BLOCK_START = 10
-_PLAYER_CREATE_MOVEMENT_BLOCK_END = 76
-_PLAYER_CREATE_REMOTE_SELF_FLAG_OFFSET = 14
-_PLAYER_CREATE_REMOTE_SELF_FLAG = 0x40
-_PLAYER_CREATE_OBJECT_TYPE = 4
-_PLAYER_CREATE_UPDATE_COUNT = 1
-_PLAYER_CREATE_UPDATE_TYPE = 2
-_PLAYER_CREATE_MOVEMENT_BLOCK_SIZE = 66
-_PLAYER_CREATE_MOVEMENT_HEADER_BITS_SIZE = 13
+for _definition_name in player_update_defs.__all__:
+    globals()[f"_{_definition_name}"] = getattr(player_update_defs, _definition_name)
 
-_PLAYER_CREATE_BIT676 = 0
-_PLAYER_CREATE_HAS_ANIM_KITS = 0
-_PLAYER_CREATE_IS_LIVING = 1
-_PLAYER_CREATE_BIT810 = 0
-_PLAYER_CREATE_TRANSPORT_FRAMES = 0
-_PLAYER_CREATE_HAS_VEHICLE_DATA = 0
-_PLAYER_CREATE_BIT1044 = 0
-_PLAYER_CREATE_BIT476 = 0
-_PLAYER_CREATE_HAS_GAMEOBJECT_ROTATION = 0
-_PLAYER_CREATE_BIT680 = 1
-_PLAYER_CREATE_HAS_ATTACKING_TARGET = 0
-_PLAYER_CREATE_HAS_SCENE_OBJECT_DATA = 0
-_PLAYER_CREATE_BIT1064 = 0
-_PLAYER_CREATE_BIT668 = 0
-_PLAYER_CREATE_HAS_TRANSPORT_POSITION = 0
-_PLAYER_CREATE_BIT681 = 0
-_PLAYER_CREATE_HAS_STATIONARY_POSITION = 0
-_PLAYER_CREATE_GUID_BIT_2 = 0
-_PLAYER_CREATE_BIT140 = 0
-_PLAYER_CREATE_HAS_PITCH = 0
-_PLAYER_CREATE_HAS_TRANSPORT_DATA = 0
-_PLAYER_CREATE_HAS_TIMESTAMP = 0
-_PLAYER_CREATE_GUID_BIT_6 = 0
-_PLAYER_CREATE_GUID_BIT_4 = 0
-_PLAYER_CREATE_GUID_BIT_3 = 0
-_PLAYER_CREATE_HAS_ORIENTATION = 1
-_PLAYER_CREATE_BIT160 = 0
-_PLAYER_CREATE_GUID_BIT_5 = 0
-_PLAYER_CREATE_BITS98 = 0
-_PLAYER_CREATE_HAS_MOVEMENT_FLAGS = 0
-_PLAYER_CREATE_BITS168 = 0
-_PLAYER_CREATE_HAS_FALL_DATA = 0
-_PLAYER_CREATE_HAS_SPLINE_ELEVATION = 0
-_PLAYER_CREATE_HAS_SPLINE_DATA = 0
-_PLAYER_CREATE_BIT141 = 0
-_PLAYER_CREATE_GUID_BIT_0 = 1
-_PLAYER_CREATE_GUID_BIT_7 = 0
-_PLAYER_CREATE_GUID_BIT_1 = 0
-_PLAYER_CREATE_HAS_MOVEMENT_FLAGS_EXTRA = 0
-
-_PLAYER_CREATE_FLY_SPEED = 7.0
-_PLAYER_CREATE_TURN_SPEED = 3.1415939331054688
-_PLAYER_CREATE_SWIM_SPEED = 4.5
-_PLAYER_CREATE_PITCH_SPEED = 3.140000104904175
-_PLAYER_CREATE_WALK_SPEED = 2.5
-_PLAYER_CREATE_FLY_BACK_SPEED = 4.5
-_PLAYER_CREATE_MOVEMENT_GUID_BYTE = 0x0F
-_PLAYER_CREATE_RUN_BACK_SPEED = 2.5
-_PLAYER_CREATE_RUN_SPEED = 7.0
-_PLAYER_CREATE_SWIM_BACK_SPEED = 4.722221851348877
-
-_OBJECT_FIELD_GUID_LOW = 0
-_OBJECT_FIELD_TYPE = 4
-_OBJECT_FIELD_SCALE_X = 7
-_UNIT_FIELD_HEALTH = 33
-_UNIT_FIELD_POWER_PRIMARY = 34
-_UNIT_FIELD_MAX_HEALTH = 39
-_UNIT_FIELD_LEVEL = 55
-_UNIT_FIELD_FACTION_TEMPLATE = 57
-_UNIT_FIELD_FLAGS = 61
-_UNIT_FIELD_FLAGS_2 = 62
-_UNIT_FIELD_BOUNDING_RADIUS = 67
-_UNIT_FIELD_COMBAT_REACH = 68
-_UNIT_FIELD_DISPLAY_ID = 69
-_UNIT_FIELD_NATIVE_DISPLAY_ID = 70
-_UNIT_FIELD_MOUNT_DISPLAY_ID = 71
-_PLAYER_BYTES = 166
-_PLAYER_BYTES_2 = 167
-_PLAYER_BYTES_3 = 168
-_UNIT_END = 0x8 + 0x98
-_PLAYER_FIELD_PLAYER_TITLE = _UNIT_END + 0x31F
-_PLAYER_FIELD_KNOWN_TITLES = _UNIT_END + 0x3D3
-_PLAYER_FIELD_COINAGE = 1149
-_PLAYER_FIELD_MAX_LEVEL = 1943
-_LANG_SKILL_ID_FIELD = 1154
-_LANG_SKILL_VALUE_FIELD = 1282
-_LANG_SKILL_MAX_FIELD = 1410
-_SKILL_RIDING = 762
-_SKILL_LANGUAGE_RANK = 300
-_SKILL_RIDING_RANK = 375
-_LANGUAGE_MASK_COMMON = (1 << 7).to_bytes(4, "little")
-_LANGUAGE_MASK_ORCISH = (1 << 1).to_bytes(4, "little")
-
-_PLAYER_CREATE_NAMED_DEFAULT_FIELDS = {
-    6: 0,
-    26: 0,
-    27: 0,
-    28: 0,
-    64: 2000,
-    65: 2000,
-    66: 2000,
-    81: 1065353216,
-    82: 1065353216,
-    83: 1065353216,
-    84: 1065353216,
-    961: 1,
-    1152: 400,
-}
-
-_PLAYER_CREATE_POWER_REGEN_DEFAULT_FIELDS = {
-    36: 100,
-    41: 1000,
-    42: 100,
-    43: 100,
-    45: 1066639324,
-    50: 1042536202,
-}
-
-_PLAYER_CREATE_UNIT_MISC_DEFAULT_FIELDS = {
-    154: 1065353216,
-}
-
-_PLAYER_CREATE_BASE_STAT_FIELDS = {
-    90: 18,
-    91: 25,
-    92: 19,
-    93: 22,
-    94: 22,
-}
-
-_PLAYER_CREATE_BASE_POWER_HEALTH_FIELDS = {
-    126: 40,
-    127: 83,
-}
-
-_PLAYER_CREATE_EXPLORATION_DEFAULT_FIELDS = {
-    1648: 8,
-}
-
-_PLAYER_CREATE_RESTED_DEFAULT_FIELDS = {
-    1827: 65,
-}
-
-_PLAYER_CREATE_LANGUAGE_RIDING_DEFAULT_FIELDS = {
-    1153: 6225974,
-    1154: 7405666,
-    1155: 10485896,
-    1156: 11337890,
-    1157: 27132133,
-    1158: 30998943,
-    1159: 798,
-    1281: 65537,
-    1282: 19661100,
-    1283: 65537,
-    1284: 65537,
-    1285: 65537,
-    1286: 65537,
-    1287: 5,
-    1409: 327685,
-    1410: 19661100,
-    1411: 327685,
-    1412: 327685,
-    1413: 65541,
-    1414: 327681,
-    1415: 5,
-}
-
-_PLAYER_CREATE_COMBAT_DEFAULT_FIELDS = {
-    72: 1074341010,
-    73: 1078535314,
-    129: 8,
-    137: 1065353216,
-    138: 1073741824,
-    1842: 1065353216,
-    1843: 1065353216,
-    1844: 1065353216,
-    1845: 1065353216,
-    1846: 1065353216,
-    1847: 1065353216,
-    1848: 1065353216,
-    1850: 1065353216,
-    1851: 1065353216,
-    1853: 1065353216,
-    1856: 1065353216,
-}
-
-_PLAYER_CREATE_RATING_DEFAULT_FIELDS = {
-    1610: 1095173714,
-    1612: 1093282693,
-    1613: 1093282693,
-    1614: 1093282693,
-    1616: 1084224438,
-    1617: 1084224438,
-    1618: 1084224438,
-    1619: 1084224438,
-    1620: 1084224438,
-    1621: 1084224438,
-    1622: 30,
-    1624: 1090519040,
-}
-
-_PLAYER_CREATE_MODIFIER_DEFAULT_FIELDS = {
-    1829: 12,
-    1830: 12,
-    1831: 12,
-    1832: 12,
-    1833: 12,
-    1834: 12,
-    1849: 12,
-}
-
-_PLAYER_CREATE_GLYPH_SLOT_DEFAULT_FIELDS = {
-    1952: 21,
-    1953: 22,
-    1954: 23,
-    1955: 24,
-    1956: 25,
-    1957: 26,
-}
-
-_PLAYER_CREATE_REFERENCE_DERIVED_FIELDS = {}
-
-_PLAYER_OBJECT_TYPE = 25
-_PLAYER_SCALE_X = 1.0
-_PLAYER_FLAGS = 8
-_PLAYER_FLAGS_MOUNTED = 0x08000000
-_PLAYER_FLAGS_2 = 2048
-_PLAYER_BOUNDING_RADIUS = 0.389
-_PLAYER_COMBAT_REACH = 1.5
-_PLAYER_MOUNT_DISPLAY_ID = 0
-_PLAYER_BYTES_3_DEFAULT = 1
-_PLAYER_MAX_LEVEL_DEFAULT = 90
-
-_PLAYER_DISPLAY_IDS = {
-    1: {0: 49, 1: 50},
-    2: {0: 51, 1: 52},
-    3: {0: 53, 1: 54},
-    4: {0: 55, 1: 56},
-    5: {0: 57, 1: 58},
-    6: {0: 59, 1: 60},
-    7: {0: 1563, 1: 1564},
-    8: {0: 1478, 1: 1479},
-    9: {0: 6894, 1: 6895},
-    10: {0: 15476, 1: 15475},
-    11: {0: 16125, 1: 16126},
-    22: {0: 29422, 1: 29423},
-    24: {0: 38551, 1: 38552},
-    25: {0: 38551, 1: 38552},
-    26: {0: 38551, 1: 38552},
-}
-
-_PLAYER_FACTION_TEMPLATE_IDS = {
-    1: 1,
-    2: 2,
-    3: 3,
-    4: 4,
-    5: 5,
-    6: 6,
-    7: 115,
-    8: 116,
-    9: 2204,
-    10: 1610,
-    11: 1629,
-    22: 2203,
-    24: 2395,
-    25: 2401,
-    26: 2402,
-}
-
-_ALLIANCE_RACES = {1, 3, 4, 7, 11, 22, 25}
-_HORDE_RACES = {2, 5, 6, 8, 9, 10, 24, 26}
-_ALLIANCE_FACTION_TEMPLATES = frozenset(
-    int(_PLAYER_FACTION_TEMPLATE_IDS[race]) for race in _ALLIANCE_RACES if race in _PLAYER_FACTION_TEMPLATE_IDS
-)
-_HORDE_FACTION_TEMPLATES = frozenset(
-    int(_PLAYER_FACTION_TEMPLATE_IDS[race]) for race in _HORDE_RACES if race in _PLAYER_FACTION_TEMPLATE_IDS
-)
-_LANGUAGE_SKILL_COMMON = 98
-_LANGUAGE_SKILL_ORCISH = 109
-_RACIAL_LANGUAGE_SKILL_BY_RACE = {
-    1: 113,
-    2: 109,
-    3: 111,
-    4: 113,
-    5: 110,
-    6: 114,
-    7: 115,
-    8: 116,
-    10: 139,
-    11: 113,
-    24: 109,
-}
 _BIAS_SENSITIVE_PLAYER_FIELDS = (57, 166, 167, 168, 1943)
 
 
 def _u32_from_float(value: float) -> int:
-    return struct.unpack("<I", struct.pack("<f", float(value)))[0]
+    return u32_from_float(value)
 
 
 def _resolve_player_guid(ctx) -> int:
@@ -779,23 +493,15 @@ def build_update_mask(field_values: dict[int, int]) -> tuple[bytes, int]:
 
     max_index = max(int(field_index) for field_index in field_values)
     mask_words = (max_index // 32) + 1
-    mask_words_list = [0] * mask_words
-
-    for field_index in field_values:
-        word_index = int(field_index) // 32
-        bit_index = int(field_index) % 32
-        mask_words_list[word_index] |= 1 << bit_index
-
-    mask_bytes = b"".join(struct.pack("<I", int(word_value) & 0xFFFFFFFF) for word_value in mask_words_list)
+    mask_bytes, _field_bytes = build_fixed_u32_field_block(field_values, mask_blocks=mask_words)
     return mask_bytes, mask_words
 
 
 def _serialize_field_values(field_values: dict[int, int]) -> bytes:
     """Serialize CREATE_OBJECT fields in ascending field-index order."""
-    payload = bytearray()
-    for field_index in sorted(field_values):
-        payload += struct.pack("<I", int(field_values[field_index]) & 0xFFFFFFFF)
-    return bytes(payload)
+    mask_words = (max(int(field_index) for field_index in field_values) // 32) + 1
+    _mask_bytes, field_bytes = build_fixed_u32_field_block(field_values, mask_blocks=mask_words)
+    return field_bytes
 
 
 def _read_u32_field_value(field_indices: list[int], field_bytes: bytes, field_index: int) -> int:

@@ -548,7 +548,7 @@ def _hide_loaded_npcs(session) -> list[tuple[str, bytes]]:
 
 
 def _show_nearby_npcs(session) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.bootstrap.replay import build_database_creature_responses
+    from server.modules.handlers.world.bootstrap.creatures import build_database_creature_responses
 
     loaded_npcs = getattr(session, "loaded_npcs", None)
     if not isinstance(loaded_npcs, set):
