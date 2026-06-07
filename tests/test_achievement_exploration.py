@@ -92,6 +92,104 @@ def test_discover_area_updates_explored_zone_bitmask(monkeypatch):
     ]
 
 
+def test_discover_area_skips_exploration_during_taxi(monkeypatch):
+    _reset_runtime(monkeypatch)
+    monkeypatch.setattr(
+        achievements,
+        "_AREA_META_BY_ID",
+        {1637: achievements.AreaMeta(area_id=1637, map_id=1, parent_area_id=0, explore_flag=707, name="Orgrimmar")},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        achievements.DatabaseConnection,
+        "save_character_exploration",
+        lambda *_: (_ for _ in ()).throw(AssertionError),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        achievements.DatabaseConnection,
+        "save_character_explored_zones",
+        lambda *_: (_ for _ in ()).throw(AssertionError),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        achievements,
+        "build_explored_zones_update_response",
+        lambda _session: (_ for _ in ()).throw(AssertionError),
+        raising=False,
+    )
+
+    session = SimpleNamespace(
+        char_guid=1,
+        realm_id=1,
+        world_guid=0x0003000100000001,
+        player_name="Tester",
+        zone=1637,
+        explored_zones_raw="",
+        taxi_state=SimpleNamespace(active=True),
+    )
+
+    responses = achievements.discover_area(session, 1637)
+
+    assert responses == []
+    assert not hasattr(session, "discovered_areas")
+    assert session.explored_zones_raw == ""
+
+
+def test_discover_area_allows_normal_mount_and_flying_mount_travel(monkeypatch):
+    _reset_runtime(monkeypatch)
+    monkeypatch.setattr(
+        achievements,
+        "_AREA_META_BY_ID",
+        {1637: achievements.AreaMeta(area_id=1637, map_id=1, parent_area_id=0, explore_flag=707, name="Orgrimmar")},
+        raising=False,
+    )
+    saved = []
+    monkeypatch.setattr(
+        achievements.DatabaseConnection,
+        "save_character_exploration",
+        lambda _guid, _realm, area_id, _timestamp: saved.append(("area", int(area_id))) or True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        achievements.DatabaseConnection,
+        "save_character_explored_zones",
+        lambda _guid, _realm, raw: saved.append(("zones", str(raw))) or True,
+        raising=False,
+    )
+    monkeypatch.setattr(achievements, "build_explored_zones_update_response", lambda _session: None, raising=False)
+    monkeypatch.setattr(
+        achievements,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: f"system|{message}".encode(),
+        raising=False,
+    )
+
+    for travel_state in (
+        {"is_mounted": True},
+        {"is_flying": True, "flying_mount": True},
+    ):
+        session = SimpleNamespace(
+            char_guid=1,
+            realm_id=1,
+            world_guid=0x0003000100000001,
+            player_name="Tester",
+            zone=1637,
+            explored_zones_raw="",
+            taxi_state=None,
+            **travel_state,
+        )
+
+        responses = achievements.discover_area(session, 1637)
+        values = [int(value) for value in session.explored_zones_raw.split()]
+
+        assert session.discovered_areas[1637] > 0
+        assert values[707 // 32] & (1 << (707 % 32))
+        assert responses == [("SMSG_MESSAGECHAT", b"system|You have discovered Orgrimmar")]
+
+    assert [item[0] for item in saved] == ["area", "zones", "area", "zones"]
+
+
 def test_discover_area_updates_real_mask_while_mapcheat_active(monkeypatch):
     _reset_runtime(monkeypatch)
     monkeypatch.setattr(

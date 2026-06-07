@@ -1958,11 +1958,138 @@ def test_addmoney_updates_player_coinage_fields(monkeypatch):
     responses = chat_handlers.chat_commands.cmd_addmoney(alice, ["1g2s3c"])
 
     assert alice.money == 10213
-    assert responses[1] == ("SMSG_UPDATE_OBJECT", b"money-update")
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"money-update")
+    assert responses[1][0] == "SMSG_MESSAGECHAT"
     assert captured["map_id"] == 1
-    assert captured["guid"] == alice.world_guid
+    assert captured["guid"] == alice.char_guid
     assert captured["field_updates"] == [
         (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE, 10213),
+        (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE + 1, 0),
+    ]
+
+
+def test_addmoney_supports_negative_copper_and_updates_coinage(monkeypatch):
+    captured = []
+    playerobjects_module = sys.modules["server.modules.handlers.world.bootstrap.playerobjects"]
+
+    def _fake_build_multi_u32_update_object_payload(*, map_id, guid, field_updates):
+        captured.append((int(map_id), int(guid), list(field_updates)))
+        return b"money-update"
+
+    monkeypatch.setattr(
+        playerobjects_module,
+        "build_multi_u32_update_object_payload",
+        _fake_build_multi_u32_update_object_payload,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.DatabaseConnection,
+        "update_character_money",
+        lambda guid, realm_id, money: True,
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.world_guid = 0x30001000003E9
+    alice.money = 20000
+
+    responses = chat_handlers.chat_commands.cmd_addmoney(alice, ["-100"])
+
+    assert alice.money == 19900
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"money-update")
+    assert captured[-1][2] == [
+        (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE, 19900),
+        (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE + 1, 0),
+    ]
+
+    chat_handlers.chat_commands.cmd_addmoney(alice, ["-999999"])
+
+    assert alice.money == 0
+    assert captured[-1][2] == [
+        (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE, 0),
+        (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE + 1, 0),
+    ]
+
+
+def test_addmoney_parses_signed_denomination_values(monkeypatch):
+    playerobjects_module = sys.modules["server.modules.handlers.world.bootstrap.playerobjects"]
+    saved = []
+
+    monkeypatch.setattr(
+        playerobjects_module,
+        "build_multi_u32_update_object_payload",
+        lambda *, map_id, guid, field_updates: b"money-update",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.DatabaseConnection,
+        "update_character_money",
+        lambda guid, realm_id, money: saved.append(int(money)) or True,
+        raising=False,
+    )
+
+    cases = (
+        ("10g10s10c", 101010),
+        ("-10g10s10c", -101010),
+        ("5g", 50000),
+        ("-5g", -50000),
+        ("25s", 2500),
+        ("-25s", -2500),
+        ("50c", 50),
+        ("-50c", -50),
+        ("100000", 100000),
+        ("-100000", -100000),
+    )
+
+    for raw, expected_delta in cases:
+        state = GlobalState()
+        alice = _make_session(state, "Alice", 1001)
+        alice.realm_id = 1
+        alice.money = 200000
+
+        responses = chat_handlers.chat_commands.cmd_addmoney(alice, [raw])
+
+        assert alice.money == 200000 + expected_delta
+        assert saved[-1] == alice.money
+        assert responses[0] == ("SMSG_UPDATE_OBJECT", b"money-update")
+
+
+def test_addmoney_uses_self_object_guid_when_world_guid_exists(monkeypatch):
+    captured = {}
+    playerobjects_module = sys.modules["server.modules.handlers.world.bootstrap.playerobjects"]
+
+    def _fake_build_multi_u32_update_object_payload(*, map_id, guid, field_updates):
+        captured["guid"] = int(guid)
+        captured["field_updates"] = list(field_updates)
+        return b"money-update"
+
+    monkeypatch.setattr(
+        playerobjects_module,
+        "build_multi_u32_update_object_payload",
+        _fake_build_multi_u32_update_object_payload,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.DatabaseConnection,
+        "update_character_money",
+        lambda guid, realm_id, money: True,
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.realm_id = 1
+    alice.world_guid = 0x30001000003E9
+    alice.money = 10
+
+    responses = chat_handlers.chat_commands.cmd_addmoney(alice, ["100"])
+
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"money-update")
+    assert captured["guid"] == alice.char_guid
+    assert captured["field_updates"] == [
+        (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE, 110),
         (chat_handlers.chat_commands._PLAYER_FIELD_COINAGE + 1, 0),
     ]
 

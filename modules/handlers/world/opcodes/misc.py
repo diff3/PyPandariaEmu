@@ -38,6 +38,7 @@ from server.modules.handlers.world.opcodes.movement import (
     _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
+from server.modules.handlers.world.taxi_runtime import complete_taxi_for_disconnect
 from server.modules.interpretation.utils import dsl_decode
 from server.modules.handlers.world.state.runtime import (
     advance_global_time,
@@ -148,6 +149,8 @@ def handle_set_action_button(session, ctx: PacketContext) -> Tuple[int, Optional
 def handle_logout_request(session, ctx):
     log_cmsg(ctx)
     Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
+
+    complete_taxi_for_disconnect(session)
 
     # --- REMOVE FROM WORLD ---
     state = getattr(session, "global_state", None)

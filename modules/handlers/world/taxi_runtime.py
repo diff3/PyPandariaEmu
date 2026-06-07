@@ -291,6 +291,20 @@ def start_taxi_flight(
         float(state.speed),
         float(path.total_length),
     )
+    Logger.info(
+        "[TAXI_XMAP_DEBUG] start player=%s route=%s leg=%s source=%s destination=%s "
+        "source_map=%s destination_map=%s phase=%s pending=%s spline_response=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        list(state.route_nodes),
+        int(state.current_leg_index),
+        int(source_node),
+        int(destination_node),
+        int(path.source_map),
+        int(path.destination_map),
+        str(getattr(state, "phase", "")),
+        getattr(session, "pending_taxi_transfer", None),
+        int(spline_response is not None),
+    )
     _taxi_debug(
         "[TAXI_DEBUG] speed player=%s base=%.2f length=%.2f estimated_seconds=%.2f packet_cadence=spline",
         int(getattr(session, "char_guid", 0) or 0),
@@ -357,6 +371,20 @@ def continue_taxi_flight(
     _apply_taxi_position(session, first, _segment_orientation(first, second))
     response = _build_taxi_spline_response(session, state)
     broadcast_player_state_update(session, force=True)
+    Logger.info(
+        "[TAXI_XMAP_DEBUG] continue player=%s route=%s leg=%s source=%s destination=%s "
+        "source_map=%s destination_map=%s phase=%s pending=%s spline_response=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        list(getattr(state, "route_nodes", ()) or ()),
+        int(getattr(state, "current_leg_index", 0) or 0),
+        int(source_node),
+        int(destination_node),
+        int(path.source_map),
+        int(path.destination_map),
+        str(getattr(state, "phase", "")),
+        getattr(session, "pending_taxi_transfer", None),
+        int(response is not None),
+    )
     return [response] if response is not None else []
 
 

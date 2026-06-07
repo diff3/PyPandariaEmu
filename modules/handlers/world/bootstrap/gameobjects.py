@@ -563,6 +563,14 @@ def build_database_gameobject_responses(
             map_id=map_id,
         ):
             continue
+        original_world_guid = int(world_guid)
+        entry = cached_transport_runtime_entry(session, entry)
+        world_guid = int(entry.get("world_guid", original_world_guid) or original_world_guid)
+        if world_guid != original_world_guid:
+            loaded_transports = getattr(session, "loaded_transport_entries", None)
+            if isinstance(loaded_transports, dict):
+                loaded_transports.pop(original_world_guid, None)
+                loaded_transports[world_guid] = dict(entry)
         filtered_entries.append(entry)
         if seen is not None:
             seen.add(world_guid)

@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import random
+import re
 import time
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
@@ -711,10 +712,8 @@ def world_boat_status(session, _args):
 
 @register_command("taxi", ".taxi <on|off|status>")
 def cmd_taxi(session, args: list[str]) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.feature_config import taxi_cheat_enabled as config_taxi_cheat_enabled
-
     if not args:
-        enabled = bool(getattr(session, "taxi_cheat_enabled", False)) or config_taxi_cheat_enabled()
+        enabled = bool(getattr(session, "taxi_cheat_enabled", False))
         return _notification_response(f"[Taxi] cheat={int(enabled)}")
 
     sub = str(args[0]).lower()
@@ -725,7 +724,7 @@ def cmd_taxi(session, args: list[str]) -> list[tuple[str, bytes]]:
         session.taxi_cheat_enabled = False
         return _notification_response("[Taxi] cheat off")
     if sub == "status":
-        enabled = bool(getattr(session, "taxi_cheat_enabled", False)) or config_taxi_cheat_enabled()
+        enabled = bool(getattr(session, "taxi_cheat_enabled", False))
         return _notification_response(f"[Taxi] cheat={int(enabled)}")
     return _notification_response("Usage: .taxi <on|off|status>")
 
@@ -1095,7 +1094,32 @@ def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
     Logger.info("[Mount][Debug] chat .dismount responses=%s", len(responses))
     return _append_feedback_response(responses, "[Mount] dismount requested")
 
-import re
+
+def _parse_money_delta(raw: str) -> int | None:
+    value = str(raw or "").lower().strip()
+    if not value:
+        return None
+
+    if value.lstrip("-").isdigit():
+        return int(value)
+
+    sign = -1 if value.startswith("-") else 1
+    if value[0:1] in {"+", "-"}:
+        value = value[1:]
+
+    pattern = re.compile(r"(?:(\d+)g)?(?:(\d+)s)?(?:(\d+)c)?")
+    match = pattern.fullmatch(value)
+    if not match:
+        return None
+
+    g, s, c = match.groups()
+    copper = int(g or 0) * 10000
+    copper += int(s or 0) * 100
+    copper += int(c or 0)
+    if copper == 0:
+        return None
+    return sign * copper
+
 
 @register_command("addmoney", ".addmoney", allow_args=True)
 def cmd_addmoney(session, args: list[str]):
@@ -1109,26 +1133,9 @@ def cmd_addmoney(session, args: list[str]):
         return msg("Usage: .addmoney <copper | 10g10s10c>")
 
     raw = args[0].lower().strip()
-    copper = 0
-
-    # --- plain copper ---
-    if raw.isdigit():
-        copper = int(raw)
-    else:
-        # --- formatted ---
-        pattern = re.compile(r"(?:(\d+)g)?(?:(\d+)s)?(?:(\d+)c)?")
-        match = pattern.fullmatch(raw)
-
-        if not match:
-            return msg("Invalid format. Example: 10g10s10c")
-
-        g, s, c = match.groups()
-        copper += int(g or 0) * 10000
-        copper += int(s or 0) * 100
-        copper += int(c or 0)
-
-        if copper == 0:
-            return msg("Invalid amount. Example: 10g10s10c")
+    copper = _parse_money_delta(raw)
+    if copper is None:
+        return msg("Invalid format. Example: 10g10s10c")
 
     current = int(getattr(session, "money", 0) or 0)
     new_amount = max(0, current + copper)
@@ -1156,20 +1163,15 @@ def cmd_addmoney(session, args: list[str]):
     ]
 
     return [
-        ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(f"+{copper} copper")),
         (
             "SMSG_UPDATE_OBJECT",
             build_multi_u32_update_object_payload(
                 map_id=int(getattr(session, "map_id", 0) or 0),
-                guid=int(
-                    getattr(session, "world_guid", 0)
-                    or getattr(session, "player_guid", 0)
-                    or getattr(session, "char_guid", 0)
-                    or 0
-                ),
+                guid=_sender_chat_guid(session),
                 field_updates=money_fields,
             ),
         ),
+        ("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(f"{copper:+d} copper")),
     ]
 
 

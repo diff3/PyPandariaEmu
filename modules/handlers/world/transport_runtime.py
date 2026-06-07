@@ -973,6 +973,87 @@ def _transport_epoch_ms() -> int:
     return int(time.time() * 1000.0)
 
 
+def _transport_base_guid(entry: dict[str, Any]) -> int:
+    for key in ("transport_db_guid", "source_transport_guid"):
+        value = int(entry.get(key, 0) or 0)
+        if value > 0:
+            return value
+
+    spawn_guid = int(entry.get("guid", 0) or 0)
+    if spawn_guid >= 100_000:
+        base_guid = int(spawn_guid) % 100_000
+        if base_guid > 0:
+            return base_guid
+    return spawn_guid
+
+
+def _canonical_runtime_state_for_entry(
+    session: Any,
+    entry: dict[str, Any],
+    *,
+    current_world_guid: int,
+    current_state: RuntimeTransportState | None,
+) -> RuntimeTransportState | None:
+    current_phase = int(
+        getattr(current_state, "path_progress_ms", entry.get("transport_path_progress", 0)) or 0
+    )
+
+    base_guid = _transport_base_guid(entry)
+    spawn_guid = int(entry.get("guid", 0) or 0)
+    is_map_clone_alias = bool(spawn_guid >= 100_000 and base_guid > 0 and spawn_guid != base_guid)
+    if not is_map_clone_alias:
+        return current_state
+    if current_phase > 0 and current_state is not None and int(current_state.spawn_guid) == int(base_guid):
+        return current_state
+
+    entry_id = int(entry.get("entry", 0) or 0)
+    session_map = int(getattr(session, "map_id", entry.get("map", 0)) or 0)
+    if base_guid <= 0 or entry_id <= 0:
+        return current_state
+
+    best_state = current_state
+    best_distance = float("inf")
+    session_x = float(getattr(session, "x", 0.0) or 0.0)
+    session_y = float(getattr(session, "y", 0.0) or 0.0)
+    for candidate_guid, candidate in list(_runtime_transport_states().items()):
+        if int(candidate_guid) == int(current_world_guid):
+            continue
+        if int(candidate.entry) != int(entry_id):
+            continue
+        if int(candidate.spawn_guid) != int(base_guid):
+            candidate_entry = get_world_transport_manager().entry_for_guid(int(candidate_guid))
+            candidate_base = _transport_base_guid(candidate_entry or {})
+            if int(candidate_base) != int(base_guid):
+                continue
+        _sync_transport_state_from_movement_cache(candidate)
+        if int(candidate.map_id) != int(session_map):
+            continue
+        if int(candidate.path_progress_ms or 0) <= 0:
+            continue
+        distance = _transport_distance(
+            session_x,
+            session_y,
+            float(getattr(session, "z", 0.0) or 0.0),
+            float(candidate.x),
+            float(candidate.y),
+            float(candidate.z),
+        )
+        if distance < best_distance:
+            best_state = candidate
+            best_distance = float(distance)
+
+    if best_state is not current_state and best_state is not None:
+        Logger.info(
+            "[TransportBootstrap] using authoritative runtime transport "
+            "clone=0x%016X authoritative=0x%016X entry=%s phase=%s",
+            int(current_world_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(best_state.guid) & 0xFFFFFFFFFFFFFFFF,
+            int(entry_id),
+            int(best_state.path_progress_ms or 0),
+        )
+    return best_state
+
+
 def linked_transport_world_guid(entry: dict[str, Any], *, map_id: int) -> int:
     base_guid = int(
         entry.get("transport_db_guid", 0)
@@ -1205,6 +1286,14 @@ def cached_transport_runtime_entry(session: Any, entry: dict[str, Any]) -> dict[
         missed_entry.setdefault("_transport_create_source_path", "database")
         missed_entry["_transport_runtime_state_found"] = False
         return missed_entry
+    state = _canonical_runtime_state_for_entry(
+        session,
+        entry,
+        current_world_guid=world_guid,
+        current_state=state,
+    )
+    if state is not None:
+        world_guid = int(state.guid)
 
     transform = get_movement_manager().get_transform(world_guid)
     visible_transfer_node = (
@@ -1313,6 +1402,7 @@ def _build_visible_transport_updates(
     considered = 0
     visible_guids: list[int] = []
     rejected_guids: list[int] = []
+    started_transport_transfer = False
 
     for world_guid, entry in list(entries.items()):
         considered += 1
@@ -1351,6 +1441,7 @@ def _build_visible_transport_updates(
             )
             if transfer_responses:
                 responses.extend(transfer_responses)
+                started_transport_transfer = True
                 continue
             responses.extend(
                 _despawn_loaded_transport(
@@ -1422,6 +1513,7 @@ def _build_visible_transport_updates(
             )
             if transfer_responses:
                 responses.extend(transfer_responses)
+                started_transport_transfer = True
                 continue
             responses.extend(
                 _despawn_loaded_transport(
@@ -1502,6 +1594,65 @@ def _build_visible_transport_updates(
         rejected_guids=rejected_guids,
         context=context,
     )
+    if not started_transport_transfer:
+        responses.extend(
+            _build_new_visible_transport_creates(
+                session,
+                entries,
+                context=f"{context}_lifecycle_spawn",
+            )
+        )
+    return responses
+
+
+def _build_new_visible_transport_creates(
+    session: Any,
+    entries: dict[int, dict[str, Any]],
+    *,
+    context: str,
+) -> list[tuple[str, bytes]]:
+    """Create transports that became visible after lifecycle despawns."""
+    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
+    if isinstance(loaded_gameobjects, set):
+        loaded_guids = set(int(guid) for guid in loaded_gameobjects)
+    else:
+        loaded_guids = set(int(guid) for guid in entries)
+
+    responses: list[tuple[str, bytes]] = []
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    for entry in synthetic_transport_entries_near(
+        session,
+        loaded_guids=loaded_guids,
+        context=context,
+    ):
+        world_guid = int(entry.get("world_guid", 0) or 0)
+        if world_guid <= 0 or world_guid in entries:
+            continue
+        if not register_loaded_transport_entry(
+            session,
+            entry,
+            world_guid=world_guid,
+            map_id=int(entry.get("map", map_id) or map_id),
+        ):
+            continue
+        entries[world_guid] = dict(entry)
+        if isinstance(loaded_gameobjects, set):
+            loaded_gameobjects.add(world_guid)
+        payload = _build_gameobject_update_payload(
+            map_id=map_id,
+            entry=entry,
+            realm_id=realm_id,
+        )
+        responses.append(make_update_object_response(payload))
+        loaded_guids.add(world_guid)
+        Logger.info(
+            "[TransportLifecycle] spawn transport=0x%016X player=%s map=%s context=%s",
+            world_guid & 0xFFFFFFFFFFFFFFFF,
+            int(getattr(session, "char_guid", 0) or 0),
+            map_id,
+            str(context),
+        )
     return responses
 
 

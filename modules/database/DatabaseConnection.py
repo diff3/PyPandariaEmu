@@ -1426,6 +1426,32 @@ class DatabaseConnection:
             return False
 
     @staticmethod
+    def save_character_taximask(char_guid: int, realm_id: int, taximask: str) -> bool:
+        session = DatabaseConnection.chars()
+        try:
+            updated = (
+                session.query(Characters)
+                .filter(
+                    Characters.guid == int(char_guid),
+                    Characters.realm == int(realm_id),
+                )
+                .update({Characters.taximask: str(taximask or "")}, synchronize_session=False)
+            )
+            session.commit()
+            if updated <= 0:
+                Logger.warning(
+                    f"[DB] save_character_taximask missing character guid={char_guid} realm={realm_id}"
+                )
+                return False
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.error(
+                f"[DB] save_character_taximask failed guid={char_guid} realm={realm_id}: {exc}"
+            )
+            return False
+
+    @staticmethod
     def ensure_character_achievement_tables() -> bool:
         if DatabaseConnection._achievement_tables_ready:
             return True

@@ -373,6 +373,23 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                 else:
                     opcode_name, payload, is_raw = item
 
+                if opcode_name in {
+                    "SMSG_TRANSFER_PENDING",
+                    "SMSG_NEW_WORLD",
+                    "SMSG_ON_MONSTER_MOVE",
+                }:
+                    taxi_state = getattr(conn_session, "taxi_state", None)
+                    Logger.info(
+                        "[TAXI_XMAP_DEBUG] send_packet opcode=%s player=%s map=%s "
+                        "phase=%s pending=%s size=%s",
+                        str(opcode_name),
+                        int(getattr(conn_session, "char_guid", 0) or 0),
+                        int(getattr(conn_session, "map_id", 0) or 0),
+                        str(getattr(taxi_state, "phase", "")),
+                        getattr(conn_session, "pending_taxi_transfer", None),
+                        len(payload),
+                    )
+
                 if is_raw:
                     if should_log_packet("worldserver", opcode_name):
                         Logger.info(

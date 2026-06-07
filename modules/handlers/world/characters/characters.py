@@ -400,8 +400,65 @@ def _build_empty_enum_characters_payload() -> bytes:
     }
     return EncoderHandler.encode_packet("SMSG_ENUM_CHARACTERS_RESULT", fields)
 
-def _default_taximask() -> str:
-    return " ".join(["0"] * 16)
+_TAXI_MASK_WORDS = 64
+_ALLIANCE_STARTING_TAXI_NODES = (
+    2,
+    582,
+    589,
+    6,
+    619,
+    620,
+    26,
+    456,
+    457,
+    94,
+    624,
+    49,
+    100,
+    128,
+    310,
+)
+_HORDE_STARTING_TAXI_NODES = (
+    23,
+    536,
+    537,
+    11,
+    384,
+    460,
+    22,
+    402,
+    82,
+    625,
+    631,
+    99,
+    128,
+    310,
+)
+_ALLIANCE_RACES = {1, 3, 4, 7, 11, 22, 25}
+_HORDE_RACES = {2, 5, 6, 8, 9, 10, 26}
+
+
+def _serialize_taximask_for_nodes(node_ids: tuple[int, ...]) -> str:
+    words = [0] * _TAXI_MASK_WORDS
+    for node_id in node_ids:
+        node_id = int(node_id or 0)
+        if node_id <= 0:
+            continue
+        protocol_bit = node_id - 1
+        word_index = protocol_bit // 32
+        if word_index >= len(words):
+            continue
+        words[word_index] |= 1 << (protocol_bit % 32)
+    return " ".join(str(word) for word in words)
+
+
+def _default_taximask(race: int) -> str:
+    race = int(race or 0)
+    if race in _ALLIANCE_RACES:
+        return _serialize_taximask_for_nodes(_ALLIANCE_STARTING_TAXI_NODES)
+    if race in _HORDE_RACES:
+        return _serialize_taximask_for_nodes(_HORDE_STARTING_TAXI_NODES)
+    return _serialize_taximask_for_nodes((128, 310))
 
 def _next_character_guid(session) -> int:
     max_guid = 0
@@ -1213,7 +1270,7 @@ def handle_CMSG_CHAR_CREATE(ctx: PacketContext):
             orientation=start_o,
             health=1,
             money=0,
-            taximask=_default_taximask(),
+            taximask=_default_taximask(race_id),
             knownTitles=_default_known_titles(),
             exploredZones=_default_explored_zones(db),
         )

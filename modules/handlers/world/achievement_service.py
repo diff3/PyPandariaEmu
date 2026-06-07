@@ -78,6 +78,11 @@ def _now() -> int:
     return int(time.time())
 
 
+def _taxi_exploration_suppressed(session: Any) -> bool:
+    state = getattr(session, "taxi_state", None)
+    return bool(getattr(state, "active", False))
+
+
 def _player_name(session: Any) -> str:
     return str(getattr(session, "player_name", "") or getattr(session, "account_name", "") or "?")
 
@@ -860,6 +865,14 @@ def discover_area(session: Any, area_id: int, *, send_map_update: bool = True) -
 
     area = _load_area_meta().get(area_id)
     if area is None:
+        return []
+
+    if _taxi_exploration_suppressed(session):
+        Logger.info(
+            "[Explore] skipped during taxi area=%s player=%s",
+            area_id,
+            _player_name(session),
+        )
         return []
 
     discovered = _session_discovered_areas(session)

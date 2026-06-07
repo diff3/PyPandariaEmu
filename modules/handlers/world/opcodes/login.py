@@ -105,7 +105,6 @@ from server.modules.handlers.world.feature_config import (
     gameobjects_enabled,
     npc_auto_stream_enabled,
     npcs_enabled,
-    taxi_cheat_enabled as config_taxi_cheat_enabled,
 )
 
 
@@ -522,6 +521,16 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
 
 def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tuple[str, bytes]]:
     # TODO: Teleport bootstrap still shares movement replay/bootstrap helpers with legacy world init.
+    Logger.info(
+        "[TAXI_XMAP_DEBUG] teleport_bootstrap_enter player=%s map=%s "
+        "teleport_pending=%s worldport_ack_pending=%s phase=%s pending=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        int(getattr(session, "map_id", 0) or 0),
+        int(bool(getattr(session, "teleport_pending", False))),
+        int(bool(getattr(session, "worldport_ack_pending", False))),
+        str(getattr(getattr(session, "taxi_state", None), "phase", "")),
+        getattr(session, "pending_taxi_transfer", None),
+    )
     _reset_loaded_world_object_state(session)
     _set_login_state(session, LoginState.WORLD_BOOTSTRAP)
     refresh_region_weather(session)
@@ -588,6 +597,19 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
             context="worldport-loading-complete",
         )
     )
+    from server.modules.handlers.world.opcodes import taxi as taxi_handlers
+
+    taxi_responses = taxi_handlers.continue_pending_cross_map_taxi(session)
+    Logger.info(
+        "[TAXI_XMAP_DEBUG] teleport_bootstrap_taxi_continue player=%s map=%s "
+        "phase=%s pending=%s packets=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        int(getattr(session, "map_id", 0) or 0),
+        str(getattr(getattr(session, "taxi_state", None), "phase", "")),
+        getattr(session, "pending_taxi_transfer", None),
+        [opcode for opcode, _payload in taxi_responses],
+    )
+    responses.extend(taxi_responses)
 
     session.loading_screen_done = True
     session.post_loading_sent = True
@@ -851,8 +873,9 @@ def handle_player_login(session, ctx: PacketContext):
     ]
 
     session.explored_zones_raw = str(getattr(row, "exploredZones", "") or "")
+    session.taximask_raw = str(getattr(row, "taximask", "") or "")
     session.map_cheat_enabled = False
-    session.taxi_cheat_enabled = bool(config_taxi_cheat_enabled())
+    session.taxi_cheat_enabled = False
     session.chosen_title = int(getattr(row, "chosenTitle", 0) or 0)
     session.known_titles_raw = str(getattr(row, "knownTitles", "") or "")
 
@@ -982,6 +1005,15 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
         Logger.info(
             f"[WorldHandlers] LOADING_SCREEN_NOTIFY show=0 completing teleport "
             f"destination={getattr(session, 'teleport_destination', None)}"
+        )
+        Logger.info(
+            "[TAXI_XMAP_DEBUG] loading_screen_complete player=%s map=%s "
+            "destination=%s phase=%s pending=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            int(getattr(session, "map_id", 0) or 0),
+            str(getattr(session, "teleport_destination", "") or ""),
+            str(getattr(getattr(session, "taxi_state", None), "phase", "")),
+            getattr(session, "pending_taxi_transfer", None),
         )
         login_ctx = _build_world_login_context(session)
         responses = _queue_teleport_world_transition(session, login_ctx)

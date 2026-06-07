@@ -338,6 +338,83 @@ def test_build_database_gameobject_responses_marks_bootstrap_creates_loaded(monk
     assert expected_guid in session.loaded_transport_entries
 
 
+def test_database_transport_bootstrap_uses_authoritative_runtime_entry(monkeypatch):
+    gameobjects = _import_gameobjects()
+    session = SimpleNamespace(map_id=1, x=50.0, y=0.0, realm_id=1)
+    clone_guid = int(gameobjects.MoTransportGuid.from_spawn_guid(100007))
+    canonical_guid = int(gameobjects.MoTransportGuid.from_spawn_guid(7))
+    captured_entries = []
+
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_gameobjects_near",
+        staticmethod(
+            lambda map_id, x, y, radius, limit: [
+                {
+                    "guid": 100007,
+                    "world_guid": clone_guid,
+                    "entry": 20808,
+                    "type": 15,
+                    "map": 1,
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.0,
+                    "transport_path_progress": 0,
+                }
+            ]
+        ),
+    )
+
+    transport_runtime_module = sys.modules["server.modules.handlers.world.transport_runtime"]
+
+    def _fake_register_loaded_transport_entry(_session, entry, world_guid, map_id):
+        loaded = getattr(_session, "loaded_transport_entries", {})
+        loaded[int(world_guid)] = dict(entry)
+        _session.loaded_transport_entries = loaded
+        return True
+
+    def _fake_cached_transport_runtime_entry(_session, entry):
+        moved = dict(entry)
+        moved["guid"] = 7
+        moved["world_guid"] = canonical_guid
+        moved["x"] = 50.0
+        moved["y"] = 0.0
+        moved["transport_path_progress"] = 500
+        return moved
+
+    monkeypatch.setattr(
+        transport_runtime_module,
+        "register_loaded_transport_entry",
+        _fake_register_loaded_transport_entry,
+    )
+    monkeypatch.setattr(
+        transport_runtime_module,
+        "cached_transport_runtime_entry",
+        _fake_cached_transport_runtime_entry,
+    )
+    monkeypatch.setattr(
+        gameobjects,
+        "_build_gameobject_update_payload",
+        lambda **kwargs: captured_entries.append(dict(kwargs["entry"])) or b"transport-create",
+    )
+    monkeypatch.setattr(
+        gameobjects,
+        "make_update_object_response",
+        lambda payload: ("SMSG_UPDATE_OBJECT", payload),
+    )
+
+    responses = gameobjects.build_database_gameobject_responses(session)
+
+    assert responses == [("SMSG_UPDATE_OBJECT", b"transport-create")]
+    assert captured_entries[0]["world_guid"] == canonical_guid
+    assert captured_entries[0]["x"] == 50.0
+    assert captured_entries[0]["transport_path_progress"] == 500
+    assert session.loaded_gameobjects == {canonical_guid}
+    assert clone_guid not in session.loaded_transport_entries
+    assert canonical_guid in session.loaded_transport_entries
+
+
 def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
     creatures = _import_creatures()
     session = SimpleNamespace(
