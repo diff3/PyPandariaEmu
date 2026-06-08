@@ -35,6 +35,14 @@ def _entry_float(entry: Mapping[str, Any], key: str, default: float = 0.0) -> fl
     return float(entry.get(key, default) or default)
 
 
+def _entry_map_id(entry: Mapping[str, Any], default: int = 0) -> int:
+    """Return a map id; map 0 is valid and must not fall back."""
+    value = entry.get("map", default)
+    if value is None:
+        value = default
+    return int(value)
+
+
 def _u32_from_float(value: float) -> int:
     """Pack a float into a little-endian uint32 value."""
     return u32_from_float(value)
@@ -218,8 +226,11 @@ def _log_gameobject_orientation_debug(
 def _gameobject_movement_block_uint32(entry: Mapping[str, Any]) -> int:
     """Return the extra movement block value required by the create flags."""
     gameobject_type = _entry_int(entry, "type") & 0xFF
-    if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
-        return _entry_int(entry, "transport_path_progress", int(time.time() * 1000.0)) & 0xFFFFFFFF
+    if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
+        path_progress = entry.get("transport_path_progress")
+        if path_progress is None:
+            path_progress = int(time.time() * 1000.0)
+        return int(path_progress) & 0xFFFFFFFF
     return _GAMEOBJECT_MOVEMENT_BLOCK_UINT32
 
 
@@ -277,6 +288,47 @@ def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
     )
 
 
+def _transport_runtime_packet_entry(entry: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Overlay transport packet fields from RuntimeTransportState when available."""
+    if _entry_int(entry, "type") != _GAMEOBJECT_TYPE_MO_TRANSPORT:
+        return entry
+
+    world_guid = int(
+        entry.get("world_guid")
+        or MoTransportGuid.from_spawn_guid(_entry_int(entry, "guid"))
+    )
+    if world_guid <= 0:
+        return entry
+
+    try:
+        from server.modules.handlers.world.transport_runtime import runtime_transport_state_for_guid
+
+        state = runtime_transport_state_for_guid(world_guid)
+    except Exception as exc:
+        Logger.warning(
+            "[MO_TRANSPORT_CREATE] runtime state lookup failed world_guid=0x%016X err=%s",
+            world_guid & 0xFFFFFFFFFFFFFFFF,
+            exc,
+        )
+        return entry
+
+    if state is None:
+        return entry
+
+    packet_entry = dict(entry)
+    packet_entry["world_guid"] = int(state.guid)
+    packet_entry["map"] = int(state.map_id)
+    packet_entry["map_id"] = int(state.map_id)
+    packet_entry["x"] = float(state.x)
+    packet_entry["y"] = float(state.y)
+    packet_entry["z"] = float(state.z)
+    packet_entry["orientation"] = float(state.orientation)
+    packet_entry["transport_path_progress"] = int(state.path_progress_ms) & 0xFFFFFFFF
+    if int(getattr(state, "route_period_ms", 0) or 0) > 0:
+        packet_entry["transport_period"] = int(state.route_period_ms)
+    return packet_entry
+
+
 def _build_gameobject_field_values(entry: Mapping[str, Any], *, world_guid: int) -> dict[int, int]:
     """Build update-field values for a single GameObject create packet."""
     gameobject_type = _entry_int(entry, "type") & 0xFF
@@ -314,7 +366,9 @@ def _build_gameobject_field_values(entry: Mapping[str, Any], *, world_guid: int)
 
 def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], realm_id: int) -> bytes:
     """Encode a GameObject CREATE_OBJECT payload through the DSL definition."""
+    entry = _transport_runtime_packet_entry(entry)
     world_guid = _resolve_world_guid(entry, realm_id)
+    packet_map_id = _entry_map_id(entry, int(map_id))
     mask_bytes, field_bytes = _build_fixed_u32_field_block(
         _build_gameobject_field_values(entry, world_guid=world_guid),
         mask_blocks=_GAMEOBJECT_MASK_BLOCKS,
@@ -335,17 +389,34 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
     _log_mo_transport_create_debug(
         entry,
         world_guid=world_guid,
-        packet_map_id=int(map_id),
+        packet_map_id=int(packet_map_id),
         packet_x=stationary_x,
         packet_y=stationary_y,
         packet_z=stationary_z,
         packet_orientation=stationary_orientation,
     )
+    movement_block_uint32 = _gameobject_movement_block_uint32(entry)
+    if _entry_int(entry, "type") in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
+        Logger.info(
+            "[TRANSPORT_CREATE_EXPERIMENT] guid=%s entry=%s type=%s map=%s "
+            "x=%.3f y=%.3f z=%.3f orientation=%.6f path_progress_ms=%s "
+            "movement_block_uint32=%s",
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+            _entry_int(entry, "entry"),
+            _entry_int(entry, "type"),
+            int(packet_map_id),
+            float(stationary_x),
+            float(stationary_y),
+            float(stationary_z),
+            float(stationary_orientation),
+            _entry_int(entry, "transport_path_progress"),
+            int(movement_block_uint32),
+        )
 
     return EncoderHandler.encode_packet(
         "GAMEOBJECT_CREATE",
         {
-            "map_id": int(map_id) & 0xFFFF,
+            "map_id": int(packet_map_id) & 0xFFFF,
             "update_count": _GAMEOBJECT_UPDATE_COUNT,
             "update_type": _GAMEOBJECT_UPDATE_TYPE,
             "guid": {"guid": world_guid},
@@ -361,7 +432,7 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
             "stationary_orientation": stationary_orientation,
             "stationary_x": stationary_x,
             # The current create flags expect these two fields explicitly.
-            "movement_block_uint32": _gameobject_movement_block_uint32(entry),
+            "movement_block_uint32": movement_block_uint32,
             "gameobject_rotation_packed": packed_rotation,
             "mask_blocks": len(mask_bytes) // 4,
             "mask": mask_bytes,
@@ -373,7 +444,9 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
 
 def _build_gameobject_values_update_payload(*, map_id: int, entry: Mapping[str, Any], realm_id: int) -> bytes:
     """Encode a minimal GameObject VALUES update for an already-created object."""
+    entry = _transport_runtime_packet_entry(entry)
     world_guid = _resolve_world_guid(entry, realm_id)
+    packet_map_id = _entry_map_id(entry, int(map_id))
     all_fields = _build_gameobject_field_values(entry, world_guid=world_guid)
     changed_fields: dict[int, int] = {}
 
@@ -398,7 +471,7 @@ def _build_gameobject_values_update_payload(*, map_id: int, entry: Mapping[str, 
     mask_bytes, field_bytes = _build_fixed_u32_field_block(changed_fields, mask_blocks=mask_blocks)
 
     payload = bytearray()
-    payload += struct.pack("<HI", int(map_id) & 0xFFFF, _GAMEOBJECT_UPDATE_COUNT)
+    payload += struct.pack("<HI", int(packet_map_id) & 0xFFFF, _GAMEOBJECT_UPDATE_COUNT)
     payload += struct.pack("<B", _GAMEOBJECT_VALUES_UPDATE_TYPE)
     payload += GuidHelper.pack(int(world_guid) & 0xFFFFFFFFFFFFFFFF)
     payload += struct.pack("<B", len(mask_bytes) // 4)

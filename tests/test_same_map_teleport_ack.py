@@ -3,6 +3,8 @@ import types
 import struct
 from types import SimpleNamespace
 
+import pytest
+
 
 database_module = types.ModuleType("server.modules.database.DatabaseConnection")
 
@@ -48,6 +50,17 @@ class _FakeSession:
         self.char_guid = 7
 
 
+@pytest.fixture(autouse=True)
+def _stub_teleport_visibility_stream(monkeypatch, request):
+    if request.node.name == "test_post_teleport_visibility_stream_bypasses_movement_throttle":
+        return
+    monkeypatch.setattr(
+        movement,
+        "stream_world_objects_after_teleport",
+        lambda _session, *, context: [],
+    )
+
+
 def test_first_movement_packet_keeps_teleport_pending_until_ack(monkeypatch):
     session = _FakeSession()
     session.teleport_pending = True
@@ -66,7 +79,7 @@ def test_first_movement_packet_keeps_teleport_pending_until_ack(monkeypatch):
     )
     calls = []
 
-    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda target: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args: None)
     monkeypatch.setattr(movement, "parse_movement_info", lambda *args: (10.0, 20.0, 30.0, 1.5))
     monkeypatch.setattr(movement, "_accept_movement_update", lambda *args: True)
     monkeypatch.setattr(
@@ -112,7 +125,7 @@ def test_first_movement_packet_keeps_near_teleport_pending_until_ack(monkeypatch
         counter=0,
     )
 
-    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda target: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args: None)
     monkeypatch.setattr(movement, "parse_movement_info", lambda *args: (10.0, 20.0, 30.0, 1.5))
     monkeypatch.setattr(movement, "_accept_movement_update", lambda *args: True)
     monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args: True)
@@ -382,6 +395,7 @@ def test_worldport_ack_keeps_teleport_pending_for_loading_screen_completion(monk
     session.teleport_destination = "Silvermoon"
 
     calls = []
+    stream_calls: list[str] = []
     monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
     monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
     monkeypatch.setattr(movement, "_save_session_position", lambda target, **kwargs: None)
@@ -396,6 +410,12 @@ def test_worldport_ack_keeps_teleport_pending_for_loading_screen_completion(monk
         "encode_skyfire_messagechat_system_payload",
         lambda message: message.encode("utf-8"),
     )
+    monkeypatch.setattr(
+        movement,
+        "stream_world_objects_after_teleport",
+        lambda target, *, context: stream_calls.append(context)
+        or [("SMSG_UPDATE_OBJECT", b"worldport-visible")],
+    )
 
     status, responses = movement.handle_move_worldport_ack(session, None)
 
@@ -404,8 +424,12 @@ def test_worldport_ack_keeps_teleport_pending_for_loading_screen_completion(monk
     assert session.worldport_ack_pending is False
     assert session.near_teleport_pending is False
     assert session.teleport_destination == "Silvermoon"
-    assert responses == [("SMSG_MESSAGECHAT", b"[Teleport] worldport ack -> Silvermoon")]
+    assert responses == [
+        ("SMSG_MESSAGECHAT", b"[Teleport] worldport ack -> Silvermoon"),
+        ("SMSG_UPDATE_OBJECT", b"worldport-visible"),
+    ]
     assert calls == [(session, "worldport-ack")]
+    assert stream_calls == ["worldport-ack"]
 
 
 def test_areatrigger_same_map_can_teleport_again_after_ack(monkeypatch):
@@ -457,7 +481,7 @@ def test_areatrigger_same_map_can_teleport_again_after_ack(monkeypatch):
         "build_same_map_teleport_self_resync_responses",
         lambda target: [("SMSG_UPDATE_OBJECT", b"0006")],
     )
-    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda target: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args: None)
     monkeypatch.setattr(movement, "parse_movement_info", lambda *args: (120.0, 240.0, 15.0, 0.75))
     monkeypatch.setattr(movement, "_accept_movement_update", lambda *args: True)
     monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args: True)
@@ -715,7 +739,7 @@ def test_handle_movement_packet_returns_stream_responses(monkeypatch):
         counter=0,
     )
 
-    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda target: None)
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args: None)
     monkeypatch.setattr(movement, "parse_movement_info", lambda *args: (10.0, 20.0, 30.0, 1.5))
     monkeypatch.setattr(movement, "_accept_movement_update", lambda *args: True)
     monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args: True)

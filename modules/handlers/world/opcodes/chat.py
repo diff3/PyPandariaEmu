@@ -1286,10 +1286,12 @@ def _clear_loaded_world_objects_for_teleport(session, movement_handlers, *, map_
         getattr(session, "loaded_gameobjects", None),
         getattr(session, "loaded_npcs", None),
     )
+    loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
 
     for loaded_guids in loaded_sets:
         if not isinstance(loaded_guids, set):
             continue
+        is_gameobject_set = loaded_guids is loaded_sets[0]
         if builder is not None:
             for guid in sorted(int(value) for value in loaded_guids):
                 if int(guid) <= 0:
@@ -1300,6 +1302,9 @@ def _clear_loaded_world_objects_for_teleport(session, movement_handlers, *, map_
                         builder(map_id=int(map_id), guid=int(guid)),
                     )
                 )
+        if is_gameobject_set and isinstance(loaded_transport_entries, dict):
+            for guid in sorted(int(value) for value in loaded_guids):
+                loaded_transport_entries.pop(int(guid), None)
         loaded_guids.clear()
 
     session.last_gameobject_stream_at = 0.0
@@ -1468,7 +1473,11 @@ def apply_player_state_change(
                 session,
                 [("SMSG_MOVE_TELEPORT", movement_handlers.build_same_map_teleport_payload(session))],
             )
-            return pre_position_responses + teleport_responses
+            visibility_responses = movement_handlers.stream_world_objects_after_teleport(
+                session,
+                context="near-teleport-start",
+            )
+            return pre_position_responses + teleport_responses + visibility_responses
 
         session.teleport_pending = True
         session.worldport_ack_pending = True

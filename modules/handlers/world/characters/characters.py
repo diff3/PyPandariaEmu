@@ -259,6 +259,11 @@ def _validate_character_name(name: str) -> Optional[int]:
     return None
 
 
+def _normalize_character_name(name: str) -> str:
+    if not name:
+        return ""
+    return name[0].upper() + name[1:].lower()
+
 
 def _default_equipment() -> list[dict]:
     return [
@@ -1160,6 +1165,7 @@ def handle_CMSG_CHAR_CREATE(ctx: PacketContext):
             "SMSG_CHAR_CREATE", {"result": name_error}
         )
         return 0, [("SMSG_CHAR_CREATE", payload)]
+    name = _normalize_character_name(name)
 
     # --------------------------------------------------
     # Name check (global, no session)

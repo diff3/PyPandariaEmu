@@ -513,6 +513,15 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
             Logger.info("[WorldLoginExperiment] sending TIME_SYNC_REQUEST")
         responses.append((opcode_name, payload))
 
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+    responses.extend(
+        movement_handlers.stream_world_objects_after_teleport(
+            session,
+            context="login-bootstrap-complete",
+        )
+    )
+
     session.loading_screen_done = True
     session.post_loading_sent = True
     Logger.info("[LOGIN] WORLD_BOOTSTRAP queued player create + minimal bootstrap bundle")

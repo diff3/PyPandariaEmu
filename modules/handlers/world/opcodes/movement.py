@@ -5004,6 +5004,7 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
         )
     ]
     responses.extend(post_teleport_responses)
+    responses.extend(stream_world_objects_after_teleport(session, context="worldport-ack"))
     responses.extend(_build_current_weather_response(session, reason="worldport-ack"))
     return 0, responses
 @register("CMSG_MOVE_FORCE_RUN_SPEED_CHANGE_ACK")

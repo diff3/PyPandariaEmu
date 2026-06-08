@@ -268,6 +268,7 @@ def _install_movement_stub(monkeypatch, **overrides):
     module._save_session_position = lambda *args, **kwargs: True
     module._capture_persist_position_from_session = lambda session: None
     module._mark_position_dirty = lambda session: None
+    module.stream_world_objects_after_teleport = lambda session, *, context: []
     module._movement_state = lambda session: SimpleNamespace(
         x=float(getattr(session, "x", 0.0) or 0.0),
         y=float(getattr(session, "y", 0.0) or 0.0),
@@ -2800,6 +2801,88 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     assert responses[1] == ("SMSG_PLAYER_MOVE", b"move")
 
 
+def test_same_map_teleport_streams_world_objects_without_ack(monkeypatch):
+    calls: list[str] = []
+    movement_module = _install_movement_stub(
+        monkeypatch,
+        stream_world_objects_after_teleport=lambda session, *, context: calls.append(context)
+        or session.loaded_gameobjects.add(11)
+        or session.loaded_transport_entries.update({11: {"entry": 20808}})
+        or [("SMSG_UPDATE_OBJECT", b"transport-create")],
+    )
+    monkeypatch.setattr(movement_module, "build_same_map_teleport_payload", lambda session: b"teleport", raising=False)
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [("SMSG_PLAYER_MOVE", b"move")],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.loaded_gameobjects = set()
+    alice.loaded_transport_entries = {}
+
+    responses = chat_handlers.apply_player_state_change(
+        alice,
+        position=(10.0, 20.0, 30.0, 1.5),
+        map_id=1,
+    )
+
+    assert calls == ["near-teleport-start"]
+    assert ("SMSG_UPDATE_OBJECT", b"transport-create") in responses
+    assert 11 in alice.loaded_gameobjects
+    assert 11 in alice.loaded_transport_entries
+    assert alice.near_teleport_pending is True
+
+
+def test_same_map_teleport_immediate_stream_makes_later_ack_stream_idempotent(monkeypatch):
+    transport_guid = 11
+    create_count = 0
+
+    def fake_stream(session, *, context):
+        nonlocal create_count
+        if transport_guid in getattr(session, "loaded_gameobjects", set()):
+            return []
+        session.loaded_gameobjects.add(transport_guid)
+        session.loaded_transport_entries[transport_guid] = {"entry": 20808}
+        create_count += 1
+        return [("SMSG_UPDATE_OBJECT", f"transport-create:{context}".encode())]
+
+    movement_module = _install_movement_stub(
+        monkeypatch,
+        stream_world_objects_after_teleport=fake_stream,
+    )
+    monkeypatch.setattr(movement_module, "build_same_map_teleport_payload", lambda session: b"teleport", raising=False)
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [("SMSG_PLAYER_MOVE", b"move")],
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.loaded_gameobjects = set()
+    alice.loaded_transport_entries = {}
+
+    responses = chat_handlers.apply_player_state_change(
+        alice,
+        position=(10.0, 20.0, 30.0, 1.5),
+        map_id=1,
+    )
+    ack_responses = movement_module.stream_world_objects_after_teleport(
+        alice,
+        context="near-teleport-ack",
+    )
+
+    assert ("SMSG_UPDATE_OBJECT", b"transport-create:near-teleport-start") in responses
+    assert ack_responses == []
+    assert create_count == 1
+    assert alice.loaded_gameobjects == {transport_guid}
+    assert alice.loaded_transport_entries == {transport_guid: {"entry": 20808}}
+
+
 def test_apply_player_state_change_clears_loaded_world_objects_before_teleport(monkeypatch):
     movement_module = _install_movement_stub(
         monkeypatch,
@@ -2816,6 +2899,7 @@ def test_apply_player_state_change_clears_loaded_world_objects_before_teleport(m
     alice = _make_session(state, "Alice", 1001)
     alice.map_id = 1
     alice.loaded_gameobjects = {11}
+    alice.loaded_transport_entries = {11: {"entry": 20808}, 33: {"entry": 176495}}
     alice.loaded_npcs = {22}
     alice.last_gameobject_stream_at = 123.0
     alice.last_npc_stream_at = 456.0
@@ -2829,9 +2913,69 @@ def test_apply_player_state_change_clears_loaded_world_objects_before_teleport(m
     assert ("SMSG_UPDATE_OBJECT", b"clear|1|11") in responses
     assert ("SMSG_UPDATE_OBJECT", b"clear|1|22") in responses
     assert alice.loaded_gameobjects == set()
+    assert alice.loaded_transport_entries == {33: {"entry": 176495}}
     assert alice.loaded_npcs == set()
     assert alice.last_gameobject_stream_at == 0.0
     assert alice.last_npc_stream_at == 0.0
+
+
+def test_teleport_cleanup_allows_transport_create_on_visibility_rebuild(monkeypatch):
+    transport_guid = 11
+    movement_module = _install_movement_stub(
+        monkeypatch,
+        _build_out_of_range_update_object_payload=lambda *, map_id, guid: f"clear|{map_id}|{guid}".encode(),
+    )
+    monkeypatch.setattr(movement_module, "build_same_map_teleport_payload", lambda session: b"teleport", raising=False)
+    monkeypatch.setattr(
+        chat_handlers,
+        "_build_movement_resync_responses",
+        lambda session: [("SMSG_PLAYER_MOVE", b"move")],
+    )
+
+    gameobjects_module = sys.modules["server.modules.handlers.world.bootstrap.gameobjects"]
+
+    def fake_visibility_rebuild(session, loaded_guids=None):
+        loaded_guids = loaded_guids if isinstance(loaded_guids, set) else set()
+        loaded_transports = getattr(session, "loaded_transport_entries", {})
+        if transport_guid in loaded_guids or transport_guid in loaded_transports:
+            return []
+        loaded_guids.add(transport_guid)
+        loaded_transports[transport_guid] = {"entry": 20808}
+        session.loaded_transport_entries = loaded_transports
+        return [("SMSG_UPDATE_OBJECT", b"transport-create")]
+
+    monkeypatch.setattr(
+        gameobjects_module,
+        "build_database_gameobject_responses",
+        fake_visibility_rebuild,
+        raising=False,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.loaded_gameobjects = {transport_guid}
+    alice.loaded_transport_entries = {transport_guid: {"entry": 20808}}
+    alice.loaded_npcs = set()
+
+    responses = chat_handlers.apply_player_state_change(
+        alice,
+        position=(10.0, 20.0, 30.0, 1.5),
+        map_id=1,
+    )
+
+    assert ("SMSG_UPDATE_OBJECT", b"clear|1|11") in responses
+    assert transport_guid not in alice.loaded_gameobjects
+    assert transport_guid not in alice.loaded_transport_entries
+
+    rebuild_responses = gameobjects_module.build_database_gameobject_responses(
+        alice,
+        loaded_guids=alice.loaded_gameobjects,
+    )
+
+    assert rebuild_responses == [("SMSG_UPDATE_OBJECT", b"transport-create")]
+    assert transport_guid in alice.loaded_gameobjects
+    assert transport_guid in alice.loaded_transport_entries
 
 
 def test_apply_player_state_change_dismounts_before_teleport(monkeypatch):

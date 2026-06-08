@@ -130,11 +130,7 @@ class MovementManager:
             started_at_ms=transport_time_ms(),
             phase_offset_ms=int(phase_offset_ms),
         )
-        self.instances[instance_key] = MovementRuntimeState(
-            instance=instance,
-            passengers={},
-            pending_transfers={},
-        )
+        self.instances[instance_key] = MovementRuntimeState(instance=instance)
         self.instance_by_template[template_key] = instance_key
         Logger.info(
             "[MovementManager] instance registered id=0x%016X template=%s",
@@ -348,6 +344,25 @@ class MovementManager:
         local_o: float = 0.0,
         source_map: int = 0,
     ) -> bool:
+        try:
+            from server.modules.handlers.world.transport_runtime import (
+                attach_transport_passenger,
+                runtime_transport_state_for_guid,
+            )
+
+            if runtime_transport_state_for_guid(int(instance_id)) is not None:
+                return attach_transport_passenger(
+                    int(instance_id),
+                    int(passenger_id),
+                    local_x=float(local_x),
+                    local_y=float(local_y),
+                    local_z=float(local_z),
+                    local_o=float(local_o),
+                    source_map=int(source_map),
+                )
+        except Exception:
+            pass
+
         state = self.instances.get(int(instance_id))
         if state is None:
             Logger.warning(
@@ -382,6 +397,17 @@ class MovementManager:
         return True
 
     def detach_passenger(self, instance_id: int, passenger_id: int) -> bool:
+        try:
+            from server.modules.handlers.world.transport_runtime import (
+                detach_transport_passenger,
+                runtime_transport_state_for_guid,
+            )
+
+            if runtime_transport_state_for_guid(int(instance_id)) is not None:
+                return detach_transport_passenger(int(instance_id), int(passenger_id))
+        except Exception:
+            pass
+
         state = self.instances.get(int(instance_id))
         if state is None or state.passengers is None:
             Logger.warning(
@@ -411,6 +437,17 @@ class MovementManager:
         instance_id: int,
         passenger_id: int,
     ) -> PassengerAttachment | None:
+        try:
+            from server.modules.handlers.world.transport_runtime import (
+                runtime_transport_state_for_guid,
+                transport_passenger_attachment,
+            )
+
+            if runtime_transport_state_for_guid(int(instance_id)) is not None:
+                return transport_passenger_attachment(int(instance_id), int(passenger_id))
+        except Exception:
+            pass
+
         state = self.instances.get(int(instance_id))
         if state is None or state.passengers is None:
             return None
@@ -424,6 +461,22 @@ class MovementManager:
         *,
         target_map_id: int,
     ) -> PassengerTransferState | None:
+        try:
+            from server.modules.handlers.world.transport_runtime import (
+                begin_transport_passenger_transfer,
+                runtime_transport_state_for_guid,
+            )
+
+            if runtime_transport_state_for_guid(int(source_instance_id)) is not None:
+                return begin_transport_passenger_transfer(
+                    int(source_instance_id),
+                    int(destination_instance_id),
+                    int(passenger_id),
+                    target_map_id=int(target_map_id),
+                )
+        except Exception:
+            pass
+
         source = self.instances.get(int(source_instance_id))
         if source is None or source.passengers is None:
             Logger.warning(
@@ -470,6 +523,20 @@ class MovementManager:
         source_instance_id: int,
         passenger_id: int,
     ) -> PassengerTransferState | None:
+        try:
+            from server.modules.handlers.world.transport_runtime import (
+                complete_transport_passenger_transfer,
+                runtime_transport_state_for_guid,
+            )
+
+            if runtime_transport_state_for_guid(int(source_instance_id)) is not None:
+                return complete_transport_passenger_transfer(
+                    int(source_instance_id),
+                    int(passenger_id),
+                )
+        except Exception:
+            pass
+
         source = self.instances.get(int(source_instance_id))
         if source is None or source.pending_transfers is None:
             Logger.warning(

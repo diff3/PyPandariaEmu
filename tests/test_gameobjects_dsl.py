@@ -22,6 +22,7 @@ def _entry():
         "state": 1,
         "animprogress": 255,
         "faction": 0,
+        "transport_path_progress": 0,
     }
 
 
@@ -74,6 +75,26 @@ def test_gameobject_update_payload_uses_dsl_compatible_layout():
     assert payload == EncoderHandler.encode_packet("GAMEOBJECT_CREATE", fields)
 
 
+def test_mo_transport_create_movement_block_uses_path_progress():
+    entry = {
+        **_entry(),
+        "type": 15,
+        "transport_path_progress": 99681,
+    }
+
+    assert gameobjects._gameobject_movement_block_uint32(entry) == 99681
+
+
+def test_non_transport_create_movement_block_unchanged():
+    entry = {
+        **_entry(),
+        "type": 5,
+        "transport_path_progress": 99681,
+    }
+
+    assert gameobjects._gameobject_movement_block_uint32(entry) == 0
+
+
 def test_transport_gameobject_uses_start_open_state_and_full_health():
     entry = {
         **_entry(),
@@ -116,6 +137,18 @@ def test_transport_gameobject_packs_path_progress_in_dynamic_flags():
     packed = fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS]
     assert packed & 0xFFFF == 0
     assert ((packed >> 16) & 0xFFFF) in (32767, 32768)
+
+
+def test_type_11_create_movement_block_still_uses_path_progress():
+    entry = {
+        **_entry(),
+        "entry": 4170,
+        "display_id": 360,
+        "type": 11,
+        "transport_path_progress": 16000,
+    }
+
+    assert gameobjects._gameobject_movement_block_uint32(entry) == 16000
 
 
 def test_mo_transport_uses_mo_transport_guid():
