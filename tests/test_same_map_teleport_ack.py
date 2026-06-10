@@ -108,7 +108,7 @@ def test_first_movement_packet_keeps_teleport_pending_until_ack(monkeypatch):
     assert calls[0] == ("store", "MSG_MOVE_HEARTBEAT", (10.0, 20.0, 30.0, 1.5))
 
 
-def test_first_movement_packet_keeps_near_teleport_pending_until_ack(monkeypatch):
+def test_first_valid_movement_packet_clears_stale_near_teleport_pending(monkeypatch):
     session = _FakeSession()
     session.teleport_pending = False
     session.near_teleport_pending = True
@@ -142,7 +142,51 @@ def test_first_movement_packet_keeps_near_teleport_pending_until_ack(monkeypatch
     assert responses is None
     assert session.teleport_pending is False
     assert session.worldport_ack_pending is False
-    assert session.near_teleport_pending is True
+    assert session.near_teleport_pending is False
+
+
+def test_movement_clears_stale_near_teleport_before_transport_transfer(monkeypatch):
+    session = _FakeSession()
+    session.teleport_pending = False
+    session.near_teleport_pending = True
+    session.worldport_ack_pending = False
+    session.movement_state = SimpleNamespace(
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=0.5,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        counter=0,
+    )
+    transfer_checks = []
+
+    monkeypatch.setattr(movement, "_clear_dance_emote_state_on_move", lambda *args: None)
+    monkeypatch.setattr(movement, "parse_movement_info", lambda *args: (10.0, 20.0, 30.0, 1.5))
+    monkeypatch.setattr(movement, "_accept_movement_update", lambda *args: True)
+    monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args: True)
+    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
+    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, force=False: None)
+    monkeypatch.setattr(movement, "_maybe_stream_world_objects", lambda target: [])
+    monkeypatch.setattr(movement, "_maybe_move_companion_pet_for_opcode", lambda *args: [])
+    monkeypatch.setattr(
+        movement,
+        "_maybe_start_transport_route_transfer",
+        lambda target, opcode_name: transfer_checks.append(movement._is_teleporting(target)) or [],
+    )
+
+    status, responses = movement.handle_movement_packet(
+        session,
+        SimpleNamespace(name="MSG_MOVE_HEARTBEAT", opcode=0, payload=b"", decoded={}),
+    )
+
+    assert status == 0
+    assert responses is None
+    assert session.near_teleport_pending is False
+    assert transfer_checks == [False]
 
 
 def test_same_map_teleport_payload_matches_pandaria548_capture_layout():
@@ -304,6 +348,12 @@ def test_same_map_teleport_ack_refreshes_mounted_state(monkeypatch):
     monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
     monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
     monkeypatch.setattr(movement, "_save_session_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(movement, "_post_teleport_multiplayer_resync", lambda target, **kwargs: [
+        ("SMSG_UPDATE_OBJECT", b"mount:2404"),
+        ("SMSG_MOVE_SET_RUN_SPEED", b"run-speed"),
+        ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight-speed"),
+        ("SMSG_PLAYER_MOVE", b"move"),
+    ])
     monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, *, force=False: calls.append(("broadcast", force)))
     monkeypatch.setattr(movement, "force_bilateral_visibility_resync", lambda target, *, reason: calls.append(("visibility", reason)))
     monkeypatch.setattr(movement, "build_same_map_teleport_self_resync_responses", lambda target: [])
@@ -326,11 +376,7 @@ def test_same_map_teleport_ack_refreshes_mounted_state(monkeypatch):
         ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight-speed"),
         ("SMSG_PLAYER_MOVE", b"move"),
     ]
-    assert calls == [
-        ("broadcast", True),
-        ("visibility", "near-teleport-ack"),
-        ("mount-peers", 2404),
-    ]
+    assert calls == []
 
 
 def test_same_map_teleport_ack_with_fixspeed_refreshes_speed_and_player_move(monkeypatch):
@@ -432,10 +478,10 @@ def test_worldport_ack_keeps_teleport_pending_for_loading_screen_completion(monk
     assert stream_calls == ["worldport-ack"]
 
 
-def test_areatrigger_same_map_can_teleport_again_after_ack(monkeypatch):
+def test_areatrigger_same_map_can_teleport_again_after_movement_resumes(monkeypatch):
     session = _FakeSession()
     session.teleport_pending = False
-    session.near_teleport_pending = False
+    session.near_teleport_pending = True
     session.worldport_ack_pending = False
     session.movement_state = SimpleNamespace(
         x=100.0,
@@ -461,9 +507,13 @@ def test_areatrigger_same_map_can_teleport_again_after_ack(monkeypatch):
         },
     )
     chat_stub = types.ModuleType("server.modules.handlers.world.opcodes.chat")
-    chat_stub.apply_player_state_change = (
-        lambda target, **kwargs: [("SMSG_MOVE_TELEPORT", f"teleport:{target.teleport_destination}".encode("utf-8"))]
-    )
+    def _apply_area_trigger_teleport(target, **kwargs):
+        target.near_teleport_pending = True
+        target.teleport_pending = False
+        target.worldport_ack_pending = False
+        return [("SMSG_MOVE_TELEPORT", f"teleport:{target.teleport_destination}".encode("utf-8"))]
+
+    chat_stub.apply_player_state_change = _apply_area_trigger_teleport
     monkeypatch.setitem(sys.modules, "server.modules.handlers.world.opcodes.chat", chat_stub)
     import server.modules.handlers.world.opcodes as world_opcodes
     monkeypatch.setattr(world_opcodes, "chat", chat_stub, raising=False)
@@ -486,37 +536,12 @@ def test_areatrigger_same_map_can_teleport_again_after_ack(monkeypatch):
     monkeypatch.setattr(movement, "_accept_movement_update", lambda *args: True)
     monkeypatch.setattr(movement, "_store_authoritative_movement", lambda *args: True)
 
-    status, responses = movement.handle_areatrigger(
-        session,
-        SimpleNamespace(payload=(100).to_bytes(4, "little")),
-    )
-
-    assert status == 0
-    assert session.near_teleport_pending is True
-    assert session.worldport_ack_pending is False
-    assert responses[0] == ("SMSG_MOVE_TELEPORT", b"teleport:areatrigger:100")
-
     movement.handle_movement_packet(
         session,
         SimpleNamespace(name="MSG_MOVE_START_FORWARD", opcode=0, payload=b"", decoded={}),
     )
-    assert session.near_teleport_pending is True
-
-    status, _responses = movement.handle_move_teleport_ack(session, None)
-    assert status == 0
     assert session.near_teleport_pending is False
     assert session.worldport_ack_pending is False
-    assert session.teleport_destination is None
-
-    status, responses = movement.handle_areatrigger(
-        session,
-        SimpleNamespace(payload=(200).to_bytes(4, "little")),
-    )
-
-    assert status == 0
-    assert session.near_teleport_pending is True
-    assert session.worldport_ack_pending is False
-    assert responses[0] == ("SMSG_MOVE_TELEPORT", b"teleport:areatrigger:200")
 
 
 def test_move_set_run_speed_payload_uses_movement_sync_guid():

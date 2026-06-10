@@ -23,8 +23,6 @@ for _definition_name in gameobject_defs.__all__:
     globals()[f"_{_definition_name}"] = getattr(gameobject_defs, _definition_name)
 
 _OBJECT_FIELD_SCALE = gameobject_defs.OBJECT_FIELD_SCALE_X
-
-
 def _entry_int(entry: Mapping[str, Any], key: str, default: int = 0) -> int:
     """Return an integer field from a GameObject entry."""
     return int(entry.get(key, default) or default)
@@ -290,13 +288,11 @@ def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
 
 def _transport_runtime_packet_entry(entry: Mapping[str, Any]) -> Mapping[str, Any]:
     """Overlay transport packet fields from RuntimeTransportState when available."""
-    if _entry_int(entry, "type") != _GAMEOBJECT_TYPE_MO_TRANSPORT:
+    gameobject_type = _entry_int(entry, "type")
+    if gameobject_type not in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         return entry
 
-    world_guid = int(
-        entry.get("world_guid")
-        or MoTransportGuid.from_spawn_guid(_entry_int(entry, "guid"))
-    )
+    world_guid = _resolve_world_guid(entry, _entry_int(entry, "realm_id", 1))
     if world_guid <= 0:
         return entry
 
@@ -306,8 +302,9 @@ def _transport_runtime_packet_entry(entry: Mapping[str, Any]) -> Mapping[str, An
         state = runtime_transport_state_for_guid(world_guid)
     except Exception as exc:
         Logger.warning(
-            "[MO_TRANSPORT_CREATE] runtime state lookup failed world_guid=0x%016X err=%s",
+            "[TRANSPORT_CREATE] runtime state lookup failed world_guid=0x%016X type=%s err=%s",
             world_guid & 0xFFFFFFFFFFFFFFFF,
+            int(gameobject_type),
             exc,
         )
         return entry
@@ -317,12 +314,28 @@ def _transport_runtime_packet_entry(entry: Mapping[str, Any]) -> Mapping[str, An
 
     packet_entry = dict(entry)
     packet_entry["world_guid"] = int(state.guid)
-    packet_entry["map"] = int(state.map_id)
-    packet_entry["map_id"] = int(state.map_id)
-    packet_entry["x"] = float(state.x)
-    packet_entry["y"] = float(state.y)
-    packet_entry["z"] = float(state.z)
-    packet_entry["orientation"] = float(state.orientation)
+    if (
+        gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT
+        and bool(packet_entry.get("client_driven_transport_animation"))
+    ):
+        base_map = _entry_int(packet_entry, "client_animation_base_map", int(state.map_id))
+        packet_entry["map"] = int(base_map)
+        packet_entry["map_id"] = int(base_map)
+        packet_entry["x"] = _entry_float(packet_entry, "client_animation_base_x")
+        packet_entry["y"] = _entry_float(packet_entry, "client_animation_base_y")
+        packet_entry["z"] = _entry_float(packet_entry, "client_animation_base_z")
+        packet_entry["orientation"] = _entry_float(
+            packet_entry,
+            "client_animation_base_orientation",
+            float(state.orientation),
+        )
+    else:
+        packet_entry["map"] = int(state.map_id)
+        packet_entry["map_id"] = int(state.map_id)
+        packet_entry["x"] = float(state.x)
+        packet_entry["y"] = float(state.y)
+        packet_entry["z"] = float(state.z)
+        packet_entry["orientation"] = float(state.orientation)
     packet_entry["transport_path_progress"] = int(state.path_progress_ms) & 0xFFFFFFFF
     if int(getattr(state, "route_period_ms", 0) or 0) > 0:
         packet_entry["transport_period"] = int(state.route_period_ms)

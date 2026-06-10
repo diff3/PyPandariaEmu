@@ -1547,6 +1547,11 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
                 opcode_name,
                 previous_guid & 0xFFFFFFFFFFFFFFFF,
             )
+            _clear_stale_transport_transfer_pending(
+                session,
+                previous_guid,
+                reason="client_clear",
+            )
         state.has_transport_data = False
         state.transport_guid = 0
         state.transport_x = 0.0
@@ -1651,10 +1656,19 @@ def _is_real_runtime_elevator_entry(entry: dict[str, Any] | None) -> bool:
     except Exception:
         return False
     try:
-        from server.modules.handlers.world.transport_runtime import is_thunder_bluff_elevator_entry
+        from server.modules.handlers.world.transport_runtime import (
+            GAMEOBJECT_TYPE_TRANSPORT,
+            is_runtime_transport_entry,
+            is_thunder_bluff_elevator_entry,
+        )
     except Exception:
         return False
-    return bool(is_thunder_bluff_elevator_entry(entry))
+    if is_thunder_bluff_elevator_entry(entry):
+        return True
+    return bool(
+        int(entry.get("type", 0) or 0) == GAMEOBJECT_TYPE_TRANSPORT
+        and is_runtime_transport_entry(entry)
+    )
 
 
 def _is_deeprun_tram_entry(entry: dict[str, Any] | None) -> bool:
@@ -1767,18 +1781,119 @@ def _clear_loaded_world_objects_for_transfer(session) -> list[tuple[str, bytes]]
     return responses
 
 
-def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tuple[str, bytes]]:
+def _pending_transport_transfer_matches(
+    session,
+    transport_guid: int,
+) -> bool:
+    pending = getattr(session, "pending_transport_transfer", None)
+    if not isinstance(pending, dict):
+        return True
+    source_guid = int(pending.get("source_guid", 0) or 0)
+    destination_guid = int(pending.get("destination_guid", 0) or 0)
+    return int(transport_guid) in {source_guid, destination_guid}
+
+
+def _clear_stale_transport_transfer_pending(
+    session,
+    transport_guid: int,
+    *,
+    reason: str,
+) -> bool:
+    if not bool(getattr(session, "transport_transfer_pending", False)):
+        return False
+    if bool(getattr(session, "teleport_pending", False)):
+        return False
+    if bool(getattr(session, "worldport_ack_pending", False)):
+        return False
+    if not _pending_transport_transfer_matches(session, int(transport_guid)):
+        return False
+
+    Logger.info(
+        "[TRANSPORT_TRANSFER_STATE_CLEAR] reason=%s transport_guid=0x%016X "
+        "player_guid=%s pending=%s",
+        str(reason),
+        int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(getattr(session, "char_guid", 0) or 0),
+        getattr(session, "pending_transport_transfer", None),
+    )
+    session.transport_transfer_pending = False
+    session.pending_transport_transfer = None
+    return True
+
+
+def _maybe_start_transport_route_transfer(
+    session,
+    opcode_name: str,
+    forced_destination_map: int | None = None,
+) -> list[tuple[str, bytes]]:
     state = _movement_state(session)
     transport_guid = int(getattr(state, "transport_guid", 0) or 0)
+    destination_map_for_log: int | None = None
+
+    def _trace(stage: str, *, reason: str | None = None) -> None:
+        movement_transport_guid = int(getattr(state, "transport_guid", 0) or 0)
+        player_guid = int(getattr(session, "char_guid", 0) or 0)
+        try:
+            from server.modules.handlers.world.transport_runtime import (
+                _session_is_transport_passenger,
+                transport_passenger_attachment,
+            )
+
+            attached = (
+                _session_is_transport_passenger(session, int(transport_guid))
+                if int(transport_guid) > 0
+                else False
+            )
+            runtime_attached = (
+                transport_passenger_attachment(int(transport_guid), player_guid) is not None
+                if int(transport_guid) > 0 and player_guid > 0
+                else False
+            )
+        except Exception:
+            attached = False
+            runtime_attached = False
+        Logger.info(
+            "[TRANSPORT_TRANSFER_TRACE] stage=%s player_guid=%s transport_guid=0x%016X "
+            "destination_map=%s attached=%s runtime_attached=%s "
+            "near_teleport_pending=%s teleport_pending=%s worldport_ack_pending=%s "
+            "transport_transfer_pending=%s movement_transport_guid=0x%016X",
+            str(stage),
+            player_guid,
+            int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
+            "none" if destination_map_for_log is None else int(destination_map_for_log),
+            bool(attached),
+            bool(runtime_attached),
+            bool(getattr(session, "near_teleport_pending", False)),
+            bool(getattr(session, "teleport_pending", False)),
+            bool(getattr(session, "worldport_ack_pending", False)),
+            bool(getattr(session, "transport_transfer_pending", False)),
+            movement_transport_guid & 0xFFFFFFFFFFFFFFFF,
+        )
+        if reason is not None:
+            Logger.info("[TRANSPORT_TRANSFER_SKIP] reason=%s", str(reason))
+
     if transport_guid <= 0:
+        _trace("no_transport_guid", reason="no_transport_guid")
         return []
     if bool(getattr(session, "transport_transfer_pending", False)):
-        return []
+        if _clear_stale_transport_transfer_pending(
+            session,
+            transport_guid,
+            reason="stale_pending",
+        ):
+            _trace("stale_pending_cleared")
+        else:
+            _trace("already_pending", reason="already_pending")
+            return []
+    _trace("before _is_teleporting()")
     if _is_teleporting(session):
+        _trace("after _is_teleporting()", reason="already_teleporting")
         return []
+    _trace("after _is_teleporting()")
 
     entry = _transport_entry_for_guid(session, transport_guid)
     if not isinstance(entry, dict):
+        _trace("missing_destination_entry", reason="missing_destination_entry")
         return []
 
     try:
@@ -1792,6 +1907,7 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
         from server.modules.handlers.world.movements.manager import get_movement_manager
     except Exception as exc:
         Logger.warning("[TransportTransfer] runtime unavailable err=%s", exc)
+        _trace("runtime_import_failed", reason="other")
         return []
 
     runtime_state = runtime_transport_state_for_guid(transport_guid)
@@ -1799,59 +1915,78 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
         moved_entry = cached_transport_runtime_entry(session, entry)
         runtime_state = runtime_transport_state_for_guid(transport_guid)
         if runtime_state is None:
+            _trace("missing_runtime_state", reason="missing_runtime_state")
             return []
         entry = moved_entry
 
     source_map = int(getattr(session, "map_id", 0) or 0)
-    destination = transport_transfer_destination_map_for_guid(transport_guid)
+    if forced_destination_map is not None:
+        destination = int(forced_destination_map)
+        Logger.info(
+            "[TRANSPORT_TRANSFER_DESTINATION] source=forced_map_mismatch "
+            "transport_guid=0x%016X destination_map=%s",
+            int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
+            int(destination),
+        )
+    else:
+        destination = transport_transfer_destination_map_for_guid(transport_guid)
     if destination is None:
+        _trace("missing_destination_map", reason="missing_destination_map")
         return []
     destination_map = int(destination)
+    destination_map_for_log = int(destination_map)
     if destination_map == source_map:
+        _trace("destination_is_source_map", reason="missing_destination_map")
         return []
 
-    destination_guid = int(linked_transport_world_guid(entry, map_id=destination_map))
+    canonical_world_db_transfer = bool(getattr(runtime_state, "world_db_transport", False))
+    if canonical_world_db_transfer:
+        destination_guid = int(getattr(runtime_state, "guid", transport_guid) or transport_guid)
+    else:
+        destination_guid = int(linked_transport_world_guid(entry, map_id=destination_map))
+    _trace("before begin_passenger_transfer()")
     passenger_transfer = get_movement_manager().begin_passenger_transfer(
         int(transport_guid),
         int(destination_guid),
         int(getattr(session, "char_guid", 0) or 0),
         target_map_id=int(destination_map),
     )
+    _trace("after begin_passenger_transfer()")
     if passenger_transfer is None:
         Logger.warning(
             "[TransportTransfer] passenger transfer rejected player=%s transport=0x%016X",
             int(getattr(session, "char_guid", 0) or 0),
             transport_guid & 0xFFFFFFFFFFFFFFFF,
         )
+        _trace("begin_passenger_transfer_failed", reason="begin_passenger_transfer_failed")
         return []
     local_x = float(passenger_transfer.local_x)
     local_y = float(passenger_transfer.local_y)
     local_z = float(passenger_transfer.local_z)
     local_o = float(passenger_transfer.local_o)
-    destination_entry = ensure_linked_transport_destination_entry(
-        entry,
-        destination_map=destination_map,
-        source_state=runtime_state,
-    )
-    destination_entry = cached_transport_runtime_entry(session, destination_entry)
-    destination_node = _transport_route_node_for_map(runtime_state, destination_map)
-    if destination_node is not None:
-        destination_x = float(getattr(destination_node, "x", 0.0) or 0.0)
-        destination_y = float(getattr(destination_node, "y", 0.0) or 0.0)
-        destination_z = float(getattr(destination_node, "z", 0.0) or 0.0)
-        destination_o = float(getattr(runtime_state, "orientation", 0.0) or 0.0)
+    if canonical_world_db_transfer:
+        destination_entry = dict(entry)
+        destination_entry["world_guid"] = int(destination_guid)
         destination_entry["map"] = int(destination_map)
         destination_entry["map_id"] = int(destination_map)
-        destination_entry["x"] = destination_x
-        destination_entry["y"] = destination_y
-        destination_entry["z"] = destination_z
-        destination_entry["orientation"] = destination_o
-    elif int(destination_entry.get("map", destination_map)) == destination_map:
-        destination_x = float(destination_entry.get("x", getattr(runtime_state, "x", 0.0)) or 0.0)
-        destination_y = float(destination_entry.get("y", getattr(runtime_state, "y", 0.0)) or 0.0)
-        destination_z = float(destination_entry.get("z", getattr(runtime_state, "z", 0.0)) or 0.0)
-        destination_o = float(destination_entry.get("orientation", getattr(runtime_state, "orientation", 0.0)) or 0.0)
+        destination_entry["home_map"] = int(destination_map)
     else:
+        destination_entry = ensure_linked_transport_destination_entry(
+            entry,
+            destination_map=destination_map,
+            source_state=runtime_state,
+        )
+    destination_entry = cached_transport_runtime_entry(session, destination_entry)
+    destination_base_source = "route_node_fallback"
+    if (
+        canonical_world_db_transfer
+        and int(
+            getattr(runtime_state, "map_id")
+            if getattr(runtime_state, "map_id", None) is not None
+            else -1
+        ) == int(destination_map)
+    ):
+        destination_base_source = "runtime_state"
         destination_x = float(getattr(runtime_state, "x", 0.0) or 0.0)
         destination_y = float(getattr(runtime_state, "y", 0.0) or 0.0)
         destination_z = float(getattr(runtime_state, "z", 0.0) or 0.0)
@@ -1862,6 +1997,35 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
         destination_entry["y"] = destination_y
         destination_entry["z"] = destination_z
         destination_entry["orientation"] = destination_o
+    else:
+        destination_node = _transport_route_node_for_map(runtime_state, destination_map)
+        if destination_node is not None:
+            destination_x = float(getattr(destination_node, "x", 0.0) or 0.0)
+            destination_y = float(getattr(destination_node, "y", 0.0) or 0.0)
+            destination_z = float(getattr(destination_node, "z", 0.0) or 0.0)
+            destination_o = float(getattr(runtime_state, "orientation", 0.0) or 0.0)
+            destination_entry["map"] = int(destination_map)
+            destination_entry["map_id"] = int(destination_map)
+            destination_entry["x"] = destination_x
+            destination_entry["y"] = destination_y
+            destination_entry["z"] = destination_z
+            destination_entry["orientation"] = destination_o
+        elif int(destination_entry.get("map", destination_map)) == destination_map:
+            destination_x = float(destination_entry.get("x", getattr(runtime_state, "x", 0.0)) or 0.0)
+            destination_y = float(destination_entry.get("y", getattr(runtime_state, "y", 0.0)) or 0.0)
+            destination_z = float(destination_entry.get("z", getattr(runtime_state, "z", 0.0)) or 0.0)
+            destination_o = float(destination_entry.get("orientation", getattr(runtime_state, "orientation", 0.0)) or 0.0)
+        else:
+            destination_x = float(getattr(runtime_state, "x", 0.0) or 0.0)
+            destination_y = float(getattr(runtime_state, "y", 0.0) or 0.0)
+            destination_z = float(getattr(runtime_state, "z", 0.0) or 0.0)
+            destination_o = float(getattr(runtime_state, "orientation", 0.0) or 0.0)
+            destination_entry["map"] = int(destination_map)
+            destination_entry["map_id"] = int(destination_map)
+            destination_entry["x"] = destination_x
+            destination_entry["y"] = destination_y
+            destination_entry["z"] = destination_z
+            destination_entry["orientation"] = destination_o
 
     player_x = destination_x + local_x
     player_y = destination_y + local_y
@@ -1889,6 +2053,15 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
         "local_y": local_y,
         "local_z": local_z,
         "local_o": local_o,
+        "base_source": str(destination_base_source),
+        "base_x": float(destination_x),
+        "base_y": float(destination_y),
+        "base_z": float(destination_z),
+        "base_o": float(destination_o),
+        "final_x": float(player_x),
+        "final_y": float(player_y),
+        "final_z": float(player_z),
+        "final_o": float(player_o),
         "destination_entry": dict(destination_entry),
     }
     try:
@@ -1998,10 +2171,16 @@ def _maybe_start_transport_route_transfer(session, opcode_name: str) -> list[tup
         },
     )()
     responses = list(clear_responses)
+    _trace("before SMSG_TRANSFER_PENDING")
+    transfer_pending_payload = build_login_packet("SMSG_TRANSFER_PENDING", ctx)
+    _trace("after SMSG_TRANSFER_PENDING")
+    _trace("before SMSG_NEW_WORLD")
+    new_world_payload = build_login_packet("SMSG_NEW_WORLD", ctx)
+    _trace("after SMSG_NEW_WORLD")
     responses.extend(
         [
-            ("SMSG_TRANSFER_PENDING", build_login_packet("SMSG_TRANSFER_PENDING", ctx)),
-            ("SMSG_NEW_WORLD", build_login_packet("SMSG_NEW_WORLD", ctx)),
+            ("SMSG_TRANSFER_PENDING", transfer_pending_payload),
+            ("SMSG_NEW_WORLD", new_world_payload),
             (
                 "SMSG_MESSAGECHAT",
                 encode_skyfire_messagechat_system_payload(
@@ -2028,6 +2207,7 @@ def _transfer_local_value(passenger_transfer, pending: dict, name: str) -> float
 def _complete_pending_transport_transfer(session) -> None:
     pending = getattr(session, "pending_transport_transfer", None)
     if not isinstance(pending, dict):
+        session.pending_transport_transfer = None
         session.transport_transfer_pending = False
         return
 
@@ -2577,10 +2757,35 @@ def _is_teleporting(session) -> bool:
     )
 
 
+def _maybe_clear_stale_near_teleport_pending_on_movement(session, opcode_name: str) -> None:
+    if not bool(getattr(session, "near_teleport_pending", False)):
+        return
+    if bool(getattr(session, "worldport_ack_pending", False)):
+        return
+    if bool(getattr(session, "teleport_pending", False)):
+        return
+    if not all(
+        math.isfinite(float(getattr(session, attr, 0.0) or 0.0))
+        for attr in ("x", "y", "z", "orientation")
+    ):
+        return
+    session.near_teleport_pending = False
+    Logger.info(
+        "[TELEPORT_STATE_CLEAR] reason=movement_resumed opcode=%s player=%s "
+        "map=%s pos=(%.3f %.3f %.3f %.3f)",
+        str(opcode_name),
+        int(getattr(session, "char_guid", 0) or 0),
+        int(getattr(session, "map_id", 0) or 0),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+    )
+
+
 def _consume_pending_teleport_on_movement(session, opcode_name: str) -> None:
-    # Movement must stay usable during teleport, but the explicit ack still
-    # owns the teleport lifecycle. Clearing pending state here breaks repeated
-    # area-trigger teleports because the later ack gets discarded.
+    # Movement must stay usable during teleport. Pending state is cleared only
+    # after accepted movement proves a same-map teleport has resumed normally.
     if not _is_teleporting(session):
         return
     Logger.debug("[Teleport] movement resumed on %s while teleport ack is pending", str(opcode_name))
@@ -3968,10 +4173,16 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
     else:
         _apply_movement_flags(state, opcode_name)
         if bool(getattr(state, "has_transport_data", False)):
+            previous_guid = int(getattr(state, "transport_guid", 0) or 0)
             Logger.info(
                 "[TRANSPORT_STATE] clear opcode=%s reason=no_skyfire_parse previous_tguid=0x%016X",
                 opcode_name,
-                int(getattr(state, "transport_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+                previous_guid & 0xFFFFFFFFFFFFFFFF,
+            )
+            _clear_stale_transport_transfer_pending(
+                session,
+                previous_guid,
+                reason="client_clear",
             )
         state.has_transport_data = False
         state.transport_guid = 0
@@ -4763,6 +4974,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     discovery_responses = _maybe_discover_current_area(session)
     if discovery_responses:
         movement_responses.extend(discovery_responses)
+    _maybe_clear_stale_near_teleport_pending_on_movement(session, opcode_name)
     if opcode_name == "MSG_MOVE_HEARTBEAT":
         _maybe_periodic_position_save(session)
     try:

@@ -328,15 +328,31 @@ def test_thunder_bluff_elevator_uses_transport_runtime_route(monkeypatch):
         30000
     )
     assert transport_runtime.is_runtime_transport_entry(prepared) is True
-    assert transport_runtime.is_thunder_bluff_elevator_entry(prepared) is True
+    assert transport_runtime._has_transport_animation(prepared) is True
+    assert prepared["client_driven_transport_animation"] is True
+    assert prepared["client_animation_base_z"] == entry["z"]
 
     _tick_transport_entry(prepared)
     _tick_transport_entry(prepared)
     moved = transport_runtime.cached_transport_runtime_entry(session, prepared)
 
-    assert moved["z"] == entry["z"]
     assert moved["x"] == entry["x"]
     assert moved["y"] == entry["y"]
+    assert moved["z"] != entry["z"]
+
+    monkeypatch.setattr(
+        gameobjects.EncoderHandler,
+        "encode_packet",
+        lambda _name, payload: payload,
+    )
+    payload = gameobjects._build_gameobject_update_payload(
+        map_id=1,
+        entry=moved,
+        realm_id=1,
+    )
+    assert payload["stationary_x"] == entry["x"]
+    assert payload["stationary_y"] == entry["y"]
+    assert payload["stationary_z"] == entry["z"]
 
     now = 101.0
     _tick_transport_entry(prepared)
@@ -372,7 +388,7 @@ def test_thunder_bluff_elevator_uses_transport_runtime_route(monkeypatch):
 
     assert moved["x"] == entry["x"]
     assert moved["y"] == entry["y"]
-    assert moved["z"] == entry["z"]
+    assert moved["transport_path_progress"] >= 0
 
 
 def test_thunder_bluff_elevator_high_spawn_uses_authoritative_runtime(monkeypatch):
@@ -395,7 +411,7 @@ def test_thunder_bluff_elevator_high_spawn_uses_authoritative_runtime(monkeypatc
     prepared = transport_runtime.prepare_runtime_transport_entry(entry)
 
     assert transport_runtime.is_runtime_transport_entry(prepared) is True
-    assert transport_runtime.is_thunder_bluff_elevator_entry(prepared) is True
+    assert transport_runtime._has_transport_animation(prepared) is True
 
 
 def test_thunder_bluff_duplicate_spawn_reuses_authoritative_runtime(monkeypatch):
@@ -441,7 +457,7 @@ def test_thunder_bluff_duplicate_spawn_reuses_authoritative_runtime(monkeypatch)
 
 def test_type11_transport_animation_uses_dbc_timed_route(monkeypatch):
     _reset_transport_states()
-    now = 200.0
+    now = 11.5
     monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
 
     animation = transport_runtime.TransportAnimationPath(
@@ -470,7 +486,7 @@ def test_type11_transport_animation_uses_dbc_timed_route(monkeypatch):
         "x": 10.0,
         "y": 20.0,
         "z": 30.0,
-        "orientation": 0.0,
+        "orientation": 0.75,
         "size": 1.0,
     }
 
@@ -479,20 +495,213 @@ def test_type11_transport_animation_uses_dbc_timed_route(monkeypatch):
 
     assert prepared["use_transport_guid"] is True
     assert prepared["transport_period"] == 10000
+    assert prepared["client_driven_transport_animation"] is True
+    assert prepared["client_animation_base_z"] == 30.0
 
     _tick_transport_entry(prepared)
     moved = transport_runtime.cached_transport_runtime_entry(session, prepared)
     assert moved["z"] == 30.0
 
-    now = 202.0
+    now = 13.5
     _tick_transport_entry(prepared)
     moved = transport_runtime.cached_transport_runtime_entry(session, prepared)
 
     assert round(moved["z"], 3) == 34.0
+    assert moved["orientation"] == 0.75
     assert moved["transport_path_progress"] == 2000
     state = transport_runtime._runtime_transport_states()[prepared["world_guid"]]
     assert state.timed_route is True
     assert state.route_period_ms == 10000
+
+
+def test_world_db_elevator_preload_registers_type11_animation_runtime(monkeypatch):
+    _reset_transport_states()
+    now = 250.0
+    monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
+    animation = transport_runtime.TransportAnimationPath(
+        entry=999002,
+        nodes=(
+            transport_runtime.TransportAnimationNode(0, 0.0, 0.0, 0.0),
+            transport_runtime.TransportAnimationNode(5000, 0.0, 0.0, 12.0),
+            transport_runtime.TransportAnimationNode(10000, 0.0, 0.0, 0.0),
+        ),
+        period_ms=10000,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "_transport_animation_for_entry",
+        lambda entry_id: animation if int(entry_id) == 999002 else None,
+    )
+    monkeypatch.setattr(transport_runtime, "_load_world_db_transports", lambda: ())
+    monkeypatch.setattr(
+        transport_runtime,
+        "_load_world_db_elevator_entries",
+        lambda: (
+            {
+                "guid": 9002,
+                "entry": 999002,
+                "map": 530,
+                "map_id": 530,
+                "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+                "original_type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+                "display_id": 360,
+                "x": -10.0,
+                "y": 20.0,
+                "z": 30.0,
+                "orientation": 0.0,
+                "size": 1.0,
+                "name": "Generic Runtime Elevator",
+            },
+        ),
+    )
+    transport_runtime.get_world_transport_manager().start()
+
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(9002))
+    state = transport_runtime._runtime_transport_states()[world_guid]
+    movement_state = transport_runtime.get_movement_manager().get_state(world_guid)
+    assert state.entry == 999002
+    assert state.map_id == 530
+    assert state.timed_route is True
+    assert state.route_period_ms == 10000
+    assert movement_state is not None
+    template = transport_runtime.get_movement_manager().templates[
+        str(movement_state.instance.template_id)
+    ]
+    assert template.kind == transport_runtime.MovementKind.ELEVATOR
+
+
+def test_world_db_elevator_loader_includes_thunder_bluff_entries(monkeypatch):
+    monkeypatch.delattr(transport_runtime._load_world_db_elevator_entries, "_entries", raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "sqlalchemy",
+        SimpleNamespace(text=lambda query: query),
+    )
+    animation = transport_runtime.TransportAnimationPath(
+        entry=999003,
+        nodes=(
+            transport_runtime.TransportAnimationNode(0, 0.0, 0.0, 0.0),
+            transport_runtime.TransportAnimationNode(1000, 0.0, 0.0, 1.0),
+        ),
+        period_ms=1000,
+    )
+    thunder_bluff_animation = transport_runtime.TransportAnimationPath(
+        entry=4170,
+        nodes=(
+            transport_runtime.TransportAnimationNode(0, 0.0, 0.0, 0.0),
+            transport_runtime.TransportAnimationNode(1000, 0.0, 0.0, 1.0),
+        ),
+        period_ms=1000,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "_transport_animation_paths",
+        lambda: {
+            999003: animation,
+            4170: thunder_bluff_animation,
+            219175: animation,
+            20651: animation,
+        },
+    )
+
+    class FakeSession:
+        def execute(self, _query, _params):
+            return SimpleNamespace(
+                mappings=lambda: (
+                    {
+                        "guid": 9003,
+                        "entry": 999003,
+                        "map": 530,
+                        "x": 1.0,
+                        "y": 2.0,
+                        "z": 3.0,
+                        "orientation": 0.0,
+                        "name": "Generic Elevator",
+                        "display_id": 360,
+                        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+                        "faction": 0,
+                        "flags": 0,
+                        "size": 1.0,
+                        "data0": 0,
+                        "data1": 0,
+                        "data2": 0,
+                        "data3": 0,
+                    },
+                    {
+                        "guid": 897,
+                        "entry": 4170,
+                        "map": 1,
+                        "x": -1286.24,
+                        "y": 189.72,
+                        "z": 130.08,
+                        "orientation": 0.0,
+                        "name": "Mesa Elevator",
+                        "display_id": 360,
+                        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+                        "faction": 0,
+                        "flags": 0,
+                        "size": 1.0,
+                        "data0": 0,
+                        "data1": 0,
+                        "data2": 0,
+                        "data3": 0,
+                    },
+                    {
+                        "guid": 100430,
+                        "entry": 219175,
+                        "map": 1136,
+                        "x": 1704.78,
+                        "y": -4265.96,
+                        "z": 34.88,
+                        "orientation": 0.0,
+                        "name": "Doodad_Orgrimmar_Elevator_01",
+                        "display_id": 9542,
+                        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+                        "faction": 0,
+                        "flags": 0,
+                        "size": 1.0,
+                        "data0": 0,
+                        "data1": 0,
+                        "data2": 0,
+                        "data3": 0,
+                    },
+                    {
+                        "guid": 1235,
+                        "entry": 20651,
+                        "map": 0,
+                        "x": 1596.21,
+                        "y": 302.401,
+                        "z": -40.6645,
+                        "orientation": 1.56207,
+                        "name": "lowerLdoor",
+                        "display_id": 462,
+                        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+                        "faction": 0,
+                        "flags": 0,
+                        "size": 1.0,
+                        "data0": 0,
+                        "data1": 0,
+                        "data2": 0,
+                        "data3": 0,
+                    },
+                )
+            )
+
+    monkeypatch.setattr(
+        database_module.DatabaseConnection,
+        "world",
+        staticmethod(lambda: FakeSession()),
+        raising=False,
+    )
+
+    entries = transport_runtime._load_world_db_elevator_entries()
+
+    assert [entry["entry"] for entry in entries] == [999003, 4170, 219175]
+    assert entries[0]["original_type"] == transport_runtime.GAMEOBJECT_TYPE_TRANSPORT
+    assert entries[1]["map"] == 1
+    assert entries[1]["map_id"] == 1
+    assert entries[2]["map"] == 1
+    assert entries[2]["map_id"] == 1
 
 
 def test_mo_transport_without_dbc_does_not_generate_fallback_route(monkeypatch):
@@ -574,7 +783,6 @@ def test_world_db_transport_spawns_from_same_map_taxi_nodes(monkeypatch):
             )
         },
     )
-    monkeypatch.setattr(transport_runtime, "_load_thunder_bluff_elevator_entries", lambda: ())
     transport_runtime.get_world_transport_manager().start()
 
     canonical_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(7))
@@ -655,7 +863,6 @@ def test_world_db_transport_canonical_runtime_progresses(monkeypatch):
             )
         },
     )
-    monkeypatch.setattr(transport_runtime, "_load_thunder_bluff_elevator_entries", lambda: ())
 
     transport_runtime.get_world_transport_manager().start()
 
@@ -1164,6 +1371,62 @@ def test_transfer_destination_prefers_runtime_state(monkeypatch):
     assert transport_runtime.transport_transfer_destination_map_for_guid(world_guid) == 0
 
 
+def test_transfer_destination_uses_runtime_state_before_sync_for_map_zero(monkeypatch):
+    _reset_transport_states()
+    world_guid = 0xF12000000000077B
+    state = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=20808,
+        spawn_guid=100781,
+        display_id=3015,
+        route=[],
+        node_index=0,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        map_id=1,
+        transfer_active=True,
+        transfer_destination_map=0,
+    )
+    transport_runtime._runtime_transport_states()[world_guid] = state
+
+    def _fail_sync(_state):
+        raise AssertionError("runtime-state destination should be read before sync")
+
+    monkeypatch.setattr(transport_runtime, "_sync_transport_state_from_movement_cache", _fail_sync)
+
+    assert transport_runtime.transport_transfer_destination_map_for_guid(world_guid) == 0
+
+
+def test_transfer_destination_uses_runtime_state_for_map_one(monkeypatch):
+    _reset_transport_states()
+    world_guid = 0xF12000000000077C
+    state = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=20808,
+        spawn_guid=100782,
+        display_id=3015,
+        route=[],
+        node_index=0,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        map_id=0,
+        transfer_active=True,
+        transfer_destination_map=1,
+    )
+    transport_runtime._runtime_transport_states()[world_guid] = state
+
+    def _fail_sync(_state):
+        raise AssertionError("runtime-state destination should be read before sync")
+
+    monkeypatch.setattr(transport_runtime, "_sync_transport_state_from_movement_cache", _fail_sync)
+
+    assert transport_runtime.transport_transfer_destination_map_for_guid(world_guid) == 1
+
+
 def test_transfer_pending_transport_is_not_streamed(monkeypatch):
     _reset_transport_states()
     monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: 0.5)
@@ -1292,7 +1555,10 @@ def test_transfer_pending_transport_auto_worldports_attached_passenger(monkeypat
     assert session.x == 102.0
     assert session.y == 203.0
     assert session.z == 14.0
-    assert movement_state.transport_guid == transport_runtime.linked_transport_world_guid(entry, map_id=0)
+    linked_destination_guid = transport_runtime.linked_transport_world_guid(entry, map_id=0)
+    assert movement_state.transport_guid == source_guid
+    assert session.pending_transport_transfer["destination_guid"] == source_guid
+    assert transport_runtime.runtime_transport_state_for_guid(linked_destination_guid) is None
 
 
 def test_waiting_transport_remains_visible(monkeypatch):
@@ -1631,6 +1897,172 @@ def test_gameobject_values_update_reads_runtime_transport_state(monkeypatch):
     assert dynamic_flags == (16383 << 16)
 
 
+def test_type11_gameobject_create_reads_runtime_elevator_state(monkeypatch):
+    _reset_transport_states()
+    captured_fields = {}
+    world_guid = 0xF120000000000E11
+    state = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=999011,
+        spawn_guid=9011,
+        display_id=360,
+        route=[],
+        node_index=0,
+        x=111.0,
+        y=222.0,
+        z=333.0,
+        orientation=1.75,
+        map_id=530,
+        path_progress_ms=4321,
+        route_period_ms=10000,
+    )
+    transport_runtime._runtime_transport_states()[world_guid] = state
+    stale_entry = {
+        "guid": 9011,
+        "world_guid": world_guid,
+        "entry": 999011,
+        "map": 1,
+        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+        "display_id": 360,
+        "x": 1.0,
+        "y": 2.0,
+        "z": 3.0,
+        "orientation": 0.5,
+        "transport_path_progress": 100,
+        "transport_period": 2000,
+    }
+
+    monkeypatch.setattr(
+        gameobjects.EncoderHandler,
+        "encode_packet",
+        lambda _name, payload: payload,
+    )
+
+    def capture_fields(fields, *, mask_blocks=1):
+        captured_fields.clear()
+        captured_fields.update(fields)
+        return (b"\x00" * (int(mask_blocks) * 4), b"")
+
+    monkeypatch.setattr(gameobjects, "_build_fixed_u32_field_block", capture_fields)
+
+    payload = gameobjects._build_gameobject_update_payload(
+        map_id=1,
+        entry=stale_entry,
+        realm_id=1,
+    )
+
+    assert payload["map_id"] == 530
+    assert payload["guid"] == {"guid": world_guid}
+    assert payload["stationary_x"] == 111.0
+    assert payload["stationary_y"] == 222.0
+    assert payload["stationary_z"] == 333.0
+    assert payload["stationary_orientation"] == 1.75
+    assert payload["movement_block_uint32"] == 4321
+    dynamic_flags = captured_fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS]
+    assert dynamic_flags == (28317 << 16)
+
+
+def test_generic_type11_runtime_elevator_counts_as_real_runtime_elevator(monkeypatch):
+    animation = transport_runtime.TransportAnimationPath(
+        entry=999012,
+        nodes=(
+            transport_runtime.TransportAnimationNode(0, 0.0, 0.0, 0.0),
+            transport_runtime.TransportAnimationNode(1000, 0.0, 0.0, 10.0),
+        ),
+        period_ms=1000,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "_transport_animation_for_entry",
+        lambda entry_id: animation if int(entry_id) == 999012 else None,
+    )
+    monkeypatch.setattr(
+        "server.modules.handlers.world.feature_config.elevators_enabled",
+        lambda: True,
+    )
+
+    entry = {
+        "guid": 9012,
+        "world_guid": 0xF120000000000E12,
+        "entry": 999012,
+        "map": 530,
+        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+        "original_type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+        "display_id": 360,
+    }
+
+    assert movement._is_real_runtime_elevator_entry(entry) is True
+
+
+def test_client_driven_type11_create_uses_base_position_with_runtime_progress(monkeypatch):
+    _reset_transport_states()
+    captured_fields = {}
+    world_guid = 0xF120000000000E13
+    state = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=999013,
+        spawn_guid=9013,
+        display_id=360,
+        route=[],
+        node_index=0,
+        x=111.0,
+        y=222.0,
+        z=333.0,
+        orientation=1.75,
+        map_id=530,
+        path_progress_ms=4321,
+        route_period_ms=10000,
+    )
+    transport_runtime._runtime_transport_states()[world_guid] = state
+    entry = {
+        "guid": 9013,
+        "world_guid": world_guid,
+        "entry": 999013,
+        "map": 530,
+        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+        "original_type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+        "display_id": 360,
+        "x": 1.0,
+        "y": 2.0,
+        "z": 3.0,
+        "orientation": 0.5,
+        "client_driven_transport_animation": True,
+        "client_animation_base_map": 530,
+        "client_animation_base_x": 1.0,
+        "client_animation_base_y": 2.0,
+        "client_animation_base_z": 3.0,
+        "client_animation_base_orientation": 0.5,
+    }
+
+    monkeypatch.setattr(
+        gameobjects.EncoderHandler,
+        "encode_packet",
+        lambda _name, payload: payload,
+    )
+
+    def capture_fields(fields, *, mask_blocks=1):
+        captured_fields.clear()
+        captured_fields.update(fields)
+        return (b"\x00" * (int(mask_blocks) * 4), b"")
+
+    monkeypatch.setattr(gameobjects, "_build_fixed_u32_field_block", capture_fields)
+
+    payload = gameobjects._build_gameobject_update_payload(
+        map_id=530,
+        entry=entry,
+        realm_id=1,
+    )
+
+    assert payload["map_id"] == 530
+    assert payload["stationary_x"] == 1.0
+    assert payload["stationary_y"] == 2.0
+    assert payload["stationary_z"] == 3.0
+    assert payload["stationary_orientation"] == 0.5
+    assert payload["movement_block_uint32"] == 4321
+    dynamic_flags = captured_fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS]
+    assert dynamic_flags == (28317 << 16)
+
+
 def test_cached_transport_entry_keeps_database_position_when_runtime_missing():
     _reset_transport_states()
     entry = {
@@ -1954,10 +2386,187 @@ def test_transport_manager_attach_requires_same_authoritative_map():
     assert manager.can_attach(SimpleNamespace(char_guid=1, map_id=0), state.guid) is False
 
 
-def test_transport_route_transfer_worldports_attached_passenger(monkeypatch):
+def _loaded_canonical_world_db_transport_after_map_change(
+    monkeypatch,
+    *,
+    entry_id: int,
+    transport_db_guid: int,
+):
     _reset_transport_states()
-    now = 500.0
-    monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
+    monkeypatch.setattr(
+        transport_runtime,
+        "_sync_transport_state_from_movement_cache",
+        lambda _state: None,
+    )
+
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(transport_db_guid))
+    entry = {
+        "guid": transport_db_guid,
+        "transport_db_guid": transport_db_guid,
+        "world_guid": world_guid,
+        "entry": entry_id,
+        "map": 1,
+        "map_id": 1,
+        "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
+        "display_id": 3015,
+        "name": "Map Change Visibility",
+        "use_transport_guid": True,
+        "world_db_transport": True,
+        "runtime_route": [
+            (1, 10.0, 20.0, 5.0, 0.0, 0),
+            (0, 100.0, 200.0, 10.0, 0.0, 1000),
+        ],
+        "shared_route_clock_key": f"world-db-transport:{transport_db_guid}",
+        "transport_period": 1000,
+    }
+    state = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=entry_id,
+        spawn_guid=transport_db_guid,
+        display_id=3015,
+        route=[
+            transport_runtime.TransportRouteNode(1, 10.0, 20.0, 5.0, 0.0, 0),
+            transport_runtime.TransportRouteNode(0, 100.0, 200.0, 10.0, 0.0, 1000),
+        ],
+        node_index=1,
+        x=100.0,
+        y=200.0,
+        z=10.0,
+        orientation=0.25,
+        map_id=0,
+        last_sent_x=100.0,
+        last_sent_y=200.0,
+        last_sent_z=10.0,
+        last_sent_map_id=0,
+        path_progress_ms=1000,
+        timed_route=True,
+        route_period_ms=1000,
+        shared_clock_key=f"world-db-transport:{transport_db_guid}",
+        transport_db_guid=transport_db_guid,
+        world_db_transport=True,
+    )
+    transport_runtime._runtime_transport_states()[world_guid] = state
+    session = SimpleNamespace(
+        char_guid=1,
+        realm_id=1,
+        gameobjects_visible=True,
+        map_id=1,
+        x=12.0,
+        y=23.0,
+        z=9.0,
+        orientation=0.0,
+        loaded_gameobjects={world_guid},
+        loaded_transport_entries={world_guid: dict(entry)},
+    )
+    return session, entry, state, world_guid
+
+
+def test_20808_map_change_invalidates_old_map_loaded_transport(monkeypatch):
+    session, _entry, _state, world_guid = _loaded_canonical_world_db_transport_after_map_change(
+        monkeypatch,
+        entry_id=20808,
+        transport_db_guid=7,
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert [name for name, _payload in responses] == ["SMSG_UPDATE_OBJECT"]
+    assert _payload_update_type(responses[0]) == 3
+    assert world_guid not in session.loaded_gameobjects
+    assert world_guid not in session.loaded_transport_entries
+
+
+def test_164871_map_change_invalidates_old_map_loaded_transport(monkeypatch):
+    session, _entry, _state, world_guid = _loaded_canonical_world_db_transport_after_map_change(
+        monkeypatch,
+        entry_id=164871,
+        transport_db_guid=6,
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert [name for name, _payload in responses] == ["SMSG_UPDATE_OBJECT"]
+    assert _payload_update_type(responses[0]) == 3
+    assert world_guid not in session.loaded_gameobjects
+    assert world_guid not in session.loaded_transport_entries
+
+
+def test_transport_map_change_invalidation_is_idempotent(monkeypatch):
+    session, _entry, _state, world_guid = _loaded_canonical_world_db_transport_after_map_change(
+        monkeypatch,
+        entry_id=20808,
+        transport_db_guid=7,
+    )
+
+    first = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+    second = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert len(first) == 1
+    assert _payload_update_type(first[0]) == 3
+    assert second == []
+    assert world_guid not in session.loaded_gameobjects
+    assert world_guid not in session.loaded_transport_entries
+
+
+def test_transport_new_map_visibility_can_create_after_map_change(monkeypatch):
+    old_session, entry, state, world_guid = _loaded_canonical_world_db_transport_after_map_change(
+        monkeypatch,
+        entry_id=20808,
+        transport_db_guid=7,
+    )
+    new_session = SimpleNamespace(
+        char_guid=2,
+        realm_id=1,
+        gameobjects_visible=True,
+        map_id=0,
+        x=100.0,
+        y=200.0,
+        z=10.0,
+        orientation=0.0,
+        loaded_gameobjects=set(),
+        loaded_transport_entries={world_guid: dict(entry)},
+    )
+    state.last_sent_map_id = int(state.map_id)
+
+    responses = transport_runtime._build_visible_transport_updates(
+        new_session,
+        new_session.loaded_transport_entries,
+        force=True,
+    )
+
+    assert old_session.map_id == 1
+    assert [name for name, _payload in responses] == ["SMSG_UPDATE_OBJECT"]
+    assert _payload_update_type(responses[0]) == 1
+    assert world_guid in new_session.loaded_gameobjects
+    assert world_guid in new_session.loaded_transport_entries
+
+
+def _transport_boundary_transfer_session(
+    monkeypatch,
+    *,
+    source_map: int,
+    destination_map: int,
+    passenger: bool,
+    transfer_active: bool = True,
+):
+    _reset_transport_states()
+    monkeypatch.setattr(
+        transport_runtime,
+        "_sync_transport_state_from_movement_cache",
+        lambda _state: None,
+    )
     monkeypatch.setattr(movement, "_is_teleporting", lambda _session: False)
     monkeypatch.setattr(movement, "_clear_loaded_world_objects_for_transfer", lambda _session: [])
     monkeypatch.setattr(
@@ -1969,9 +2578,698 @@ def test_transport_route_transfer_worldports_attached_passenger(monkeypatch):
     monkeypatch.setattr(movement, "_save_session_position", lambda *args, **kwargs: True)
     monkeypatch.setattr(movement, "_post_teleport_multiplayer_resync", lambda *args, **kwargs: [])
 
-    source_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(100007))
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(7))
     entry = {
-        "guid": 100007,
+        "guid": 7,
+        "transport_db_guid": 7,
+        "world_guid": world_guid,
+        "entry": 20808,
+        "map": source_map,
+        "map_id": source_map,
+        "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
+        "display_id": 3015,
+        "use_transport_guid": True,
+        "world_db_transport": True,
+        "runtime_route": [
+            (source_map, 10.0, 20.0, 5.0, 0.0, 0),
+            (destination_map, 100.0, 200.0, 10.0, 0.0, 1000),
+        ],
+        "shared_route_clock_key": "world-db-transport:7",
+        "transport_period": 1000,
+    }
+    state = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=20808,
+        spawn_guid=7,
+        display_id=3015,
+        route=[
+            transport_runtime.TransportRouteNode(source_map, 10.0, 20.0, 5.0, 0.0, 0),
+            transport_runtime.TransportRouteNode(destination_map, 100.0, 200.0, 10.0, 0.0, 1000),
+        ],
+        node_index=1,
+        x=100.0,
+        y=200.0,
+        z=10.0,
+        orientation=0.25,
+        map_id=destination_map,
+        path_progress_ms=1000,
+        timed_route=True,
+        route_period_ms=1000,
+        shared_clock_key="world-db-transport:7",
+        transfer_active=transfer_active,
+        transfer_destination_map=destination_map,
+        transport_db_guid=7,
+        world_db_transport=True,
+    )
+    transport_runtime._runtime_transport_states()[world_guid] = state
+    movement_state = SimpleNamespace(
+        has_transport_data=passenger,
+        transport_guid=world_guid if passenger else 0,
+        transport_x=2.0,
+        transport_y=3.0,
+        transport_z=4.0,
+        transport_orientation=0.5,
+        transport_time=1000,
+        transport_time2=0,
+        transport_time3=0,
+        transport_seat=-1,
+        transport_vehicle_id=0,
+        x=12.0,
+        y=23.0,
+        z=9.0,
+        orientation=0.0,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        pitch=0.0,
+        last_valid_orientation=0.0,
+    )
+    session = SimpleNamespace(
+        char_guid=1,
+        realm_id=1,
+        gameobjects_visible=True,
+        map_id=source_map,
+        x=12.0,
+        y=23.0,
+        z=9.0,
+        orientation=0.0,
+        movement_state=movement_state,
+        loaded_gameobjects={world_guid},
+        loaded_transport_entries={world_guid: entry},
+    )
+    if passenger:
+        transport_runtime.attach_transport_passenger(
+            world_guid,
+            1,
+            local_x=2.0,
+            local_y=3.0,
+            local_z=4.0,
+            local_o=0.5,
+            source_map=source_map,
+        )
+    return session, state, world_guid
+
+
+def test_20808_boundary_passenger_worldports_before_despawn_ratchet_to_booty(monkeypatch):
+    session, _state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=1,
+        destination_map=0,
+        passenger=True,
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert [name for name, _payload in responses][-3:-1] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    update_responses = [response for response in responses if response[0] == "SMSG_UPDATE_OBJECT"]
+    assert not any(_payload_update_type(response) == 3 for response in update_responses)
+    assert session.transport_transfer_pending is True
+    assert session.map_id == 0
+    assert session.movement_state.transport_guid == world_guid
+
+
+def test_20808_boundary_passenger_worldports_before_despawn_booty_to_ratchet(monkeypatch):
+    session, _state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=0,
+        destination_map=1,
+        passenger=True,
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert [name for name, _payload in responses][-3:-1] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    update_responses = [response for response in responses if response[0] == "SMSG_UPDATE_OBJECT"]
+    assert not any(_payload_update_type(response) == 3 for response in update_responses)
+    assert session.transport_transfer_pending is True
+    assert session.map_id == 1
+    assert session.movement_state.transport_guid == world_guid
+
+
+def test_20808_boundary_forced_map_zero_succeeds_after_transfer_window(monkeypatch):
+    session, state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=1,
+        destination_map=0,
+        passenger=True,
+        transfer_active=False,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "transport_transfer_destination_map_for_guid",
+        lambda _world_guid: None,
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert state.transfer_active is False
+    assert state.transfer_destination_map == 0
+    assert [name for name, _payload in responses][-3:-1] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    assert session.transport_transfer_pending is True
+    assert session.map_id == 0
+    assert session.movement_state.transport_guid == world_guid
+
+
+def test_20808_boundary_forced_map_one_succeeds_after_transfer_window(monkeypatch):
+    session, state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=0,
+        destination_map=1,
+        passenger=True,
+        transfer_active=False,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "transport_transfer_destination_map_for_guid",
+        lambda _world_guid: None,
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert state.transfer_active is False
+    assert state.transfer_destination_map == 1
+    assert [name for name, _payload in responses][-3:-1] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    assert session.transport_transfer_pending is True
+    assert session.map_id == 1
+    assert session.movement_state.transport_guid == world_guid
+
+
+def test_20808_boundary_forced_map_duplicate_tick_does_not_duplicate_transfer(monkeypatch):
+    session, _state, _world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=1,
+        destination_map=0,
+        passenger=True,
+        transfer_active=False,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "transport_transfer_destination_map_for_guid",
+        lambda _world_guid: None,
+    )
+
+    first = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+    second = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert [name for name, _payload in first][-3:-1] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    assert [name for name, _payload in second].count("SMSG_TRANSFER_PENDING") == 0
+    assert [name for name, _payload in second].count("SMSG_NEW_WORLD") == 0
+
+
+def test_20808_boundary_stale_pending_does_not_block_next_transfer(monkeypatch):
+    session, _state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=0,
+        destination_map=1,
+        passenger=True,
+        transfer_active=False,
+    )
+    session.transport_transfer_pending = True
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+    session.pending_transport_transfer = {
+        "source_guid": world_guid,
+        "destination_guid": world_guid,
+        "source_map": 1,
+        "destination_map": 0,
+    }
+    monkeypatch.setattr(
+        transport_runtime,
+        "transport_transfer_destination_map_for_guid",
+        lambda _world_guid: None,
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert [name for name, _payload in responses][-3:-1] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    assert session.transport_transfer_pending is True
+    assert session.worldport_ack_pending is True
+    assert session.pending_transport_transfer["source_map"] == 0
+    assert session.pending_transport_transfer["destination_map"] == 1
+    assert session.movement_state.transport_guid == world_guid
+
+
+def test_20808_boundary_active_pending_still_blocks_duplicate_transfer(monkeypatch):
+    session, _state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=0,
+        destination_map=1,
+        passenger=True,
+        transfer_active=False,
+    )
+    session.transport_transfer_pending = True
+    session.teleport_pending = True
+    session.worldport_ack_pending = True
+    session.pending_transport_transfer = {
+        "source_guid": world_guid,
+        "destination_guid": world_guid,
+        "source_map": 1,
+        "destination_map": 0,
+    }
+
+    responses = movement._maybe_start_transport_route_transfer(
+        session,
+        "MSG_MOVE_HEARTBEAT",
+        forced_destination_map=1,
+    )
+
+    assert responses == []
+    assert session.transport_transfer_pending is True
+    assert session.pending_transport_transfer["destination_map"] == 0
+
+
+def test_20808_client_clear_clears_stale_transport_transfer_pending(monkeypatch):
+    session, _state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=0,
+        destination_map=1,
+        passenger=True,
+    )
+    session.transport_transfer_pending = True
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+    session.pending_transport_transfer = {
+        "source_guid": world_guid,
+        "destination_guid": world_guid,
+        "source_map": 1,
+        "destination_map": 0,
+    }
+
+    movement._store_transport_state_from_parsed(
+        session,
+        "MSG_MOVE_HEARTBEAT",
+        {"has_transport_data": False},
+    )
+
+    assert session.transport_transfer_pending is False
+    assert session.pending_transport_transfer is None
+    assert session.movement_state.transport_guid == 0
+
+
+def test_20808_client_clear_preserves_active_transport_transfer_pending(monkeypatch):
+    session, _state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=0,
+        destination_map=1,
+        passenger=True,
+    )
+    session.transport_transfer_pending = True
+    session.teleport_pending = False
+    session.worldport_ack_pending = True
+    session.pending_transport_transfer = {
+        "source_guid": world_guid,
+        "destination_guid": world_guid,
+        "source_map": 0,
+        "destination_map": 1,
+    }
+
+    movement._store_transport_state_from_parsed(
+        session,
+        "MSG_MOVE_HEARTBEAT",
+        {"has_transport_data": False},
+    )
+
+    assert session.transport_transfer_pending is True
+    assert session.pending_transport_transfer["destination_map"] == 1
+    assert session.movement_state.transport_guid == 0
+
+
+def test_20808_boundary_passenger_reattaches_same_guid_after_ack(monkeypatch):
+    session, _state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=1,
+        destination_map=0,
+        passenger=True,
+    )
+    transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    movement.handle_move_worldport_ack(session, SimpleNamespace())
+
+    assert session.transport_transfer_pending is False
+    assert session.movement_state.transport_guid == world_guid
+    assert (
+        transport_runtime.transport_passenger_attachment(world_guid, 1)
+        is not None
+    )
+
+
+def test_20808_boundary_non_passenger_receives_out_of_range(monkeypatch):
+    session, _state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=1,
+        destination_map=0,
+        passenger=False,
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert [name for name, _payload in responses] == ["SMSG_UPDATE_OBJECT"]
+    assert _payload_update_type(responses[0]) == 3
+    assert world_guid not in session.loaded_gameobjects
+    assert world_guid not in session.loaded_transport_entries
+
+
+def test_20808_boundary_duplicate_tick_does_not_duplicate_transfer(monkeypatch):
+    session, _state, _world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=1,
+        destination_map=0,
+        passenger=True,
+    )
+
+    first = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+    second = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert [name for name, _payload in first][-3:-1] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    assert [name for name, _payload in second].count("SMSG_TRANSFER_PENDING") == 0
+    assert [name for name, _payload in second].count("SMSG_NEW_WORLD") == 0
+
+
+def _run_canonical_transport_transfer(
+    monkeypatch,
+    *,
+    entry_id: int,
+    transport_db_guid: int,
+    source_map: int,
+    destination_map: int,
+    runtime_map: int | None = None,
+    runtime_base: tuple[float, float, float, float] = (100.0, 200.0, 10.0, 0.25),
+    route_base: tuple[float, float, float] = (100.0, 200.0, 10.0),
+    expected_base_source: str | None = None,
+    freeze_runtime_state: bool = False,
+    runtime_transfer_metadata: bool = False,
+):
+    _reset_transport_states()
+    now = 500.0
+    monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
+    monkeypatch.setattr(movement, "_is_teleporting", lambda _session: False)
+
+    def _clear_loaded_for_transfer(_session):
+        loaded_gameobjects = getattr(_session, "loaded_gameobjects", None)
+        if isinstance(loaded_gameobjects, set):
+            loaded_gameobjects.clear()
+        loaded_transport_entries = getattr(_session, "loaded_transport_entries", None)
+        if isinstance(loaded_transport_entries, dict):
+            loaded_transport_entries.clear()
+        return []
+
+    monkeypatch.setattr(movement, "_clear_loaded_world_objects_for_transfer", _clear_loaded_for_transfer)
+    monkeypatch.setattr(
+        movement,
+        "_capture_persist_position_from_session",
+        lambda _session: None,
+    )
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_save_session_position", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_post_teleport_multiplayer_resync", lambda *args, **kwargs: [])
+
+    source_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(transport_db_guid))
+    runtime_x, runtime_y, runtime_z, runtime_o = runtime_base
+    route_x, route_y, route_z = route_base
+    route = [
+        (source_map, 10.0, 20.0, 5.0, 0.0, 0),
+        (destination_map, route_x, route_y, route_z, 0.0, 1000),
+    ]
+    entry = {
+        "guid": transport_db_guid,
+        "transport_db_guid": transport_db_guid,
+        "world_guid": source_guid,
+        "entry": entry_id,
+        "map": source_map,
+        "map_id": source_map,
+        "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
+        "display_id": 3015,
+        "name": "Canonical Transfer",
+        "use_transport_guid": True,
+        "world_db_transport": True,
+        "runtime_route": route,
+        "shared_route_clock_key": f"world-db-transport:{transport_db_guid}",
+        "transport_period": 1000,
+    }
+    state = transport_runtime.RuntimeTransportState(
+        guid=source_guid,
+        entry=entry_id,
+        spawn_guid=transport_db_guid,
+        display_id=3015,
+        route=[
+            transport_runtime.TransportRouteNode(source_map, 10.0, 20.0, 5.0, 0.0, 0),
+            transport_runtime.TransportRouteNode(destination_map, route_x, route_y, route_z, 0.0, 1000),
+        ],
+        node_index=1,
+        x=runtime_x,
+        y=runtime_y,
+        z=runtime_z,
+        orientation=runtime_o,
+        map_id=destination_map if runtime_map is None else runtime_map,
+        path_progress_ms=1000,
+        timed_route=True,
+        route_period_ms=1000,
+        shared_clock_key=f"world-db-transport:{transport_db_guid}",
+        transport_db_guid=transport_db_guid,
+        world_db_transport=True,
+    )
+    transport_runtime._runtime_transport_states()[source_guid] = state
+    if freeze_runtime_state:
+        monkeypatch.setattr(
+            transport_runtime,
+            "_sync_transport_state_from_movement_cache",
+            lambda _state: None,
+        )
+        monkeypatch.setattr(
+            transport_runtime,
+            "transport_transfer_destination_map_for_guid",
+            lambda _world_guid: int(destination_map),
+        )
+
+    movement_state = SimpleNamespace(
+        has_transport_data=True,
+        transport_guid=source_guid,
+        transport_x=2.0,
+        transport_y=3.0,
+        transport_z=4.0,
+        transport_orientation=0.5,
+        transport_time=1000,
+        transport_time2=0,
+        transport_time3=0,
+        transport_seat=-1,
+        transport_vehicle_id=0,
+        x=12.0,
+        y=23.0,
+        z=9.0,
+        orientation=0.0,
+        flags=0,
+        flags2=0,
+        timestamp_ms=0,
+        client_timestamp_ms=0,
+        server_movement_timestamp_ms=0,
+        pitch=0.0,
+        last_valid_orientation=0.0,
+    )
+    session = SimpleNamespace(
+        char_guid=1,
+        realm_id=1,
+        map_id=source_map,
+        x=12.0,
+        y=23.0,
+        z=9.0,
+        orientation=0.0,
+        movement_state=movement_state,
+        loaded_gameobjects={source_guid},
+        loaded_transport_entries={source_guid: entry},
+    )
+    transport_runtime._ensure_movement_instance_for_state(state)
+    if runtime_transfer_metadata:
+        state.transfer_active = True
+        state.transfer_destination_map = int(destination_map)
+        manager_state = transport_runtime.get_movement_manager().get_state(source_guid)
+        assert manager_state is not None
+        manager_state.transfer_active = False
+        manager_state.transfer_destination_map = None
+        manager_state.lifecycle_events = ()
+    transport_runtime.get_movement_manager().attach_passenger(
+        source_guid,
+        1,
+        local_x=2.0,
+        local_y=3.0,
+        local_z=4.0,
+        local_o=0.5,
+        source_map=source_map,
+    )
+    linked_destination_guid = transport_runtime.linked_transport_world_guid(
+        entry,
+        map_id=destination_map,
+    )
+    if linked_destination_guid != source_guid:
+        assert transport_runtime.runtime_transport_state_for_guid(linked_destination_guid) is None
+
+    responses = movement._maybe_start_transport_route_transfer(session, "MSG_MOVE_HEARTBEAT")
+
+    assert [name for name, _payload in responses][-3:-1] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    assert session.worldport_ack_pending is True
+    assert session.map_id == destination_map
+    assert movement_state.transport_guid == source_guid
+    assert movement_state.transport_x == 2.0
+    pending = session.pending_transport_transfer
+    if expected_base_source is not None:
+        assert pending["base_source"] == expected_base_source
+    if expected_base_source == "runtime_state":
+        assert (
+            pending["base_x"],
+            pending["base_y"],
+            pending["base_z"],
+            pending["base_o"],
+        ) == runtime_base
+    assert session.x == pending["final_x"]
+    assert session.y == pending["final_y"]
+    assert session.z == pending["final_z"]
+    assert session.pending_transport_transfer["source_guid"] == source_guid
+    assert session.pending_transport_transfer["destination_guid"] == source_guid
+    if linked_destination_guid != source_guid:
+        assert transport_runtime.runtime_transport_state_for_guid(linked_destination_guid) is None
+
+    movement.handle_move_worldport_ack(session, SimpleNamespace())
+
+    assert session.transport_transfer_pending is False
+    assert movement_state.has_transport_data is True
+    assert movement_state.transport_guid == source_guid
+    assert source_guid in session.loaded_transport_entries
+    assert source_guid not in session.loaded_gameobjects
+    if linked_destination_guid != source_guid:
+        assert linked_destination_guid not in session.loaded_transport_entries
+        assert linked_destination_guid not in session.loaded_gameobjects
+        assert transport_runtime.runtime_transport_state_for_guid(linked_destination_guid) is None
+    assert (
+        transport_runtime.get_movement_manager().passenger_attachment(
+            source_guid,
+            1,
+        )
+        is not None
+    )
+    return source_guid, linked_destination_guid, session
+
+
+def test_20808_passenger_transfer_preserves_guid_map_1_to_0(monkeypatch):
+    _run_canonical_transport_transfer(
+        monkeypatch,
+        entry_id=20808,
+        transport_db_guid=7,
+        source_map=1,
+        destination_map=0,
+    )
+
+
+def test_20808_transfer_worldport_uses_live_runtime_base(monkeypatch):
+    _run_canonical_transport_transfer(
+        monkeypatch,
+        entry_id=20808,
+        transport_db_guid=7,
+        source_map=1,
+        destination_map=0,
+        runtime_base=(123.0, 234.0, 12.0, 0.75),
+        route_base=(100.0, 200.0, 10.0),
+        expected_base_source="runtime_state",
+        freeze_runtime_state=True,
+    )
+
+
+def test_20808_transfer_route_uses_runtime_state_destination_map_zero(monkeypatch):
+    _run_canonical_transport_transfer(
+        monkeypatch,
+        entry_id=20808,
+        transport_db_guid=7,
+        source_map=1,
+        destination_map=0,
+        runtime_transfer_metadata=True,
+    )
+
+
+def test_20808_transfer_worldport_falls_back_to_route_node(monkeypatch):
+    _reset_transport_states()
+    now = 520.0
+    monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
+    monkeypatch.setattr(movement, "_is_teleporting", lambda _session: False)
+    monkeypatch.setattr(movement, "_clear_loaded_world_objects_for_transfer", lambda _session: [])
+    monkeypatch.setattr(
+        movement,
+        "_capture_persist_position_from_session",
+        lambda _session: None,
+    )
+    monkeypatch.setattr(movement, "_mark_position_dirty", lambda _session: None)
+    monkeypatch.setattr(movement, "_save_session_position", lambda *args, **kwargs: True)
+    monkeypatch.setattr(movement, "_post_teleport_multiplayer_resync", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        transport_runtime,
+        "_sync_transport_state_from_movement_cache",
+        lambda _state: None,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "transport_transfer_destination_map_for_guid",
+        lambda _world_guid: 0,
+    )
+
+    source_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(7))
+    entry = {
+        "guid": 7,
         "transport_db_guid": 7,
         "world_guid": source_guid,
         "entry": 20808,
@@ -1979,7 +3277,6 @@ def test_transport_route_transfer_worldports_attached_passenger(monkeypatch):
         "map_id": 1,
         "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
         "display_id": 3015,
-        "name": "The Maiden's Fancy",
         "use_transport_guid": True,
         "world_db_transport": True,
         "runtime_route": [
@@ -1992,25 +3289,26 @@ def test_transport_route_transfer_worldports_attached_passenger(monkeypatch):
     state = transport_runtime.RuntimeTransportState(
         guid=source_guid,
         entry=20808,
-        spawn_guid=100007,
+        spawn_guid=7,
         display_id=3015,
         route=[
             transport_runtime.TransportRouteNode(1, 10.0, 20.0, 5.0, 0.0, 0),
             transport_runtime.TransportRouteNode(0, 100.0, 200.0, 10.0, 0.0, 1000),
         ],
-        node_index=1,
-        x=100.0,
-        y=200.0,
-        z=10.0,
-        orientation=0.25,
-        map_id=0,
+        node_index=0,
+        x=123.0,
+        y=234.0,
+        z=12.0,
+        orientation=0.75,
+        map_id=1,
         path_progress_ms=1000,
         timed_route=True,
         route_period_ms=1000,
         shared_clock_key="world-db-transport:7",
+        transport_db_guid=7,
+        world_db_transport=True,
     )
     transport_runtime._runtime_transport_states()[source_guid] = state
-
     movement_state = SimpleNamespace(
         has_transport_data=True,
         transport_guid=source_guid,
@@ -2044,6 +3342,7 @@ def test_transport_route_transfer_worldports_attached_passenger(monkeypatch):
         z=9.0,
         orientation=0.0,
         movement_state=movement_state,
+        loaded_gameobjects={source_guid},
         loaded_transport_entries={source_guid: entry},
     )
     transport_runtime._ensure_movement_instance_for_state(state)
@@ -2057,35 +3356,76 @@ def test_transport_route_transfer_worldports_attached_passenger(monkeypatch):
         source_map=1,
     )
 
-    responses = movement._maybe_start_transport_route_transfer(session, "MSG_MOVE_HEARTBEAT")
+    movement._maybe_start_transport_route_transfer(session, "MSG_MOVE_HEARTBEAT")
 
-    assert [name for name, _payload in responses][-3:-1] == [
-        "SMSG_TRANSFER_PENDING",
-        "SMSG_NEW_WORLD",
-    ]
-    assert session.worldport_ack_pending is True
-    assert session.map_id == 0
-    assert movement_state.transport_guid == transport_runtime.linked_transport_world_guid(entry, map_id=0)
-    assert movement_state.transport_x == 2.0
-    assert session.x == 102.0
-    assert session.y == 203.0
-    assert session.z == 14.0
+    pending = session.pending_transport_transfer
+    assert pending["base_source"] == "route_node_fallback"
+    assert (pending["base_x"], pending["base_y"], pending["base_z"]) == (100.0, 200.0, 10.0)
+    assert (session.x, session.y, session.z) == (102.0, 203.0, 14.0)
 
-    movement.handle_move_worldport_ack(session, SimpleNamespace())
 
-    assert session.transport_transfer_pending is False
+def test_20808_passenger_transfer_preserves_guid_map_0_to_1(monkeypatch):
+    source_guid, linked_destination_guid, _session = _run_canonical_transport_transfer(
+        monkeypatch,
+        entry_id=20808,
+        transport_db_guid=7,
+        source_map=0,
+        destination_map=1,
+    )
+
+    assert linked_destination_guid != source_guid
+
+
+def test_164871_passenger_transfer_preserves_guid_map_1_to_0(monkeypatch):
+    _run_canonical_transport_transfer(
+        monkeypatch,
+        entry_id=164871,
+        transport_db_guid=6,
+        source_map=1,
+        destination_map=0,
+    )
+
+
+def test_first_movement_after_ack_preserves_matching_transport_guid(monkeypatch):
+    source_guid, _linked_destination_guid, session = _run_canonical_transport_transfer(
+        monkeypatch,
+        entry_id=20808,
+        transport_db_guid=7,
+        source_map=1,
+        destination_map=0,
+    )
+    movement_state = session.movement_state
+
+    movement._store_transport_state_from_parsed(
+        session,
+        "MSG_MOVE_HEARTBEAT",
+        {
+            "has_transport_data": True,
+            "transport_guid": source_guid,
+            "transport_x": 2.0,
+            "transport_y": 3.0,
+            "transport_z": 4.0,
+            "transport_orientation": 0.5,
+            "transport_time": 1000,
+            "transport_time2": 0,
+            "transport_time3": 0,
+            "transport_seat": -1,
+            "transport_vehicle_id": 0,
+        },
+    )
+
     assert movement_state.has_transport_data is True
-    assert movement_state.transport_guid in session.loaded_transport_entries
+    assert movement_state.transport_guid == source_guid
     assert (
         transport_runtime.get_movement_manager().passenger_attachment(
-            movement_state.transport_guid,
+            source_guid,
             1,
         )
         is not None
     )
 
 
-def test_transport_transfer_registers_missing_destination_instance(monkeypatch):
+def test_legacy_transport_transfer_registers_missing_destination_instance(monkeypatch):
     _reset_transport_states()
     now = 510.0
     monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: now)
@@ -2112,7 +3452,7 @@ def test_transport_transfer_registers_missing_destination_instance(monkeypatch):
         "display_id": 3015,
         "name": "Route Stability",
         "use_transport_guid": True,
-        "world_db_transport": True,
+        "world_db_transport": False,
         "runtime_route": [
             (1, 10.0, 20.0, 5.0, 0.0, 0),
             (0, 100.0, 200.0, 10.0, 0.0, 1000),
@@ -2244,7 +3584,6 @@ def test_transport_rehydrate_preserves_shared_clock_phase(monkeypatch):
 def test_deeprun_tram_without_dbc_template_does_not_spawn(monkeypatch):
     _reset_transport_states()
     monkeypatch.setattr(transport_runtime, "_load_world_db_transports", lambda: ())
-    monkeypatch.setattr(transport_runtime, "_load_thunder_bluff_elevator_entries", lambda: ())
     monkeypatch.setattr(transport_runtime, "_shared_route_phase_ms", lambda *_args: 0)
     transport_runtime.get_world_transport_manager().start()
 

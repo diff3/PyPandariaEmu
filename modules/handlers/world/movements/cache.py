@@ -37,6 +37,31 @@ def _movement_node_time(node: MovementNode) -> int:
     return int(node.time_ms)
 
 
+def _reverse_elevator_nodes_preserving_time(
+    ordered_nodes: list[MovementNode],
+) -> tuple[MovementNode, ...]:
+    """Reverse elevator positions while keeping TransportAnimation time monotonic."""
+    times = [int(node.time_ms) for node in ordered_nodes]
+    reversed_nodes = list(reversed(ordered_nodes))
+    result: list[MovementNode] = []
+    for index, node in enumerate(reversed_nodes):
+        result.append(
+            MovementNode(
+                map_id=int(node.map_id),
+                x=float(node.x),
+                y=float(node.y),
+                z=float(node.z),
+                time_ms=int(times[index]),
+                yaw=node.yaw,
+                station=bool(node.station),
+                transfer=bool(node.transfer),
+                flags=int(node.flags),
+                delay=int(node.delay),
+            )
+        )
+    return tuple(result)
+
+
 class MovementTemplateCache:
     def __init__(self) -> None:
         self.transport_animation: dict[int, MovementTemplate] = {}
@@ -189,11 +214,10 @@ def _load_transport_animation_templates() -> dict[int, MovementTemplate]:
 
         #
         # Blizzard elevator animation data appears reversed.
-        # Reverse node order so elevators move in the correct direction.
+        # Reverse positions so elevators move in the correct direction while
+        # preserving monotonic DBC timing for MovementManager validation.
         #
-        ordered_nodes.reverse()
-
-        ordered = tuple(ordered_nodes)
+        ordered = _reverse_elevator_nodes_preserving_time(ordered_nodes)
 
         if ordered:
             Logger.info(
