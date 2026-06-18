@@ -1758,6 +1758,43 @@ def cmd_mapcheat(session, args: list[str]) -> list[tuple[str, bytes]]:
     return _notification_response("Usage: mapcheat <on|0>")
 
 
+@register_command("pvg", ".pvg <start|stop|status|plant <lane 1-5> <spitter|rocknut>>")
+def cmd_plants_vs_ghouls(session, args: list[str]) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.features.plants_vs_ghouls import (
+        get_plants_vs_ghouls_manager,
+    )
+
+    manager = get_plants_vs_ghouls_manager()
+    if not args:
+        return _notification_response(
+            ".pvg <start|stop|status|plant <lane 1-5> <spitter|rocknut>>"
+        )
+
+    action = str(args[0]).strip().lower()
+    if action == "start":
+        if not manager.start_match(session):
+            return _notification_response("[PvG] failed to start match")
+        return _notification_response("[PvG] start")
+    if action == "stop":
+        if not manager.stop_match(session, reason="command-stop"):
+            return _notification_response("[PvG] no active match")
+        return _notification_response("[PvG] stop")
+    if action == "status":
+        return _notification_response(manager.status_text(session))
+    if action == "plant":
+        if len(args) != 3:
+            return _notification_response("Usage: .pvg plant <lane 1-5> <spitter|rocknut>")
+        try:
+            lane_number = int(args[1])
+        except (TypeError, ValueError):
+            return _notification_response("Usage: .pvg plant <lane 1-5> <spitter|rocknut>")
+        _ok, message = manager.place_plant(session, lane_number=lane_number, kind=args[2])
+        return _notification_response(message)
+
+    return _notification_response(
+        ".pvg <start|stop|status|plant <lane 1-5> <spitter|rocknut>>"
+    )
+
 
 def find_online_player_by_name(name: str):
     if not name:

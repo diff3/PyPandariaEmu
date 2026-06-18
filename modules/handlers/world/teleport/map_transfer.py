@@ -80,6 +80,16 @@ def apply_map_transfer(
     source_map = int(getattr(session, "map_id", 0) or 0)
     same_map = source_map == int(target.map_id)
 
+    if not same_map:
+        try:
+            from server.modules.handlers.world.features.plants_vs_ghouls import (
+                get_plants_vs_ghouls_manager,
+            )
+
+            get_plants_vs_ghouls_manager().handle_map_change(session, int(target.map_id))
+        except Exception as exc:
+            Logger.warning("[PvG] map-transfer cleanup failed: %s", exc)
+
     session.teleport_destination = target.name or str(reason)
     session.near_teleport_pending = same_map
     session.teleport_pending = not same_map

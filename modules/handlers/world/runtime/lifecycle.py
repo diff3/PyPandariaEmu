@@ -121,6 +121,15 @@ def handle_disconnect_session(target_session) -> None:
     except Exception as exc:
         Logger.warning(f"[DISCONNECT] taxi finalize failed: {exc}")
 
+    try:
+        from server.modules.handlers.world.features.plants_vs_ghouls import (
+            get_plants_vs_ghouls_manager,
+        )
+
+        get_plants_vs_ghouls_manager().handle_disconnect(target_session)
+    except Exception as exc:
+        Logger.warning(f"[DISCONNECT] PvG cleanup failed: {exc}")
+
     # --- Remove from world (broadcast) ---
     try:
         broadcast_player_remove(target_session)
