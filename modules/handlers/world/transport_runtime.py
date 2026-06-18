@@ -76,6 +76,8 @@ _UNDERCITY_ELEVATOR_DOOR_ENTRIES = frozenset({
 _PHASELESS_ELEVATOR_MAP_ALIASES = {
     1136: 1,
 }
+_ZEPPELIN_NAME_TOKENS = ("zeppelin", "the thundercaller", "cloudkisser")
+_ZEPPELIN_ENTRY_IDS = frozenset({176495, 186238})
 
 
 def _transport_debug_log(message: str, *args) -> None:
@@ -772,6 +774,39 @@ def is_deeprun_tram_entry(entry: dict[str, Any] | None) -> bool:
         and int(entry.get("map", entry.get("map_id", -1)) or -1) == _DEEPRUN_TRAM_MAP_ID
         and int(entry.get("entry", 0) or 0) == _DEEPRUN_TRAM_ENTRY
     )
+
+
+def is_cross_map_boat_entry(entry: dict[str, Any] | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if is_deeprun_tram_entry(entry):
+        return False
+    if int(entry.get("type", 0) or 0) != GAMEOBJECT_TYPE_MO_TRANSPORT:
+        return False
+    if not bool(entry.get("world_db_transport", False)):
+        return False
+    entry_id = int(entry.get("entry", 0) or 0)
+    if entry_id in _ZEPPELIN_ENTRY_IDS:
+        return False
+    text = " ".join(
+        str(value or "")
+        for value in (
+            entry.get("name"),
+            entry.get("template_name"),
+        )
+    ).lower()
+    if any(token in text for token in _ZEPPELIN_NAME_TOKENS):
+        return False
+    route = entry.get("runtime_route")
+    if isinstance(route, (list, tuple)):
+        maps = {
+            int(node[0])
+            for node in route
+            if isinstance(node, (list, tuple)) and len(node) >= 1
+        }
+        if len(maps) >= 2:
+            return True
+    return True
 
 
 def prepare_runtime_transport_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -1914,6 +1949,13 @@ def _maybe_start_passenger_transport_transfer(
     movement_state = getattr(session, "movement_state", None)
     player_guid = int(getattr(session, "char_guid", 0) or 0)
     runtime_state = _runtime_transport_states().get(int(world_guid))
+    loaded_entries = getattr(session, "loaded_transport_entries", None)
+    entry = authoritative_transport_entry_for_guid(int(world_guid))
+    if entry is None and isinstance(loaded_entries, dict):
+        loaded_entry = loaded_entries.get(int(world_guid))
+        if isinstance(loaded_entry, dict):
+            entry = dict(loaded_entry)
+    cross_map_boat = is_cross_map_boat_entry(entry)
     session_map = getattr(session, "map_id", None)
     destination_map = (
         getattr(runtime_state, "transfer_destination_map", None)
@@ -1968,6 +2010,16 @@ def _maybe_start_passenger_transport_transfer(
         float(getattr(movement_state, "transport_orientation", 0.0) or 0.0),
         str(getattr(session, "transport_attach_state", "") or ""),
     )
+    if cross_map_boat and not attached and runtime_attached and movement_state is not None:
+        attachment = transport_passenger_attachment(int(world_guid), int(player_guid))
+        if attachment is not None:
+            movement_state.has_transport_data = True
+            movement_state.transport_guid = int(world_guid)
+            movement_state.transport_x = float(attachment.local_x)
+            movement_state.transport_y = float(attachment.local_y)
+            movement_state.transport_z = float(attachment.local_z)
+            movement_state.transport_orientation = float(attachment.local_o)
+            attached = True
     if not attached:
         _log_transfer_exit("not_attached")
         return []
@@ -1980,6 +2032,12 @@ def _maybe_start_passenger_transport_transfer(
 
     if forced_destination_map is None and str(reason) == "map" and destination_map is not None:
         forced_destination_map = int(destination_map)
+    if cross_map_boat:
+        Logger.info(
+            "[TransportTransfer] boundary transfer start player=%s transport=0x%016X",
+            int(getattr(session, "char_guid", 0) or 0),
+            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+        )
     responses = _maybe_start_transport_route_transfer(
         session,
         f"TRANSPORT_RUNTIME_{str(reason).upper()}",

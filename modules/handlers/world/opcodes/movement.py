@@ -57,6 +57,133 @@ def _transport_debug_log(message: str, *args) -> None:
     Logger.info(message, *args)
 
 
+def _verify_pending_boat_transfer_attachment(session, pending: dict[str, Any] | None) -> None:
+    if not isinstance(pending, dict):
+        return
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            attach_transport_passenger,
+            cached_transport_runtime_entry,
+            is_cross_map_boat_entry,
+            runtime_transport_state_for_guid,
+            transport_passenger_attachment,
+        )
+    except Exception:
+        return
+
+    destination_entry = pending.get("destination_entry")
+    if not is_cross_map_boat_entry(destination_entry if isinstance(destination_entry, dict) else None):
+        return
+
+    player_guid = int(getattr(session, "char_guid", 0) or 0)
+    destination_guid = int(pending.get("destination_guid", 0) or 0)
+    if player_guid <= 0 or destination_guid <= 0:
+        return
+
+    Logger.info(
+        "[TransportTransfer] verify player=%s transport=0x%016X",
+        player_guid,
+        destination_guid & 0xFFFFFFFFFFFFFFFF,
+    )
+
+    movement_state = getattr(session, "movement_state", None)
+    runtime_attachment = transport_passenger_attachment(destination_guid, player_guid)
+    if (
+        movement_state is not None
+        and bool(getattr(movement_state, "has_transport_data", False))
+        and int(getattr(movement_state, "transport_guid", 0) or 0) == destination_guid
+        and runtime_attachment is not None
+    ):
+        Logger.info("[TransportTransfer] verify success")
+        return
+
+    Logger.info("[TransportTransfer] verify failed reattaching")
+
+    local_x = float(
+        getattr(runtime_attachment, "local_x", pending.get("local_x", 0.0))
+        if runtime_attachment is not None
+        else pending.get("local_x", 0.0)
+    )
+    local_y = float(
+        getattr(runtime_attachment, "local_y", pending.get("local_y", 0.0))
+        if runtime_attachment is not None
+        else pending.get("local_y", 0.0)
+    )
+    local_z = float(
+        getattr(runtime_attachment, "local_z", pending.get("local_z", 0.0))
+        if runtime_attachment is not None
+        else pending.get("local_z", 0.0)
+    )
+    local_o = float(
+        getattr(runtime_attachment, "local_o", pending.get("local_o", 0.0))
+        if runtime_attachment is not None
+        else pending.get("local_o", 0.0)
+    )
+
+    runtime_state = runtime_transport_state_for_guid(destination_guid)
+    if runtime_state is not None:
+        transport_map = int(getattr(runtime_state, "map_id", pending.get("destination_map", 0)) or 0)
+        transport_x = float(getattr(runtime_state, "x", 0.0) or 0.0)
+        transport_y = float(getattr(runtime_state, "y", 0.0) or 0.0)
+        transport_z = float(getattr(runtime_state, "z", 0.0) or 0.0)
+        transport_o = float(getattr(runtime_state, "orientation", 0.0) or 0.0)
+    else:
+        entry = destination_entry if isinstance(destination_entry, dict) else {}
+        transport_map = int(entry.get("map", entry.get("map_id", pending.get("destination_map", 0))) or 0)
+        transport_x = float(entry.get("x", pending.get("base_x", 0.0)) or 0.0)
+        transport_y = float(entry.get("y", pending.get("base_y", 0.0)) or 0.0)
+        transport_z = float(entry.get("z", pending.get("base_z", 0.0)) or 0.0)
+        transport_o = float(entry.get("orientation", pending.get("base_o", 0.0)) or 0.0)
+
+    world_x = float(transport_x) + float(local_x)
+    world_y = float(transport_y) + float(local_y)
+    world_z = float(transport_z) + float(local_z)
+    world_o = float(transport_o) + float(local_o)
+
+    if runtime_attachment is None:
+        attach_transport_passenger(
+            destination_guid,
+            player_guid,
+            local_x=local_x,
+            local_y=local_y,
+            local_z=local_z,
+            local_o=local_o,
+            source_map=transport_map,
+        )
+
+    if movement_state is not None:
+        movement_state.has_transport_data = True
+        movement_state.transport_guid = destination_guid
+        movement_state.transport_x = local_x
+        movement_state.transport_y = local_y
+        movement_state.transport_z = local_z
+        movement_state.transport_orientation = local_o
+        movement_state.transport_time = int(pending.get("route_phase", 0) or 0) & 0xFFFFFFFF
+        movement_state.x = world_x
+        movement_state.y = world_y
+        movement_state.z = world_z
+        movement_state.orientation = world_o
+
+    session.map_id = int(transport_map)
+    session.x = world_x
+    session.y = world_y
+    session.z = world_z
+    session.orientation = world_o
+    session.transport_attach_state = "ATTACHED"
+    session.transport_attach_source_map = int(transport_map)
+    session.persist_map_id = int(transport_map)
+    session.persist_x = world_x
+    session.persist_y = world_y
+    session.persist_z = world_z
+    session.persist_orientation = world_o
+
+    loaded_entries = getattr(session, "loaded_transport_entries", None)
+    if isinstance(loaded_entries, dict) and isinstance(destination_entry, dict):
+        loaded_entries[destination_guid] = cached_transport_runtime_entry(session, dict(destination_entry))
+
+    Logger.info("[TransportTransfer] verify success")
+
+
 def _append_guid_byte_seq(payload: bytearray, raw_guid: bytes, order: tuple[int, ...]) -> None:
     for index in order:
         value = raw_guid[index]
@@ -2218,6 +2345,7 @@ def _complete_pending_transport_transfer(session) -> None:
             float(state.transport_z),
             float(state.transport_orientation),
         )
+        _verify_pending_boat_transfer_attachment(session, pending)
     Logger.info(
         "[TransportTransfer] completed player=%s source_map=%s dest_map=%s node=%s route_phase=%s",
         int(getattr(session, "char_guid", 0) or 0),

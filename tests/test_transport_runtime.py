@@ -2957,6 +2957,34 @@ def test_20808_boundary_passenger_reattaches_same_guid_after_ack(monkeypatch):
     )
 
 
+def test_20808_boundary_runtime_passenger_starts_transfer_when_movement_state_missing(monkeypatch):
+    session, _state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=1,
+        destination_map=0,
+        passenger=True,
+    )
+    session.movement_state.has_transport_data = False
+    session.movement_state.transport_guid = 0
+    session.movement_state.transport_x = 0.0
+    session.movement_state.transport_y = 0.0
+    session.movement_state.transport_z = 0.0
+    session.movement_state.transport_orientation = 0.0
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        session.loaded_transport_entries,
+    )
+
+    assert [name for name, _payload in responses][-3:-1] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    assert session.transport_transfer_pending is True
+    assert session.movement_state.transport_guid == world_guid
+    assert session.movement_state.has_transport_data is True
+
+
 def test_20808_boundary_non_passenger_receives_out_of_range(monkeypatch):
     session, _state, world_guid = _transport_boundary_transfer_session(
         monkeypatch,
@@ -3374,6 +3402,191 @@ def test_20808_passenger_transfer_preserves_guid_map_0_to_1(monkeypatch):
     )
 
     assert linked_destination_guid != source_guid
+
+
+def test_verify_pending_boat_transfer_attachment_noop_when_already_attached(monkeypatch):
+    _reset_transport_states()
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(7))
+    entry = {
+        "guid": 7,
+        "transport_db_guid": 7,
+        "world_guid": world_guid,
+        "entry": 20808,
+        "map": 0,
+        "map_id": 0,
+        "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
+        "display_id": 3015,
+        "name": "The Maiden's Fancy",
+        "use_transport_guid": True,
+        "world_db_transport": True,
+        "runtime_route": [
+            (1, 10.0, 20.0, 5.0, 0.0, 0),
+            (0, 120.0, 230.0, 15.0, 0.0, 1000),
+        ],
+        "transport_period": 1000,
+    }
+    transport_runtime._runtime_transport_states()[world_guid] = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=20808,
+        spawn_guid=7,
+        display_id=3015,
+        route=[
+            transport_runtime.TransportRouteNode(1, 10.0, 20.0, 5.0, 0.0, 0),
+            transport_runtime.TransportRouteNode(0, 120.0, 230.0, 15.0, 0.0, 1000),
+        ],
+        node_index=1,
+        x=120.0,
+        y=230.0,
+        z=15.0,
+        orientation=0.75,
+        map_id=0,
+        path_progress_ms=1000,
+        timed_route=True,
+        route_period_ms=1000,
+        world_db_transport=True,
+        transport_db_guid=7,
+    )
+    transport_runtime.attach_transport_passenger(
+        world_guid,
+        1,
+        local_x=2.0,
+        local_y=3.0,
+        local_z=4.0,
+        local_o=0.5,
+        source_map=0,
+    )
+    movement_state = SimpleNamespace(
+        has_transport_data=True,
+        transport_guid=world_guid,
+        transport_x=2.0,
+        transport_y=3.0,
+        transport_z=4.0,
+        transport_orientation=0.5,
+        transport_time=1000,
+        x=122.0,
+        y=233.0,
+        z=19.0,
+        orientation=1.25,
+    )
+    session = SimpleNamespace(
+        char_guid=1,
+        map_id=0,
+        x=122.0,
+        y=233.0,
+        z=19.0,
+        orientation=1.25,
+        movement_state=movement_state,
+        loaded_transport_entries={world_guid: dict(entry)},
+    )
+    pending = {
+        "destination_guid": world_guid,
+        "destination_map": 0,
+        "destination_entry": dict(entry),
+        "local_x": 2.0,
+        "local_y": 3.0,
+        "local_z": 4.0,
+        "local_o": 0.5,
+        "route_phase": 1000,
+    }
+
+    movement._verify_pending_boat_transfer_attachment(session, pending)
+
+    assert session.x == 122.0
+    assert session.y == 233.0
+    assert session.z == 19.0
+    assert session.movement_state.transport_guid == world_guid
+    assert transport_runtime.transport_passenger_attachment(world_guid, 1) is not None
+
+
+def test_verify_pending_boat_transfer_attachment_restores_missing_attachment_from_live_runtime_position(monkeypatch):
+    _reset_transport_states()
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(7))
+    entry = {
+        "guid": 7,
+        "transport_db_guid": 7,
+        "world_guid": world_guid,
+        "entry": 20808,
+        "map": 0,
+        "map_id": 0,
+        "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
+        "display_id": 3015,
+        "name": "The Maiden's Fancy",
+        "use_transport_guid": True,
+        "world_db_transport": True,
+        "runtime_route": [
+            (1, 10.0, 20.0, 5.0, 0.0, 0),
+            (0, 100.0, 200.0, 10.0, 0.0, 1000),
+        ],
+        "transport_period": 1000,
+    }
+    transport_runtime._runtime_transport_states()[world_guid] = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=20808,
+        spawn_guid=7,
+        display_id=3015,
+        route=[
+            transport_runtime.TransportRouteNode(1, 10.0, 20.0, 5.0, 0.0, 0),
+            transport_runtime.TransportRouteNode(0, 100.0, 200.0, 10.0, 0.0, 1000),
+        ],
+        node_index=1,
+        x=150.0,
+        y=260.0,
+        z=18.0,
+        orientation=0.9,
+        map_id=0,
+        path_progress_ms=1300,
+        timed_route=True,
+        route_period_ms=1000,
+        world_db_transport=True,
+        transport_db_guid=7,
+    )
+    movement_state = SimpleNamespace(
+        has_transport_data=False,
+        transport_guid=0,
+        transport_x=0.0,
+        transport_y=0.0,
+        transport_z=0.0,
+        transport_orientation=0.0,
+        transport_time=0,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.0,
+    )
+    session = SimpleNamespace(
+        char_guid=1,
+        map_id=0,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.0,
+        movement_state=movement_state,
+        loaded_transport_entries={world_guid: dict(entry)},
+    )
+    pending = {
+        "destination_guid": world_guid,
+        "destination_map": 0,
+        "destination_entry": dict(entry),
+        "local_x": 2.0,
+        "local_y": 3.0,
+        "local_z": 4.0,
+        "local_o": 0.5,
+        "base_x": 100.0,
+        "base_y": 200.0,
+        "base_z": 10.0,
+        "base_o": 0.25,
+        "route_phase": 1300,
+    }
+
+    movement._verify_pending_boat_transfer_attachment(session, pending)
+
+    assert session.x == 152.0
+    assert session.y == 263.0
+    assert session.z == 22.0
+    assert session.orientation == 1.4
+    assert session.movement_state.has_transport_data is True
+    assert session.movement_state.transport_guid == world_guid
+    assert transport_runtime.transport_passenger_attachment(world_guid, 1) is not None
 
 
 def test_164871_passenger_transfer_preserves_guid_map_1_to_0(monkeypatch):
