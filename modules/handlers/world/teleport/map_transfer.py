@@ -89,6 +89,14 @@ def apply_map_transfer(
             get_plants_vs_ghouls_manager().handle_map_change(session, int(target.map_id))
         except Exception as exc:
             Logger.warning("[PvG] map-transfer cleanup failed: %s", exc)
+        try:
+            from server.modules.handlers.world.features.halfhill_farming import (
+                get_halfhill_farm_manager,
+            )
+
+            get_halfhill_farm_manager().clear_for_map_transfer(session)
+        except Exception as exc:
+            Logger.warning("[HalfhillFarm] map-transfer cleanup failed: %s", exc)
 
     session.teleport_destination = target.name or str(reason)
     session.near_teleport_pending = same_map

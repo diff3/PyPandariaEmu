@@ -130,6 +130,15 @@ def handle_disconnect_session(target_session) -> None:
     except Exception as exc:
         Logger.warning(f"[DISCONNECT] PvG cleanup failed: {exc}")
 
+    try:
+        from server.modules.handlers.world.features.halfhill_farming import (
+            get_halfhill_farm_manager,
+        )
+
+        get_halfhill_farm_manager().clear_for_logout(target_session)
+    except Exception as exc:
+        Logger.warning(f"[DISCONNECT] HalfhillFarm cleanup failed: {exc}")
+
     # --- Remove from world (broadcast) ---
     try:
         broadcast_player_remove(target_session)

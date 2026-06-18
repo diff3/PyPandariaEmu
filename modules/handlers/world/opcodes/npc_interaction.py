@@ -275,6 +275,29 @@ def restore_homebind_from_database(session) -> None:
 
 
 def handle_gossip_hello_for_npc(session, guid: int, data: bytes) -> Optional[list[tuple[str, bytes]]]:
+    try:
+        from server.modules.handlers.world.features.halfhill_farming.farmer_yoon import (
+            handle_farmer_yoon_interaction,
+        )
+
+        names = getattr(session, "npc_names_by_guid", None)
+        if isinstance(names, dict):
+            target_guid = int(guid or 0)
+            candidate_guids = [target_guid]
+            try:
+                candidate_guids.append(int(GuidHelper.decode(target_guid).low))
+            except Exception:
+                pass
+            for candidate_guid in candidate_guids:
+                name = str(names.get(int(candidate_guid or 0), "") or "").strip().lower()
+                if name != "farmer yoon":
+                    continue
+                session.gossip_npc_guid = int(target_guid or candidate_guid)
+                session.gossip_npc_flags = int(_npc_flags(session, session.gossip_npc_guid))
+                return handle_farmer_yoon_interaction(session, int(target_guid or candidate_guid))
+    except Exception as exc:
+        Logger.warning("[HalfhillFarm] Farmer Yoon gossip failed: %s", exc)
+
     innkeeper_guid = _resolve_innkeeper_guid(session, int(guid or 0))
     if innkeeper_guid <= 0:
         return None
@@ -388,6 +411,22 @@ def handle_use_item(session, ctx: PacketContext):
         int(item_entry),
         len(data),
     )
+    try:
+        from server.modules.handlers.world.features.halfhill_farming import (
+            get_halfhill_farm_manager,
+        )
+
+        farm_responses = get_halfhill_farm_manager().select_seed(
+            session,
+            item_entry=int(item_entry),
+            bag=int(bag),
+            slot=int(slot),
+        )
+        if farm_responses:
+            return 0, farm_responses
+    except Exception as exc:
+        Logger.warning("[HalfhillFarm] seed selection failed: %s", exc)
+
     if item_entry != HEARTHSTONE_ITEM_ID and not _session_has_hearthstone(session):
         return 0, None
 

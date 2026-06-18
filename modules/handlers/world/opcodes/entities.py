@@ -470,6 +470,17 @@ def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[li
         str(entry.get("name", "") or ""),
     )
 
+    try:
+        from server.modules.handlers.world.features.halfhill_farming import (
+            get_halfhill_farm_manager,
+        )
+
+        farm_responses = get_halfhill_farm_manager().handle_gameobject_use(session, entry)
+        if farm_responses is not None:
+            return 0, (farm_responses or None)
+    except Exception as exc:
+        Logger.warning("[HalfhillFarm] gameobject use failed: %s", exc)
+
     teleport_responses = activate_gameobject_teleport(session, entry)
     if teleport_responses is not None:
         return 0, (teleport_responses or None)

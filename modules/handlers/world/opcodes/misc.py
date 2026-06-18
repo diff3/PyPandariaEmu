@@ -150,6 +150,15 @@ def handle_logout_request(session, ctx):
     log_cmsg(ctx)
     Logger.info("[WorldHandlers] CMSG_LOGOUT_REQUEST")
 
+    try:
+        from server.modules.handlers.world.features.halfhill_farming import (
+            get_halfhill_farm_manager,
+        )
+
+        get_halfhill_farm_manager().clear_for_logout(session)
+    except Exception as exc:
+        Logger.warning("[HalfhillFarm] logout cleanup failed: %s", exc)
+
     complete_taxi_for_disconnect(session)
 
     # --- REMOVE FROM WORLD ---
