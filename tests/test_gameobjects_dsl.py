@@ -151,6 +151,18 @@ def test_type_11_create_movement_block_still_uses_path_progress():
     assert gameobjects._gameobject_movement_block_uint32(entry) == 16000
 
 
+def test_type_11_create_flags_match_skyfire_transport_stationary_rotation_layout():
+    update_flags = (
+        gameobjects._UPDATEFLAG_TRANSPORT
+        | gameobjects._UPDATEFLAG_STATIONARY_POSITION
+        | gameobjects._UPDATEFLAG_ROTATION
+    )
+
+    assert gameobjects.gameobject_defs.build_gameobject_create_flags(update_flags) == bytes.fromhex(
+        "000000030040"
+    )
+
+
 def test_mo_transport_uses_mo_transport_guid():
     entry = {**_entry(), "guid": 6, "type": 15}
 

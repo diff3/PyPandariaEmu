@@ -42,6 +42,21 @@ from server.modules.handlers.world.state.runtime import (
 from server.modules.handlers.world.login.packets import build_login_packet
 
 
+def _transport_movement_debug_enabled() -> bool:
+    try:
+        from server.modules.handlers.world.feature_config import transport_movement_debug_enabled
+
+        return bool(transport_movement_debug_enabled())
+    except Exception:
+        return False
+
+
+def _transport_debug_log(message: str, *args) -> None:
+    if not _transport_movement_debug_enabled():
+        return
+    Logger.info(message, *args)
+
+
 def _append_guid_byte_seq(payload: bytearray, raw_guid: bytes, order: tuple[int, ...]) -> None:
     for index in order:
         value = raw_guid[index]
@@ -1612,7 +1627,7 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
             record_transport_attach(session, transport_guid, opcode_name=opcode_name)
         except Exception as exc:
             Logger.warning("[TransportAttach] lifecycle notify failed err=%s", exc)
-    Logger.info(
+    _transport_debug_log(
         "[TransportOffset] opcode=%s tguid=0x%016X "
         "offset=(%.3f %.3f %.3f) torient=%.3f time=%u seat=%s",
         opcode_name,
@@ -1828,52 +1843,8 @@ def _maybe_start_transport_route_transfer(
 ) -> list[tuple[str, bytes]]:
     state = _movement_state(session)
     transport_guid = int(getattr(state, "transport_guid", 0) or 0)
-    destination_map_for_log: int | None = None
-
-    def _trace(stage: str, *, reason: str | None = None) -> None:
-        movement_transport_guid = int(getattr(state, "transport_guid", 0) or 0)
-        player_guid = int(getattr(session, "char_guid", 0) or 0)
-        try:
-            from server.modules.handlers.world.transport_runtime import (
-                _session_is_transport_passenger,
-                transport_passenger_attachment,
-            )
-
-            attached = (
-                _session_is_transport_passenger(session, int(transport_guid))
-                if int(transport_guid) > 0
-                else False
-            )
-            runtime_attached = (
-                transport_passenger_attachment(int(transport_guid), player_guid) is not None
-                if int(transport_guid) > 0 and player_guid > 0
-                else False
-            )
-        except Exception:
-            attached = False
-            runtime_attached = False
-        Logger.info(
-            "[TRANSPORT_TRANSFER_TRACE] stage=%s player_guid=%s transport_guid=0x%016X "
-            "destination_map=%s attached=%s runtime_attached=%s "
-            "near_teleport_pending=%s teleport_pending=%s worldport_ack_pending=%s "
-            "transport_transfer_pending=%s movement_transport_guid=0x%016X",
-            str(stage),
-            player_guid,
-            int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
-            "none" if destination_map_for_log is None else int(destination_map_for_log),
-            bool(attached),
-            bool(runtime_attached),
-            bool(getattr(session, "near_teleport_pending", False)),
-            bool(getattr(session, "teleport_pending", False)),
-            bool(getattr(session, "worldport_ack_pending", False)),
-            bool(getattr(session, "transport_transfer_pending", False)),
-            movement_transport_guid & 0xFFFFFFFFFFFFFFFF,
-        )
-        if reason is not None:
-            Logger.info("[TRANSPORT_TRANSFER_SKIP] reason=%s", str(reason))
 
     if transport_guid <= 0:
-        _trace("no_transport_guid", reason="no_transport_guid")
         return []
     if bool(getattr(session, "transport_transfer_pending", False)):
         if _clear_stale_transport_transfer_pending(
@@ -1881,19 +1852,14 @@ def _maybe_start_transport_route_transfer(
             transport_guid,
             reason="stale_pending",
         ):
-            _trace("stale_pending_cleared")
+            pass
         else:
-            _trace("already_pending", reason="already_pending")
             return []
-    _trace("before _is_teleporting()")
     if _is_teleporting(session):
-        _trace("after _is_teleporting()", reason="already_teleporting")
         return []
-    _trace("after _is_teleporting()")
 
     entry = _transport_entry_for_guid(session, transport_guid)
     if not isinstance(entry, dict):
-        _trace("missing_destination_entry", reason="missing_destination_entry")
         return []
 
     try:
@@ -1907,7 +1873,6 @@ def _maybe_start_transport_route_transfer(
         from server.modules.handlers.world.movements.manager import get_movement_manager
     except Exception as exc:
         Logger.warning("[TransportTransfer] runtime unavailable err=%s", exc)
-        _trace("runtime_import_failed", reason="other")
         return []
 
     runtime_state = runtime_transport_state_for_guid(transport_guid)
@@ -1915,28 +1880,18 @@ def _maybe_start_transport_route_transfer(
         moved_entry = cached_transport_runtime_entry(session, entry)
         runtime_state = runtime_transport_state_for_guid(transport_guid)
         if runtime_state is None:
-            _trace("missing_runtime_state", reason="missing_runtime_state")
             return []
         entry = moved_entry
 
     source_map = int(getattr(session, "map_id", 0) or 0)
     if forced_destination_map is not None:
         destination = int(forced_destination_map)
-        Logger.info(
-            "[TRANSPORT_TRANSFER_DESTINATION] source=forced_map_mismatch "
-            "transport_guid=0x%016X destination_map=%s",
-            int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
-            int(destination),
-        )
     else:
         destination = transport_transfer_destination_map_for_guid(transport_guid)
     if destination is None:
-        _trace("missing_destination_map", reason="missing_destination_map")
         return []
     destination_map = int(destination)
-    destination_map_for_log = int(destination_map)
     if destination_map == source_map:
-        _trace("destination_is_source_map", reason="missing_destination_map")
         return []
 
     canonical_world_db_transfer = bool(getattr(runtime_state, "world_db_transport", False))
@@ -1944,21 +1899,18 @@ def _maybe_start_transport_route_transfer(
         destination_guid = int(getattr(runtime_state, "guid", transport_guid) or transport_guid)
     else:
         destination_guid = int(linked_transport_world_guid(entry, map_id=destination_map))
-    _trace("before begin_passenger_transfer()")
     passenger_transfer = get_movement_manager().begin_passenger_transfer(
         int(transport_guid),
         int(destination_guid),
         int(getattr(session, "char_guid", 0) or 0),
         target_map_id=int(destination_map),
     )
-    _trace("after begin_passenger_transfer()")
     if passenger_transfer is None:
         Logger.warning(
             "[TransportTransfer] passenger transfer rejected player=%s transport=0x%016X",
             int(getattr(session, "char_guid", 0) or 0),
             transport_guid & 0xFFFFFFFFFFFFFFFF,
         )
-        _trace("begin_passenger_transfer_failed", reason="begin_passenger_transfer_failed")
         return []
     local_x = float(passenger_transfer.local_x)
     local_y = float(passenger_transfer.local_y)
@@ -2171,12 +2123,8 @@ def _maybe_start_transport_route_transfer(
         },
     )()
     responses = list(clear_responses)
-    _trace("before SMSG_TRANSFER_PENDING")
     transfer_pending_payload = build_login_packet("SMSG_TRANSFER_PENDING", ctx)
-    _trace("after SMSG_TRANSFER_PENDING")
-    _trace("before SMSG_NEW_WORLD")
     new_world_payload = build_login_packet("SMSG_NEW_WORLD", ctx)
-    _trace("after SMSG_NEW_WORLD")
     responses.extend(
         [
             ("SMSG_TRANSFER_PENDING", transfer_pending_payload),
@@ -2930,7 +2878,7 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
         )
         if is_transport:
             transport = loaded_transport_entries.get(int(guid), {})
-            Logger.info(
+            _transport_debug_log(
                 "[TransportStream] keep-authoritative guid=0x%X entry=%s pos=(%.2f %.2f %.2f)",
                 int(guid),
                 int(transport.get("entry", 0) or 0) if isinstance(transport, dict) else 0,
@@ -4885,7 +4833,7 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     )
 
     transport_guid = int(getattr(state, "transport_guid", 0) or 0)
-    if transport_guid:
+    if transport_guid and _transport_movement_debug_enabled():
         Logger.debug(
             "[TransportOffset] opcode=%s tguid=0x%016X offset=(%.3f %.3f %.3f) "
             "world=(%.3f %.3f %.3f)",

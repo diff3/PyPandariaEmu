@@ -17,6 +17,7 @@ from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.feature_config import (
     flight_paths_enabled,
+    taxi_movement_debug_enabled,
 )
 from server.modules.handlers.world.movements.cache import get_movement_cache
 from server.modules.handlers.world.taxi_runtime import (
@@ -74,6 +75,12 @@ _TAXI_MOUNT_DISPLAY_BY_CREATURE_ID: dict[int, int] = {
 }
 _TAXI_PATH_FMT = "diii"
 _TAXI_RESAMPLE_DISTANCE_YARDS = 18.0
+
+
+def _taxi_xmap_debug(message: str, *args) -> None:
+    if not taxi_movement_debug_enabled():
+        return
+    Logger.info(message, *args)
 
 
 def _payload(ctx) -> bytes:
@@ -935,7 +942,7 @@ def _begin_cross_map_taxi_transfer(
     destination_node: int,
 ) -> list[tuple[str, bytes]]:
     state = getattr(session, "taxi_state", None)
-    Logger.info(
+    _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] transfer_begin_enter player=%s route=%s leg=%s "
         "source=%s destination=%s current_map=%s phase=%s pending=%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -960,7 +967,7 @@ def _begin_cross_map_taxi_transfer(
     source_map = int(getattr(session, "map_id", 0) or 0)
     destination_map = int(destination[0])
     if destination_map == source_map:
-        Logger.info(
+        _taxi_xmap_debug(
             "[TAXI_XMAP_DEBUG] transfer_begin_noop player=%s source=%s destination=%s "
             "map=%s phase=%s pending=%s",
             int(getattr(session, "char_guid", 0) or 0),
@@ -1062,7 +1069,7 @@ def _begin_cross_map_taxi_transfer(
         ("SMSG_TRANSFER_PENDING", build_login_packet("SMSG_TRANSFER_PENDING", ctx)),
         ("SMSG_NEW_WORLD", build_login_packet("SMSG_NEW_WORLD", ctx)),
     ]
-    Logger.info(
+    _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] transfer_begin_packets player=%s route=%s leg=%s "
         "source=%s destination=%s source_map=%s destination_map=%s phase=%s "
         "pending=%s packets=%s",
@@ -1083,7 +1090,7 @@ def _begin_cross_map_taxi_transfer(
 def continue_pending_cross_map_taxi(session) -> list[tuple[str, bytes]]:
     pending = getattr(session, "pending_taxi_transfer", None)
     state = getattr(session, "taxi_state", None)
-    Logger.info(
+    _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] continue_pending_enter player=%s route=%s leg=%s "
         "map=%s phase=%s pending=%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -1145,7 +1152,7 @@ def continue_pending_cross_map_taxi(session) -> list[tuple[str, bytes]]:
         destination_landing_point=_taxi_destination_landing_point(destination_node),
     )
     state = getattr(session, "taxi_state", None)
-    Logger.info(
+    _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] continue_pending_exit player=%s route=%s leg=%s "
         "source=%s destination=%s map=%s phase=%s pending=%s packets=%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -1397,7 +1404,7 @@ def handle_activate_taxi_express(session, ctx):
 @register("CMSG_MOVE_SPLINE_DONE")
 def handle_move_spline_done(session, ctx):
     state = getattr(session, "taxi_state", None)
-    Logger.info(
+    _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] spline_done_enter player=%s map=%s state_exists=%s "
         "active=%s completed=%s route=%s leg=%s phase=%s pending=%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -1417,7 +1424,7 @@ def handle_move_spline_done(session, ctx):
     current_leg_index = int(getattr(state, "current_leg_index", 0) or 0)
     next_source_index = current_leg_index + 1
     next_destination_index = current_leg_index + 2
-    Logger.info(
+    _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] spline_done_indices player=%s route=%s leg=%s "
         "next_source_index=%s next_destination_index=%s route_len=%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -1432,7 +1439,7 @@ def handle_move_spline_done(session, ctx):
         destination_node = int(route_nodes[next_destination_index])
         destination = _taxi_destination_position(destination_node)
         if destination is None:
-            Logger.info(
+            _taxi_xmap_debug(
                 "[TAXI_XMAP_DEBUG] spline_done_missing_destination player=%s "
                 "source=%s destination=%s route=%s leg=%s",
                 int(getattr(session, "char_guid", 0) or 0),
@@ -1444,7 +1451,7 @@ def handle_move_spline_done(session, ctx):
             complete_taxi_spline(session)
             return 0, None
         destination_map = int(destination[0])
-        Logger.info(
+        _taxi_xmap_debug(
             "[TAXI_XMAP_DEBUG] spline_done_next_leg player=%s source=%s "
             "destination=%s current_map=%s destination_map=%s route=%s leg=%s "
             "phase=%s pending=%s",
@@ -1474,7 +1481,7 @@ def handle_move_spline_done(session, ctx):
             source_node=source_node,
             destination_landing_point=_taxi_destination_landing_point(destination_node),
         )
-        Logger.info(
+        _taxi_xmap_debug(
             "[TAXI_XMAP_DEBUG] spline_done_same_map_continue player=%s "
             "source=%s destination=%s map=%s packets=%s",
             int(getattr(session, "char_guid", 0) or 0),
@@ -1485,7 +1492,7 @@ def handle_move_spline_done(session, ctx):
         )
         return 0, responses
 
-    Logger.info(
+    _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] spline_done_final_complete player=%s route=%s leg=%s "
         "map=%s phase=%s pending=%s",
         int(getattr(session, "char_guid", 0) or 0),

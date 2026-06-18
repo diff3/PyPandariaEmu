@@ -14,9 +14,11 @@ import threading
 import time
 from dataclasses import dataclass
 
-from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
-from server.modules.handlers.world.feature_config import flight_paths_enabled
+from server.modules.handlers.world.feature_config import (
+    flight_paths_enabled,
+    taxi_movement_debug_enabled,
+)
 from server.modules.handlers.world.protocol.movement.spline import (
     TAXI_SPLINE_FLAGS,
     SplineVector,
@@ -1710,8 +1712,6 @@ def _taxi_debug(message: str, *args) -> None:
 
 def _taxi_debug_enabled() -> bool:
     try:
-        config = ConfigLoader.load_config()
-        taxi_config = config.get("Taxi", {}) if isinstance(config, dict) else {}
-        return bool(taxi_config.get("DebugMovement", False))
+        return bool(taxi_movement_debug_enabled())
     except Exception:
         return False

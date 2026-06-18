@@ -43,6 +43,58 @@ GO_STATE_ACTIVE = 0
 GO_STATE_READY = 1
 GO_HEALTH_FULL = 0xFF
 
+UPDATEFLAG_NONE = 0x0000
+UPDATEFLAG_SELF = 0x0001
+UPDATEFLAG_TRANSPORT = 0x0002
+UPDATEFLAG_HAS_TARGET = 0x0004
+UPDATEFLAG_LIVING = 0x0008
+UPDATEFLAG_STATIONARY_POSITION = 0x0010
+UPDATEFLAG_VEHICLE = 0x0020
+UPDATEFLAG_GO_TRANSPORT_POSITION = 0x0040
+UPDATEFLAG_ROTATION = 0x0080
+UPDATEFLAG_ANIMKITS = 0x0100
+
+
+def build_gameobject_create_flags(update_flags: int) -> bytes:
+    """Pack SkyFire-style movement-update presence bits for a non-living GameObject."""
+    flags = int(update_flags)
+    bits: list[int] = [
+        0,  # UPDATEFLAG_HAS_GAMEOBJECT
+        1 if (flags & UPDATEFLAG_ANIMKITS) else 0,
+        1 if (flags & UPDATEFLAG_LIVING) else 0,
+        0,  # UPDATEFLAG_SCENE_LOCAL_SCRIPT_DATA
+        0,
+    ]
+    bits.extend([0] * 22)  # UPDATEFLAG_TRANSPORT_FRAME_COUNT
+    bits.extend(
+        [
+            1 if (flags & UPDATEFLAG_VEHICLE) else 0,
+            0,  # UNK 1044
+            0,
+            1 if (flags & UPDATEFLAG_TRANSPORT) else 0,
+            1 if (flags & UPDATEFLAG_ROTATION) else 0,
+            0,
+            1 if (flags & UPDATEFLAG_SELF) else 0,
+            1 if (flags & UPDATEFLAG_HAS_TARGET) else 0,
+            0,  # UPDATEFLAG_SCENE_OBJECT
+            0,  # UPDATEFLAG_SCENE_PENDING_INSTANCES
+            0,
+            0,  # UPDATEFLAG_HAS_AREATRIGGER
+            1 if (flags & UPDATEFLAG_GO_TRANSPORT_POSITION) else 0,
+            0,  # UPDATEFLAG_REPLACE_YOU
+            1 if (flags & UPDATEFLAG_STATIONARY_POSITION) else 0,
+        ]
+    )
+
+    packed = bytearray()
+    for offset in range(0, len(bits), 8):
+        chunk = bits[offset : offset + 8]
+        value = 0
+        for index, bit in enumerate(chunk):
+            value |= (int(bit) & 1) << (7 - index)
+        packed.append(value)
+    return bytes(packed)
+
 __all__ = [
     "OBJECT_FIELD_DYNAMIC_FLAGS",
     "OBJECT_FIELD_ENTRY",
@@ -78,4 +130,15 @@ __all__ = [
     "GO_STATE_ACTIVE",
     "GO_STATE_READY",
     "GO_HEALTH_FULL",
+    "UPDATEFLAG_NONE",
+    "UPDATEFLAG_SELF",
+    "UPDATEFLAG_TRANSPORT",
+    "UPDATEFLAG_HAS_TARGET",
+    "UPDATEFLAG_LIVING",
+    "UPDATEFLAG_STATIONARY_POSITION",
+    "UPDATEFLAG_VEHICLE",
+    "UPDATEFLAG_GO_TRANSPORT_POSITION",
+    "UPDATEFLAG_ROTATION",
+    "UPDATEFLAG_ANIMKITS",
+    "build_gameobject_create_flags",
 ]

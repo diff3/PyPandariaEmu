@@ -18,6 +18,7 @@ from server.modules.handlers.world.protocol.update_object.serializers import (
 )
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
+from server.modules.handlers.world.feature_config import transport_movement_debug_enabled
 
 for _definition_name in gameobject_defs.__all__:
     globals()[f"_{_definition_name}"] = getattr(gameobject_defs, _definition_name)
@@ -39,6 +40,12 @@ def _entry_map_id(entry: Mapping[str, Any], default: int = 0) -> int:
     if value is None:
         value = default
     return int(value)
+
+
+def _transport_debug_log(message: str, *args) -> None:
+    if not transport_movement_debug_enabled():
+        return
+    Logger.info(message, *args)
 
 
 def _u32_from_float(value: float) -> int:
@@ -166,6 +173,15 @@ def _rotation_components(entry: Mapping[str, Any]) -> tuple[float, float, float,
 
 def _gameobject_rotation_packed(entry: Mapping[str, Any]) -> int:
     return _pack_gameobject_rotation(*_rotation_components(entry))
+
+
+def _gameobject_update_flags(entry: Mapping[str, Any]) -> int:
+    """Return SkyFire-style update flags for the create movement blocks."""
+    flags = _UPDATEFLAG_STATIONARY_POSITION | _UPDATEFLAG_ROTATION
+    gameobject_type = _entry_int(entry, "type") & 0xFF
+    if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
+        flags |= _UPDATEFLAG_TRANSPORT
+    return int(flags)
 
 
 def _gameobject_orientation_debug_enabled() -> bool:
@@ -382,6 +398,11 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
     entry = _transport_runtime_packet_entry(entry)
     world_guid = _resolve_world_guid(entry, realm_id)
     packet_map_id = _entry_map_id(entry, int(map_id))
+    update_flags = _gameobject_update_flags(entry)
+    gameobject_type = _entry_int(entry, "type") & 0xFF
+    create_flags = bytes(_GAMEOBJECT_CREATE_FLAGS)
+    if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
+        create_flags = gameobject_defs.build_gameobject_create_flags(update_flags)
     mask_bytes, field_bytes = _build_fixed_u32_field_block(
         _build_gameobject_field_values(entry, world_guid=world_guid),
         mask_blocks=_GAMEOBJECT_MASK_BLOCKS,
@@ -409,23 +430,6 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
         packet_orientation=stationary_orientation,
     )
     movement_block_uint32 = _gameobject_movement_block_uint32(entry)
-    if _entry_int(entry, "type") in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
-        Logger.info(
-            "[TRANSPORT_CREATE_EXPERIMENT] guid=%s entry=%s type=%s map=%s "
-            "x=%.3f y=%.3f z=%.3f orientation=%.6f path_progress_ms=%s "
-            "movement_block_uint32=%s",
-            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-            _entry_int(entry, "entry"),
-            _entry_int(entry, "type"),
-            int(packet_map_id),
-            float(stationary_x),
-            float(stationary_y),
-            float(stationary_z),
-            float(stationary_orientation),
-            _entry_int(entry, "transport_path_progress"),
-            int(movement_block_uint32),
-        )
-
     return EncoderHandler.encode_packet(
         "GAMEOBJECT_CREATE",
         {
@@ -434,12 +438,12 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
             "update_type": _GAMEOBJECT_UPDATE_TYPE,
             "guid": {"guid": world_guid},
             "object_type": _GAMEOBJECT_OBJECT_TYPE,
-            "create_flag_0": _GAMEOBJECT_CREATE_FLAGS[0],
-            "create_flag_1": _GAMEOBJECT_CREATE_FLAGS[1],
-            "create_flag_2": _GAMEOBJECT_CREATE_FLAGS[2],
-            "create_flag_3": _GAMEOBJECT_CREATE_FLAGS[3],
-            "create_flag_4": _GAMEOBJECT_CREATE_FLAGS[4],
-            "create_flag_5": _GAMEOBJECT_CREATE_FLAGS[5],
+            "create_flag_0": create_flags[0],
+            "create_flag_1": create_flags[1],
+            "create_flag_2": create_flags[2],
+            "create_flag_3": create_flags[3],
+            "create_flag_4": create_flags[4],
+            "create_flag_5": create_flags[5],
             "stationary_y": stationary_y,
             "stationary_z": stationary_z,
             "stationary_orientation": stationary_orientation,
@@ -556,7 +560,7 @@ def _log_mo_transport_create_debug(
     ) & 0xFFFFFFFF
     packet_progress = _entry_int(entry, "transport_path_progress") & 0xFFFFFFFF
 
-    Logger.info(
+    _transport_debug_log(
         "[MO_TRANSPORT_CREATE] world_guid=0x%016X entry=%s transport_type=%s "
         "source_path=%s runtime_state_found=%s runtime_map=%s "
         "runtime_pos=(%.3f %.3f %.3f) packet_map=%s "
@@ -705,7 +709,7 @@ def build_database_gameobject_responses(
             realm_id=realm_id,
         )
         if bool(entry.get("synthetic_transport")):
-            Logger.info(
+            _transport_debug_log(
                 "[WorldTransport] synthetic create guid=%s entry=%s type=%s "
                 "payload=%s pos=(%.2f %.2f %.2f) o=%.3f",
                 int(entry.get("guid", 0) or 0),
@@ -718,7 +722,7 @@ def build_database_gameobject_responses(
                 float(entry.get("orientation", 0.0) or 0.0),
             )
         if int(entry.get("type", 0) or 0) == 11:
-            Logger.info(
+            _transport_debug_log(
                 "[TransportElevator] stream create guid=%s entry=%s payload=%s "
                 "pos=(%.2f %.2f %.2f)",
                 int(entry.get("guid", 0) or 0),
@@ -729,7 +733,7 @@ def build_database_gameobject_responses(
                 float(entry.get("z", 0.0) or 0.0),
             )
         if int(entry.get("type", 0) or 0) == 15:
-            Logger.info(
+            _transport_debug_log(
                 "[WorldTransport] stream create guid=%s entry=%s payload=%s "
                 "pos=(%.2f %.2f %.2f) o=%.3f",
                 int(entry.get("guid", 0) or 0),

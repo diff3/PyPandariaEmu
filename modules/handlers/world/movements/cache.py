@@ -10,6 +10,7 @@ from pathlib import Path
 from shared.Logger import Logger
 from shared.PathUtils import get_dbc_root
 from server.modules.dbc import read_dbc
+from server.modules.handlers.world.feature_config import transport_movement_debug_enabled
 
 from .templates import build_template
 from .types import (
@@ -219,7 +220,7 @@ def _load_transport_animation_templates() -> dict[int, MovementTemplate]:
         #
         ordered = _reverse_elevator_nodes_preserving_time(ordered_nodes)
 
-        if ordered:
+        if ordered and transport_movement_debug_enabled():
             Logger.info(
                 (
                     "[ElevatorDebug] entry=%s "

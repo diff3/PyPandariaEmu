@@ -12,6 +12,7 @@ CONFIG_ENABLE_ELEVATORS = "Transport.EnableElevators"
 CONFIG_ENABLE_MOVING_TRANSPORTS = "Transport.EnableMovingTransports"
 CONFIG_DEBUG_TRANSPORT_MOVEMENT = "Transport.DebugMovement"
 CONFIG_ENABLE_FLIGHT_PATHS = "Taxi.EnableFlightPaths"
+CONFIG_DEBUG_TAXI_MOVEMENT = "Taxi.DebugMovement"
 CONFIG_ENABLE_MAP_CHEAT = "Player.EnableMapExploreCheat"
 CONFIG_ENABLE_TAXI_CHEAT = "Player.EnableTaxiCheat"
 CONFIG_ENABLE_GAMEOBJECTS = "World.EnableGameObjects"
@@ -25,6 +26,7 @@ _DEFAULTS: dict[str, bool] = {
     CONFIG_ENABLE_MOVING_TRANSPORTS: True,
     CONFIG_DEBUG_TRANSPORT_MOVEMENT: False,
     CONFIG_ENABLE_FLIGHT_PATHS: True,
+    CONFIG_DEBUG_TAXI_MOVEMENT: False,
     CONFIG_ENABLE_MAP_CHEAT: False,
     CONFIG_ENABLE_TAXI_CHEAT: False,
     CONFIG_ENABLE_GAMEOBJECTS: True,
@@ -86,6 +88,10 @@ def flight_paths_enabled() -> bool:
     return feature_enabled(CONFIG_ENABLE_FLIGHT_PATHS)
 
 
+def taxi_movement_debug_enabled() -> bool:
+    return feature_enabled(CONFIG_DEBUG_TAXI_MOVEMENT)
+
+
 def map_cheat_enabled() -> bool:
     return feature_enabled(CONFIG_ENABLE_MAP_CHEAT)
 
@@ -122,6 +128,10 @@ def log_effective_world_feature_config() -> None:
         "enabled" if transport_movement_debug_enabled() else "disabled",
     )
     Logger.info("[Config] Flight paths: %s", "enabled" if flight_paths_enabled() else "disabled")
+    Logger.info(
+        "[Config] Taxi movement debug: %s",
+        "enabled" if taxi_movement_debug_enabled() else "disabled",
+    )
     Logger.info("[Config] Map cheat: %s", "enabled" if map_cheat_enabled() else "disabled")
     Logger.info("[Config] Taxi cheat: %s", "enabled" if taxi_cheat_enabled() else "disabled")
     Logger.info("[Config] GameObjects: %s", "enabled" if gameobjects_enabled() else "disabled")

@@ -59,7 +59,10 @@ except Exception:
 config = ConfigLoader.load_config()
 
 from server.modules.database.DatabaseConnection import DatabaseConnection
-from server.modules.handlers.world.feature_config import log_effective_world_feature_config
+from server.modules.handlers.world.feature_config import (
+    log_effective_world_feature_config,
+    taxi_movement_debug_enabled,
+)
 from server.modules.opcodes.WorldOpcodes import (
     WORLD_CLIENT_OPCODES,
     WORLD_SERVER_OPCODES,
@@ -360,6 +363,11 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
     state = WorldState.NEW
     encrypted = False
 
+    def _taxi_xmap_debug(message: str, *args) -> None:
+        if not taxi_movement_debug_enabled():
+            return
+        Logger.info(message, *args)
+
     def _send_normalized_responses(target_sock: socket.socket, responses) -> None:
         normalized = normalize_responses(responses)
         if not normalized:
@@ -379,7 +387,7 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                     "SMSG_ON_MONSTER_MOVE",
                 }:
                     taxi_state = getattr(conn_session, "taxi_state", None)
-                    Logger.info(
+                    _taxi_xmap_debug(
                         "[TAXI_XMAP_DEBUG] send_packet opcode=%s player=%s map=%s "
                         "phase=%s pending=%s size=%s",
                         str(opcode_name),

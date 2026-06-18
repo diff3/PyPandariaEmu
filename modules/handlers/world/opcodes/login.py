@@ -105,7 +105,14 @@ from server.modules.handlers.world.feature_config import (
     gameobjects_enabled,
     npc_auto_stream_enabled,
     npcs_enabled,
+    taxi_movement_debug_enabled,
 )
+
+
+def _taxi_xmap_debug(message: str, *args) -> None:
+    if not taxi_movement_debug_enabled():
+        return
+    Logger.info(message, *args)
 
 
 def _resolve_session_ids(session) -> Tuple[Optional[int], Optional[int]]:
@@ -530,7 +537,7 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
 
 def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tuple[str, bytes]]:
     # TODO: Teleport bootstrap still shares movement replay/bootstrap helpers with legacy world init.
-    Logger.info(
+    _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] teleport_bootstrap_enter player=%s map=%s "
         "teleport_pending=%s worldport_ack_pending=%s phase=%s pending=%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -609,7 +616,7 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     from server.modules.handlers.world.opcodes import taxi as taxi_handlers
 
     taxi_responses = taxi_handlers.continue_pending_cross_map_taxi(session)
-    Logger.info(
+    _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] teleport_bootstrap_taxi_continue player=%s map=%s "
         "phase=%s pending=%s packets=%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -1015,7 +1022,7 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
             f"[WorldHandlers] LOADING_SCREEN_NOTIFY show=0 completing teleport "
             f"destination={getattr(session, 'teleport_destination', None)}"
         )
-        Logger.info(
+        _taxi_xmap_debug(
             "[TAXI_XMAP_DEBUG] loading_screen_complete player=%s map=%s "
             "destination=%s phase=%s pending=%s",
             int(getattr(session, "char_guid", 0) or 0),

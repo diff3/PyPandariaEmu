@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import inspect
 import json
 import math
 import struct
@@ -77,6 +76,12 @@ _UNDERCITY_ELEVATOR_DOOR_ENTRIES = frozenset({
 _PHASELESS_ELEVATOR_MAP_ALIASES = {
     1136: 1,
 }
+
+
+def _transport_debug_log(message: str, *args) -> None:
+    if not transport_movement_debug_enabled():
+        return
+    Logger.info(message, *args)
 
 
 @dataclass(frozen=True)
@@ -155,7 +160,6 @@ class RuntimeTransportState:
     world_db_transport: bool = False
     clock_model: str = ""
     clock_started_at_ms: int = 0
-    clock_after_60s_logged: bool = False
 
 
 class WorldTransportManager:
@@ -556,15 +560,16 @@ class WorldTransportManager:
                 reason="accepted",
                 context=context,
             )
-            Logger.debug(
-                "[TransportStream] streamed transport=0x%016X player=%s phase=%s node=%s state=%s map=%s",
-                int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-                int(getattr(session, "char_guid", 0) or 0),
-                int(moved_entry.get("transport_path_progress", 0) or 0),
-                int(getattr(_runtime_transport_states().get(int(world_guid)), "node_index", 0) or 0),
-                _movement_lifecycle_state(int(world_guid)),
-                int(session_map),
-            )
+            if transport_movement_debug_enabled():
+                Logger.debug(
+                    "[TransportStream] streamed transport=0x%016X player=%s phase=%s node=%s state=%s map=%s",
+                    int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+                    int(getattr(session, "char_guid", 0) or 0),
+                    int(moved_entry.get("transport_path_progress", 0) or 0),
+                    int(getattr(_runtime_transport_states().get(int(world_guid)), "node_index", 0) or 0),
+                    _movement_lifecycle_state(int(world_guid)),
+                    int(session_map),
+                )
         _log_transport_discovery_summary(
             session,
             considered=considered,
@@ -586,7 +591,6 @@ class WorldTransportManager:
                     server_time_ms=_transport_server_time_ms(state),
                 )
                 _sync_transport_state_from_movement_cache(state)
-                _maybe_log_reference_transport_clock_after_60s(state)
             self._maybe_write_runtime_snapshot(states)
             self._log_tick(states)
             time.sleep(_TRANSPORT_TICK_SECONDS)
@@ -714,7 +718,7 @@ def register_loaded_transport_entry(
 
     if ENABLE_TRANSPORT_RUNTIME_UPDATES:
         ensure_transport_runtime_for_session(session)
-    Logger.info(
+    _transport_debug_log(
         "[WorldTransport] stream register guid=%s world_guid=0x%016X entry=%s "
         "name=%r display=%s pos=(%.2f %.2f %.2f)",
         int(entry.get("guid", 0) or 0),
@@ -865,7 +869,7 @@ def _log_transport_discovery_decision(
     reason: str,
     context: str,
 ) -> None:
-    Logger.info(
+    _transport_debug_log(
         "[TRANSPORT_DISCOVERY] context=%s player_guid=%s player_map=%s "
         "player_pos=(%.3f %.3f %.3f) transport_guid=0x%016X entry=%s "
         "transport_map=%s transport_pos=(%.3f %.3f %.3f) phase_ms=%s "
@@ -899,7 +903,7 @@ def _log_transport_discovery_summary(
     rejected_guids: list[int],
     context: str,
 ) -> None:
-    Logger.info(
+    _transport_debug_log(
         "[TRANSPORT_DISCOVERY_SUMMARY] context=%s player_guid=%s "
         "transports_considered=%s transports_visible=%s transports_rejected=%s "
         "visible_guids=%s rejected_guids=%s",
@@ -948,7 +952,6 @@ def _shared_route_phase_ms(clock_key: str, period_ms: int) -> int:
 _REFERENCE_TRANSPORT_CLOCK_MODEL = "reference-diff"
 _SHARED_TRANSPORT_CLOCK_MODEL = "shared-wall-clock"
 _TRANSPORT_EVALUATOR_PHASE_BIAS_MS = 11500
-_TRANSPORT_CLOCK_DIAGNOSTIC_DELAY_MS = 60000
 
 
 def _transport_epoch_ms() -> int:
@@ -962,35 +965,6 @@ def _transport_monotonic_ms() -> int:
 
 def _is_reference_clock_transport_state(state: RuntimeTransportState) -> bool:
     return str(getattr(state, "clock_model", "") or "") == _REFERENCE_TRANSPORT_CLOCK_MODEL
-
-
-def _log_reference_transport_clock(state: RuntimeTransportState, *, context: str) -> None:
-    Logger.info(
-        "[TRANSPORT_CLOCK_EXPERIMENT] context=%s guid=0x%016X entry=%s "
-        "phase=%s map=%s pos=(%.3f,%.3f,%.3f)",
-        str(context or "unknown"),
-        int(state.guid) & 0xFFFFFFFFFFFFFFFF,
-        int(state.entry),
-        int(float(getattr(state, "path_progress_ms", 0.0) or 0.0)),
-        int(state.map_id),
-        float(state.x),
-        float(state.y),
-        float(state.z),
-    )
-
-
-def _maybe_log_reference_transport_clock_after_60s(state: RuntimeTransportState) -> None:
-    if not _is_reference_clock_transport_state(state):
-        return
-    if bool(getattr(state, "clock_after_60s_logged", False)):
-        return
-    started_at = int(getattr(state, "clock_started_at_ms", 0) or 0)
-    if started_at <= 0:
-        return
-    if _transport_monotonic_ms() - started_at < _TRANSPORT_CLOCK_DIAGNOSTIC_DELAY_MS:
-        return
-    state.clock_after_60s_logged = True
-    _log_reference_transport_clock(state, context="after-60s")
 
 
 def _transport_base_guid(entry: dict[str, Any]) -> int:
@@ -1246,41 +1220,13 @@ def complete_transport_passenger_transfer(
 
 
 def transport_transfer_destination_map_for_guid(world_guid: int) -> int | None:
-    def _audit_return(returning: int | None, state: RuntimeTransportState | None) -> int | None:
-        frame = inspect.currentframe()
-        line_number = frame.f_back.f_lineno if frame is not None and frame.f_back is not None else 0
-        Logger.info(
-            "[TRANSPORT_TRANSFER_DESTINATION_AUDIT] transport_guid=0x%016X "
-            "transfer_active=%s transfer_destination_map=%s returning=%s "
-            "file=%s line=%s function_id=%s function_first_line=%s",
-            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-            bool(getattr(state, "transfer_active", False)) if state is not None else "none",
-            (
-                getattr(state, "transfer_destination_map", None)
-                if state is not None
-                else "none"
-            ),
-            "none" if returning is None else int(returning),
-            __file__,
-            int(line_number),
-            id(transport_transfer_destination_map_for_guid),
-            int(transport_transfer_destination_map_for_guid.__code__.co_firstlineno),
-        )
-        return returning
-
     state = runtime_transport_state_for_guid(int(world_guid))
     if state is None:
-        return _audit_return(None, state)
+        return None
     if bool(getattr(state, "transfer_active", False)):
         active_destination_map = getattr(state, "transfer_destination_map", None)
         if active_destination_map is not None:
-            Logger.debug(
-                "[TRANSPORT_TRANSFER_DESTINATION] source=runtime_state "
-                "transport_guid=0x%016X destination_map=%s",
-                int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-                int(active_destination_map),
-            )
-            return _audit_return(int(active_destination_map), state)
+            return int(active_destination_map)
     _sync_transport_state_from_movement_cache(state)
     latest_events = tuple(getattr(state, "lifecycle_events", ()) or ())
     latest_event = latest_events[-1] if latest_events else None
@@ -1291,18 +1237,12 @@ def transport_transfer_destination_map_for_guid(world_guid: int) -> int | None:
         if bool(getattr(state, "transfer_active", False)):
             active_destination_map = getattr(state, "transfer_destination_map", None)
             if active_destination_map is not None:
-                Logger.debug(
-                    "[TRANSPORT_TRANSFER_DESTINATION] source=runtime_state "
-                    "transport_guid=0x%016X destination_map=%s",
-                    int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-                    int(active_destination_map),
-                )
-                return _audit_return(int(active_destination_map), state)
-        return _audit_return(None, state)
+                return int(active_destination_map)
+        return None
     destination_map = getattr(state, "transfer_destination_map", None)
     if destination_map is None:
-        return _audit_return(None, state)
-    return _audit_return(int(destination_map), state)
+        return None
+    return int(destination_map)
 
 
 def authoritative_transport_entry_for_guid(world_guid: int) -> dict[str, Any] | None:
@@ -1541,7 +1481,7 @@ def ensure_transport_runtime_for_session(session: Any) -> None:
         daemon=True,
     )
     thread.start()
-    Logger.info(
+    _transport_debug_log(
         "[WorldTransport] runtime start char=%s",
         int(getattr(session, "char_guid", 0) or 0),
     )
@@ -1568,7 +1508,7 @@ def _transport_runtime_loop(session: Any) -> None:
         Logger.warning("[WorldTransport] runtime failed err=%s", exc)
     finally:
         session._transport_runtime_running = False
-        Logger.info(
+        _transport_debug_log(
             "[WorldTransport] runtime stop char=%s",
             int(getattr(session, "char_guid", 0) or 0),
         )
@@ -2045,14 +1985,7 @@ def _maybe_start_passenger_transport_transfer(
         f"TRANSPORT_RUNTIME_{str(reason).upper()}",
         forced_destination_map=forced_destination_map,
     )
-    if responses:
-        Logger.info(
-            "[TransportTransfer] auto-transfer player=%s transport=0x%016X reason=%s",
-            int(getattr(session, "char_guid", 0) or 0),
-            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-            str(reason),
-        )
-    else:
+    if not responses:
         _log_transfer_exit("route_transfer_returned_no_responses")
     return responses
 
@@ -2255,24 +2188,21 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
         server_time_ms=_transport_server_time_ms(state),
     )
     _sync_transport_state_from_movement_cache(state)
-    if reference_clock:
-        _log_reference_transport_clock(state, context="startup")
     states[world_guid] = state
-    if transport_movement_debug_enabled():
-        Logger.info(
-            "[WorldTransport] route load world_guid=0x%016X entry=%s display=%s "
-            "map=%s nodes=%s period=%sms timed=%s start=(%.2f %.2f %.2f)",
-            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-            int(state.entry),
-            int(state.display_id),
-            int(state.map_id),
-            len(route),
-            int(state.route_period_ms),
-            bool(state.timed_route),
-            float(state.x),
-            float(state.y),
-            float(state.z),
-        )
+    _transport_debug_log(
+        "[WorldTransport] route load world_guid=0x%016X entry=%s display=%s "
+        "map=%s nodes=%s period=%sms timed=%s start=(%.2f %.2f %.2f)",
+        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(state.entry),
+        int(state.display_id),
+        int(state.map_id),
+        len(route),
+        int(state.route_period_ms),
+        bool(state.timed_route),
+        float(state.x),
+        float(state.y),
+        float(state.z),
+    )
     return state
 
 
@@ -2458,7 +2388,7 @@ def _transport_animation_paths() -> dict[int, TransportAnimationPath]:
         )
 
     setattr(_transport_animation_paths, "_paths", paths)
-    Logger.info(
+    _transport_debug_log(
         "[WorldTransport] DBC movement animation templates loaded animated_entries=%s",
         len(paths),
     )
@@ -2528,7 +2458,7 @@ def _load_world_db_transports() -> tuple[dict[str, Any], ...]:
 
     result = tuple(transports)
     setattr(_load_world_db_transports, "_transports", result)
-    Logger.info("[WorldTransport] loaded world DB transports count=%s", len(result))
+    _transport_debug_log("[WorldTransport] loaded world DB transports count=%s", len(result))
     return result
 
 
@@ -2668,7 +2598,7 @@ def _transport_taxi_path_nodes_by_path() -> dict[int, tuple[TransportTaxiPathNod
             paths[int(path_id)] = tuple(nodes)
 
     setattr(_transport_taxi_path_nodes_by_path, "_paths", paths)
-    Logger.info(
+    _transport_debug_log(
         "[WorldTransport] DBC movement taxi path templates loaded transport_paths=%s",
         len(paths),
     )
@@ -2846,16 +2776,15 @@ def _build_dbc_animation_route(entry: dict[str, Any]) -> list[TransportRouteNode
         )
 
     if len(route) >= 2:
-        if transport_movement_debug_enabled():
-            Logger.info(
-                "[WorldTransport] DBC route entry=%s nodes=%s period=%sms base=(%.2f %.2f %.2f)",
-                int(animation.entry),
-                len(route),
-                int(animation.period_ms),
-                float(base_x),
-                float(base_y),
-                float(base_z),
-            )
+        _transport_debug_log(
+            "[WorldTransport] DBC route entry=%s nodes=%s period=%sms base=(%.2f %.2f %.2f)",
+            int(animation.entry),
+            len(route),
+            int(animation.period_ms),
+            float(base_x),
+            float(base_y),
+            float(base_z),
+        )
     return route
 
 
@@ -3035,7 +2964,7 @@ def _ensure_movement_instance_for_state(state: RuntimeTransportState) -> None:
         int(state.guid),
         server_time_ms=_transport_server_time_ms(state),
     )
-    Logger.info(
+    _transport_debug_log(
         "[TRANSPORT_DEBUG] rehydrate guid=0x%016X entry=%s map=%s phase=%s node=%s",
         int(state.guid) & 0xFFFFFFFFFFFFFFFF,
         int(state.entry),
@@ -3131,17 +3060,18 @@ def _maybe_log_transport_tick(world_guid: int, entry: dict[str, Any]) -> None:
 
     state.tick_log_after = now + 5.0
     if is_deeprun_tram_entry(entry):
-        Logger.debug(
-            "[Tram] transport tick world_guid=0x%016X node=%s phase=%sms "
-            "pos=(%.2f %.2f %.2f) passenger_count=%s",
-            int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-            int(state.node_index),
-            int(state.path_progress_ms) & 0xFFFFFFFF,
-            float(entry.get("x", 0.0) or 0.0),
-            float(entry.get("y", 0.0) or 0.0),
-            float(entry.get("z", 0.0) or 0.0),
-            0,
-        )
+        if transport_movement_debug_enabled():
+            Logger.debug(
+                "[Tram] transport tick world_guid=0x%016X node=%s phase=%sms "
+                "pos=(%.2f %.2f %.2f) passenger_count=%s",
+                int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+                int(state.node_index),
+                int(state.path_progress_ms) & 0xFFFFFFFF,
+                float(entry.get("x", 0.0) or 0.0),
+                float(entry.get("y", 0.0) or 0.0),
+                float(entry.get("z", 0.0) or 0.0),
+                0,
+            )
     else:
         if transport_movement_debug_enabled():
             Logger.debug(
