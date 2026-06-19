@@ -166,6 +166,57 @@ def _shutdown_active_clients() -> None:
             pass
 
 
+def _log_plants_vs_ghouls_loaded() -> None:
+    from server.modules.handlers.world.features.plants_vs_ghouls import (
+        get_plants_vs_ghouls_manager,
+    )
+    from server.modules.handlers.world.features.plants_vs_ghouls.definitions import (
+        LANE_COUNT,
+        PLANT_DEFINITIONS,
+        WAVE_DEFINITIONS,
+        ZOMBIE_DEFINITION,
+    )
+
+    _ = get_plants_vs_ghouls_manager()
+    Logger.info(
+        "[Plants vs Ghouls] Loaded prototype lanes=%s waves=%s plants=%s zombie_entry=%s",
+        int(LANE_COUNT),
+        len(WAVE_DEFINITIONS),
+        len(PLANT_DEFINITIONS),
+        int(ZOMBIE_DEFINITION.entry),
+    )
+
+
+def _log_halfhill_farming_loaded() -> None:
+    from server.modules.handlers.world.features.halfhill_farming import (
+        get_halfhill_farm_manager,
+    )
+    from server.modules.handlers.world.features.halfhill_farming.definitions import (
+        CROPS_BY_SEED_ITEM,
+        HALFHILL_MAP_ID,
+        MANAGED_PLOT_GUIDS,
+    )
+
+    _ = get_halfhill_farm_manager()
+    Logger.info(
+        "[HalfhillFarm] Loaded prototype map=%s plots=%s crops=%s",
+        int(HALFHILL_MAP_ID),
+        len(MANAGED_PLOT_GUIDS),
+        len(CROPS_BY_SEED_ITEM),
+    )
+
+
+def _log_pet_battles_loaded() -> None:
+    from server.modules.handlers.world.features.pet_battles import (
+        get_pet_battle_manager,
+    )
+
+    _ = get_pet_battle_manager()
+    Logger.info(
+        "[PetBattle] Loaded prototype mode=ui-only command=.petbattle start|stop",
+    )
+
+
 # ---- Utility helpers ----------------------------------------------------
 """def build_world_packet(opcode_name: str, payload: bytes) -> bytes:
     
@@ -634,6 +685,18 @@ def run_world() -> None:
         load_teleports(DatabaseConnection.world())
     except Exception as exc:
         Logger.warning(f"[Teleport] preload failed: {exc}")
+    try:
+        _log_plants_vs_ghouls_loaded()
+    except Exception as exc:
+        Logger.warning(f"[PvG] preload failed: {exc}")
+    try:
+        _log_halfhill_farming_loaded()
+    except Exception as exc:
+        Logger.warning(f"[HalfhillFarm] preload failed: {exc}")
+    try:
+        _log_pet_battles_loaded()
+    except Exception as exc:
+        Logger.warning(f"[PetBattle] preload failed: {exc}")
     try:
         preload_cache()
     except Exception:

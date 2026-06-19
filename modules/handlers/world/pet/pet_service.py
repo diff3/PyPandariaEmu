@@ -17,7 +17,7 @@ except ImportError:
 
 from DSL.modules.bitsHandler import BitWriter
 from shared.Logger import Logger
-from shared.PathUtils import get_dbc_root, get_project_root
+from shared.PathUtils import get_dbc_root, get_db2_root, get_project_root
 
 BATTLE_PET_TRAINING_SPELLS: tuple[int, ...] = (
     119467,  # Battle Pet Training
@@ -90,10 +90,20 @@ def _candidate_battle_pet_species_paths() -> list[Path]:
             root.parent / "DBFilesClient" / "BattlePetSpecies.db2",
         ])
 
+    db2_root = get_db2_root()
+    if db2_root:
+        root = Path(db2_root)
+        paths.extend([
+            root / "BattlePetSpecies.db2",
+            root / "DBFilesClient" / "BattlePetSpecies.db2",
+        ])
+
     project_root = get_project_root()
     paths.extend([
-        project_root / "data" / "dbc" / "BattlePetSpecies.db2",
-        project_root / "data" / "db2" / "BattlePetSpecies.db2",
+        project_root / "data" / "client" / "dbc" / "BattlePetSpecies.db2",
+        project_root / "data" / "client" / "db2" / "BattlePetSpecies.db2",
+        project_root / "dbc" / "BattlePetSpecies.db2",
+        project_root / "db2" / "BattlePetSpecies.db2",
         project_root.parent / "mistofpandaria" / "BattlePetSpecies.db2",
     ])
 

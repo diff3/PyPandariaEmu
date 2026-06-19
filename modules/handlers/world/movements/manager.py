@@ -132,11 +132,12 @@ class MovementManager:
         )
         self.instances[instance_key] = MovementRuntimeState(instance=instance)
         self.instance_by_template[template_key] = instance_key
-        Logger.info(
-            "[MovementManager] instance registered id=0x%016X template=%s",
-            instance_key,
-            template.template_id,
-        )
+        if transport_movement_debug_enabled():
+            Logger.info(
+                "[MovementManager] instance registered id=0x%016X template=%s",
+                instance_key,
+                template.template_id,
+            )
         self._emit_event(
             self.instances[instance_key],
             MovementLifecycleEventType.SPAWN,
@@ -260,7 +261,7 @@ class MovementManager:
         )
         self._detect_lifecycle_events(state, transform)
         self._update_visibility_state(state)
-        if previous != state.lifecycle_state:
+        if previous != state.lifecycle_state and transport_movement_debug_enabled():
             Logger.info(
                 "[MovementManager] lifecycle instance=0x%016X %s->%s event=%s",
                 int(instance_id) & 0xFFFFFFFFFFFFFFFF,
@@ -692,14 +693,15 @@ class MovementManager:
         state.visibility_state = current.value
         if previous == state.visibility_state:
             return
-        Logger.info(
-            "[MovementVisibility] instance=0x%016X %s->%s lifecycle=%s event=%s",
-            int(state.instance.instance_id) & 0xFFFFFFFFFFFFFFFF,
-            previous,
-            state.visibility_state,
-            str(state.lifecycle_state),
-            str(state.last_event),
-        )
+        if transport_movement_debug_enabled():
+            Logger.info(
+                "[MovementVisibility] instance=0x%016X %s->%s lifecycle=%s event=%s",
+                int(state.instance.instance_id) & 0xFFFFFFFFFFFFFFFF,
+                previous,
+                state.visibility_state,
+                str(state.lifecycle_state),
+                str(state.last_event),
+            )
 
     def _visibility_state_for_runtime(
         self,

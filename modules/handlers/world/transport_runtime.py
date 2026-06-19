@@ -239,13 +239,14 @@ class WorldTransportManager:
             )
             self.entries[world_guid] = transport_entry
             state = _transport_state_for_entry(transport_entry)
-            Logger.info(
-                "[TransportRegister] transport=0x%016X entry=%s map=%s source=%s",
-                world_guid & 0xFFFFFFFFFFFFFFFF,
-                int(transport_entry.get("entry", 0) or 0),
-                int(transport_entry.get("map", transport_entry.get("map_id", 0)) or 0),
-                str(source),
-            )
+            if transport_movement_debug_enabled():
+                Logger.info(
+                    "[TransportRegister] transport=0x%016X entry=%s map=%s source=%s",
+                    world_guid & 0xFFFFFFFFFFFFFFFF,
+                    int(transport_entry.get("entry", 0) or 0),
+                    int(transport_entry.get("map", transport_entry.get("map_id", 0)) or 0),
+                    str(source),
+                )
             return state
 
     def _duplicate_runtime_guid_locked(self, entry: dict[str, Any]) -> int:

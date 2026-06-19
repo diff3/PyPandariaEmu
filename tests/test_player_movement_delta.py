@@ -12,6 +12,7 @@ import types
 CREATE_BEFORE_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"
@@ -21,6 +22,7 @@ CREATE_BEFORE_PATH = (
 CREATE_AFTER_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"
@@ -30,6 +32,7 @@ CREATE_AFTER_PATH = (
 MOVE_BEFORE_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"
@@ -39,6 +42,7 @@ MOVE_BEFORE_PATH = (
 MOVE_AFTER_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"
@@ -48,6 +52,7 @@ MOVE_AFTER_PATH = (
 MOVE_JUMP_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"
@@ -57,6 +62,7 @@ MOVE_JUMP_PATH = (
 MOVE_FALL_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"

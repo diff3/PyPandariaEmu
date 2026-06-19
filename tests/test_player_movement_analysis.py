@@ -12,6 +12,7 @@ import types
 FIRST_CAPTURE_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"
@@ -21,6 +22,7 @@ FIRST_CAPTURE_PATH = (
 SECOND_CAPTURE_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"
@@ -30,6 +32,7 @@ SECOND_CAPTURE_PATH = (
 THIRD_CAPTURE_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"

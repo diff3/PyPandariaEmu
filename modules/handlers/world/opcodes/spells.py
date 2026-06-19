@@ -123,6 +123,7 @@ USE_RAW_SNIFFED_KNOWN_SPELLS = False
 _RAW_KNOWN_SPELLS_SNIFF_PATH = (
     Path(__file__).resolve().parents[5]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "debug"

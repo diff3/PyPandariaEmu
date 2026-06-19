@@ -11,6 +11,7 @@ from DSL.modules.bitsHandler import BitInterPreter
 from DSL.modules.bitsHandler import BitWriter
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
+from shared.PathUtils import get_dbc_root
 from server.modules.dbc.DBCReader import read_dbc
 from server.modules.game.guid import GuidHelper
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
@@ -266,8 +267,11 @@ def _decode_activate_taxi_express(data: bytes) -> tuple[int, tuple[int, ...]]:
 
 
 def _dbc_path() -> str:
+    dbc_root = get_dbc_root()
+    if dbc_root is not None:
+        return str(dbc_root)
     config = ConfigLoader.load_config()
-    return str(config.get("dbc_path") or "data/dbc")
+    return str(config.get("dbc_path") or "data/client/dbc")
 
 
 def _load_taxi_nodes() -> dict[int, TaxiNode]:

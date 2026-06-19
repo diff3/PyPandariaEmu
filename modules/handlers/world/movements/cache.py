@@ -162,10 +162,11 @@ def _inject_legacy_elevator_templates(
 
         templates[int(entry)] = template
 
-        Logger.info(
-            "[MovementCache] injected legacy elevator entry=%s",
-            entry,
-        )
+        if transport_movement_debug_enabled():
+            Logger.info(
+                "[MovementCache] injected legacy elevator entry=%s",
+                entry,
+            )
 
 
 def _load_transport_animation_templates() -> dict[int, MovementTemplate]:

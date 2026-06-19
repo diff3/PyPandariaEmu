@@ -127,7 +127,7 @@ class TestEncodeRoundtrip(unittest.TestCase):
                     debug_path = self.DEBUG_DIR / f"{case_name}.json"
                     #debug_path = Path(
                      #   debug_path = self.DEBUG_DIR / f"{case_name}.json"
-                         # f"protocols/{self.program}/{self.expansion}/{self.version}/data/debug/{case_name}.json"
+                         # f"protocols/{self.program}/{self.expansion}/{self.version}/data/proxy/debug/{case_name}.json"
                    # )
                     debug_ok = False
                     if debug_path.exists():

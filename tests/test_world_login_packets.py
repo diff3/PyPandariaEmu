@@ -39,7 +39,7 @@ def _import_login_flow():
 
 login_packets = _import_login_packets()
 login_flow = _import_login_flow()
-CAPTURE_DIR = Path(__file__).resolve().parents[2] / "data" / "pandaria548" / "captures" / "focus" / "debug"
+CAPTURE_DIR = Path(__file__).resolve().parents[2] / "data" / "proxy" / "pandaria548" / "captures" / "focus" / "debug"
 
 
 def _capture_payload(name: str) -> bytes:

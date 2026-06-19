@@ -49,9 +49,9 @@ Known field specification:
   5. guid mask: uint8, 1 byte
   6. guid data: variable length, 0 to 8 bytes
      - size is the popcount of the guid mask
-- Verified player CREATE_OBJECT capture:
+  - Verified player CREATE_OBJECT capture:
   - Source:
-    - data/skyfire548/captures/focus/debug/SMSG_UPDATE_OBJECT_1776451639_0458.json
+    - data/proxy/skyfire548/captures/focus/debug/SMSG_UPDATE_OBJECT_1776451639_0458.json
   - Verified top-level layout:
     1. map_id: uint16, bytes 0x0000-0x0001, value 1
     2. update_count: uint32, bytes 0x0002-0x0005, value 1

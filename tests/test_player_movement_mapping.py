@@ -12,6 +12,7 @@ import types
 CREATE_OBJECT_CAPTURE_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"
@@ -21,6 +22,7 @@ CREATE_OBJECT_CAPTURE_PATH = (
 FACING_CAPTURE_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"
@@ -30,6 +32,7 @@ FACING_CAPTURE_PATH = (
 MOVE_CAPTURE_PATH = (
     Path(__file__).resolve().parents[2]
     / "data"
+    / "proxy"
     / "skyfire548"
     / "captures"
     / "focus"

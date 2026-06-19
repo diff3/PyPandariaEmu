@@ -40,9 +40,9 @@ Key output settings for both auth and world:
 The runtime data layout is now centralized under project `data/`:
 
 - `data/def`
-- `data/json`
-- `data/debug`
-- `data/captures`
+- `data/proxy/json`
+- `data/proxy/debug`
+- `data/proxy/captures`
 
 AuthServer and WorldServer both use config-driven paths through shared path helpers.
 
