@@ -97,6 +97,14 @@ def apply_map_transfer(
             get_halfhill_farm_manager().clear_for_map_transfer(session)
         except Exception as exc:
             Logger.warning("[HalfhillFarm] map-transfer cleanup failed: %s", exc)
+        try:
+            from server.modules.handlers.world.features.pet_battles import (
+                get_pet_battle_manager,
+            )
+
+            get_pet_battle_manager().handle_map_transfer(session)
+        except Exception as exc:
+            Logger.warning("[PetBattle] map-transfer cleanup failed: %s", exc)
 
     session.teleport_destination = target.name or str(reason)
     session.near_teleport_pending = same_map

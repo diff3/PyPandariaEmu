@@ -138,6 +138,14 @@ def handle_disconnect_session(target_session) -> None:
         get_halfhill_farm_manager().clear_for_logout(target_session)
     except Exception as exc:
         Logger.warning(f"[DISCONNECT] HalfhillFarm cleanup failed: {exc}")
+    try:
+        from server.modules.handlers.world.features.pet_battles import (
+            get_pet_battle_manager,
+        )
+
+        get_pet_battle_manager().handle_disconnect(target_session)
+    except Exception as exc:
+        Logger.warning(f"[DISCONNECT] PetBattle cleanup failed: {exc}")
 
     # --- Remove from world (broadcast) ---
     try:

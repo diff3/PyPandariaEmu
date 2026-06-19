@@ -1796,6 +1796,15 @@ def cmd_plants_vs_ghouls(session, args: list[str]) -> list[tuple[str, bytes]]:
     )
 
 
+@register_command("petbattle", ".petbattle <start|stop|status>")
+def cmd_petbattle(session, args: list[str]) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.features.pet_battles.commands import (
+        handle_petbattle_command,
+    )
+
+    return handle_petbattle_command(session, args)
+
+
 def find_online_player_by_name(name: str):
     if not name:
         return None
@@ -2119,6 +2128,7 @@ PRIMARY_COMMANDS = {
     "mapcheat": Command(handler=cmd_mapcheat, usage=".mapcheat <on|0>"),
     "morph": Command(handler=cmd_morph, usage=".morph <displayId|namel|list>", require_args=True),
     "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
+    "petbattle": Command(handler=cmd_petbattle, usage=".petbattle <start|stop|status>"),
     "roll": Command(handler=cmd_roll, usage=".roll"),
     "save": Command(handler=cmd_save, usage=".save", allow_args=False),
     "server": Command(
