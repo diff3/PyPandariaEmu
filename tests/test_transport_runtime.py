@@ -3831,6 +3831,19 @@ def test_deeprun_tram_without_dbc_template_does_not_spawn(monkeypatch):
     assert transport_runtime.synthetic_transport_entries_near(instance_session, loaded_guids=set()) == []
 
 
+def test_deeprun_runtime_registration_is_silent(monkeypatch):
+    logged: list[str] = []
+
+    def _capture(message, *args, **kwargs):
+        logged.append(str(message) % args if args else str(message))
+
+    monkeypatch.setattr(transport_runtime.Logger, "warning", _capture)
+
+    transport_runtime.get_world_transport_manager()._register_deeprun_trams_locked()
+
+    assert logged == []
+
+
 def test_uld_instance_tram_entry_is_not_deeprun_special_case(monkeypatch):
     _reset_transport_states()
     animation = transport_runtime.TransportAnimationPath(

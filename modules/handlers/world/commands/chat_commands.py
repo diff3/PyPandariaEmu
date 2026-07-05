@@ -2129,6 +2129,7 @@ PRIMARY_COMMANDS = {
     "morph": Command(handler=cmd_morph, usage=".morph <displayId|namel|list>", require_args=True),
     "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
     "petbattle": Command(handler=cmd_petbattle, usage=".petbattle <start|stop|status>"),
+    "pvg": Command(handler=cmd_plants_vs_ghouls, usage=".pvg <start|stop|status|plant <lane 1-5> <spitter|rocknut>>"),
     "roll": Command(handler=cmd_roll, usage=".roll"),
     "save": Command(handler=cmd_save, usage=".save", allow_args=False),
     "server": Command(

@@ -1,6 +1,7 @@
 from DSL.modules.EncoderHandler import EncoderHandler
 from server.modules.handlers.world.bootstrap import gameobjects
 from server.modules.game.guid import GameObjectGuid, MoTransportGuid
+from shared.Logger import Logger
 
 
 def _entry():
@@ -121,7 +122,7 @@ def test_transport_gameobject_uses_start_open_state_and_full_health():
     assert fields[gameobjects._GAMEOBJECT_FIELD_FLAGS] & gameobjects._GO_FLAG_TRANSPORT
 
 
-def test_transport_gameobject_packs_path_progress_in_dynamic_flags():
+def test_transport_gameobject_does_not_pack_path_progress_in_dynamic_flags():
     entry = {
         **_entry(),
         "entry": 4170,
@@ -134,9 +135,22 @@ def test_transport_gameobject_packs_path_progress_in_dynamic_flags():
 
     fields = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
 
-    packed = fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS]
-    assert packed & 0xFFFF == 0
-    assert ((packed >> 16) & 0xFFFF) in (32767, 32768)
+    assert fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS] == 0
+
+
+def test_transport_dynamic_flags_ignore_seed_for_type_11(monkeypatch):
+    entry = {
+        **_entry(),
+        "entry": 4170,
+        "display_id": 360,
+        "type": 11,
+        "transport_period": 32000,
+    }
+    monkeypatch.setattr(gameobjects.time, "time", lambda: 12.345)
+    world_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+
+    fields = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
+    assert fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS] == 0
 
 
 def test_type_11_create_movement_block_still_uses_path_progress():
@@ -161,6 +175,181 @@ def test_type_11_create_flags_match_skyfire_transport_stationary_rotation_layout
     assert gameobjects.gameobject_defs.build_gameobject_create_flags(update_flags) == bytes.fromhex(
         "000000030040"
     )
+
+
+def test_deeprun_visible_subway_entries_are_detected():
+    entry = {
+        **_entry(),
+        "guid": 18802,
+        "entry": 176080,
+        "map_id": 369,
+        "type": 11,
+        "display_id": 3831,
+    }
+
+    assert gameobjects._is_deeprun_visible_subway_entry(entry) is True
+
+
+def test_deeprun_create_audit_logs_expected_fields(monkeypatch):
+    entry = {
+        **_entry(),
+        "guid": 18802,
+        "entry": 176080,
+        "map_id": 369,
+        "type": 11,
+        "display_id": 3831,
+        "data0": 0,
+        "data1": 0,
+    }
+    world_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+    field_values = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
+    logged: list[str] = []
+
+    def _capture(message, *args, **kwargs):
+        logged.append(str(message) % args if args else str(message))
+
+    monkeypatch.setattr(Logger, "info", _capture)
+
+    gameobjects._log_deeprun_create_audit(
+        entry,
+        world_guid=world_guid,
+        packet_map_id=369,
+        update_flags=(
+            gameobjects._UPDATEFLAG_TRANSPORT
+            | gameobjects._UPDATEFLAG_STATIONARY_POSITION
+            | gameobjects._UPDATEFLAG_ROTATION
+        ),
+        create_flags=bytes.fromhex("000000030040"),
+        movement_block_uint32=1234,
+        field_values=field_values,
+    )
+
+    assert logged
+    assert "[DEEPRUN_CREATE_AUDIT]" in logged[0]
+    assert "entry=176080" in logged[0]
+    assert "create_flags=000000030040" in logged[0]
+    assert "transport_block=yes" in logged[0]
+
+
+def test_deeprun_visible_subway_keeps_gameobject_guid():
+    entry = {
+        **_entry(),
+        "guid": 18802,
+        "entry": 176080,
+        "map_id": 369,
+        "type": 11,
+        "display_id": 3831,
+    }
+
+    assert gameobjects._resolve_world_guid(entry, 1) == GameObjectGuid.from_spawn_guid(18802, 1)
+
+
+def test_deeprun_visible_subway_type_11_level_uses_data0_only():
+    entry = {
+        **_entry(),
+        "guid": 18806,
+        "entry": 176084,
+        "map_id": 369,
+        "type": 11,
+        "display_id": 3831,
+        "data0": 0,
+        "data6": 58633,
+        "data8": 71667,
+        "data10": 130300,
+    }
+    world_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+
+    fields = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
+
+    assert gameobjects._client_transport_period(entry) == 0
+    assert fields[gameobjects._GAMEOBJECT_FIELD_LEVEL] == 0
+    assert fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS] == 0
+
+
+def test_deeprun_visible_subway_entries_never_pack_transport_progress():
+    for guid, entry_id in (
+        (18802, 176080),
+        (18803, 176081),
+        (18804, 176082),
+        (18805, 176083),
+        (18806, 176084),
+        (18807, 176085),
+    ):
+        entry = {
+            **_entry(),
+            "guid": guid,
+            "entry": entry_id,
+            "map_id": 369,
+            "type": 11,
+            "display_id": 3831,
+            "data0": 0,
+            "data6": 58633 if entry_id == 176084 else 0,
+            "data8": 71667 if entry_id == 176084 else 0,
+            "data10": 130300 if entry_id == 176084 else 0,
+            "transport_path_progress": 54321,
+        }
+        world_guid = GameObjectGuid.from_spawn_guid(guid, 1)
+        fields = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
+
+        assert fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS] == 0
+
+
+def test_mo_transport_still_packs_path_progress_in_dynamic_flags():
+    entry = {
+        **_entry(),
+        "type": 15,
+        "transport_period": 32000,
+        "transport_path_progress": 16000,
+    }
+    world_guid = MoTransportGuid.from_spawn_guid(entry["guid"])
+
+    fields = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
+
+    packed = fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS]
+    assert packed & 0xFFFF == 0
+    assert ((packed >> 16) & 0xFFFF) in (32767, 32768)
+
+
+def test_deeprun_preserves_spawn_quaternion_fields_from_db():
+    entry = {
+        **_entry(),
+        "guid": 18802,
+        "entry": 176080,
+        "map_id": 369,
+        "type": 11,
+        "display_id": 3831,
+        "orientation": 1.5708,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 1.0,
+        "rotation3": 0.0,
+    }
+    world_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+
+    fields = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
+
+    assert gameobjects._rotation_components(entry) == (0.0, 0.0, 1.0, 0.0)
+    assert gameobjects._GAMEOBJECT_FIELD_ROTATION_START + 2 in fields
+    assert gameobjects._GAMEOBJECT_FIELD_ROTATION_START + 3 not in fields
+    assert fields[gameobjects._GAMEOBJECT_FIELD_ROTATION_START + 2] == 0x3F800000
+
+
+def test_deeprun_packed_rotation_still_uses_orientation_seed():
+    entry = {
+        **_entry(),
+        "guid": 18802,
+        "entry": 176080,
+        "map_id": 369,
+        "type": 11,
+        "display_id": 3831,
+        "orientation": 1.5708,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 1.0,
+        "rotation3": 0.0,
+    }
+
+    assert gameobjects._gameobject_rotation_packed(entry) == 0x0B5050
 
 
 def test_mo_transport_uses_mo_transport_guid():

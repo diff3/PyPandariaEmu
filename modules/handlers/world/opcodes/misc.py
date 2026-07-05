@@ -360,6 +360,48 @@ def handle_world_state_ui_timer_update(session, ctx: PacketContext) -> Tuple[int
     return 0, None
 
 
+@register("UNKNOWN_CMSG_0x17BA")
+@register("UNKNOWN_CMSG_0x1C45")
+def handle_pet_battle_unknown_ui_exit(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    Logger.info(
+        "[PETBATTLE_PASSIVE] opcode=0x%04X size=%u payload=%s",
+        int(getattr(ctx, "opcode", 0) or 0) & 0xFFFF,
+        len(bytes(getattr(ctx, "payload", b"") or b"")),
+        bytes(getattr(ctx, "payload", b"") or b"").hex(),
+    )
+    return 0, None
+
+
+@register("UNKNOWN_CMSG_0x1063")
+def handle_pet_battle_forfeit_confirm(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    try:
+        from server.modules.handlers.world.features.pet_battles import (
+            get_pet_battle_manager,
+        )
+    except Exception:
+        Logger.info(
+            "[PETBATTLE_PASSIVE] opcode=0x%04X size=%u payload=%s",
+            int(getattr(ctx, "opcode", 0) or 0) & 0xFFFF,
+            len(bytes(getattr(ctx, "payload", b"") or b"")),
+            bytes(getattr(ctx, "payload", b"") or b"").hex(),
+        )
+        return 0, None
+
+    manager = get_pet_battle_manager()
+    active = manager.active_session(session)
+    Logger.info(
+        "[PETBATTLE_1063] opcode=0x%04X size=%u payload=%s battle_id=%s active=%s",
+        int(getattr(ctx, "opcode", 0) or 0) & 0xFFFF,
+        len(bytes(getattr(ctx, "payload", b"") or b"")),
+        bytes(getattr(ctx, "payload", b"") or b"").hex(),
+        int(getattr(active, "battle_id", 0) or 0),
+        int(active is not None),
+    )
+    if active is not None:
+        manager.stop_session(session, reason="client-forfeit-confirm", send_packets=False)
+    return 0, None
+
+
 @register("CMSG_REQUEST_HOTFIX")
 def handle_request_hotfix(session, ctx: PacketContext):
     Logger.info(

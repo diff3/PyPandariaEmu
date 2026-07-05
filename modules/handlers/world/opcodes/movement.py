@@ -40,6 +40,7 @@ from server.modules.handlers.world.state.runtime import (
     refresh_region_weather,
 )
 from server.modules.handlers.world.login.packets import build_login_packet
+from server.modules.handlers.world.features.deeprun_collision import clamp_deeprun_player_z
 
 
 def _transport_movement_debug_enabled() -> bool:
@@ -55,6 +56,20 @@ def _transport_debug_log(message: str, *args) -> None:
     if not _transport_movement_debug_enabled():
         return
     Logger.info(message, *args)
+
+
+def _clear_falling_state(state) -> None:
+    state.has_fall_data = False
+    state.fall_time = 0
+    state.fall_vertical_speed = 0.0
+    state.fall_horizontal_speed = 0.0
+    state.fall_sin_angle = 0.0
+    state.fall_cos_angle = 0.0
+    state.flags &= ~_MOVEMENTFLAG_FALLING
+    if hasattr(state, "is_ascending"):
+        state.is_ascending = False
+    if hasattr(state, "is_descending"):
+        state.is_descending = False
 
 
 def _verify_pending_boat_transfer_attachment(session, pending: dict[str, Any] | None) -> None:
@@ -4413,6 +4428,15 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
         )
     if movement is not None and not older_movement_packet:
         x, y, z, orientation = movement
+        clamped, clamped_z = clamp_deeprun_player_z(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            world_x=float(x),
+            world_y=float(y),
+            world_z=float(z),
+        )
+        if clamped:
+            z = float(clamped_z)
+            _clear_falling_state(state)
         state.x = float(x)
         state.y = float(y)
         state.z = float(z)

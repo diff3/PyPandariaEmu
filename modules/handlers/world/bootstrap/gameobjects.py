@@ -24,6 +24,9 @@ for _definition_name in gameobject_defs.__all__:
     globals()[f"_{_definition_name}"] = getattr(gameobject_defs, _definition_name)
 
 _OBJECT_FIELD_SCALE = gameobject_defs.OBJECT_FIELD_SCALE_X
+_DEEPRUN_VISIBLE_ENTRY_IDS = frozenset({176080, 176081, 176082, 176083, 176084, 176085})
+
+
 def _entry_int(entry: Mapping[str, Any], key: str, default: int = 0) -> int:
     """Return an integer field from a GameObject entry."""
     return int(entry.get(key, default) or default)
@@ -36,7 +39,7 @@ def _entry_float(entry: Mapping[str, Any], key: str, default: float = 0.0) -> fl
 
 def _entry_map_id(entry: Mapping[str, Any], default: int = 0) -> int:
     """Return a map id; map 0 is valid and must not fall back."""
-    value = entry.get("map", default)
+    value = entry.get("map", entry.get("map_id", default))
     if value is None:
         value = default
     return int(value)
@@ -65,14 +68,6 @@ def _rotation_has_quaternion(entry: Mapping[str, Any]) -> bool:
         abs(_entry_float(entry, key)) > _QUATERNION_EPSILON
         for key in ("rotation0", "rotation1", "rotation2")
     ) or abs(abs(_entry_float(entry, "rotation3")) - 1.0) > _QUATERNION_EPSILON
-
-
-def _rotation_has_yaw_only(entry: Mapping[str, Any]) -> bool:
-    return (
-        abs(_entry_float(entry, "rotation0")) <= _QUATERNION_EPSILON
-        and abs(_entry_float(entry, "rotation1")) <= _QUATERNION_EPSILON
-        and _rotation_has_quaternion(entry)
-    )
 
 
 def _raw_rotation_components(entry: Mapping[str, Any]) -> tuple[float, float, float, float]:
@@ -150,12 +145,7 @@ def _stationary_orientation(entry: Mapping[str, Any]) -> float:
 
 def _rotation_components(entry: Mapping[str, Any]) -> tuple[float, float, float, float]:
     raw_rotation = _raw_rotation_components(entry)
-    has_real_quaternion = (
-        _rotation_has_quaternion(entry)
-        and not _rotation_has_yaw_only(entry)
-        and _quaternion_is_unit(*raw_rotation)
-    )
-    if has_real_quaternion:
+    if _rotation_has_quaternion(entry) and _quaternion_is_unit(*raw_rotation):
         return _normalize_quaternion(*raw_rotation)
 
     orientation = _stationary_orientation(entry)
@@ -172,7 +162,14 @@ def _rotation_components(entry: Mapping[str, Any]) -> tuple[float, float, float,
 
 
 def _gameobject_rotation_packed(entry: Mapping[str, Any]) -> int:
-    return _pack_gameobject_rotation(*_rotation_components(entry))
+    orientation = _stationary_orientation(entry)
+    atan_pow = math.atan(math.pow(2.0, -20.0))
+    rotation_sin = math.sin(orientation * 0.5)
+    rotation_cos = math.cos(orientation * 0.5)
+    packed = int(
+        rotation_sin / atan_pow * (1.0 if rotation_cos >= 0.0 else -1.0)
+    )
+    return int(packed) & 0x1FFFFF
 
 
 def _gameobject_update_flags(entry: Mapping[str, Any]) -> int:
@@ -241,24 +238,43 @@ def _gameobject_movement_block_uint32(entry: Mapping[str, Any]) -> int:
     """Return the extra movement block value required by the create flags."""
     gameobject_type = _entry_int(entry, "type") & 0xFF
     if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
-        path_progress = entry.get("transport_path_progress")
-        if path_progress is None:
-            path_progress = int(time.time() * 1000.0)
-        return int(path_progress) & 0xFFFFFFFF
+        return _effective_transport_path_progress(entry)
     return _GAMEOBJECT_MOVEMENT_BLOCK_UINT32
+
+
+def _is_deeprun_visible_subway_entry(entry: Mapping[str, Any]) -> bool:
+    return (
+        _entry_map_id(entry) == 369
+        and _entry_int(entry, "type") == _GAMEOBJECT_TYPE_TRANSPORT
+        and _entry_int(entry, "entry") in _DEEPRUN_VISIBLE_ENTRY_IDS
+    )
+
+
+def _client_transport_period(entry: Mapping[str, Any]) -> int:
+    gameobject_type = _entry_int(entry, "type") & 0xFF
+    if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
+        return _entry_int(entry, "data0")
+    return _entry_int(entry, "transport_period", _entry_int(entry, "data0"))
+
+
+def _effective_transport_path_progress(entry: Mapping[str, Any]) -> int:
+    path_progress = entry.get("transport_path_progress")
+    if path_progress is None:
+        path_progress = int(time.time() * 1000.0)
+    return int(path_progress) & 0xFFFFFFFF
 
 
 def _gameobject_dynamic_flags(entry: Mapping[str, Any]) -> int:
     """Pack GO dynamic flags; transport path progress lives in the high half."""
     gameobject_type = _entry_int(entry, "type") & 0xFF
-    if gameobject_type not in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
+    if gameobject_type != _GAMEOBJECT_TYPE_MO_TRANSPORT:
         return 0
 
-    period = _entry_int(entry, "transport_period", _entry_int(entry, "data0"))
+    period = _client_transport_period(entry)
     if period <= 0:
         return 0xFFFF0000
 
-    timer = _entry_int(entry, "transport_path_progress") % int(period)
+    timer = _effective_transport_path_progress(entry) % int(period)
     path_progress = int((float(timer) / float(period)) * 65535.0) & 0xFFFF
     return path_progress << 16
 
@@ -291,7 +307,10 @@ def _build_fixed_u32_field_block(fields: dict[int, int], *, mask_blocks: int = 1
 
 def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
     """Resolve the full 64-bit world guid for a GameObject spawn."""
-    if _entry_int(entry, "type") == _GAMEOBJECT_TYPE_MO_TRANSPORT:
+    if (
+        _entry_int(entry, "type") == _GAMEOBJECT_TYPE_MO_TRANSPORT
+        or bool(entry.get("use_transport_guid"))
+    ):
         return int(
             entry.get("world_guid")
             or MoTransportGuid.from_spawn_guid(_entry_int(entry, "guid"))
@@ -380,7 +399,7 @@ def _build_gameobject_field_values(entry: Mapping[str, Any], *, world_guid: int)
         field_values[_GAMEOBJECT_FIELD_LEVEL] = _entry_int(
             entry,
             "transport_period",
-            _entry_int(entry, "data0"),
+            _client_transport_period(entry),
         )
     faction = _entry_int(entry, "faction")
     if faction != 0:
@@ -388,8 +407,6 @@ def _build_gameobject_field_values(entry: Mapping[str, Any], *, world_guid: int)
     for offset, value in enumerate(_rotation_components(entry)):
         if value != 0.0:
             field_values[_GAMEOBJECT_FIELD_ROTATION_START + offset] = _u32_from_float(value)
-    if _GAMEOBJECT_FIELD_ROTATION_START + 3 not in field_values:
-        field_values[_GAMEOBJECT_FIELD_ROTATION_START + 3] = _u32_from_float(1.0)
     return field_values
 
 
@@ -403,8 +420,9 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
     create_flags = bytes(_GAMEOBJECT_CREATE_FLAGS)
     if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
         create_flags = gameobject_defs.build_gameobject_create_flags(update_flags)
+    field_values = _build_gameobject_field_values(entry, world_guid=world_guid)
     mask_bytes, field_bytes = _build_fixed_u32_field_block(
-        _build_gameobject_field_values(entry, world_guid=world_guid),
+        field_values,
         mask_blocks=_GAMEOBJECT_MASK_BLOCKS,
     )
 
@@ -430,6 +448,15 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
         packet_orientation=stationary_orientation,
     )
     movement_block_uint32 = _gameobject_movement_block_uint32(entry)
+    _log_deeprun_create_audit(
+        entry,
+        world_guid=world_guid,
+        packet_map_id=int(packet_map_id),
+        update_flags=update_flags,
+        create_flags=create_flags,
+        movement_block_uint32=movement_block_uint32,
+        field_values=field_values,
+    )
     return EncoderHandler.encode_packet(
         "GAMEOBJECT_CREATE",
         {
@@ -582,6 +609,44 @@ def _log_mo_transport_create_debug(
         float(packet_orientation),
         int(phase_ms),
         int(packet_progress),
+    )
+
+
+def _log_deeprun_create_audit(
+    entry: Mapping[str, Any],
+    *,
+    world_guid: int,
+    packet_map_id: int,
+    update_flags: int,
+    create_flags: bytes,
+    movement_block_uint32: int,
+    field_values: Mapping[int, int],
+) -> None:
+    if not _is_deeprun_visible_subway_entry(entry):
+        return
+
+    Logger.info(
+        "[DEEPRUN_CREATE_AUDIT] entry=%s guid=%s world_guid=0x%016X map=%s "
+        "displayId=%s type=%s update_flags=0x%04X create_flags=%s "
+        "transport_block=%s stationary_block=%s rotation_block=%s "
+        "data0=%s data1=%s go_state=%s transport_period=%s movement_block=%s dynamic_flags=0x%08X",
+        _entry_int(entry, "entry"),
+        _entry_int(entry, "guid"),
+        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
+        int(packet_map_id),
+        _entry_int(entry, "display_id"),
+        _entry_int(entry, "type"),
+        int(update_flags) & 0xFFFF,
+        bytes(create_flags).hex(),
+        "yes" if (update_flags & _UPDATEFLAG_TRANSPORT) else "no",
+        "yes" if (update_flags & _UPDATEFLAG_STATIONARY_POSITION) else "no",
+        "yes" if (update_flags & _UPDATEFLAG_ROTATION) else "no",
+        _entry_int(entry, "data0"),
+        _entry_int(entry, "data1"),
+        _effective_gameobject_state(entry),
+        _entry_int(entry, "transport_period", _entry_int(entry, "data0")),
+        int(movement_block_uint32) & 0xFFFFFFFF,
+        int(field_values.get(_OBJECT_FIELD_DYNAMIC_FLAGS, 0)) & 0xFFFFFFFF,
     )
 
 

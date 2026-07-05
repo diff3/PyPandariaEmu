@@ -41,6 +41,7 @@ from server.modules.handlers.world.chat.codec import (
 from server.modules.handlers.world.commands import chat_commands
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.opcodes import login as login_handlers
+from server.modules.api.chat_bridge import chat_bridge_runtime
 from server.modules.handlers.world.state.runtime import (
     attach_session_to_world_state,
     build_explored_zones_update_response,
@@ -2087,6 +2088,14 @@ def _handle_chat_message(session, ctx: PacketContext):
     Logger.info(f"[CHAT] {player_name}: {message}")
 
     if ctx.name == "CMSG_MESSAGECHAT_SAY":
+        chat_bridge_runtime.record_event(
+            channel="say",
+            player_name=player_name,
+            message=message,
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            char_guid=int(getattr(session, "char_guid", 0) or 0),
+        )
+
         payload_out = encode_messagechat_payload(
             chat_type=CHAT_MSG_SAY,
             language=language,
@@ -2111,6 +2120,13 @@ def _handle_chat_message(session, ctx: PacketContext):
         return 0, [say_chat_response]
 
     if ctx.name == "CMSG_MESSAGECHAT_YELL":
+        chat_bridge_runtime.record_event(
+            channel="yell",
+            player_name=player_name,
+            message=message,
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            char_guid=int(getattr(session, "char_guid", 0) or 0),
+        )
         if USE_SYSTEM_CHAT_FALLBACK:
             Logger.info(f"[CHAT][YELL] using skyfire packet path sender={player_name!r} message={message!r}")
         yell_chat_response = _build_chat_response(
@@ -2141,6 +2157,15 @@ def _handle_chat_message(session, ctx: PacketContext):
                 f"[CHAT][WHISPER] target offline from={player_name!r} target={target_name!r} message={message!r}"
             )
             return 0, _notification_response(f"{target_name} is not online")
+
+        chat_bridge_runtime.record_event(
+            channel="whisper",
+            player_name=player_name,
+            message=message,
+            target_name=target_name,
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            char_guid=int(getattr(session, "char_guid", 0) or 0),
+        )
 
         target_player_name = (
             str(getattr(target_session, "player_name", "") or "").strip()

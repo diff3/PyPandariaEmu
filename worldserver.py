@@ -35,6 +35,7 @@ from server.modules.handlers.world.transport_runtime import start_world_transpor
 from server.modules.handlers.world.movements.manager import get_movement_manager
 from server.modules.handlers.world.runtime.lifecycle import handle_disconnect_session
 from server.modules.handlers.world.addons import load_from_db as load_addon_cache
+from server.modules.api.bridge_worker import start_world_api_bridge, stop_world_api_bridge
 
 try:
     from server.modules.handlers.WorldHandlers import (
@@ -109,6 +110,65 @@ _ACTIVE_CLIENTS: dict[int, tuple[socket.socket, object, tuple[str, int]]] = {}
 
 HANDSHAKE_SERVER = b"0\x00WORLD OF WARCRAFT CONNECTION - SERVER TO CLIENT\x00"
 HANDSHAKE_CLIENT = b"0\x00WORLD OF WARCRAFT CONNECTION - CLIENT TO SERVER\x00"
+
+
+def _hex_or_dash(payload: bytes, *, limit: int = 96) -> str:
+    raw = bytes(payload or b"")
+    if not raw:
+        return "-"
+    compact = raw.hex()
+    if len(compact) <= int(limit):
+        return compact
+    return f"{compact[:int(limit)]}..."
+
+
+def _pet_battle_trace_active(session: object) -> bool:
+    active_battle = getattr(session, "pet_battle_session", None)
+    if active_battle is not None and bool(getattr(active_battle, "active", False)):
+        return True
+    until = float(getattr(session, "pet_battle_trace_until", 0.0) or 0.0)
+    if until <= 0.0:
+        return False
+    if time.monotonic() > until:
+        return False
+    return True
+
+
+def _pet_battle_trace_delta(session: object) -> float:
+    started = float(getattr(session, "pet_battle_trace_started_at", 0.0) or 0.0)
+    if started <= 0.0:
+        return 0.0
+    return max(0.0, float(time.monotonic()) - started)
+
+
+def _log_opcode_trace(session: object, opcode: int, name: str, payload: bytes) -> None:
+    Logger.info(
+        "[OPCODE_TRACE] opcode=%s opcode_hex=0x%04X size=%s payload=%s",
+        int(opcode),
+        int(opcode) & 0xFFFF,
+        len(payload or b""),
+        _hex_or_dash(payload),
+    )
+    if not _pet_battle_trace_active(session):
+        return
+    active_battle = getattr(session, "pet_battle_session", None)
+    battle_id = int(getattr(active_battle, "battle_id", 0) or 0)
+    if battle_id <= 0:
+        battle_id = int(getattr(session, "pet_battle_trace_battle_id", 0) or 0)
+    active_flag = bool(getattr(active_battle, "active", False))
+    if active_battle is None:
+        active_flag = bool(getattr(session, "pet_battle_trace_active", False))
+    Logger.info(
+        "[PETBATTLE_TRACE] t_rel=%.3f ts=%.3f opcode=0x%04X name=%s size=%s payload=%s battle_id=%s active=%s",
+        _pet_battle_trace_delta(session),
+        time.monotonic(),
+        int(opcode) & 0xFFFF,
+        str(name),
+        len(payload or b""),
+        _hex_or_dash(payload),
+        battle_id,
+        int(active_flag),
+    )
 
 # ---- Signal handling ----------------------------------------------------
 
@@ -487,13 +547,42 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
         # ---- SERVER → CLIENT HANDSHAKE ----
         sock.sendall(HANDSHAKE_SERVER)
         Logger.success("[WorldServer] → client HANDSHAKE")
+        log_raw_packet(
+            "worldserver",
+            "HANDSHAKE",
+            "[WorldServer] S→C RAW HANDSHAKE",
+            HANDSHAKE_SERVER,
+        )
         state = WorldState.HANDSHAKE_SENT
 
         while running:
-            data = sock.recv(4096)
+            try:
+                data = sock.recv(4096)
+            except ConnectionResetError as exc:
+                Logger.error(
+                    "[WorldServer] recv reset state=%s encrypted=%s addr=%s err=%s",
+                    str(state.name if hasattr(state, "name") else state),
+                    int(bool(encrypted)),
+                    addr,
+                    exc,
+                )
+                if state == WorldState.HANDSHAKE_SENT:
+                    Logger.error(
+                        "[WorldServer] client reset before HANDSHAKE_WORLD_C addr=%s",
+                        addr,
+                    )
+                raise
             if not data:
                 Logger.info(f"[WorldServer] {addr}: disconnected")
                 break
+
+            if state == WorldState.HANDSHAKE_SENT:
+                log_raw_packet(
+                    "worldserver",
+                    "HANDSHAKE",
+                    "[WorldServer] C→S RAW PRE_AUTH",
+                    data,
+                )
 
             IGNORE_ACTIVITY_OPCODES = {
                 "CMSG_WORLD_STATE_UI_TIMER_UPDATE",
@@ -554,6 +643,7 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
                 # ---- NORMAL CLIENT PACKET ----
                 name = opcode_resolver.decode_opcode(opcode, "C")
+                _log_opcode_trace(conn_session, opcode, name, payload)
                 
                 ALIVE_OPCODES = {
                     "CMSG_PING",
@@ -698,6 +788,10 @@ def run_world() -> None:
     except Exception as exc:
         Logger.warning(f"[PetBattle] preload failed: {exc}")
     try:
+        start_world_api_bridge()
+    except Exception as exc:
+        Logger.warning(f"[ChatAPI] bridge startup failed: {exc}")
+    try:
         preload_cache()
     except Exception:
         pass
@@ -715,7 +809,7 @@ def run_world() -> None:
     srv.bind((HOST, PORT))
     srv.listen(5)
 
-    Logger.info(f"WorldServer listening on {HOST}:{PORT}")
+    Logger.success(f"WorldServer listening on {HOST}:{PORT}")
     threading.Thread(target=_cleanup_dead_sessions, daemon=True).start()
 
     while running:
@@ -730,6 +824,10 @@ def run_world() -> None:
             Logger.error(traceback.format_exc())
 
     Logger.info("WorldServer stopping…")
+    try:
+        stop_world_api_bridge()
+    except Exception as exc:
+        Logger.warning(f"[ChatAPI] bridge shutdown failed: {exc}")
     _shutdown_active_clients()
     srv.close()
 

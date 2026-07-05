@@ -620,7 +620,9 @@ class WorldTransportManager:
         self._register_world_db_elevators_locked()
 
     def _register_deeprun_trams_locked(self) -> None:
-        Logger.warning("[MovementManager] Deeprun Tram has no DBC template; not spawning hardcoded tram")
+        # Deeprun Tram on map 369 is represented by DB-spawned type 11 gameobjects,
+        # not by a runtime hardcoded transport registration.
+        return
 
     def _register_world_db_transports_locked(self) -> None:
         for spec in _load_world_db_transports():

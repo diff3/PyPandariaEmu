@@ -20,6 +20,12 @@ def _install_common_stubs() -> None:
     )
     sys.modules["shared.Logger"] = logger_module
 
+    yaml_module = types.ModuleType("yaml")
+    yaml_module.safe_load = lambda *args, **kwargs: {}
+    yaml_module.load = lambda *args, **kwargs: {}
+    yaml_module.FullLoader = object
+    sys.modules["yaml"] = yaml_module
+
     bits_module = types.ModuleType("DSL.modules.bitsHandler")
 
     class BitWriter:
@@ -51,6 +57,10 @@ def _install_common_stubs() -> None:
 
     bits_module.BitWriter = BitWriter
     sys.modules["DSL.modules.bitsHandler"] = bits_module
+
+    pet_service_module = types.ModuleType("server.modules.handlers.world.pet.pet_service")
+    pet_service_module.build_battle_pet_journal_payload = lambda: b""
+    sys.modules["server.modules.handlers.world.pet.pet_service"] = pet_service_module
 
 
 class PetBattleRuntimeTests(unittest.TestCase):
@@ -84,10 +94,15 @@ class PetBattleRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(responses)
         self.assertEqual(
             [opcode for opcode, _payload in responses],
-            ["SMSG_PET_BATTLE_QUEUE_STATUS", "SMSG_BATTLE_PET_LOCATION_FINALIZE"],
+            [
+                "SMSG_BATTLE_PET_UPDATE_INIT",
+                "SMSG_BATTLE_PET_LOCATION_FINALIZE",
+            ],
         )
         self.assertIsNotNone(self.manager.active_session(self.session))
         self.assertIsNotNone(self.session.pet_battle_session)
+        self.assertTrue(bool(getattr(self.session, "pet_battle_trace_active", False)))
+        self.assertGreater(float(getattr(self.session, "pet_battle_trace_until", 0.0) or 0.0), 0.0)
 
     def test_duplicate_start_prevention(self):
         self.assertIsNotNone(self.manager.start_session(self.session))
@@ -98,12 +113,11 @@ class PetBattleRuntimeTests(unittest.TestCase):
 
         responses = self.manager.stop_session(self.session, reason="unit-test")
 
-        self.assertEqual(
-            [opcode for opcode, _payload in responses],
-            ["SMSG_PET_BATTLE_QUEUE_STATUS"],
-        )
+        self.assertEqual(responses, [])
         self.assertIsNone(self.manager.active_session(self.session))
         self.assertIsNone(self.session.pet_battle_session)
+        self.assertFalse(bool(getattr(self.session, "pet_battle_trace_active", True)))
+        self.assertGreater(float(getattr(self.session, "pet_battle_trace_until", 0.0) or 0.0), 0.0)
 
     def test_logout_cleanup_clears_active_session(self):
         self.manager.start_session(self.session)

@@ -18,9 +18,7 @@ def handle_petbattle_command(session, args: list[str]) -> list[tuple[str, bytes]
         responses = manager.start_session(session)
         if responses is None:
             return _notification_response("[PetBattle] session already active or unavailable")
-        return list(responses) + _notification_response(
-            "[PetBattle] start sent; client still needs SMSG_BATTLE_PET_UPDATE_INIT for full UI activation"
-        )
+        return list(responses) + _notification_response("[PetBattle] start")
 
     if action == "stop":
         responses = manager.stop_session(session, reason="command-stop")
