@@ -10,6 +10,32 @@ from shared.Logger import Logger
 HANDLERS: dict[str, Callable[[Any, Any], tuple[int, Any]]] = {}
 
 
+def _maybe_log_godel_probe(session, opcode: str, data: Any, *, handled: bool) -> None:
+    if not bool(getattr(session, "_godel_enabled", False)):
+        return
+
+    opcode_name = str(opcode or "")
+    upper = opcode_name.upper()
+    if not ("GAME" in upper or "OBJECT" in upper or "GO" in upper):
+        return
+
+    payload = bytes(getattr(data, "payload", b"") or b"")
+    Logger.info(
+        "[GoDelProbe] dispatcher opcode=%s handled=%s player=%s godel=on payload_len=%s payload=%s",
+        opcode_name,
+        str(bool(handled)).lower(),
+        str(
+            getattr(session, "player_name", "")
+            or getattr(session, "char_name", "")
+            or getattr(session, "char_guid", "")
+            or getattr(session, "account_id", "")
+            or "unknown"
+        ),
+        len(payload),
+        payload.hex(),
+    )
+
+
 def register(opcode: str):
     """Register a world opcode handler in the shared dispatcher registry."""
     def wrapper(func):
@@ -30,8 +56,11 @@ def dispatch(session, opcode: str, data):
     """
     handler = HANDLERS.get(str(opcode))
     if handler is None:
+        _maybe_log_godel_probe(session, str(opcode), data, handled=False)
         Logger.warning(f"Unhandled opcode: {opcode}")
         return 0, None
+
+    _maybe_log_godel_probe(session, str(opcode), data, handled=True)
 
     if (
         (str(opcode).startswith("MSG_MOVE") or str(opcode).startswith("CMSG_MOVE"))

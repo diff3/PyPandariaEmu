@@ -113,6 +113,34 @@ class GameObjectCollisionIndex:
             for cell_y in range(math.floor(min_y / _GRID_SIZE), math.floor(max_y / _GRID_SIZE) + 1):
                 cells.setdefault((cell_x, cell_y), []).append(collision)
 
+    def remove(self, map_id: int, guid: int) -> int:
+        removed = 0
+        map_id = int(map_id)
+        guid = int(guid)
+        kept_objects: list[GameObjectCollision] = []
+        for collision in self._objects:
+            if collision.map_id == map_id and collision.guid == guid:
+                removed += 1
+                continue
+            kept_objects.append(collision)
+        if removed <= 0:
+            return 0
+        self._objects = kept_objects
+        cells = self._cells.get(map_id, {})
+        for key in list(cells):
+            kept = [
+                collision
+                for collision in cells.get(key, ())
+                if not (collision.map_id == map_id and collision.guid == guid)
+            ]
+            if kept:
+                cells[key] = kept
+            else:
+                cells.pop(key, None)
+        if not cells:
+            self._cells.pop(map_id, None)
+        return removed
+
     def nearby_segment(self, map_id: int, start, end) -> Iterable[GameObjectCollision]:
         cells = self._cells.get(int(map_id), {})
         min_x, max_x = sorted((float(start[0]), float(end[0])))
@@ -272,6 +300,29 @@ def clear_gameobject_collision_index() -> None:
     gameobject_collision_index.clear()
 
 
+def build_gameobject_collision(entry: Mapping, display_bounds: DisplayBounds | None) -> GameObjectCollision | None:
+    eligible, _reason = gameobject_eligibility_reason(entry, display_bounds)
+    if not eligible or display_bounds is None:
+        return None
+    display_id = int(entry.get("display_id", 0) or 0)
+    bounds = build_oriented_bounds(
+        display_bounds,
+        position=(float(entry.get("x", 0.0)), float(entry.get("y", 0.0)), float(entry.get("z", 0.0))),
+        orientation=float(entry.get("orientation", 0.0) or 0.0),
+        scale=float(entry.get("size", 1.0) or 1.0),
+    )
+    if bounds is None:
+        return None
+    return GameObjectCollision(
+        int(entry.get("map_id", entry.get("map", 0)) or 0),
+        int(entry.get("guid", 0) or 0),
+        int(entry.get("entry", 0) or 0),
+        display_id,
+        bounds,
+        str(entry.get("name", "") or ""),
+    )
+
+
 def build_gameobject_collision_index(entries_by_map: Mapping[int, Iterable[Mapping]]) -> int:
     gameobject_collision_index.clear()
     bounds_by_display = load_display_bounds()
@@ -295,13 +346,8 @@ def build_gameobject_collision_index(entries_by_map: Mapping[int, Iterable[Mappi
                         reason,
                     )
                 continue
-            bounds = build_oriented_bounds(
-                display_bounds,
-                position=(float(entry.get("x", 0.0)), float(entry.get("y", 0.0)), float(entry.get("z", 0.0))),
-                orientation=float(entry.get("orientation", 0.0) or 0.0),
-                scale=float(entry.get("size", 1.0) or 1.0),
-            )
-            if bounds is None:
+            collision = build_gameobject_collision(entry, display_bounds)
+            if collision is None:
                 if gameobject_collision_debug_enabled():
                     Logger.info(
                         "[GOCollision] exclude map=%s guid=%s entry=%s display=%s type=%s name=%s reason=failed_bounds_build",
@@ -313,14 +359,6 @@ def build_gameobject_collision_index(entries_by_map: Mapping[int, Iterable[Mappi
                         str(entry.get("name", "") or ""),
                     )
                 continue
-            collision = GameObjectCollision(
-                int(map_id),
-                int(entry.get("guid", 0) or 0),
-                int(entry.get("entry", 0) or 0),
-                display_id,
-                bounds,
-                str(entry.get("name", "") or ""),
-            )
             gameobject_collision_index.register(collision)
             if gameobject_collision_debug_enabled():
                 Logger.info(

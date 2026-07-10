@@ -36,6 +36,20 @@ GAMEOBJECT_USE_LOOKUP_RADIUS = 60.0
 GAMEOBJECT_NEAREST_TELEPORT_RADIUS = 35.0
 
 
+def _godel_mode_enabled(session) -> bool:
+    return bool(getattr(session, "_godel_enabled", False))
+
+
+def _godel_player_label(session) -> str:
+    return str(
+        getattr(session, "player_name", "")
+        or getattr(session, "char_name", "")
+        or getattr(session, "char_guid", "")
+        or getattr(session, "account_id", "")
+        or "unknown"
+    )
+
+
 def _get_realm_name() -> str:
     try:
         realm = DatabaseConnection.get_realmlist()
@@ -169,6 +183,40 @@ def _find_visible_gameobject(session, world_guid: int) -> Optional[dict]:
             result["world_guid"] = entry_world_guid
             return result
     return None
+
+
+def _log_gameobject_interaction_packet(
+    session,
+    *,
+    opcode: str,
+    target_guid: int | None = None,
+    entry: dict[str, Any] | None = None,
+    template_entry: int | None = None,
+    note: str = "",
+) -> None:
+    spawn_id = 0
+    go_entry = int(template_entry or 0)
+    go_type = 0
+    name = ""
+    if entry:
+        spawn_id = int(entry.get("guid", 0) or 0)
+        go_entry = int(entry.get("entry", go_entry) or 0)
+        go_type = int(entry.get("type", 0) or 0)
+        name = str(entry.get("name", "") or "")
+
+    Logger.info(
+        "[GoDelProbe] opcode=%s player=%s target_guid=%s spawn_id=%s entry=%s type=%s "
+        "godel=%s note=%s name=%r",
+        str(opcode or ""),
+        _godel_player_label(session),
+        "none" if target_guid is None else f"0x{int(target_guid):016X}",
+        int(spawn_id),
+        int(go_entry),
+        int(go_type),
+        "on" if _godel_mode_enabled(session) else "off",
+        str(note or ""),
+        name,
+    )
 
 
 def _find_nearest_teleport_gameobject(session) -> Optional[dict]:
@@ -435,6 +483,12 @@ def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[li
     opcode_name = str(ctx.name or "")
     guid = _decode_gameobject_use_guid(bytes(ctx.payload or b""), ctx.decoded or {}, opcode_name)
     if guid is None:
+        _log_gameobject_interaction_packet(
+            session,
+            opcode=opcode_name,
+            target_guid=None,
+            note="decode_failed",
+        )
         Logger.warning(
             "[GAMEOBJECT_USE] failed to decode guid payload=%s; trying nearest teleport/chair",
             bytes(ctx.payload or b"").hex(),
@@ -452,6 +506,12 @@ def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[li
 
     entry = _find_visible_gameobject(session, int(guid))
     if entry is None:
+        _log_gameobject_interaction_packet(
+            session,
+            opcode=opcode_name,
+            target_guid=int(guid),
+            note="visible_lookup_miss",
+        )
         Logger.info(
             "[GAMEOBJECT_USE] missing visible gameobject guid=0x%016X; trying nearest teleport/chair",
             int(guid),
@@ -461,6 +521,14 @@ def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[li
             entry = _find_nearest_chair(session)
         if entry is None:
             return 0, None
+
+    _log_gameobject_interaction_packet(
+        session,
+        opcode=opcode_name,
+        target_guid=int(guid),
+        entry=entry,
+        note="handler_entered",
+    )
 
     Logger.debug(
         "[GAMEOBJECT_USE] guid=0x%016X entry=%s type=%s name=%r",
@@ -876,14 +944,31 @@ def handle_gameobject_query(session, ctx: PacketContext) -> Tuple[int, Optional[
     Logger.debug(f"[ENTITY] opcode={ctx.name}")
     payload = bytes(ctx.payload or b"")
     if len(payload) < 4:
+        _log_gameobject_interaction_packet(
+            session,
+            opcode=str(ctx.name or "CMSG_GAMEOBJECT_QUERY"),
+            note="short_payload",
+        )
         return 0, None
 
     entry = struct.unpack_from("<I", payload, 0)[0]
     if entry <= 0:
+        _log_gameobject_interaction_packet(
+            session,
+            opcode=str(ctx.name or "CMSG_GAMEOBJECT_QUERY"),
+            template_entry=int(entry),
+            note="invalid_entry",
+        )
         return 0, None
 
     try:
         info = DatabaseConnection.get_gameobject_template(entry)
+        _log_gameobject_interaction_packet(
+            session,
+            opcode=str(ctx.name or "CMSG_GAMEOBJECT_QUERY"),
+            template_entry=int(entry),
+            note="template_query",
+        )
         response = _build_gameobject_query_response_payload(entry, info)
         if info:
             Logger.info(

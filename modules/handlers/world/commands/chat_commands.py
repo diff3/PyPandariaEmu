@@ -95,7 +95,7 @@ MORPH_NAME_TO_DISPLAY = {
     "lich": 15945,
 
     # Creatures
-    "murloc": 21723, 
+    "murloc": 21723,
     "elemental": 171,
     "baby_dragon": 400,
 
@@ -819,6 +819,59 @@ def cmd_gocollision(session, args: list[str]) -> list[tuple[str, bytes]]:
     if not needs_args and sub_args:
         return _notification_response(f"'{sub}' takes no arguments")
     return handler(session, sub_args)
+
+
+@register_command("go", ".go <info|list|search|add|del|undo|move|rotate|copy|place|history>", require_args=True)
+def cmd_go(session, args: list[str]) -> list[tuple[str, bytes]]:
+    gm_error = _require_gm(session)
+    if gm_error is not None:
+        return gm_error
+    if not args:
+        return _notification_response("Usage: .go <info|list|search|add|del|undo|move|rotate|copy|place|history>")
+
+    from server.modules.handlers.world.features import go_editor
+
+    sub = str(args[0] or "").casefold()
+    sub_args = args[1:]
+    if sub == "info":
+        if sub_args:
+            return _notification_response("Usage: .go info")
+        return go_editor.info(session)
+    if sub == "list":
+        return go_editor.list_nearby_command(session, sub_args)
+    if sub == "search":
+        return go_editor.search(session, sub_args)
+    if sub == "add":
+        return go_editor.add(session, sub_args)
+    if sub == "del":
+        if sub_args:
+            return _notification_response("Usage: .go del")
+        return go_editor.delete_nearest(session)
+    if sub == "undo":
+        if sub_args:
+            return _notification_response("Usage: .go undo")
+        return go_editor.undo(session)
+    if sub == "move":
+        if sub_args:
+            return _notification_response("Usage: .go move")
+        return go_editor.move(session)
+    if sub == "rotate":
+        if sub_args:
+            return _notification_response("Usage: .go rotate")
+        return go_editor.rotate(session)
+    if sub == "copy":
+        if sub_args:
+            return _notification_response("Usage: .go copy")
+        return go_editor.copy(session)
+    if sub == "place":
+        if sub_args:
+            return _notification_response("Usage: .go place")
+        return go_editor.place(session)
+    if sub == "history":
+        if sub_args:
+            return _notification_response("Usage: .go history")
+        return go_editor.history(session)
+    return _notification_response("Usage: .go <info|list|search|add|del|undo|move|rotate|copy|place|history>")
 
 
 def _gameobject_cache_status() -> dict[str, int | bool]:
@@ -2449,7 +2502,7 @@ def cmd_time(session, args: list[str]) -> list[tuple[str, bytes]]:
     return []
 
 
-  
+
 
 # Real commands live here for quick scanning.
 PRIMARY_COMMANDS = {
@@ -2464,6 +2517,7 @@ PRIMARY_COMMANDS = {
     "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", require_args=True),
     # "fixplayer": Command(handler=cmd_fixplayer, usage=".fixplayer [teleport]"),
     # "fixspeed": Command(handler=cmd_fixspeed, usage=".fixspeed", allow_args=False),
+    "go": Command(handler=cmd_go, usage=".go <info|list|search|add|del|undo|move|rotate|copy|place|history>", require_args=True),
     "gocollision": Command(handler=cmd_gocollision, usage=".gocollision <show <guid>|around <radius>|clear>"),
     "goto": Command(handler=cmd_goto, usage=".goto <player>", require_args=True),
     "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),

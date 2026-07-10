@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from hashlib import md5
+import math
 
 from sqlalchemy import create_engine, or_, text
 from sqlalchemy.orm import scoped_session, sessionmaker
@@ -1823,6 +1824,45 @@ class DatabaseConnection:
         return dict(row)
 
     @staticmethod
+    def search_gameobject_templates(search_text: str, *, limit: int = 20) -> list[dict]:
+        needle = str(search_text or "").strip()
+        if not needle:
+            return []
+        limit = max(1, min(int(limit or 20), 100))
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return []
+
+        stmt = text(
+            """
+            SELECT
+                entry,
+                name,
+                type
+            FROM gameobject_template
+            WHERE LOWER(name) LIKE LOWER(:needle)
+            ORDER BY LOWER(name), entry
+            LIMIT :limit
+            """
+        )
+        try:
+            rows = session.execute(
+                stmt,
+                {
+                    "needle": f"%{needle}%",
+                    "limit": int(limit),
+                },
+            ).mappings().all()
+        except Exception as exc:
+            Logger.warning(f"[DB] gameobject_template search failed text={needle!r}: {exc}")
+            return []
+
+        return [dict(row) for row in rows]
+
+    @staticmethod
     def get_creatures_near(
         map_id: int,
         x: float,
@@ -2012,6 +2052,70 @@ class DatabaseConnection:
         return gameobjects
 
     @staticmethod
+    def get_gameobject_spawn(spawn_guid: int) -> dict | None:
+        if int(spawn_guid or 0) <= 0:
+            return None
+
+        if DatabaseConnection._world_cache_loaded and DatabaseConnection._cache_gameobjects_loaded:
+            for entries in (DatabaseConnection._cache_gameobjects_by_map or {}).values():
+                for entry in entries or ():
+                    if int(entry.get("guid", 0) or 0) == int(spawn_guid):
+                        return dict(entry)
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        try:
+            row = (
+                session.query(
+                    WorldGameObject.guid,
+                    WorldGameObject.id,
+                    WorldGameObject.map,
+                    WorldGameObject.spawnMask,
+                    WorldGameObject.phaseId,
+                    WorldGameObject.phaseGroup,
+                    WorldGameObject.position_x,
+                    WorldGameObject.position_y,
+                    WorldGameObject.position_z,
+                    WorldGameObject.orientation,
+                    WorldGameObject.rotation0,
+                    WorldGameObject.rotation1,
+                    WorldGameObject.rotation2,
+                    WorldGameObject.rotation3,
+                    WorldGameObject.spawntimesecs,
+                    WorldGameObject.animprogress,
+                    WorldGameObject.state,
+                    WorldGameObjectTemplate.type,
+                    WorldGameObjectTemplate.displayId,
+                    WorldGameObjectTemplate.name,
+                    WorldGameObjectTemplate.faction,
+                    WorldGameObjectTemplate.flags,
+                    WorldGameObjectTemplate.size,
+                    *[
+                        getattr(WorldGameObjectTemplate, f"data{index}")
+                        for index in range(24)
+                    ],
+                )
+                .join(WorldGameObjectTemplate, WorldGameObjectTemplate.entry == WorldGameObject.id)
+                .outerjoin(GameEventGameObject, GameEventGameObject.guid == WorldGameObject.guid)
+                .filter(GameEventGameObject.guid.is_(None))
+                .filter(WorldGameObject.guid == int(spawn_guid))
+                .first()
+            )
+        except Exception as exc:
+            Logger.warning(f"[DB] gameobject spawn lookup failed guid={spawn_guid}: {exc}")
+            return None
+        finally:
+            session.close()
+
+        if row is None:
+            return None
+        return DatabaseConnection._build_gameobject_candidate(row)
+
+    @staticmethod
     def _build_gameobject_candidate(row) -> dict | None:
         display_id = int(getattr(row, "displayId", 0) or 0)
         if display_id == 0:
@@ -2030,6 +2134,10 @@ class DatabaseConnection:
             "guid": int(getattr(row, "guid", 0) or 0),
             "entry": int(getattr(row, "id", 0) or 0),
             "map_id": int(getattr(row, "map", 0) or 0),
+            "map": int(getattr(row, "map", 0) or 0),
+            "spawnMask": int(getattr(row, "spawnMask", 1) or 1),
+            "phaseId": int(getattr(row, "phaseId", 0) or 0),
+            "phaseGroup": int(getattr(row, "phaseGroup", 0) or 0),
             "x": float(getattr(row, "position_x", 0.0) or 0.0),
             "y": float(getattr(row, "position_y", 0.0) or 0.0),
             "z": float(getattr(row, "position_z", 0.0) or 0.0),
@@ -2038,6 +2146,7 @@ class DatabaseConnection:
             "rotation1": float(getattr(row, "rotation1", 0.0) or 0.0),
             "rotation2": float(getattr(row, "rotation2", 0.0) or 0.0),
             "rotation3": float(getattr(row, "rotation3", 0.0) or 0.0),
+            "spawntimesecs": int(getattr(row, "spawntimesecs", 0) or 0),
             "animprogress": int(getattr(row, "animprogress", 0) or 0),
             "state": int(getattr(row, "state", 0) or 0),
             "type": go_type,
@@ -2051,6 +2160,269 @@ class DatabaseConnection:
                 for index in range(24)
             },
         }
+
+    @staticmethod
+    def _cache_remove_gameobject_spawn(spawn_guid: int) -> None:
+        cache_by_map = getattr(DatabaseConnection, "_cache_gameobjects_by_map", None)
+        if not isinstance(cache_by_map, dict):
+            return
+        for map_id, entries in list(cache_by_map.items()):
+            cache_by_map[int(map_id)] = [
+                dict(entry)
+                for entry in (entries or ())
+                if int(entry.get("guid", 0) or 0) != int(spawn_guid)
+            ]
+
+    @staticmethod
+    def _cache_restore_gameobject_spawn(entry: dict) -> None:
+        cache_by_map = getattr(DatabaseConnection, "_cache_gameobjects_by_map", None)
+        if not isinstance(cache_by_map, dict):
+            return
+        spawn_guid = int(entry.get("guid", 0) or 0)
+        map_id = int(entry.get("map_id", entry.get("map", 0)) or 0)
+        if spawn_guid <= 0:
+            return
+        DatabaseConnection._cache_remove_gameobject_spawn(spawn_guid)
+        cache_by_map.setdefault(map_id, []).append(dict(entry))
+
+    @staticmethod
+    def delete_gameobject_spawn(spawn_guid: int) -> dict | None:
+        existing = DatabaseConnection.get_gameobject_spawn(int(spawn_guid))
+        if existing is None:
+            return None
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        try:
+            deleted = (
+                session.query(WorldGameObject)
+                .filter(WorldGameObject.guid == int(spawn_guid))
+                .delete(synchronize_session=False)
+            )
+            if int(deleted or 0) <= 0:
+                session.rollback()
+                return None
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] gameobject delete failed guid={spawn_guid}: {exc}")
+            return None
+        finally:
+            session.close()
+
+        DatabaseConnection._cache_remove_gameobject_spawn(int(spawn_guid))
+        return dict(existing)
+
+    @staticmethod
+    def restore_gameobject_spawn(entry: dict) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        spawn_guid = int(entry.get("guid", 0) or 0)
+        go_entry = int(entry.get("entry", 0) or 0)
+        if spawn_guid <= 0 or go_entry <= 0:
+            return False
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return False
+
+        try:
+            existing = session.query(WorldGameObject).filter(WorldGameObject.guid == spawn_guid).first()
+            if existing is not None:
+                session.delete(existing)
+                session.flush()
+            row = WorldGameObject(
+                guid=spawn_guid,
+                id=go_entry,
+                map=int(entry.get("map_id", entry.get("map", 0)) or 0),
+                spawnMask=int(entry.get("spawnMask", 1) or 1),
+                phaseId=int(entry.get("phaseId", 0) or 0),
+                phaseGroup=int(entry.get("phaseGroup", 0) or 0),
+                position_x=float(entry.get("x", 0.0) or 0.0),
+                position_y=float(entry.get("y", 0.0) or 0.0),
+                position_z=float(entry.get("z", 0.0) or 0.0),
+                orientation=float(entry.get("orientation", 0.0) or 0.0),
+                rotation0=float(entry.get("rotation0", 0.0) or 0.0),
+                rotation1=float(entry.get("rotation1", 0.0) or 0.0),
+                rotation2=float(entry.get("rotation2", 0.0) or 0.0),
+                rotation3=float(entry.get("rotation3", 0.0) or 0.0),
+                spawntimesecs=int(entry.get("spawntimesecs", 0) or 0),
+                animprogress=int(entry.get("animprogress", 0) or 0),
+                state=int(entry.get("state", 0) or 0),
+            )
+            session.add(row)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] gameobject restore failed guid={spawn_guid}: {exc}")
+            return False
+        finally:
+            session.close()
+
+        DatabaseConnection._cache_restore_gameobject_spawn(dict(entry))
+        return True
+
+    @staticmethod
+    def _gameobject_rotation_from_orientation(orientation: float) -> tuple[float, float, float, float]:
+        yaw = float(orientation or 0.0)
+        return 0.0, 0.0, math.sin(yaw * 0.5), math.cos(yaw * 0.5)
+
+    @staticmethod
+    def create_gameobject_spawn(
+        entry: int,
+        *,
+        map_id: int,
+        x: float,
+        y: float,
+        z: float,
+        orientation: float,
+        spawn_mask: int = 1,
+        phase_id: int = 0,
+        phase_group: int = 0,
+        state: int = 1,
+        animprogress: int = 255,
+        spawntimesecs: int = 300,
+    ) -> dict | None:
+        if int(entry or 0) <= 0:
+            return None
+        template = DatabaseConnection.get_gameobject_template(int(entry))
+        if template is None:
+            return None
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        rotation0, rotation1, rotation2, rotation3 = DatabaseConnection._gameobject_rotation_from_orientation(
+            float(orientation or 0.0)
+        )
+        spawn_guid = 0
+        try:
+            max_guid = session.query(WorldGameObject.guid).order_by(WorldGameObject.guid.desc()).first()
+            spawn_guid = int(max_guid[0] if max_guid else 0) + 1
+            row = WorldGameObject(
+                guid=spawn_guid,
+                id=int(entry),
+                map=int(map_id),
+                spawnMask=int(spawn_mask or 1),
+                phaseId=int(phase_id or 0),
+                phaseGroup=int(phase_group or 0),
+                position_x=float(x),
+                position_y=float(y),
+                position_z=float(z),
+                orientation=float(orientation or 0.0),
+                rotation0=float(rotation0),
+                rotation1=float(rotation1),
+                rotation2=float(rotation2),
+                rotation3=float(rotation3),
+                spawntimesecs=int(spawntimesecs or 0),
+                animprogress=max(0, min(int(animprogress or 0), 255)),
+                state=max(0, min(int(state or 0), 255)),
+            )
+            session.add(row)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] gameobject create failed entry={entry}: {exc}")
+            return None
+        finally:
+            session.close()
+
+        created = DatabaseConnection.get_gameobject_spawn(spawn_guid)
+        if created is None:
+            created = {
+                "guid": int(spawn_guid),
+                "entry": int(entry),
+                "map_id": int(map_id),
+                "map": int(map_id),
+                "spawnMask": int(spawn_mask or 1),
+                "phaseId": int(phase_id or 0),
+                "phaseGroup": int(phase_group or 0),
+                "x": float(x),
+                "y": float(y),
+                "z": float(z),
+                "orientation": float(orientation or 0.0),
+                "rotation0": float(rotation0),
+                "rotation1": float(rotation1),
+                "rotation2": float(rotation2),
+                "rotation3": float(rotation3),
+                "spawntimesecs": int(spawntimesecs or 0),
+                "animprogress": max(0, min(int(animprogress or 0), 255)),
+                "state": max(0, min(int(state or 0), 255)),
+                "type": int(template.get("type", 0) or 0),
+                "display_id": int(template.get("displayId", template.get("display_id", 0)) or 0),
+                "name": str(template.get("name", "") or ""),
+                "faction": int(template.get("faction", 0) or 0),
+                "flags": int(template.get("flags", 0) or 0),
+                "size": float(template.get("size", 1.0) or 1.0),
+                **{
+                    f"data{index}": int(template.get(f"data{index}", 0) or 0)
+                    for index in range(24)
+                },
+            }
+        if created is not None:
+            DatabaseConnection._cache_restore_gameobject_spawn(dict(created))
+        return created
+
+    @staticmethod
+    def update_gameobject_spawn_transform(
+        spawn_guid: int,
+        *,
+        x: float | None = None,
+        y: float | None = None,
+        z: float | None = None,
+        orientation: float | None = None,
+    ) -> dict | None:
+        existing = DatabaseConnection.get_gameobject_spawn(int(spawn_guid))
+        if existing is None:
+            return None
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        try:
+            row = session.query(WorldGameObject).filter(WorldGameObject.guid == int(spawn_guid)).first()
+            if row is None:
+                session.rollback()
+                return None
+            if x is not None:
+                row.position_x = float(x)
+            if y is not None:
+                row.position_y = float(y)
+            if z is not None:
+                row.position_z = float(z)
+            if orientation is not None:
+                row.orientation = float(orientation)
+                rotation0, rotation1, rotation2, rotation3 = DatabaseConnection._gameobject_rotation_from_orientation(
+                    float(orientation)
+                )
+                row.rotation0 = float(rotation0)
+                row.rotation1 = float(rotation1)
+                row.rotation2 = float(rotation2)
+                row.rotation3 = float(rotation3)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] gameobject transform update failed guid={spawn_guid}: {exc}")
+            return None
+        finally:
+            session.close()
+
+        updated = DatabaseConnection.get_gameobject_spawn(int(spawn_guid))
+        if updated is not None:
+            DatabaseConnection._cache_restore_gameobject_spawn(dict(updated))
+        return updated
 
     @staticmethod
     def _build_creature_template_entry(row) -> dict:
@@ -2951,7 +3323,7 @@ class DatabaseConnection:
             except Exception:
                 continue
         return result
-    
+
 
     @staticmethod
     def get_areatrigger_teleport(trigger_id: int) -> dict | None:
@@ -3149,7 +3521,7 @@ class DatabaseConnection:
     @staticmethod
     def update_verifier_and_salt_old(account, verifier, salt):
         return AuthConnection.update_verifier(account, verifier, salt)
-    
+
     # ACCOUNT ORM HELPERS
     @staticmethod
     def create_or_update_account_old(username, salt, verifier):
@@ -3158,7 +3530,7 @@ class DatabaseConnection:
     @staticmethod
     def set_gmlevel_old(account_id, gmlevel):
         return AuthConnection.set_gmlevel(account_id, gmlevel)
-    
+
 
 
 
