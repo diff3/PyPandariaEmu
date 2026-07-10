@@ -34,7 +34,7 @@ class WorldLoginContext:
     player_guid: Optional[int] = None      # login GUID from CMSG_PLAYER_LOGIN
     char_guid: Optional[int] = None        # DB low guid
     world_guid: Optional[int] = None        # full uint64 world GUID
-    
+
 
     # --------------------------------------------------
     # Character screen / auth
@@ -100,6 +100,19 @@ class WorldLoginContext:
     y: float = 0.0
     z: float = 0.0
     orientation: float = 0.0
+
+    # Optional movement-on-transport data used by the player CREATE_OBJECT
+    # movement block. Ordinary login/teleport contexts keep this disabled.
+    has_transport_data: bool = False
+    transport_guid: int = 0
+    transport_x: float = 0.0
+    transport_y: float = 0.0
+    transport_z: float = 0.0
+    transport_orientation: float = 0.0
+    transport_time: int = 0
+    transport_time2: int = 0
+    transport_time3: int = 0
+    transport_seat: int = -1
 
     # --------------------------------------------------
     # Movement / speeds (MoP defaults)
@@ -168,6 +181,7 @@ class WorldLoginContext:
             account_data_times[index] = int(
                 getattr(session, "account_data_times", {}).get(index, 0) or 0
             )
+        movement_state = getattr(session, "movement_state", None)
         return cls(
             account_id=session.account_id,
             account_name=session.account_name,
@@ -194,6 +208,21 @@ class WorldLoginContext:
             y=session.y,
             z=session.z,
             orientation=session.orientation,
+            has_transport_data=bool(
+                getattr(movement_state, "has_transport_data", False)
+                and int(getattr(movement_state, "transport_guid", 0) or 0) > 0
+            ),
+            transport_guid=int(getattr(movement_state, "transport_guid", 0) or 0),
+            transport_x=float(getattr(movement_state, "transport_x", 0.0) or 0.0),
+            transport_y=float(getattr(movement_state, "transport_y", 0.0) or 0.0),
+            transport_z=float(getattr(movement_state, "transport_z", 0.0) or 0.0),
+            transport_orientation=float(
+                getattr(movement_state, "transport_orientation", 0.0) or 0.0
+            ),
+            transport_time=int(getattr(movement_state, "transport_time", 0) or 0),
+            transport_time2=int(getattr(movement_state, "transport_time2", 0) or 0),
+            transport_time3=int(getattr(movement_state, "transport_time3", 0) or 0),
+            transport_seat=int(getattr(movement_state, "transport_seat", -1)),
 
             server_time=session.server_time,
             game_time=getattr(session, "game_time", int(time.time())),

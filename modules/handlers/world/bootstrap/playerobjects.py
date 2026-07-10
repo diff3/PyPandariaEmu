@@ -393,7 +393,11 @@ def locate_update_field_region(payload: bytes) -> dict[str, int]:
     return candidates[0]
 
 
-def _locate_server_built_create_field_region(payload: bytes) -> dict[str, int] | None:
+def _locate_server_built_create_field_region(
+    payload: bytes,
+    *,
+    movement_block_size: int = _PLAYER_CREATE_MOVEMENT_BLOCK_SIZE,
+) -> dict[str, int] | None:
     """Locate the field region from the known server-built CREATE_OBJECT layout."""
     if len(payload) < 9:
         return None
@@ -410,7 +414,7 @@ def _locate_server_built_create_field_region(payload: bytes) -> dict[str, int] |
             return None
 
         offset += 1
-        mask_offset = offset + _PLAYER_CREATE_MOVEMENT_BLOCK_SIZE
+        mask_offset = offset + int(movement_block_size)
         if mask_offset >= len(payload):
             return None
 
@@ -514,10 +518,24 @@ def _read_u32_field_value(field_indices: list[int], field_bytes: bytes, field_in
     raise ValueError(f"missing field {field_index}")
 
 
-def _verify_player_level_field_in_payload(payload: bytes, expected_level: int) -> None:
+def _verify_player_level_field_in_payload(
+    payload: bytes,
+    expected_level: int,
+    *,
+    movement_block_size: int = _PLAYER_CREATE_MOVEMENT_BLOCK_SIZE,
+) -> None:
     """Ensure CREATE_OBJECT includes the level field and that it matches ctx.level."""
-    mask_start, mask_end, mask_blocks = locate_mask_region(payload)
-    field_start, field_end = locate_field_region(payload)
+    region = _locate_server_built_create_field_region(
+        payload,
+        movement_block_size=movement_block_size,
+    )
+    if region is None:
+        raise ValueError("could not locate server-built player create field region")
+    mask_start = region["mask_start"]
+    mask_end = region["mask_end"]
+    mask_blocks = region["mask_blocks"]
+    field_start = region["field_start"]
+    field_end = region["field_end"]
     field_indices = extract_field_indices(payload[mask_start:mask_end], mask_blocks)
 
     if _UNIT_FIELD_LEVEL not in field_indices:
@@ -557,8 +575,216 @@ def _pack_msb_bits(values: list[tuple[int, int]]) -> bytes:
     return bytes(output)
 
 
-def build_player_create_movement_header() -> bytes:
-    """Build the known CreateObject movement bit header and speed section."""
+_MOVEMENTFLAG_FALLING = 0x00000800
+_MOVEMENTFLAG_SWIMMING = 0x00100000
+_MOVEMENTFLAG_FLYING = 0x01000000
+_MOVEMENTFLAG_SPLINE_ELEVATION = 0x02000000
+_MOVEMENTFLAG2_ALWAYS_ALLOW_PITCHING = 0x00000010
+
+
+def _guid_byte_seq(raw_guid: bytes, index: int) -> bytes:
+    value = raw_guid[index]
+    if not value:
+        return b""
+    return bytes((value ^ 0x01,))
+
+
+def _movement_u32(ctx, *names: str, default: int = 0) -> int:
+    for name in names:
+        value = getattr(ctx, name, None)
+        if value is not None:
+            return int(value or 0) & 0xFFFFFFFF
+    return int(default) & 0xFFFFFFFF
+
+
+def _movement_float(ctx, *names: str, default: float = 0.0) -> float:
+    for name in names:
+        value = getattr(ctx, name, None)
+        if value is not None:
+            return float(value or 0.0)
+    return float(default)
+
+
+def _movement_int(ctx, *names: str, default: int = 0) -> int:
+    for name in names:
+        value = getattr(ctx, name, None)
+        if value is not None:
+            return int(value or 0)
+    return int(default)
+
+
+def _experimental_player_create_living_movement_enabled() -> bool:
+    try:
+        from server.modules.handlers.world.feature_config import (
+            experimental_player_create_living_movement_enabled,
+        )
+
+        return bool(experimental_player_create_living_movement_enabled())
+    except Exception:
+        return False
+
+
+def _resolve_player_create_movement_guid(ctx) -> int:
+    return _resolve_player_guid(ctx)
+
+
+def _player_create_transport_data(ctx) -> dict[str, int | float] | None:
+    guid = int(getattr(ctx, "transport_guid", 0) or 0)
+    if not bool(getattr(ctx, "has_transport_data", False)) or guid <= 0:
+        return None
+    return {
+        "guid": guid,
+        "x": float(getattr(ctx, "transport_x", 0.0) or 0.0),
+        "y": float(getattr(ctx, "transport_y", 0.0) or 0.0),
+        "z": float(getattr(ctx, "transport_z", 0.0) or 0.0),
+        "orientation": float(getattr(ctx, "transport_orientation", 0.0) or 0.0),
+        "time": int(getattr(ctx, "transport_time", 0) or 0) & 0xFFFFFFFF,
+        "time2": int(getattr(ctx, "transport_time2", 0) or 0) & 0xFFFFFFFF,
+        "time3": int(getattr(ctx, "transport_time3", 0) or 0) & 0xFFFFFFFF,
+        "seat": int(getattr(ctx, "transport_seat", -1)),
+    }
+
+
+def _player_create_movement_state(ctx) -> dict[str, int | float | bool | None]:
+    movement_flags = _movement_u32(ctx, "movement_flags", "move_flags")
+    movement_flags2 = _movement_u32(ctx, "movement_flags2", "move_flags2")
+    movement_counter = _movement_u32(ctx, "movement_counter")
+    timestamp = _movement_u32(ctx, "movement_timestamp", "timestamp", "time")
+    orientation = _movement_float(ctx, "orientation")
+    pitch = _movement_float(ctx, "pitch")
+    fall_time = _movement_u32(ctx, "fall_time")
+    fall_zspeed = _movement_float(ctx, "fall_zspeed", "jump_zspeed")
+    fall_cos = _movement_float(ctx, "fall_cos_angle", "jump_cos_angle")
+    fall_sin = _movement_float(ctx, "fall_sin_angle", "jump_sin_angle")
+    fall_xyspeed = _movement_float(ctx, "fall_xy_speed", "jump_xy_speed")
+    spline_elevation = _movement_float(ctx, "spline_elevation")
+    has_fall_direction = bool(
+        getattr(ctx, "has_fall_direction", False)
+        or getattr(ctx, "fall_direction", False)
+        or (movement_flags & _MOVEMENTFLAG_FALLING)
+    )
+    has_fall_data = bool(has_fall_direction or fall_time)
+    has_pitch = bool(
+        getattr(ctx, "has_pitch", False)
+        or (movement_flags & (_MOVEMENTFLAG_SWIMMING | _MOVEMENTFLAG_FLYING))
+        or (movement_flags2 & _MOVEMENTFLAG2_ALWAYS_ALLOW_PITCHING)
+    )
+    has_spline_elevation = bool(movement_flags & _MOVEMENTFLAG_SPLINE_ELEVATION)
+    return {
+        "movement_flags": movement_flags,
+        "movement_flags2": movement_flags2,
+        "movement_counter": movement_counter,
+        "timestamp": timestamp,
+        "orientation": orientation,
+        "pitch": pitch,
+        "fall_time": fall_time,
+        "fall_zspeed": fall_zspeed,
+        "fall_cos": fall_cos,
+        "fall_sin": fall_sin,
+        "fall_xyspeed": fall_xyspeed,
+        "spline_elevation": spline_elevation,
+        "has_fall_direction": has_fall_direction,
+        "has_fall_data": has_fall_data,
+        "has_pitch": has_pitch,
+        "has_spline_elevation": has_spline_elevation,
+        "has_timestamp": bool(timestamp),
+        "has_orientation": not math.isclose(orientation, 0.0, abs_tol=1e-6),
+        "has_movement_flags": bool(movement_flags),
+        "has_movement_flags2": bool(movement_flags2),
+    }
+
+
+def _build_player_create_movement_bits(ctx=None) -> bytes:
+    """Build the SkyFire 5.4.8 CREATE_OBJECT living movement bit region."""
+    transport = _player_create_transport_data(ctx) if ctx is not None else None
+    state = _player_create_movement_state(ctx) if ctx is not None else _player_create_movement_state(object())
+    player_guid = _resolve_player_create_movement_guid(ctx) if ctx is not None else 0
+    player_guid_bytes = int(player_guid).to_bytes(8, "little", signed=False)
+    transport_guid_bytes = (
+        int(transport["guid"]).to_bytes(8, "little", signed=False)
+        if transport is not None
+        else bytes(8)
+    )
+    transport_masks = [1 if value else 0 for value in transport_guid_bytes]
+    has_time2 = bool(transport and int(transport["time2"]) != 0)
+    has_time3 = bool(transport and int(transport["time3"]) != 0)
+
+    bits = [
+        (_PLAYER_CREATE_BIT676, 1),
+        (_PLAYER_CREATE_HAS_ANIM_KITS, 1),
+        (_PLAYER_CREATE_IS_LIVING, 1),
+        (_PLAYER_CREATE_BIT810, 1),
+        (0, 1),  # fake bit
+        (_PLAYER_CREATE_TRANSPORT_FRAMES, 22),
+        (_PLAYER_CREATE_HAS_VEHICLE_DATA, 1),
+        (_PLAYER_CREATE_BIT1044, 1),
+        (0, 1),  # fake bit
+        (_PLAYER_CREATE_BIT476, 1),
+        (_PLAYER_CREATE_HAS_GAMEOBJECT_ROTATION, 1),
+        (0, 1),  # fake bit
+        (_PLAYER_CREATE_BIT680, 1),
+        (_PLAYER_CREATE_HAS_ATTACKING_TARGET, 1),
+        (_PLAYER_CREATE_HAS_SCENE_OBJECT_DATA, 1),
+        (_PLAYER_CREATE_BIT1064, 1),
+        (0, 1),  # fake bit
+        (_PLAYER_CREATE_BIT668, 1),
+        (_PLAYER_CREATE_HAS_TRANSPORT_POSITION, 1),
+        (_PLAYER_CREATE_BIT681, 1),
+        (_PLAYER_CREATE_HAS_STATIONARY_POSITION, 1),
+        (1 if player_guid_bytes[2] else 0, 1),
+        (_PLAYER_CREATE_BIT140, 1),
+        (0 if bool(state["has_pitch"]) else 1, 1),
+        (1 if transport is not None else _PLAYER_CREATE_HAS_TRANSPORT_DATA, 1),
+        (0, 1),  # fake bit
+    ]
+    if transport is not None:
+        bits.extend(
+            [
+                (transport_masks[4], 1),
+                (transport_masks[2], 1),
+                (1 if has_time3 else 0, 1),
+                (transport_masks[0], 1),
+                (transport_masks[1], 1),
+                (transport_masks[3], 1),
+                (transport_masks[6], 1),
+                (transport_masks[7], 1),
+                (1 if has_time2 else 0, 1),
+                (transport_masks[5], 1),
+            ]
+        )
+    bits.extend([
+        (0 if bool(state["has_timestamp"]) else 1, 1),
+        (1 if player_guid_bytes[6] else 0, 1),
+        (1 if player_guid_bytes[4] else 0, 1),
+        (1 if player_guid_bytes[3] else 0, 1),
+        (0 if bool(state["has_orientation"]) else 1, 1),
+        (0 if int(state["movement_counter"]) else 1, 1),
+        (1 if player_guid_bytes[5] else 0, 1),
+        (_PLAYER_CREATE_BITS98, 22),
+        (0 if bool(state["has_movement_flags"]) else 1, 1),
+        (_PLAYER_CREATE_BITS168, 19),
+        (1 if bool(state["has_fall_data"]) else 0, 1),
+    ])
+    if bool(state["has_movement_flags"]):
+        bits.append((int(state["movement_flags"]) & 0x3FFFFFFF, 30))
+    bits.extend([
+        (0 if bool(state["has_spline_elevation"]) else 1, 1),
+        (_PLAYER_CREATE_HAS_SPLINE_DATA, 1),
+        (_PLAYER_CREATE_BIT141, 1),
+        (1 if player_guid_bytes[0] else 0, 1),
+        (1 if player_guid_bytes[7] else 0, 1),
+        (1 if player_guid_bytes[1] else 0, 1),
+    ])
+    bits.append((0 if bool(state["has_movement_flags2"]) else 1, 1))
+    if bool(state["has_fall_data"]):
+        bits.append((1 if bool(state["has_fall_direction"]) else 0, 1))
+    if bool(state["has_movement_flags2"]):
+        bits.append((int(state["movement_flags2"]) & 0x1FFF, 13))
+    return _pack_msb_bits(bits)
+
+
+def _build_legacy_player_create_movement_header() -> bytes:
+    """Build the stable pre-experiment CreateObject movement header/speed region."""
     header_bits = _pack_msb_bits([
         (_PLAYER_CREATE_BIT676, 1),
         (_PLAYER_CREATE_HAS_ANIM_KITS, 1),
@@ -609,8 +835,6 @@ def build_player_create_movement_header() -> bytes:
         raise ValueError("player create movement header size mismatch")
 
     output = bytearray(header_bits)
-    # Speed section. These are named bootstrap defaults, not runtime movement
-    # authority; changing them would change packet identity.
     output.extend(struct.pack("<f", _PLAYER_CREATE_FLY_SPEED))
     output.extend(struct.pack("<f", _PLAYER_CREATE_TURN_SPEED))
     output.extend(struct.pack("<f", _PLAYER_CREATE_SWIM_SPEED))
@@ -618,19 +842,125 @@ def build_player_create_movement_header() -> bytes:
     return bytes(output)
 
 
+def _build_skyfire_player_create_movement_header(ctx=None) -> bytes:
+    """Build the SkyFire 5.4.8 CREATE_OBJECT living movement pre-position region."""
+    transport = _player_create_transport_data(ctx) if ctx is not None else None
+    transport_guid_bytes = (
+        int(transport["guid"]).to_bytes(8, "little", signed=False)
+        if transport is not None
+        else bytes(8)
+    )
+    has_time2 = bool(transport and int(transport["time2"]) != 0)
+    has_time3 = bool(transport and int(transport["time3"]) != 0)
+    output = bytearray(_build_player_create_movement_bits(ctx))
+    if transport is not None:
+        def append_guid_byte(index: int) -> None:
+            output.extend(_guid_byte_seq(transport_guid_bytes, index))
+
+        append_guid_byte(7)
+        output.extend(struct.pack("<f", float(transport["x"])))
+        if has_time3:
+            output.extend(struct.pack("<I", int(transport["time3"])))
+        output.extend(struct.pack("<f", float(transport["orientation"])))
+        output.extend(struct.pack("<f", float(transport["y"])))
+        append_guid_byte(4)
+        append_guid_byte(1)
+        append_guid_byte(3)
+        output.extend(struct.pack("<f", float(transport["z"])))
+        append_guid_byte(5)
+        if has_time2:
+            output.extend(struct.pack("<I", int(transport["time2"])))
+        append_guid_byte(0)
+        output.extend(struct.pack("<b", int(transport["seat"])))
+        append_guid_byte(6)
+        append_guid_byte(2)
+        output.extend(struct.pack("<I", int(transport["time"])))
+    return bytes(output)
+
+
+def build_player_create_movement_header(ctx=None) -> bytes:
+    """Build the active player CREATE_OBJECT movement header.
+
+    The SkyFire living-movement port is experimental because the normal
+    no-transport login path must retain the known-good 826-byte payload.
+    """
+    if _experimental_player_create_living_movement_enabled():
+        return _build_skyfire_player_create_movement_header(ctx)
+    return _build_legacy_player_create_movement_header()
+
+
+def build_skyfire_player_create_living_movement_block(ctx) -> bytes:
+    """Build the player CREATE_OBJECT living movement block in SkyFire 5.4.8 order."""
+    state = _player_create_movement_state(ctx)
+    player_guid = _resolve_player_create_movement_guid(ctx)
+    player_guid_bytes = int(player_guid).to_bytes(8, "little", signed=False)
+    output = bytearray(_build_skyfire_player_create_movement_header(ctx))
+
+    output.extend(_guid_byte_seq(player_guid_bytes, 4))
+    # Player CREATE has no spline payload for the local player in the current path.
+    output.extend(struct.pack("<f", _movement_float(ctx, "fly_speed", default=_PLAYER_CREATE_FLY_SPEED)))
+    movement_counter = int(state["movement_counter"])
+    if movement_counter:
+        output.extend(struct.pack("<I", movement_counter & 0xFFFFFFFF))
+    output.extend(_guid_byte_seq(player_guid_bytes, 2))
+
+    if bool(state["has_fall_data"]):
+        if bool(state["has_fall_direction"]):
+            output.extend(struct.pack("<f", float(state["fall_xyspeed"])))
+            output.extend(struct.pack("<f", float(state["fall_cos"])))
+            output.extend(struct.pack("<f", float(state["fall_sin"])))
+        output.extend(struct.pack("<I", int(state["fall_time"]) & 0xFFFFFFFF))
+        output.extend(struct.pack("<f", float(state["fall_zspeed"])))
+
+    output.extend(_guid_byte_seq(player_guid_bytes, 1))
+    output.extend(struct.pack("<f", _movement_float(ctx, "turn_speed", default=_PLAYER_CREATE_TURN_SPEED)))
+    if bool(state["has_timestamp"]):
+        output.extend(struct.pack("<I", int(state["timestamp"]) & 0xFFFFFFFF))
+    output.extend(struct.pack("<f", _movement_float(ctx, "run_back_speed", default=_PLAYER_CREATE_RUN_BACK_SPEED)))
+    if bool(state["has_spline_elevation"]):
+        output.extend(struct.pack("<f", float(state["spline_elevation"])))
+
+    output.extend(_guid_byte_seq(player_guid_bytes, 7))
+    output.extend(struct.pack("<f", _movement_float(ctx, "pitch_speed", default=_PLAYER_CREATE_PITCH_SPEED)))
+    output.extend(struct.pack("<f", float(getattr(ctx, "x", 0.0) or 0.0)))
+    if bool(state["has_pitch"]):
+        output.extend(struct.pack("<f", float(state["pitch"])))
+    if bool(state["has_orientation"]):
+        output.extend(struct.pack("<f", float(state["orientation"])))
+
+    output.extend(struct.pack("<f", _movement_float(ctx, "walk_speed", default=_PLAYER_CREATE_WALK_SPEED)))
+    output.extend(struct.pack("<f", float(getattr(ctx, "y", 0.0) or 0.0)))
+    output.extend(struct.pack("<f", _movement_float(ctx, "fly_back_speed", default=_PLAYER_CREATE_FLY_BACK_SPEED)))
+    output.extend(_guid_byte_seq(player_guid_bytes, 3))
+    output.extend(_guid_byte_seq(player_guid_bytes, 5))
+    output.extend(_guid_byte_seq(player_guid_bytes, 6))
+    output.extend(_guid_byte_seq(player_guid_bytes, 0))
+    output.extend(struct.pack("<f", _movement_float(ctx, "swim_back_speed", default=_PLAYER_CREATE_SWIM_BACK_SPEED)))
+    output.extend(struct.pack("<f", _movement_float(ctx, "run_speed", default=_PLAYER_CREATE_RUN_SPEED)))
+    output.extend(struct.pack("<f", _movement_float(ctx, "swim_speed", default=_PLAYER_CREATE_SWIM_SPEED)))
+    output.extend(struct.pack("<f", float(getattr(ctx, "z", 0.0) or 0.0)))
+    if _player_create_transport_data(ctx) is None and len(output) != _PLAYER_CREATE_MOVEMENT_BLOCK_SIZE:
+        raise ValueError("player create movement block size mismatch")
+    return bytes(output)
+
+
 def build_movement_block(ctx) -> bytes:
-    """Build the player CREATE_OBJECT movement block from code-only constants."""
-    output = bytearray(build_player_create_movement_header())
-    # Position section. These are the live-owned bytes in the create movement
-    # block and are patched from the login/runtime context.
+    """Build the player CREATE_OBJECT movement block.
+
+    Default: stable pre-experiment no-transport layout used by ordinary login.
+    Experiment: SkyFire 5.4.8 living movement serializer.
+    """
+    if _player_create_transport_data(ctx) is not None:
+        return build_skyfire_player_create_living_movement_block(ctx)
+    if _experimental_player_create_living_movement_enabled():
+        return build_skyfire_player_create_living_movement_block(ctx)
+
+    output = bytearray(_build_legacy_player_create_movement_header())
     output.extend(struct.pack("<f", float(getattr(ctx, "x", 0.0) or 0.0)))
     output.extend(struct.pack("<f", float(getattr(ctx, "orientation", 0.0) or 0.0)))
     output.extend(struct.pack("<f", _PLAYER_CREATE_WALK_SPEED))
     output.extend(struct.pack("<f", float(getattr(ctx, "y", 0.0) or 0.0)))
     output.extend(struct.pack("<f", _PLAYER_CREATE_FLY_BACK_SPEED))
-    # Guid section. The bit header only includes guid byte 0 today. This remains
-    # fixed in Phase 1 because deriving it would alter packets for non-captured
-    # low GUIDs.
     output.append(_PLAYER_CREATE_MOVEMENT_GUID_BYTE)
     output.extend(struct.pack("<f", _PLAYER_CREATE_RUN_BACK_SPEED))
     output.extend(struct.pack("<f", _PLAYER_CREATE_RUN_SPEED))
@@ -757,7 +1087,11 @@ def build_full_player_create(ctx) -> bytes | None:
     """Build a full player CREATE_OBJECT using a built header plus known body blocks."""
     try:
         movement_block = build_movement_block(ctx)
-        if len(movement_block) != (_PLAYER_CREATE_MOVEMENT_BLOCK_END - _PLAYER_CREATE_MOVEMENT_BLOCK_START):
+        if (
+            _player_create_transport_data(ctx) is None
+            and len(movement_block)
+            != (_PLAYER_CREATE_MOVEMENT_BLOCK_END - _PLAYER_CREATE_MOVEMENT_BLOCK_START)
+        ):
             return None
 
         srv_values = build_player_field_values(ctx)
@@ -792,6 +1126,7 @@ def build_full_player_create(ctx) -> bytes | None:
         _verify_player_level_field_in_payload(
             built_payload,
             int(getattr(ctx, "level", 1) or 1),
+            movement_block_size=len(movement_block),
         )
         Logger.info(
             f"[CREATE BUILD] guid={getattr(ctx, 'guid', None)} "

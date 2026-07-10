@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import math
 import random
 import re
 import time
@@ -39,6 +40,7 @@ from server.modules.handlers.world.opcodes import spells as spells_handlers
 from server.modules.handlers.world.opcodes.movement import (
     _save_current_position_like_command as save_current_position_like_command,
 )
+from server.modules.handlers.world.feature_config import transport_debug_messages_enabled
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
 from server.modules.handlers.world.state.runtime import (
     broadcast_region_weather,
@@ -243,6 +245,50 @@ def _call_command(name: str, session, args: list[str]) -> list[tuple[str, bytes]
     return COMMANDS[name].handler(session, args)
 
 
+def _session_gm_level(session) -> int:
+    from server.modules.auth.AuthConnection import AuthConnection
+
+    account_id = int(getattr(session, "account_id", 0) or 0)
+    cached_account_id = int(getattr(session, "_cached_gm_level_account_id", 0) or 0)
+    cached_value = getattr(session, "_cached_gm_level", None)
+    if account_id > 0 and cached_value is not None and cached_account_id == account_id:
+        return int(cached_value)
+    if account_id <= 0:
+        return 0
+    try:
+        session_factory = AuthConnection.session()
+        auth_mode = AuthConnection._resolve_auth_mode()
+        if auth_mode == "legacy":
+            from server.modules.database.AuthModelLegacy import AccountAccess
+        else:
+            from server.modules.database.AuthModel import AccountAccess
+        rows = (
+            session_factory.query(AccountAccess.gmlevel)
+            .filter(AccountAccess.id == int(account_id))
+            .all()
+        )
+        gm_level = max((int(row[0] or 0) for row in rows), default=0)
+    except Exception as exc:
+        Logger.warning("[GOCollisionDebug] GM lookup failed account=%s err=%s", account_id, exc)
+        gm_level = 0
+    session._cached_gm_level_account_id = int(account_id)
+    session._cached_gm_level = int(gm_level)
+    return int(gm_level)
+
+
+def _require_gm(session) -> list[tuple[str, bytes]] | None:
+    if _session_gm_level(session) > 0:
+        return None
+    return _notification_response("This command is GM-only.")
+
+
+def _parse_int_arg(raw: str) -> int | None:
+    try:
+        return int(str(raw).strip(), 0)
+    except (TypeError, ValueError):
+        return None
+
+
 def _client_bag_for_item(session, item) -> int | None:
     """Resolve inventory internal bag ids to client bag ids for move/equip commands."""
     bag = int(getattr(item, "bag", 0) or 0)
@@ -422,6 +468,134 @@ def cmd_gps(session, args: list[str]) -> list[tuple[str, bytes]]:
     return _notification_response(feedback)
 
 
+@register_command(
+    "worldporttest",
+    ".worldporttest <map> <x> <y> <z> <o>|transport <transport_guid>",
+    require_args=True,
+)
+def cmd_worldporttest(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Temporary GM-only direct worldport diagnostic command."""
+    gm_error = _require_gm(session)
+    if gm_error is not None:
+        return gm_error
+    if not transport_debug_messages_enabled():
+        return _notification_response("Worldport test requires Transport.DebugMessages=true.")
+
+    from server.modules.handlers.world.teleport.map_transfer import (
+        TeleportDestination,
+        apply_map_transfer,
+    )
+
+    player_guid = int(getattr(session, "char_guid", 0) or 0)
+    from_map = int(getattr(session, "map_id", 0) or 0)
+    keep_transport = False
+    transport_guid = 0
+    transport_entry: int | None = None
+    source_map_id: int | None = None
+
+    if str(args[0]).casefold() == "transport":
+        if len(args) != 2:
+            return _notification_response("Usage: .worldporttest transport <transport_guid>")
+        transport_guid = _parse_int_arg(args[1]) or 0
+        if transport_guid <= 0:
+            return _notification_response("Usage: .worldporttest transport <transport_guid>")
+
+        from server.modules.handlers.world.transport_runtime import (
+            current_runtime_transport_state_for_guid,
+            transport_passenger_attachment,
+        )
+
+        runtime_state = current_runtime_transport_state_for_guid(int(transport_guid))
+        if runtime_state is None:
+            return _notification_response(f"[WorldportTest] transport 0x{transport_guid:016X} not found")
+
+        movement_state = getattr(session, "movement_state", None)
+        attachment = transport_passenger_attachment(int(transport_guid), player_guid)
+        if attachment is not None:
+            local_x = float(attachment.local_x)
+            local_y = float(attachment.local_y)
+            local_z = float(attachment.local_z)
+            local_o = float(attachment.local_o)
+        elif (
+            movement_state is not None
+            and int(getattr(movement_state, "transport_guid", 0) or 0) == int(transport_guid)
+        ):
+            local_x = float(getattr(movement_state, "transport_x", 0.0) or 0.0)
+            local_y = float(getattr(movement_state, "transport_y", 0.0) or 0.0)
+            local_z = float(getattr(movement_state, "transport_z", 0.0) or 0.0)
+            local_o = float(getattr(movement_state, "transport_orientation", 0.0) or 0.0)
+        else:
+            local_x = local_y = local_z = local_o = 0.0
+
+        transport_o = float(getattr(runtime_state, "orientation", 0.0) or 0.0)
+        cos_o = math.cos(transport_o)
+        sin_o = math.sin(transport_o)
+        target_x = float(runtime_state.x) + (cos_o * local_x - sin_o * local_y)
+        target_y = float(runtime_state.y) + (sin_o * local_x + cos_o * local_y)
+        target_z = float(runtime_state.z) + local_z
+        target_o = transport_o + local_o
+        to_map = int(runtime_state.map_id)
+        keep_transport = True
+        transport_entry = int(runtime_state.entry)
+        source_map_id = from_map
+
+        if movement_state is not None:
+            movement_state.has_transport_data = True
+            movement_state.transport_guid = int(transport_guid)
+            movement_state.transport_x = local_x
+            movement_state.transport_y = local_y
+            movement_state.transport_z = local_z
+            movement_state.transport_orientation = local_o
+            movement_state.transport_time = int(getattr(runtime_state, "path_progress_ms", 0) or 0) & 0xFFFFFFFF
+    else:
+        if len(args) != 5:
+            return _notification_response("Usage: .worldporttest <map> <x> <y> <z> <o>")
+        try:
+            to_map = int(args[0], 0)
+            target_x = float(args[1])
+            target_y = float(args[2])
+            target_z = float(args[3])
+            target_o = float(args[4])
+        except ValueError:
+            return _notification_response("Usage: .worldporttest <map> <x> <y> <z> <o>")
+
+    session._worldporttest_active = True
+    session._worldporttest_first_movement_logged = False
+    session._worldporttest_transport_guid = int(transport_guid)
+    Logger.info(
+        "[WorldportTest] begin player=%s from_map=%s to_map=%s "
+        "keep_transport=%s transport_guid=0x%016X",
+        player_guid,
+        int(from_map),
+        int(to_map),
+        str(bool(keep_transport)).lower(),
+        int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
+    )
+    responses = apply_map_transfer(
+        session,
+        TeleportDestination(
+            map_id=int(to_map),
+            x=float(target_x),
+            y=float(target_y),
+            z=float(target_z),
+            orientation=float(target_o),
+            name="worldporttest",
+        ),
+        reason="worldporttest",
+        keep_transport=bool(keep_transport),
+        source_map_id=source_map_id,
+        transport_entry=transport_entry,
+    )
+    opcodes = [str(opcode) for opcode, _payload in list(responses or [])]
+    Logger.info(
+        "[WorldportTest] apply_map_transfer_return "
+        "smsg_transfer_pending=%s smsg_new_world=%s",
+        str("SMSG_TRANSFER_PENDING" in opcodes).lower(),
+        str("SMSG_NEW_WORLD" in opcodes).lower(),
+    )
+    return list(responses or [])
+
+
 @register_command("spawngo", ".spawngo", allow_args=False)
 def cmd_spawngo(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Load nearby gameobjects from the world database for the current player."""
@@ -480,6 +654,173 @@ def cmd_spawngo(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
+def _current_map_gameobject_entry_by_guid(session, guid: int) -> dict[str, Any] | None:
+    requested_guid = int(guid)
+    loaded_entries = getattr(session, "loaded_gameobject_entries", None)
+    if isinstance(loaded_entries, dict):
+        for world_guid, entry in loaded_entries.items():
+            if int(world_guid or 0) == requested_guid or int(entry.get("guid", 0) or 0) == requested_guid:
+                return dict(entry)
+    cache_by_map = getattr(DatabaseConnection, "_cache_gameobjects_by_map", {}) or {}
+    map_entries = cache_by_map.get(int(getattr(session, "map_id", 0) or 0), ()) or ()
+    for entry in map_entries:
+        if int(entry.get("guid", 0) or 0) == requested_guid:
+            return dict(entry)
+    return None
+
+
+def _gocollision_display_bounds_by_display() -> dict[int, Any]:
+    cache = getattr(_gocollision_display_bounds_by_display, "_cache", None)
+    if isinstance(cache, dict):
+        return cache
+    from server.modules.handlers.world.collision.gameobject_collision import load_display_bounds
+
+    cache = load_display_bounds()
+    setattr(_gocollision_display_bounds_by_display, "_cache", cache)
+    return cache
+
+
+def _gocollision_show(session, args: list[str]) -> list[tuple[str, bytes]]:
+    gm_error = _require_gm(session)
+    if gm_error is not None:
+        return gm_error
+    guid = _parse_int_arg(args[0] if args else "")
+    if guid is None or guid <= 0:
+        return _notification_response("Usage: .gocollision show <guid>")
+    from server.modules.handlers.world.collision import gameobject_collision_index
+    from server.modules.handlers.world.collision.debug_visualization import (
+        describe_collision_visualization,
+        render_collision_bounds,
+    )
+    from server.modules.handlers.world.collision.gameobject_collision import gameobject_eligibility_reason
+
+    entry = _current_map_gameobject_entry_by_guid(session, guid)
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    collision = gameobject_collision_index.get(map_id, guid)
+    if collision is None and entry is not None:
+        collision = gameobject_collision_index.get(map_id, int(entry.get("guid", 0) or 0))
+    display_bounds = None
+    eligible = collision is not None
+    eligible_reason = "indexed"
+    if entry is not None:
+        display_bounds = _gocollision_display_bounds_by_display().get(int(entry.get("display_id", 0) or 0))
+        eligible, eligible_reason = gameobject_eligibility_reason(entry, display_bounds)
+    bounds = collision.bounds if collision is not None else None
+    responses: list[tuple[str, bytes]] = []
+    if bounds is not None:
+        handle = render_collision_bounds(session, bounds, duration_ms=10_000)
+        Logger.info(
+            "[GOCollisionDebug] Render guid=%s Eligible=%s Indexed=%s Duration=%sms markers=%s",
+            int(guid),
+            "True" if eligible else "False",
+            "True",
+            10_000,
+            len(handle.world_guids),
+        )
+    elif entry is not None:
+        Logger.info(
+            "[GOCollisionDebug] Render guid=%s Eligible=%s Indexed=%s Duration=%sms",
+            int(guid),
+            "True" if eligible else "False",
+            "False",
+            0,
+        )
+    lines = describe_collision_visualization(
+        entry,
+        bounds,
+        eligible=eligible,
+        eligible_reason=eligible_reason,
+        indexed=collision is not None,
+    )
+    for line in lines:
+        responses.extend(_notification_response(line))
+    if bounds is None:
+        responses.extend(_notification_response("No active collision bounds to render."))
+    return responses
+
+
+def _gocollision_around(session, args: list[str]) -> list[tuple[str, bytes]]:
+    gm_error = _require_gm(session)
+    if gm_error is not None:
+        return gm_error
+    radius = None
+    try:
+        radius = float(args[0] if args else "")
+    except (TypeError, ValueError):
+        radius = None
+    if radius is None or radius <= 0.0:
+        return _notification_response("Usage: .gocollision around <radius>")
+    from server.modules.handlers.world.collision import gameobject_collision_index
+    from server.modules.handlers.world.collision.debug_visualization import render_collision_bounds
+
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    point = (
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+    )
+    collisions = list(gameobject_collision_index.nearby_point(map_id, point, radius=float(radius)))
+    rendered = 0
+    markers = 0
+    for collision in collisions:
+        handle = render_collision_bounds(session, collision.bounds, duration_ms=10_000)
+        rendered += 1
+        markers += len(handle.world_guids)
+        Logger.info(
+            "[GOCollisionDebug] Render guid=%s Eligible=True Indexed=True Duration=%sms",
+            collision.guid,
+            10_000,
+        )
+    return _notification_response(
+        f"[GOCollision] rendered {rendered} indexed objects within {float(radius):.1f} yards ({markers} markers)"
+    )
+
+
+def _gocollision_clear(session, _args: list[str]) -> list[tuple[str, bytes]]:
+    gm_error = _require_gm(session)
+    if gm_error is not None:
+        return gm_error
+    from server.modules.handlers.world.collision.debug_visualization import clear_debug_visualizations
+
+    responses = clear_debug_visualizations(session)
+    responses.extend(_notification_response("[GOCollision] cleared debug visuals"))
+    return responses
+
+
+def _gocollision_shadowstats(session, _args: list[str]) -> list[tuple[str, bytes]]:
+    gm_error = _require_gm(session)
+    if gm_error is not None:
+        return gm_error
+    from server.modules.handlers.world.collision.geometry_shadow import format_geometry_shadow_stats_lines
+
+    responses: list[tuple[str, bytes]] = []
+    for line in format_geometry_shadow_stats_lines():
+        responses.extend(_notification_response(line))
+    return responses
+
+
+@register_command("gocollision", ".gocollision <show <guid>|around <radius>|clear|shadowstats>")
+def cmd_gocollision(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args:
+        return _notification_response("Usage: .gocollision <show <guid>|around <radius>|clear|shadowstats>")
+    subcommands = {
+        "show": (_gocollision_show, True),
+        "around": (_gocollision_around, True),
+        "clear": (_gocollision_clear, False),
+        "shadowstats": (_gocollision_shadowstats, False),
+    }
+    sub = str(args[0] or "").casefold()
+    if sub not in subcommands:
+        return _notification_response(f"Unknown subcommand: {sub}")
+    handler, needs_args = subcommands[sub]
+    sub_args = args[1:]
+    if needs_args and not sub_args:
+        return _notification_response(f"Missing arguments for '{sub}'")
+    if not needs_args and sub_args:
+        return _notification_response(f"'{sub}' takes no arguments")
+    return handler(session, sub_args)
+
+
 def _gameobject_cache_status() -> dict[str, int | bool]:
     config = ConfigLoader.load_config()
     preload_enabled = bool(config.get("worldserver", {}).get("preload_gameobjects", True))
@@ -511,6 +852,9 @@ def _hide_loaded_gameobjects(session) -> list[tuple[str, bytes]]:
         for guid in sorted(int(guid) for guid in loaded_gameobjects)
     ]
     loaded_gameobjects.clear()
+    loaded_gameobject_entries = getattr(session, "loaded_gameobject_entries", None)
+    if isinstance(loaded_gameobject_entries, dict):
+        loaded_gameobject_entries.clear()
     loaded_transports = getattr(session, "loaded_transport_entries", None)
     if isinstance(loaded_transports, dict):
         loaded_transports.clear()
@@ -2120,6 +2464,7 @@ PRIMARY_COMMANDS = {
     "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", require_args=True),
     # "fixplayer": Command(handler=cmd_fixplayer, usage=".fixplayer [teleport]"),
     # "fixspeed": Command(handler=cmd_fixspeed, usage=".fixspeed", allow_args=False),
+    "gocollision": Command(handler=cmd_gocollision, usage=".gocollision <show <guid>|around <radius>|clear>"),
     "goto": Command(handler=cmd_goto, usage=".goto <player>", require_args=True),
     "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),
     "help": Command(handler=cmd_help, usage=".help"),

@@ -372,6 +372,17 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     session.worldport_ack_pending = False
     session.teleport_destination = None
     session.near_teleport_pending = False
+    try:
+        from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
+
+        detach_session_transport_passenger(
+            session,
+            reason="login_reset",
+            opcode_name="login_reset",
+        )
+    except Exception as exc:
+        Logger.warning("[TransportDetach] login reset detach failed error=%s", str(exc))
+    session.post_bootstrap_transport_reattach_request = None
     session.inventory_activated = False
 
 
@@ -388,6 +399,7 @@ def _reset_morph_state(session, race: int, gender: int) -> None:
 def _reset_loaded_world_object_state(session) -> None:
     """Drop client-visible world object bookkeeping for a fresh login."""
     session.loaded_gameobjects = set()
+    session.loaded_gameobject_entries = {}
     session.loaded_transport_entries = {}
     session.loaded_npcs = set()
     session.npc_flags_by_guid = {}
@@ -450,13 +462,180 @@ def build_player_bootstrap_packets(session) -> list[tuple[str, bytes]]:
     if active_mover is not None:
         responses.append(("SMSG_MOVE_SET_ACTIVE_MOVER", active_mover))
 
+    bootstrap_runtime = getattr(session, "_player_bootstrap_runtime_transport", None)
+    transport_bootstrap = isinstance(bootstrap_runtime, dict)
+    pre_player_gameobject_responses: list[tuple[str, bytes]] = []
+    if transport_bootstrap:
+        pre_player_gameobject_responses = build_database_gameobject_responses(session)
+        responses.extend(pre_player_gameobject_responses)
+        if bool(bootstrap_runtime.get("transport_create_transform_matched")):
+            Logger.info(
+                "[TransportBootstrap] transport_create_sent guid=0x%016X packets=%s",
+                int(bootstrap_runtime["transport_guid"]) & 0xFFFFFFFFFFFFFFFF,
+                len(pre_player_gameobject_responses),
+            )
+        else:
+            Logger.warning(
+                "[TransportBootstrap] transport_create_sent guid=0x%016X packets=%s "
+                "matched=false",
+                int(bootstrap_runtime["transport_guid"]) & 0xFFFFFFFFFFFFFFFF,
+                len(pre_player_gameobject_responses),
+            )
+    if isinstance(bootstrap_runtime, dict):
+        Logger.info(
+            "[TransportTransfer] player_bootstrap_runtime "
+            "transport_guid=0x%016X route_phase=%s "
+            "runtime_transport_world=(%.3f %.3f %.3f) runtime_rotation=%.6f "
+            "local_offset=(%.3f %.3f %.3f %.3f) "
+            "rotated_offset=(%.3f %.3f %.3f) "
+            "player_world=(%.3f %.3f %.3f %.3f) "
+            "has_transport_data=%s fallback=false",
+            int(bootstrap_runtime["transport_guid"]) & 0xFFFFFFFFFFFFFFFF,
+            int(bootstrap_runtime["route_phase"]),
+            float(bootstrap_runtime["x"]),
+            float(bootstrap_runtime["y"]),
+            float(bootstrap_runtime["z"]),
+            float(bootstrap_runtime["orientation"]),
+            float(bootstrap_runtime["local_x"]),
+            float(bootstrap_runtime["local_y"]),
+            float(bootstrap_runtime["local_z"]),
+            float(bootstrap_runtime["local_o"]),
+            float(bootstrap_runtime["rotated_x"]),
+            float(bootstrap_runtime["rotated_y"]),
+            float(bootstrap_runtime["rotated_z"]),
+            float(ctx.x),
+            float(ctx.y),
+            float(ctx.z),
+            float(ctx.orientation),
+            "true" if bool(ctx.has_transport_data) else "false",
+        )
+        Logger.info(
+            "[TransportBootstrap] player_create_transport has_transport_data=%s "
+            "guid=0x%016X offset=(%.3f %.3f %.3f %.6f) transport_time=%s",
+            "true" if bool(ctx.has_transport_data) else "false",
+            int(getattr(ctx, "transport_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+            float(getattr(ctx, "transport_x", 0.0) or 0.0),
+            float(getattr(ctx, "transport_y", 0.0) or 0.0),
+            float(getattr(ctx, "transport_z", 0.0) or 0.0),
+            float(getattr(ctx, "transport_orientation", 0.0) or 0.0),
+            int(getattr(ctx, "transport_time", 0) or 0) & 0xFFFFFFFF,
+        )
     player_create = build_login_packet("SMSG_UPDATE_OBJECT_1773613176_0002", ctx)
     if player_create is not None:
         responses.append(("SMSG_UPDATE_OBJECT", player_create))
         session.player_object_sent = True
 
-    responses.extend(build_database_gameobject_responses(session))
+    if not transport_bootstrap:
+        responses.extend(build_database_gameobject_responses(session))
+    if (
+        isinstance(bootstrap_runtime, dict)
+        and not bool(bootstrap_runtime.get("transport_create_transform_matched"))
+    ):
+        Logger.warning(
+            "[TransportTransfer] transport_bootstrap_runtime "
+            "transport_guid=0x%016X matches_player_runtime=false "
+            "reason=transport_create_not_built",
+            int(bootstrap_runtime["transport_guid"]) & 0xFFFFFFFFFFFFFFFF,
+        )
     return responses
+
+
+def _sync_pending_transport_before_player_bootstrap(session) -> bool:
+    """Place a pending boat passenger on the current destination transform."""
+    session._player_bootstrap_runtime_transport = None
+    pending = getattr(session, "pending_transport_transfer", None)
+    if not isinstance(pending, dict):
+        return False
+
+    destination_entry = pending.get("destination_entry")
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            current_runtime_transport_state_for_guid,
+            is_cross_map_boat_entry,
+            is_cross_map_zeppelin_entry,
+        )
+
+        if not isinstance(destination_entry, dict) or not (
+            is_cross_map_boat_entry(destination_entry)
+            or is_cross_map_zeppelin_entry(destination_entry)
+        ):
+            return False
+
+        destination_guid = int(pending.get("destination_guid", 0) or 0)
+        runtime_state = current_runtime_transport_state_for_guid(destination_guid)
+        destination_map = int(
+            pending.get("destination_map", getattr(session, "map_id", 0)) or 0
+        )
+        if runtime_state is None or int(getattr(runtime_state, "map_id", -1)) != destination_map:
+            Logger.info(
+                "[TransportTransfer] player_bootstrap_runtime transfer_id=%s "
+                "transport_guid=0x%016X fallback=true reason=transport_not_found",
+                str(pending.get("transfer_id", "unknown") or "unknown"),
+                destination_guid & 0xFFFFFFFFFFFFFFFF,
+            )
+            return False
+
+        local_x = float(pending.get("local_x", 0.0) or 0.0)
+        local_y = float(pending.get("local_y", 0.0) or 0.0)
+        local_z = float(pending.get("local_z", 0.0) or 0.0)
+        local_o = float(pending.get("local_o", 0.0) or 0.0)
+        transport_x = float(getattr(runtime_state, "x", 0.0) or 0.0)
+        transport_y = float(getattr(runtime_state, "y", 0.0) or 0.0)
+        transport_z = float(getattr(runtime_state, "z", 0.0) or 0.0)
+        transport_o = float(getattr(runtime_state, "orientation", 0.0) or 0.0)
+        state = getattr(session, "movement_state", None)
+        if state is None:
+            from server.session.world_session import MovementState
+
+            state = MovementState()
+            session.movement_state = state
+        state.has_transport_data = True
+        state.transport_guid = destination_guid
+        state.transport_x = local_x
+        state.transport_y = local_y
+        state.transport_z = local_z
+        state.transport_orientation = local_o
+        state.transport_time = int(getattr(runtime_state, "path_progress_ms", 0) or 0) & 0xFFFFFFFF
+        state.transport_time2 = 0
+        state.transport_time3 = 0
+        state.transport_seat = -1
+
+        route_phase = int(getattr(runtime_state, "path_progress_ms", 0) or 0) & 0xFFFFFFFF
+        session._player_bootstrap_runtime_transport = {
+            "transport_guid": destination_guid,
+            "map_id": destination_map,
+            "x": transport_x,
+            "y": transport_y,
+            "z": transport_z,
+            "orientation": transport_o,
+            "route_phase": route_phase,
+            "local_x": local_x,
+            "local_y": local_y,
+            "local_z": local_z,
+            "local_o": local_o,
+            "rotated_x": 0.0,
+            "rotated_y": 0.0,
+            "rotated_z": 0.0,
+        }
+        Logger.info(
+            "[TransportBootstrap] preserved_attachment "
+            "transport_guid=0x%016X has_transport_data=true "
+            "player_world=(%.3f %.3f %.3f %.3f)",
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+            float(getattr(session, "x", 0.0) or 0.0),
+            float(getattr(session, "y", 0.0) or 0.0),
+            float(getattr(session, "z", 0.0) or 0.0),
+            float(getattr(session, "orientation", 0.0) or 0.0),
+        )
+        return True
+    except Exception as exc:
+        Logger.info(
+            "[TransportTransfer] player_bootstrap_runtime transfer_id=%s "
+            "fallback=true reason=transport_not_found error=%s",
+            str(pending.get("transfer_id", "unknown") or "unknown"),
+            str(exc),
+        )
+        return False
 
 
 def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[tuple[str, bytes]]:
@@ -536,6 +715,12 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
 
 
 def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tuple[str, bytes]]:
+    trace_id = str(getattr(session, "loading_screen_trace_id", "unknown") or "unknown")
+    bootstrap_started = time.monotonic()
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=bootstrap event=entering responses=0",
+        trace_id,
+    )
     # TODO: Teleport bootstrap still shares movement replay/bootstrap helpers with legacy world init.
     _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] teleport_bootstrap_enter player=%s map=%s "
@@ -565,7 +750,34 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         Logger.info(f"[Teleport] sending {opcode_name}")
         responses.append((opcode_name, payload))
 
-    responses.extend(build_player_bootstrap_packets(session))
+    step_started = time.monotonic()
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=player_bootstrap_packets event=entering",
+        trace_id,
+    )
+    try:
+        _sync_pending_transport_before_player_bootstrap(session)
+        player_bootstrap_packets = build_player_bootstrap_packets(session)
+    except Exception as exc:
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=player_bootstrap_packets "
+            "event=exception elapsed_ms=%.3f error=%s",
+            trace_id,
+            (time.monotonic() - step_started) * 1000.0,
+            str(exc),
+        )
+        raise
+    finally:
+        session._player_bootstrap_runtime_transport = None
+    responses.extend(player_bootstrap_packets)
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=player_bootstrap_packets "
+        "event=leaving elapsed_ms=%.3f packets=%s total_packets=%s",
+        trace_id,
+        (time.monotonic() - step_started) * 1000.0,
+        len(player_bootstrap_packets),
+        len(responses),
+    )
 
     post_teleport_spell_packets = spells_handlers.build_active_mover_spell_sync_responses(session)
     if post_teleport_spell_packets:
@@ -604,14 +816,60 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
 
     from server.modules.handlers.world.transport_runtime import build_bootstrap_transport_value_updates
 
-    responses.extend(build_bootstrap_transport_value_updates(session))
+    step_started = time.monotonic()
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=transport_bootstrap_packets event=entering",
+        trace_id,
+    )
+    try:
+        transport_packets = build_bootstrap_transport_value_updates(session)
+    except Exception as exc:
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=transport_bootstrap_packets "
+            "event=exception elapsed_ms=%.3f error=%s",
+            trace_id,
+            (time.monotonic() - step_started) * 1000.0,
+            str(exc),
+        )
+        raise
+    responses.extend(transport_packets)
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=transport_bootstrap_packets "
+        "event=leaving elapsed_ms=%.3f packets=%s total_packets=%s",
+        trace_id,
+        (time.monotonic() - step_started) * 1000.0,
+        len(transport_packets),
+        len(responses),
+    )
     from server.modules.handlers.world.opcodes import movement as movement_handlers
 
-    responses.extend(
-        movement_handlers.stream_world_objects_after_teleport(
+    step_started = time.monotonic()
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=world_stream_packets event=entering",
+        trace_id,
+    )
+    try:
+        world_stream_packets = movement_handlers.stream_world_objects_after_teleport(
             session,
             context="worldport-loading-complete",
         )
+    except Exception as exc:
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=world_stream_packets "
+            "event=exception elapsed_ms=%.3f error=%s",
+            trace_id,
+            (time.monotonic() - step_started) * 1000.0,
+            str(exc),
+        )
+        raise
+    responses.extend(world_stream_packets)
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=world_stream_packets "
+        "event=leaving elapsed_ms=%.3f packets=%s total_packets=%s",
+        trace_id,
+        (time.monotonic() - step_started) * 1000.0,
+        len(world_stream_packets),
+        len(responses),
     )
     from server.modules.handlers.world.opcodes import taxi as taxi_handlers
 
@@ -632,6 +890,45 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     session.teleport_pending = False
     session.worldport_ack_pending = False
     session.teleport_destination = None
+    Logger.info(
+        "[TransportTransfer] bootstrap_complete trace_id=%s packets=%s",
+        trace_id,
+        len(responses),
+    )
+    pending_transport = getattr(session, "pending_transport_transfer", None)
+    if isinstance(pending_transport, dict):
+        try:
+            from server.modules.handlers.world.transport_debug_messages import build_message
+
+            debug_response = build_message(
+                session,
+                "world_loaded",
+                "[Transport] WORLD LOADED map=%s"
+                % int(getattr(session, "map_id", 0) or 0),
+                transfer_id=str(
+                    pending_transport.get("transfer_id", "")
+                    or getattr(session, "transport_debug_transfer_id", "transport")
+                    or "transport"
+                ),
+            )
+            if debug_response is not None:
+                responses.append(debug_response)
+        except Exception as exc:
+            Logger.warning("[TransportDebug] world-loaded message failed error=%s", str(exc))
+    if isinstance(getattr(session, "pending_transport_transfer", None), dict):
+        Logger.info(
+            "[TransportBoundary] post_bootstrap_reattach_skipped "
+            "reason=boundary_lifecycle player=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=bootstrap event=leaving "
+        "elapsed_ms=%.3f packets=%s empty=%s",
+        trace_id,
+        (time.monotonic() - bootstrap_started) * 1000.0,
+        len(responses),
+        "true" if not responses else "false",
+    )
     return responses
 
 
@@ -984,7 +1281,40 @@ def handle_player_login(session, ctx: PacketContext):
 
 @register("CMSG_LOADING_SCREEN_NOTIFY")
 def handle_loading_screen_notify(session, ctx: PacketContext):
-    decoded = log_cmsg(ctx)
+    handler_started = time.monotonic()
+    trace_id = str(getattr(session, "loading_screen_trace_id", "") or "")
+    if not trace_id:
+        trace_id = (
+            f"{int(getattr(session, 'char_guid', 0) or 0)}-"
+            f"{int(handler_started * 1000.0)}"
+        )
+    session.loading_screen_trace_id = trace_id
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=handler event=entering opcode=%s",
+        trace_id,
+        str(getattr(ctx, "name", "CMSG_LOADING_SCREEN_NOTIFY")),
+    )
+    decode_started = time.monotonic()
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=decode event=entering",
+        trace_id,
+    )
+    try:
+        decoded = log_cmsg(ctx)
+    except Exception as exc:
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=decode event=exception "
+            "elapsed_ms=%.3f error=%s",
+            trace_id,
+            (time.monotonic() - decode_started) * 1000.0,
+            str(exc),
+        )
+        raise
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=decode event=leaving elapsed_ms=%.3f",
+        trace_id,
+        (time.monotonic() - decode_started) * 1000.0,
+    )
     showing = _decode_loading_screen_showing(decoded, ctx.payload)
     _resolve_session_ids(session)
 
@@ -992,6 +1322,12 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
     if showing:
         _set_login_state(session, LoginState.LOADING_SCREEN)
         Logger.info("[WorldHandlers] LOADING_SCREEN_NOTIFY show=1")
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=handler event=leaving "
+            "elapsed_ms=%.3f reason=showing packets=0",
+            trace_id,
+            (time.monotonic() - handler_started) * 1000.0,
+        )
         return 0, None
 
     if (
@@ -1003,6 +1339,12 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
         Logger.info(
             f"[WorldHandlers] LOADING_SCREEN_NOTIFY show=0 deferred until PLAYER_LOGIN "
             f"(state={session.login_state.value if session.login_state else 'None'})"
+        )
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=handler event=leaving "
+            "elapsed_ms=%.3f reason=deferred packets=0",
+            trace_id,
+            (time.monotonic() - handler_started) * 1000.0,
         )
         return 0, None
 
@@ -1016,8 +1358,20 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
             f"[WorldHandlers] LOADING_SCREEN_NOTIFY ignored outside login flow "
             f"(state={session.login_state.value if session.login_state else 'None'})"
         )
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=handler event=leaving "
+            "elapsed_ms=%.3f reason=invalid_state packets=0",
+            trace_id,
+            (time.monotonic() - handler_started) * 1000.0,
+        )
         return 0, None
     if getattr(session, "teleport_pending", False):
+        if bool(getattr(session, "_worldporttest_active", False)):
+            Logger.info(
+                "[WorldportTest] loading_notify player=%s map=%s",
+                int(getattr(session, "char_guid", 0) or 0),
+                int(getattr(session, "map_id", 0) or 0),
+            )
         Logger.info(
             f"[WorldHandlers] LOADING_SCREEN_NOTIFY show=0 completing teleport "
             f"destination={getattr(session, 'teleport_destination', None)}"
@@ -1031,8 +1385,38 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
             str(getattr(getattr(session, "taxi_state", None), "phase", "")),
             getattr(session, "pending_taxi_transfer", None),
         )
-        login_ctx = _build_world_login_context(session)
-        responses = _queue_teleport_world_transition(session, login_ctx)
+        context_started = time.monotonic()
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=login_context event=entering",
+            trace_id,
+        )
+        try:
+            login_ctx = _build_world_login_context(session)
+        except Exception as exc:
+            Logger.info(
+                "[LoadingScreenTrace] trace_id=%s stage=login_context event=exception "
+                "elapsed_ms=%.3f error=%s",
+                trace_id,
+                (time.monotonic() - context_started) * 1000.0,
+                str(exc),
+            )
+            raise
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=login_context event=leaving elapsed_ms=%.3f",
+            trace_id,
+            (time.monotonic() - context_started) * 1000.0,
+        )
+        try:
+            responses = _queue_teleport_world_transition(session, login_ctx)
+        except Exception as exc:
+            Logger.info(
+                "[LoadingScreenTrace] trace_id=%s stage=bootstrap event=exception "
+                "elapsed_ms=%.3f error=%s",
+                trace_id,
+                (time.monotonic() - handler_started) * 1000.0,
+                str(exc),
+            )
+            raise
         responses.insert(
             0,
             (
@@ -1042,13 +1426,42 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
                 ),
             ),
         )
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=handler event=leaving "
+            "elapsed_ms=%.3f reason=teleport_complete packets=%s empty=%s",
+            trace_id,
+            (time.monotonic() - handler_started) * 1000.0,
+            len(responses),
+            "true" if not responses else "false",
+        )
+        if bool(getattr(session, "_worldporttest_active", False)):
+            Logger.info(
+                "[WorldportTest] bootstrap_complete player=%s map=%s packets=%s",
+                int(getattr(session, "char_guid", 0) or 0),
+                int(getattr(session, "map_id", 0) or 0),
+                len(responses),
+            )
         return 0, responses
     if getattr(session, "post_loading_sent", False):
         Logger.info("[WorldHandlers] LOADING_SCREEN_NOTIFY show=0 after bootstrap; ignoring duplicate")
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=handler event=leaving "
+            "elapsed_ms=%.3f reason=duplicate packets=0",
+            trace_id,
+            (time.monotonic() - handler_started) * 1000.0,
+        )
         return 0, None
 
     login_ctx = _build_world_login_context(session)
     responses = _queue_world_bootstrap_transition(session, login_ctx)
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=handler event=leaving "
+        "elapsed_ms=%.3f reason=normal_bootstrap packets=%s empty=%s",
+        trace_id,
+        (time.monotonic() - handler_started) * 1000.0,
+        len(responses),
+        "true" if not responses else "false",
+    )
     return 0, responses
 
 

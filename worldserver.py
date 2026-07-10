@@ -64,6 +64,7 @@ from server.modules.handlers.world.feature_config import (
     log_effective_world_feature_config,
     taxi_movement_debug_enabled,
 )
+from server.modules.handlers.world.collision.geometry_shadow import log_geometry_shadow_initialization
 from server.modules.opcodes.WorldOpcodes import (
     WORLD_CLIENT_OPCODES,
     WORLD_SERVER_OPCODES,
@@ -101,6 +102,7 @@ WORLD_HANDLERS = opcode_handlers
 HOST = config["worldserver"]["host"]
 PORT = config["worldserver"]["port"]
 log_effective_world_feature_config()
+log_geometry_shadow_initialization()
 STARTED_AT = time.time()
 running = True
 restart_requested = False
@@ -473,6 +475,9 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
     state = WorldState.NEW
     encrypted = False
+    recv_calls = 0
+    recv_calls_with_data = 0
+    any_client_bytes_received = False
 
     def _taxi_xmap_debug(message: str, *args) -> None:
         if not taxi_movement_debug_enabled():
@@ -558,6 +563,7 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
         while running:
             try:
                 data = sock.recv(4096)
+                recv_calls += 1
             except ConnectionResetError as exc:
                 Logger.error(
                     "[WorldServer] recv reset state=%s encrypted=%s addr=%s err=%s",
@@ -566,6 +572,12 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                     addr,
                     exc,
                 )
+                Logger.error(
+                    "[WorldServer] recv reset diagnostics recv_calls=%s recv_calls_with_data=%s any_bytes_received=%s",
+                    recv_calls,
+                    recv_calls_with_data,
+                    int(any_client_bytes_received),
+                )
                 if state == WorldState.HANDSHAKE_SENT:
                     Logger.error(
                         "[WorldServer] client reset before HANDSHAKE_WORLD_C addr=%s",
@@ -573,8 +585,27 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                     )
                 raise
             if not data:
+                Logger.info(
+                    "[WorldServer] peer closed before sending any bytes state=%s encrypted=%s addr=%s recv_calls=%s",
+                    str(state.name if hasattr(state, "name") else state),
+                    int(bool(encrypted)),
+                    addr,
+                    recv_calls,
+                )
                 Logger.info(f"[WorldServer] {addr}: disconnected")
                 break
+
+            recv_calls_with_data += 1
+            any_client_bytes_received = True
+            Logger.info(
+                "[WorldServer] recv bytes=%s state=%s encrypted=%s addr=%s",
+                len(data),
+                str(state.name if hasattr(state, "name") else state),
+                int(bool(encrypted)),
+                addr,
+            )
+            Logger.info("[WorldServer] recv raw hex=%s", data.hex())
+            Logger.info("[WorldServer] recv raw repr=%r", data)
 
             if state == WorldState.HANDSHAKE_SENT:
                 log_raw_packet(
@@ -595,6 +626,12 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
             # ---- PARSE BY ENCRYPTION STATE ----
             if not encrypted:
+                Logger.info(
+                    "[WorldServer] before parse_plain_packets state=%s recv_len=%s addr=%s",
+                    str(state.name if hasattr(state, "name") else state),
+                    len(data),
+                    addr,
+                )
                 packets = parse_plain_packets(data, "C")
             else:
                 buffer.extend(data)
@@ -682,8 +719,64 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                     realm_id=getattr(conn_session, "realm_id", None),
                 )
 
-                err, response = handler(ctx)
+                loading_trace_started = time.monotonic()
+                if name == "CMSG_LOADING_SCREEN_NOTIFY":
+                    conn_session.loading_screen_trace_id = (
+                        f"{int(getattr(conn_session, 'char_guid', 0) or 0)}-"
+                        f"{int(loading_trace_started * 1000.0)}"
+                    )
+                    Logger.info(
+                        "[LoadingScreenTrace] trace_id=%s stage=network_handler "
+                        "event=entering",
+                        str(
+                            getattr(conn_session, "loading_screen_trace_id", "pending")
+                            or "pending"
+                        ),
+                    )
+                try:
+                    err, response = handler(ctx)
+                except Exception as exc:
+                    if name == "CMSG_LOADING_SCREEN_NOTIFY":
+                        Logger.info(
+                            "[LoadingScreenTrace] trace_id=%s stage=network_handler "
+                            "event=exception elapsed_ms=%.3f error=%s",
+                            str(
+                                getattr(conn_session, "loading_screen_trace_id", "unknown")
+                                or "unknown"
+                            ),
+                            (time.monotonic() - loading_trace_started) * 1000.0,
+                            str(exc),
+                        )
+                    raise
+                if name == "CMSG_LOADING_SCREEN_NOTIFY":
+                    response_count = (
+                        len(response)
+                        if isinstance(response, list)
+                        else (1 if response else 0)
+                    )
+                    Logger.info(
+                        "[LoadingScreenTrace] trace_id=%s stage=network_handler "
+                        "event=leaving elapsed_ms=%.3f err=%s packets=%s empty=%s",
+                        str(
+                            getattr(conn_session, "loading_screen_trace_id", "unknown")
+                            or "unknown"
+                        ),
+                        (time.monotonic() - loading_trace_started) * 1000.0,
+                        int(err or 0),
+                        response_count,
+                        "true" if not response else "false",
+                    )
                 if err or not response:
+                    if name == "CMSG_LOADING_SCREEN_NOTIFY":
+                        Logger.info(
+                            "[LoadingScreenTrace] trace_id=%s stage=network_send "
+                            "event=early_return reason=%s packets=0",
+                            str(
+                                getattr(conn_session, "loading_screen_trace_id", "unknown")
+                                or "unknown"
+                            ),
+                            "handler_error" if err else "empty_response",
+                        )
                     continue
 
                 # ---- INIT ARC4 AFTER HANDLER RAN ----
@@ -708,7 +801,68 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                         return
 
                 # ---- SEND SERVER RESPONSES ----
-                _send_normalized_responses(sock, response)
+                if name == "CMSG_LOADING_SCREEN_NOTIFY":
+                    Logger.info(
+                        "[LoadingScreenTrace] trace_id=%s stage=network_send "
+                        "event=entering packets=%s",
+                        str(
+                            getattr(conn_session, "loading_screen_trace_id", "unknown")
+                            or "unknown"
+                        ),
+                        len(response) if isinstance(response, list) else 1,
+                    )
+                send_started = time.monotonic()
+                try:
+                    _send_normalized_responses(sock, response)
+                except Exception as exc:
+                    if name == "CMSG_LOADING_SCREEN_NOTIFY":
+                        Logger.info(
+                            "[LoadingScreenTrace] trace_id=%s stage=network_send "
+                            "event=exception elapsed_ms=%.3f error=%s",
+                            str(
+                                getattr(conn_session, "loading_screen_trace_id", "unknown")
+                                or "unknown"
+                            ),
+                            (time.monotonic() - send_started) * 1000.0,
+                            str(exc),
+                        )
+                    raise
+                if name == "CMSG_LOADING_SCREEN_NOTIFY":
+                    Logger.info(
+                        "[LoadingScreenTrace] trace_id=%s stage=network_send "
+                        "event=leaving elapsed_ms=%.3f",
+                        str(
+                            getattr(conn_session, "loading_screen_trace_id", "unknown")
+                            or "unknown"
+                        ),
+                        (time.monotonic() - send_started) * 1000.0,
+                    )
+                    try:
+                        from server.modules.handlers.world.opcodes import (
+                            movement as movement_handlers,
+                        )
+
+                        post_bootstrap_responses = (
+                            movement_handlers.complete_queued_post_bootstrap_transport_reattach(
+                                conn_session
+                            )
+                        )
+                    except Exception as exc:
+                        Logger.warning(
+                            "[TransportTransfer] post_bootstrap_reattach_failed "
+                            "reason=post_send_exception error=%s",
+                            str(exc),
+                        )
+                        post_bootstrap_responses = []
+                    if post_bootstrap_responses:
+                        try:
+                            _send_normalized_responses(sock, post_bootstrap_responses)
+                        except Exception as exc:
+                            Logger.warning(
+                                "[TransportTransfer] post_bootstrap_reattach_failed "
+                                "reason=separate_update_send error=%s",
+                                str(exc),
+                            )
 
     except Exception as exc:
         Logger.error(f"[WorldServer] error: {exc}")

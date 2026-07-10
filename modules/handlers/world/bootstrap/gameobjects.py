@@ -176,7 +176,7 @@ def _gameobject_update_flags(entry: Mapping[str, Any]) -> int:
     """Return SkyFire-style update flags for the create movement blocks."""
     flags = _UPDATEFLAG_STATIONARY_POSITION | _UPDATEFLAG_ROTATION
     gameobject_type = _entry_int(entry, "type") & 0xFF
-    if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
+    if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         flags |= _UPDATEFLAG_TRANSPORT
     return int(flags)
 
@@ -285,18 +285,26 @@ def _effective_gameobject_state(entry: Mapping[str, Any]) -> int:
     if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
         start_open = _entry_int(entry, "data1") != 0
         return _GO_STATE_ACTIVE if start_open else _GO_STATE_READY
+    if gameobject_type == _GAMEOBJECT_TYPE_MO_TRANSPORT:
+        # MoP 5.4.8 transport creates use GO_STATE_READY even when the
+        # synthetic runtime entry has not supplied a client-visible state.
+        return _GO_STATE_READY
     return _entry_int(entry, "state") & 0xFF
 
 
 def _pack_gameobject_percent_health(entry: Mapping[str, Any]) -> int:
     state = _effective_gameobject_state(entry)
     gameobject_type = _entry_int(entry, "type") & 0xFF
-    return state | (gameobject_type << 8) | (_GO_HEALTH_FULL << 24)
+    return state | (gameobject_type << 8)
 
 
 def _pack_gameobject_state_spell_visual_id(entry: Mapping[str, Any]) -> int:
     artkit = _entry_int(entry, "artkit") & 0xFF
     animprogress = _entry_int(entry, "animprogress") & 0xFF
+    if (_entry_int(entry, "type") & 0xFF) == _GAMEOBJECT_TYPE_MO_TRANSPORT:
+        # Both available 5.4.8 transport captures carry full animation
+        # progress, including for runtime-created cross-map transports.
+        animprogress = _GO_HEALTH_FULL
     return (artkit << 8) | (animprogress << 24)
 
 
@@ -323,6 +331,8 @@ def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
 
 def _transport_runtime_packet_entry(entry: Mapping[str, Any]) -> Mapping[str, Any]:
     """Overlay transport packet fields from RuntimeTransportState when available."""
+    if bool(entry.get("_bootstrap_runtime_transform_pinned")):
+        return entry
     gameobject_type = _entry_int(entry, "type")
     if gameobject_type not in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         return entry
@@ -416,10 +426,7 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
     world_guid = _resolve_world_guid(entry, realm_id)
     packet_map_id = _entry_map_id(entry, int(map_id))
     update_flags = _gameobject_update_flags(entry)
-    gameobject_type = _entry_int(entry, "type") & 0xFF
-    create_flags = bytes(_GAMEOBJECT_CREATE_FLAGS)
-    if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
-        create_flags = gameobject_defs.build_gameobject_create_flags(update_flags)
+    create_flags = gameobject_defs.build_gameobject_create_flags(update_flags)
     field_values = _build_gameobject_field_values(entry, world_guid=world_guid)
     mask_bytes, field_bytes = _build_fixed_u32_field_block(
         field_values,
@@ -431,7 +438,7 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
     stationary_orientation = _stationary_orientation(entry)
     stationary_x = _entry_float(entry, "x")
     packet_rotation = _rotation_components(entry)
-    packed_rotation = _pack_gameobject_rotation(*packet_rotation)
+    packed_rotation = _gameobject_rotation_packed(entry)
     _log_gameobject_orientation_debug(
         entry,
         stationary_orientation=stationary_orientation,
@@ -475,7 +482,7 @@ def _build_gameobject_update_payload(*, map_id: int, entry: Mapping[str, Any], r
             "stationary_z": stationary_z,
             "stationary_orientation": stationary_orientation,
             "stationary_x": stationary_x,
-            # The current create flags expect these two fields explicitly.
+            "has_transport_block": bool(update_flags & _UPDATEFLAG_TRANSPORT),
             "movement_block_uint32": movement_block_uint32,
             "gameobject_rotation_packed": packed_rotation,
             "mask_blocks": len(mask_bytes) // 4,
@@ -690,6 +697,10 @@ def build_database_gameobject_responses(
     if not isinstance(session_loaded_gameobjects, set):
         session_loaded_gameobjects = set()
         session.loaded_gameobjects = session_loaded_gameobjects
+    loaded_gameobject_entries = getattr(session, "loaded_gameobject_entries", None)
+    if not isinstance(loaded_gameobject_entries, dict):
+        loaded_gameobject_entries = {}
+        session.loaded_gameobject_entries = loaded_gameobject_entries
     filtered_entries: list[dict] = []
     for entry in entries:
         entry = prepare_runtime_transport_entry(entry)
@@ -727,6 +738,7 @@ def build_database_gameobject_responses(
                 loaded_transports.pop(original_world_guid, None)
                 loaded_transports[world_guid] = dict(entry)
         filtered_entries.append(entry)
+        loaded_gameobject_entries[world_guid] = dict(entry)
         if seen is not None:
             seen.add(world_guid)
         else:
@@ -743,6 +755,7 @@ def build_database_gameobject_responses(
         if int(entry.get("type", 0) or 0) == 15:
             entry.setdefault("_transport_create_source_path", "startup")
         filtered_entries.append(entry)
+        loaded_gameobject_entries[world_guid] = dict(entry)
         register_loaded_transport_entry(
             session,
             entry,

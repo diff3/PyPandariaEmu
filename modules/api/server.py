@@ -12,6 +12,63 @@ from shared.Logger import Logger
 from server.modules.api.chat_bridge import chat_bridge_runtime
 
 
+API_DOCUMENTATION = {
+    "name": "PyPandaria API",
+    "version": "0.2",
+    "authentication": {
+        "configuration": "Api.Token",
+        "headers": ["Authorization: Bearer <token>", "X-API-Token: <token>"],
+    },
+    "routes": [
+        {
+            "method": "GET",
+            "path": "/api",
+            "description": "Returns API documentation",
+        },
+        {
+            "method": "GET",
+            "path": "/api/health",
+            "description": "Health check",
+        },
+        {
+            "method": "GET",
+            "path": "/api/chat/players",
+            "description": "Returns online players",
+        },
+        {
+            "method": "GET",
+            "path": "/api/chat/events",
+            "description": "Returns chat events",
+            "query": {
+                "after_id": "integer",
+                "limit": "integer",
+            },
+        },
+        {
+            "method": "POST",
+            "path": "/api/chat/world",
+            "description": "Broadcast external chat message",
+            "body": {
+                "author": "string",
+                "source": "string",
+                "message": "string",
+            },
+        },
+        {
+            "method": "POST",
+            "path": "/api/chat/whisper",
+            "description": "Send external whisper",
+            "body": {
+                "target_name": "string",
+                "author": "string",
+                "source": "string",
+                "message": "string",
+            },
+        },
+    ],
+}
+
+
 def _api_config() -> dict:
     config = ConfigLoader.get_config()
     section = dict(config.get("Api") or {})
@@ -66,6 +123,11 @@ def build_handler(token: str):
             if _unauthorized(self, token):
                 return
             parsed = urlparse(self.path)
+            if parsed.path == "/api":
+                payload = dict(API_DOCUMENTATION)
+                payload["authentication_required"] = bool(token)
+                _write_json(self, 200, payload)
+                return
             if parsed.path == "/api/health":
                 _write_json(self, 200, {"ok": True, "service": "api-server"})
                 return
@@ -126,4 +188,3 @@ def run_api_server() -> None:
             pass
         server.server_close()
         Logger.info("[ApiServer] stopped")
-

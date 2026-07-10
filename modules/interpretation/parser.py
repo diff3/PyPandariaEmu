@@ -4,6 +4,8 @@
 
 from typing import Any, List, Optional, Tuple
 
+from shared.Logger import Logger
+
 
 AUTH_RESPONSE_OPCODE = 0x01F6
 
@@ -53,6 +55,17 @@ def parse_plain_packets(raw_data: bytes, direction: str) -> List[Tuple[bytes, An
     """
     _ = direction  # kept for API parity; currently unused
     packets: List[Tuple[bytes, Any, bytes]] = []
+    recv_len = len(raw_data)
+    handshake_found = b"WORLD OF WARCRAFT" in raw_data
+    synthetic_handshake = False
+    first_opcode: int | None = None
+
+    Logger.info(
+        "[WorldParser] parse_plain_packets direction=%s recv_len=%s handshake_substring_found=%s",
+        str(direction),
+        recv_len,
+        int(handshake_found),
+    )
 
     while raw_data:
         if len(raw_data) < 4:
@@ -71,6 +84,9 @@ def parse_plain_packets(raw_data: bytes, direction: str) -> List[Tuple[bytes, An
             h.hex = "HANDSHAKE"
             h.header_raw = header
             packets.append((orig, h, raw_data))
+            synthetic_handshake = True
+            if first_opcode is None:
+                first_opcode = h.cmd
             break
 
         size, cmd, hexop = parse_header(header)
@@ -95,5 +111,13 @@ def parse_plain_packets(raw_data: bytes, direction: str) -> List[Tuple[bytes, An
         h.header_raw = header
 
         packets.append((orig, h, payload))
+        if first_opcode is None:
+            first_opcode = h.cmd
 
+    Logger.info(
+        "[WorldParser] parse_plain_packets result_count=%s synthetic_handshake=%s first_opcode=%s",
+        len(packets),
+        int(synthetic_handshake),
+        first_opcode if first_opcode is not None else "None",
+    )
     return packets

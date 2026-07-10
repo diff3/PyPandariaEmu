@@ -188,6 +188,8 @@ class DatabaseConnection:
 
     @staticmethod
     def _reset_caches() -> None:
+        from server.modules.handlers.world.collision import clear_gameobject_collision_index
+        clear_gameobject_collision_index()
         DatabaseConnection._world_cache_loaded = False
         DatabaseConnection._cache_playercreateinfo = {}
         DatabaseConnection._cache_playercreateinfo_items = {}
@@ -505,6 +507,8 @@ class DatabaseConnection:
                     by_map.setdefault(int(candidate["map_id"]), []).append(candidate)
                 DatabaseConnection._cache_gameobjects_by_map = by_map
                 DatabaseConnection._cache_gameobjects_loaded = True
+                from server.modules.handlers.world.collision import build_gameobject_collision_index
+                build_gameobject_collision_index(by_map)
                 Logger.info(
                     "[DB] preloaded %s gameobjects across %s maps",
                     sum(len(entries) for entries in by_map.values()),
@@ -514,9 +518,13 @@ class DatabaseConnection:
                 Logger.warning(f"[DB] gameobject preload failed: {exc}")
                 DatabaseConnection._cache_gameobjects_by_map = {}
                 DatabaseConnection._cache_gameobjects_loaded = False
+                from server.modules.handlers.world.collision import clear_gameobject_collision_index
+                clear_gameobject_collision_index()
         else:
             DatabaseConnection._cache_gameobjects_by_map = {}
             DatabaseConnection._cache_gameobjects_loaded = False
+            from server.modules.handlers.world.collision import clear_gameobject_collision_index
+            clear_gameobject_collision_index()
             Logger.info("[DB] gameobject preload disabled by config")
 
         if item_entries:

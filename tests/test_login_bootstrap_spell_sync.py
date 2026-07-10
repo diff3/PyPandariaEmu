@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import sys
+import math
 from types import SimpleNamespace
 import types
+
+import pytest
 
 database_module = types.ModuleType("server.modules.database.DatabaseConnection")
 database_module.DatabaseConnection = type(
@@ -29,6 +32,221 @@ sys.modules.setdefault("server.modules.handlers.world.characters.characters", ch
 
 from server.modules.handlers.world.opcodes import login as login_handlers
 from server.session.world_session import LoginState
+from server.session.world_session import MovementState
+
+
+def test_pending_boat_sync_preserves_attachment_before_bootstrap(monkeypatch) -> None:
+    from server.modules.handlers.world import transport_runtime
+
+    transport_guid = 0x1FC0000000000007
+    runtime = SimpleNamespace(
+        guid=transport_guid,
+        map_id=0,
+        x=100.0,
+        y=200.0,
+        z=10.0,
+        orientation=math.pi / 2.0,
+        path_progress_ms=4321,
+    )
+    monkeypatch.setattr(transport_runtime, "is_cross_map_boat_entry", lambda _entry: True)
+    monkeypatch.setattr(transport_runtime, "is_cross_map_zeppelin_entry", lambda _entry: False)
+    monkeypatch.setattr(
+        transport_runtime,
+        "current_runtime_transport_state_for_guid",
+        lambda guid: runtime if guid == transport_guid else None,
+    )
+    session = SimpleNamespace(
+        map_id=0,
+        x=-500.0,
+        y=-600.0,
+        z=-10.0,
+        orientation=0.0,
+        movement_state=MovementState(),
+        pending_transport_transfer={
+            "transfer_id": "16-pre-bootstrap",
+            "destination_guid": transport_guid,
+            "destination_map": 0,
+            "destination_entry": {"entry": 20808},
+            "base_x": -1000.0,
+            "base_y": -2000.0,
+            "local_x": 2.0,
+            "local_y": 3.0,
+            "local_z": 4.0,
+            "local_o": 0.25,
+        },
+    )
+
+    assert login_handlers._sync_pending_transport_before_player_bootstrap(session) is True
+    assert session.x == pytest.approx(-500.0)
+    assert session.y == pytest.approx(-600.0)
+    assert session.z == pytest.approx(-10.0)
+    assert session.orientation == pytest.approx(0.0)
+    assert session.movement_state.has_transport_data is True
+    assert session.movement_state.transport_guid == transport_guid
+    assert session.movement_state.transport_x == pytest.approx(2.0)
+    assert session.movement_state.transport_y == pytest.approx(3.0)
+    assert session.movement_state.transport_z == pytest.approx(4.0)
+    assert session.movement_state.transport_orientation == pytest.approx(0.25)
+    assert session.movement_state.transport_time == 4321
+    assert session._player_bootstrap_runtime_transport == {
+        "transport_guid": transport_guid,
+        "map_id": 0,
+        "x": 100.0,
+        "y": 200.0,
+        "z": 10.0,
+        "orientation": math.pi / 2.0,
+        "route_phase": 4321,
+        "local_x": 2.0,
+        "local_y": 3.0,
+        "local_z": 4.0,
+        "local_o": 0.25,
+        "rotated_x": 0.0,
+        "rotated_y": 0.0,
+        "rotated_z": 0.0,
+    }
+
+
+def test_pending_boat_sync_missing_runtime_keeps_snapshot_and_does_not_block(monkeypatch) -> None:
+    from server.modules.handlers.world import transport_runtime
+
+    monkeypatch.setattr(transport_runtime, "is_cross_map_boat_entry", lambda _entry: True)
+    monkeypatch.setattr(transport_runtime, "is_cross_map_zeppelin_entry", lambda _entry: False)
+    monkeypatch.setattr(
+        transport_runtime,
+        "current_runtime_transport_state_for_guid",
+        lambda _guid: None,
+    )
+    state = MovementState()
+    session = SimpleNamespace(
+        map_id=0,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.5,
+        movement_state=state,
+        pending_transport_transfer={
+            "transfer_id": "16-fallback",
+            "destination_guid": 7,
+            "destination_map": 0,
+            "destination_entry": {"entry": 20808},
+            "local_x": 2.0,
+        },
+    )
+
+    assert login_handlers._sync_pending_transport_before_player_bootstrap(session) is False
+    assert (session.x, session.y, session.z, session.orientation) == (10.0, 20.0, 30.0, 0.5)
+    assert getattr(state, "has_transport_data", False) is False
+
+
+def test_normal_bootstrap_has_no_transport_sync_side_effects() -> None:
+    state = MovementState()
+    session = SimpleNamespace(
+        map_id=1,
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=0.4,
+        movement_state=state,
+        pending_transport_transfer=None,
+    )
+
+    assert login_handlers._sync_pending_transport_before_player_bootstrap(session) is False
+    assert (session.x, session.y, session.z, session.orientation) == (1.0, 2.0, 3.0, 0.4)
+    assert getattr(state, "has_transport_data", False) is False
+
+
+def test_transport_bootstrap_player_create_uses_runtime_position_with_transport_block(
+    monkeypatch,
+) -> None:
+    transport_guid = 0x1FC0000000000007
+    pending = {"transfer_id": "16-wire-baseline", "destination_guid": transport_guid}
+    movement_state = MovementState()
+    movement_state.has_transport_data = True
+    movement_state.transport_guid = transport_guid
+    movement_state.transport_x = 2.0
+    movement_state.transport_y = 3.0
+    movement_state.transport_z = 4.0
+    movement_state.transport_orientation = 0.25
+    session = SimpleNamespace(
+        x=97.0,
+        y=202.0,
+        z=14.0,
+        orientation=1.75,
+        movement_state=movement_state,
+        pending_transport_transfer=pending,
+        _player_bootstrap_runtime_transport={
+            "transport_guid": transport_guid,
+            "route_phase": 4321,
+            "x": 100.0,
+            "y": 200.0,
+            "z": 10.0,
+            "orientation": 1.5,
+            "local_x": 2.0,
+            "local_y": 3.0,
+            "local_z": 4.0,
+            "local_o": 0.25,
+            "rotated_x": -3.0,
+            "rotated_y": 2.0,
+            "rotated_z": 4.0,
+            "transport_create_transform_matched": True,
+        },
+    )
+    captured = {}
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda _session: SimpleNamespace(
+            x=_session.x,
+            y=_session.y,
+            z=_session.z,
+            orientation=_session.orientation,
+            has_transport_data=True,
+            transport_guid=_session.movement_state.transport_guid,
+            transport_x=_session.movement_state.transport_x,
+            transport_y=_session.movement_state.transport_y,
+            transport_z=_session.movement_state.transport_z,
+            transport_orientation=_session.movement_state.transport_orientation,
+            transport_time=1234,
+        ),
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_login_packet",
+        lambda opcode, ctx: captured.update(
+            {
+                opcode: (
+                    ctx.x,
+                    ctx.y,
+                    ctx.z,
+                    ctx.orientation,
+                    ctx.has_transport_data,
+                    getattr(ctx, "transport_guid", 0),
+                )
+            }
+        )
+        or b"packet",
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_database_gameobject_responses",
+        lambda _session: [("SMSG_UPDATE_OBJECT", b"transport-create")],
+    )
+
+    responses = login_handlers.build_player_bootstrap_packets(session)
+
+    assert captured["SMSG_UPDATE_OBJECT_1773613176_0002"] == (
+        97.0,
+        202.0,
+        14.0,
+        1.75,
+        True,
+        transport_guid,
+    )
+    assert responses[1] == ("SMSG_UPDATE_OBJECT", b"transport-create")
+    assert responses[2] == ("SMSG_UPDATE_OBJECT", b"packet")
+    assert movement_state.has_transport_data is True
+    assert movement_state.transport_guid == transport_guid
+    assert session.pending_transport_transfer is pending
 
 
 def test_build_player_bootstrap_packets_uses_native_builders(monkeypatch) -> None:
@@ -58,6 +276,56 @@ def test_build_player_bootstrap_packets_uses_native_builders(monkeypatch) -> Non
     ]
     assert calls == ["SMSG_MOVE_SET_ACTIVE_MOVER", "SMSG_UPDATE_OBJECT_1773613176_0002"]
     assert session.player_object_sent is True
+
+
+def test_pending_transport_transfer_syncs_before_player_bootstrap(monkeypatch) -> None:
+    from server.modules.handlers.world import transport_runtime
+
+    transport_guid = 0x1FC0000000000007
+    runtime_state = SimpleNamespace(
+        guid=transport_guid,
+        map_id=1,
+        x=100.0,
+        y=200.0,
+        z=10.0,
+        orientation=math.pi / 2.0,
+        path_progress_ms=4321,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "current_runtime_transport_state_for_guid",
+        lambda guid: runtime_state if guid == transport_guid else None,
+    )
+    session = SimpleNamespace(
+        map_id=1,
+        x=-1.0,
+        y=-2.0,
+        z=-3.0,
+        orientation=0.0,
+        movement_state=MovementState(),
+        pending_transport_transfer={
+            "transfer_id": "transport-16-test",
+            "destination_guid": transport_guid,
+            "destination_map": 1,
+            "local_x": 2.0,
+            "local_y": 3.0,
+            "local_z": 4.0,
+            "local_o": 0.25,
+            "destination_entry": {
+                "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
+                "world_db_transport": True,
+                "entry": 20808,
+            },
+        },
+    )
+
+    assert login_handlers._sync_pending_transport_before_player_bootstrap(session) is True
+    assert session.x == pytest.approx(-1.0)
+    assert session.y == pytest.approx(-2.0)
+    assert session.z == pytest.approx(-3.0)
+    assert session.movement_state.has_transport_data is True
+    assert session.movement_state.transport_guid == transport_guid
+    assert session.movement_state.transport_time == 4321
 
 
 def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
@@ -333,6 +601,7 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
     state_changes: list[LoginState] = []
     player_bootstrap_loaded_state: list[tuple[set[int], dict[int, int]]] = []
     transport_refresh_state: list[tuple[set[int], dict[int, int]]] = []
+    bootstrap_order: list[str] = []
 
     monkeypatch.setattr(
         login_handlers,
@@ -356,12 +625,18 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
     monkeypatch.setattr(
         login_handlers,
         "build_player_bootstrap_packets",
-        lambda _session: player_bootstrap_loaded_state.append(
+        lambda _session: bootstrap_order.append("player_bootstrap")
+        or player_bootstrap_loaded_state.append(
             (set(_session.loaded_gameobjects), dict(_session.loaded_transport_entries))
         )
         or _session.loaded_gameobjects.add(0x1FC00000000186A7)
         or _session.loaded_transport_entries.update({0x1FC00000000186A7: {"entry": 176495}})
         or [("SMSG_UPDATE_OBJECT", b"create")],
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "_sync_pending_transport_before_player_bootstrap",
+        lambda _session: bootstrap_order.append("transport_sync") or False,
     )
     monkeypatch.setattr(
         transport_runtime,
@@ -400,6 +675,7 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
     responses = login_handlers._queue_teleport_world_transition(session, ctx)
 
     assert state_changes == [LoginState.WORLD_BOOTSTRAP]
+    assert bootstrap_order == ["transport_sync", "player_bootstrap"]
     assert player_bootstrap_loaded_state == [(set(), {})]
     assert transport_refresh_state == [
         ({0x1FC00000000186A7}, {0x1FC00000000186A7: {"entry": 176495}})
@@ -434,9 +710,25 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
         teleport_pending=True,
         worldport_ack_pending=True,
         teleport_destination="test",
+        char_guid=1,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.5,
         loaded_gameobjects=set(),
         loaded_transport_entries={},
         loaded_npcs=set(),
+        transport_transfer_pending=True,
+        pending_transport_transfer={
+            "transfer_id": "1-post-bootstrap",
+            "destination_guid": 0x1FC0000000000007,
+            "destination_entry": {
+                "entry": 20808,
+                "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
+                "world_db_transport": True,
+                "name": "The Maiden's Fancy",
+            },
+        },
     )
     ctx = SimpleNamespace()
     calls: list[str] = []
@@ -455,8 +747,59 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
         "stream_world_objects_after_teleport",
         lambda _session, *, context: calls.append(context) or [("SMSG_UPDATE_OBJECT", b"visible-now")],
     )
-
     responses = login_handlers._queue_teleport_world_transition(session, ctx)
 
     assert calls == ["worldport-loading-complete"]
-    assert responses == [("SMSG_UPDATE_OBJECT", b"visible-now")]
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"visible-now")
+    assert (session.x, session.y, session.z, session.orientation) == (10.0, 20.0, 30.0, 0.5)
+    assert session.pending_transport_transfer["transfer_id"] == "1-post-bootstrap"
+    assert session.transport_transfer_pending is True
+    assert not hasattr(session, "post_bootstrap_transport_reattach_request")
+
+
+def test_worldport_bootstrap_return_is_not_blocked_by_reattach_queue_failure(monkeypatch) -> None:
+    from server.modules.handlers.world import transport_runtime
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+    pending = {"transfer_id": "1-fail", "destination_guid": 7}
+    session = SimpleNamespace(
+        loading_screen_done=False,
+        post_loading_sent=False,
+        teleport_pending=True,
+        worldport_ack_pending=True,
+        teleport_destination="test",
+        loaded_gameobjects=set(),
+        loaded_transport_entries={},
+        loaded_npcs=set(),
+        pending_transport_transfer=pending,
+        transport_transfer_pending=True,
+    )
+    ctx = SimpleNamespace()
+
+    monkeypatch.setattr(login_handlers, "_set_login_state", lambda _session, state: None)
+    monkeypatch.setattr(login_handlers, "refresh_region_weather", lambda _session: None)
+    monkeypatch.setattr(login_handlers, "build_login_packet", lambda opcode_name, _ctx: None)
+    monkeypatch.setattr(login_handlers, "build_player_bootstrap_packets", lambda _session: [])
+    monkeypatch.setattr(login_handlers.spells_handlers, "build_active_mover_spell_sync_responses", lambda _session: [])
+    monkeypatch.setattr(login_handlers, "build_login_inventory_sync_responses", lambda _session: [])
+    monkeypatch.setattr(login_handlers, "trigger_inventory_activation", lambda _session: [])
+    monkeypatch.setattr(login_handlers, "build_explored_zones_update_response", lambda _session: None)
+    monkeypatch.setattr(transport_runtime, "build_bootstrap_transport_value_updates", lambda _session: [])
+    monkeypatch.setattr(
+        movement_handlers,
+        "stream_world_objects_after_teleport",
+        lambda _session, *, context: [("SMSG_UPDATE_OBJECT", b"bootstrap")],
+    )
+    monkeypatch.setattr(
+        movement_handlers,
+        "queue_pending_transport_transfer_post_bootstrap",
+        lambda _session: (_ for _ in ()).throw(RuntimeError("reattach queue failed")),
+    )
+
+    responses = login_handlers._queue_teleport_world_transition(session, ctx)
+
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"bootstrap")
+    assert session.pending_transport_transfer is pending
+    assert session.transport_transfer_pending is True
+    assert session.teleport_pending is False
+    assert session.worldport_ack_pending is False

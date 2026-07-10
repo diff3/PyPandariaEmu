@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+import time
 
 from shared.Logger import Logger
 
@@ -45,4 +46,35 @@ def dispatch(session, opcode: str, data):
             return 0, None
 
     Logger.debug(f"[DISPATCH] opcode={opcode} handler={handler.__name__}")
-    return handler(session, data)
+    if str(opcode) != "CMSG_LOADING_SCREEN_NOTIFY":
+        return handler(session, data)
+
+    started = time.monotonic()
+    trace_id = str(getattr(session, "loading_screen_trace_id", "pending") or "pending")
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=dispatcher event=entering handler=%s",
+        trace_id,
+        handler.__name__,
+    )
+    try:
+        result = handler(session, data)
+    except Exception as exc:
+        Logger.info(
+            "[LoadingScreenTrace] trace_id=%s stage=dispatcher event=exception "
+            "elapsed_ms=%.3f error=%s",
+            str(getattr(session, "loading_screen_trace_id", trace_id) or trace_id),
+            (time.monotonic() - started) * 1000.0,
+            str(exc),
+        )
+        raise
+    response = result[1] if isinstance(result, tuple) and len(result) > 1 else None
+    packet_count = len(response) if isinstance(response, list) else (1 if response else 0)
+    Logger.info(
+        "[LoadingScreenTrace] trace_id=%s stage=dispatcher event=leaving "
+        "elapsed_ms=%.3f packets=%s empty=%s",
+        str(getattr(session, "loading_screen_trace_id", trace_id) or trace_id),
+        (time.monotonic() - started) * 1000.0,
+        packet_count,
+        "true" if not response else "false",
+    )
+    return result

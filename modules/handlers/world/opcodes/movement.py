@@ -58,6 +58,27 @@ def _transport_debug_log(message: str, *args) -> None:
     Logger.info(message, *args)
 
 
+def _transport_player_debug(
+    session,
+    stage: str,
+    text: str,
+    *,
+    transfer_id: str | None = None,
+) -> bool:
+    try:
+        from server.modules.handlers.world.transport_debug_messages import send_message
+
+        return send_message(
+            session,
+            stage,
+            text,
+            transfer_id=transfer_id,
+        )
+    except Exception as exc:
+        Logger.warning("[TransportDebug] message failed stage=%s error=%s", stage, str(exc))
+        return False
+
+
 def _clear_falling_state(state) -> None:
     state.has_fall_data = False
     state.fall_time = 0
@@ -80,6 +101,7 @@ def _verify_pending_boat_transfer_attachment(session, pending: dict[str, Any] | 
             attach_transport_passenger,
             cached_transport_runtime_entry,
             is_cross_map_boat_entry,
+            is_cross_map_zeppelin_entry,
             runtime_transport_state_for_guid,
             transport_passenger_attachment,
         )
@@ -87,12 +109,35 @@ def _verify_pending_boat_transfer_attachment(session, pending: dict[str, Any] | 
         return
 
     destination_entry = pending.get("destination_entry")
-    if not is_cross_map_boat_entry(destination_entry if isinstance(destination_entry, dict) else None):
+    is_boat = is_cross_map_boat_entry(
+        destination_entry if isinstance(destination_entry, dict) else None
+    )
+    is_zeppelin = is_cross_map_zeppelin_entry(
+        destination_entry if isinstance(destination_entry, dict) else None
+    )
+    if not (is_boat or is_zeppelin):
+        return
+
+    transfer_id = str(pending.get("transfer_id", "unknown") or "unknown")
+    transport_kind = "boat" if is_boat else "zeppelin"
+    if is_zeppelin and not is_boat:
+        Logger.info(
+            "[TransportTransferDiag] verify transfer_id=%s kind=%s return_reason=not_boat_verifier "
+            "early_return=true runtime_attachment=unknown rebase=false",
+            transfer_id,
+            transport_kind,
+        )
         return
 
     player_guid = int(getattr(session, "char_guid", 0) or 0)
     destination_guid = int(pending.get("destination_guid", 0) or 0)
     if player_guid <= 0 or destination_guid <= 0:
+        Logger.info(
+            "[TransportTransferDiag] verify transfer_id=%s kind=%s return_reason=invalid_identity "
+            "early_return=true runtime_attachment=unknown rebase=false",
+            transfer_id,
+            transport_kind,
+        )
         return
 
     Logger.info(
@@ -110,6 +155,12 @@ def _verify_pending_boat_transfer_attachment(session, pending: dict[str, Any] | 
         and runtime_attachment is not None
     ):
         Logger.info("[TransportTransfer] verify success")
+        Logger.info(
+            "[TransportTransferDiag] verify transfer_id=%s kind=%s return_reason=already_attached "
+            "early_return=true runtime_attachment=true rebase=false",
+            transfer_id,
+            transport_kind,
+        )
         return
 
     Logger.info("[TransportTransfer] verify failed reattaching")
@@ -184,6 +235,19 @@ def _verify_pending_boat_transfer_attachment(session, pending: dict[str, Any] | 
     session.y = world_y
     session.z = world_z
     session.orientation = world_o
+    Logger.info(
+        "[TransportTransferDiag] verify transfer_id=%s kind=%s return_reason=completed "
+        "early_return=false runtime_attachment=%s runtime_transport=%s rebase=true "
+        "rebased_world=(%.3f %.3f %.3f %.3f)",
+        transfer_id,
+        transport_kind,
+        "true" if runtime_attachment is not None else "false",
+        "true" if runtime_state is not None else "false",
+        world_x,
+        world_y,
+        world_z,
+        world_o,
+    )
     session.transport_attach_state = "ATTACHED"
     session.transport_attach_source_map = int(transport_map)
     session.persist_map_id = int(transport_map)
@@ -1684,18 +1748,83 @@ def _log_orientation_write(
 def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[str, Any]) -> None:
     state = _movement_state(session)
     previous_guid = int(getattr(state, "transport_guid", 0) or 0)
+    previous_attached_guid = int(getattr(session, "transport_attached_guid", 0) or 0)
+    parsed_has_transport = bool(parsed.get("has_transport_data"))
+    parsed_transport_guid = int(parsed.get("transport_guid", 0) or 0)
+    if previous_guid or previous_attached_guid:
+        would_detach = (
+            not parsed_has_transport
+            or (
+                previous_guid > 0
+                and parsed_transport_guid > 0
+                and parsed_transport_guid != previous_guid
+            )
+        )
+        try:
+            from server.modules.handlers.world.transport_runtime import log_transport_attachment_lifetime
+
+            log_transport_attachment_lifetime(
+                "MOVEMENT",
+                session=session,
+                world_guid=previous_guid or previous_attached_guid,
+                reason=f"opcode={opcode_name}",
+                local_offset=(
+                    float(parsed.get("transport_x", 0.0) or 0.0),
+                    float(parsed.get("transport_y", 0.0) or 0.0),
+                    float(parsed.get("transport_z", 0.0) or 0.0),
+                    float(parsed.get("transport_orientation", 0.0) or 0.0),
+                ) if parsed_has_transport else None,
+                movement_packet_has_transport=parsed_has_transport,
+                movement_transport_guid=parsed_transport_guid,
+                would_detach=would_detach,
+                detach_occurred=would_detach,
+            )
+        except Exception as exc:
+            Logger.warning("[TransportAttachment] movement diagnostic failed err=%s", str(exc))
+    if (
+        not bool(getattr(session, "_transport_bootstrap_first_movement_logged", False))
+        and (
+            previous_guid
+            or isinstance(getattr(session, "pending_transport_transfer", None), dict)
+            or bool(getattr(session, "transport_debug_transfer_id", ""))
+        )
+    ):
+        session._transport_bootstrap_first_movement_logged = True
+        Logger.info(
+            "[TransportBootstrap] first_movement opcode=%s transport=%s "
+            "guid=0x%016X previous_guid=0x%016X",
+            opcode_name,
+            "yes" if bool(parsed.get("has_transport_data")) else "no",
+            int(parsed.get("transport_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+            previous_guid & 0xFFFFFFFFFFFFFFFF,
+        )
+
+    if (
+        bool(getattr(session, "_worldporttest_active", False))
+        and not bool(getattr(session, "_worldporttest_first_movement_logged", False))
+    ):
+        session._worldporttest_first_movement_logged = True
+        Logger.info(
+            "[WorldportTest] first_movement opcode=%s transport=%s",
+            opcode_name,
+            "yes" if bool(parsed.get("has_transport_data")) else "no",
+        )
 
     if not bool(parsed.get("has_transport_data")):
         if previous_guid:
             _log_transport_passenger_detach(session, previous_guid, opcode_name)
             try:
-                from server.modules.handlers.world.transport_runtime import record_transport_detach
+                from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
 
-                record_transport_detach(
+                detach_session_transport_passenger(
                     session,
-                    previous_guid,
                     opcode_name=opcode_name,
                     reason="client_clear",
+                    world_guid=previous_guid,
+                    clear_pending_transfer=not (
+                        bool(getattr(session, "teleport_pending", False))
+                        or bool(getattr(session, "worldport_ack_pending", False))
+                    ),
                 )
             except Exception as exc:
                 Logger.warning("[TransportDetach] lifecycle notify failed err=%s", exc)
@@ -1709,36 +1838,50 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
                 previous_guid,
                 reason="client_clear",
             )
-        state.has_transport_data = False
-        state.transport_guid = 0
-        state.transport_x = 0.0
-        state.transport_y = 0.0
-        state.transport_z = 0.0
-        state.transport_orientation = 0.0
-        state.transport_time = 0
-        state.transport_time2 = 0
-        state.transport_time3 = 0
-        state.transport_seat = -1
-        state.transport_vehicle_id = 0
+        if not previous_guid:
+            state.has_transport_data = False
+            state.transport_guid = 0
+            state.transport_x = 0.0
+            state.transport_y = 0.0
+            state.transport_z = 0.0
+            state.transport_orientation = 0.0
+            state.transport_time = 0
+            state.transport_time2 = 0
+            state.transport_time3 = 0
+            state.transport_seat = -1
+            state.transport_vehicle_id = 0
         return
 
     transport_guid = int(parsed.get("transport_guid", 0) or 0)
     if previous_guid != transport_guid:
+        if previous_guid:
+            try:
+                from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
+
+                detach_session_transport_passenger(
+                    session,
+                    reason="new_transport",
+                    world_guid=previous_guid,
+                    opcode_name=opcode_name,
+                )
+            except Exception as exc:
+                Logger.warning("[TransportDetach] previous transport detach failed err=%s", exc)
         try:
             from server.modules.handlers.world.transport_runtime import can_attach_transport
 
             if not can_attach_transport(session, transport_guid):
-                state.has_transport_data = False
-                state.transport_guid = 0
-                state.transport_x = 0.0
-                state.transport_y = 0.0
-                state.transport_z = 0.0
-                state.transport_orientation = 0.0
-                state.transport_time = 0
-                state.transport_time2 = 0
-                state.transport_time3 = 0
-                state.transport_seat = -1
-                state.transport_vehicle_id = 0
+                try:
+                    from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
+
+                    detach_session_transport_passenger(
+                        session,
+                        reason="attach_rejected",
+                        world_guid=transport_guid,
+                        opcode_name=opcode_name,
+                    )
+                except Exception:
+                    state.has_transport_data = False
+                    state.transport_guid = 0
                 Logger.warning(
                     "[TransportAttach] rejected opcode=%s tguid=0x%016X player=%s",
                     opcode_name,
@@ -1780,6 +1923,30 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
         float(state.transport_orientation),
         int(state.transport_time),
         int(state.transport_seat),
+    )
+
+
+def _log_transport_parse_unknown_preserve(session, opcode_name: str, transport_guid: int) -> None:
+    try:
+        from server.modules.handlers.world.transport_runtime import runtime_transport_state_for_guid
+
+        runtime_state = runtime_transport_state_for_guid(int(transport_guid))
+        passengers = getattr(runtime_state, "passengers", None) if runtime_state is not None else None
+        runtime_present = bool(
+            isinstance(passengers, dict)
+            and int(getattr(session, "char_guid", 0) or 0) in passengers
+        )
+    except Exception:
+        runtime_present = False
+    Logger.info(
+        "[TransportAttachment] event=MOVEMENT_PARSE_UNKNOWN "
+        "player=%s opcode=%s transport_guid=0x%016X "
+        "runtime_passenger_present=%s action=preserve_attachment "
+        "reason=no_skyfire_parse",
+        int(getattr(session, "char_guid", 0) or 0),
+        str(opcode_name),
+        int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
+        str(runtime_present).lower(),
     )
 
 
@@ -1935,6 +2102,9 @@ def _clear_loaded_world_objects_for_transfer(session) -> list[tuple[str, bytes]]
     loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
     if isinstance(loaded_transport_entries, dict):
         loaded_transport_entries.clear()
+    loaded_gameobject_entries = getattr(session, "loaded_gameobject_entries", None)
+    if isinstance(loaded_gameobject_entries, dict):
+        loaded_gameobject_entries.clear()
     return responses
 
 
@@ -1978,11 +2148,23 @@ def _clear_stale_transport_transfer_pending(
     return True
 
 
-def _maybe_start_transport_route_transfer(
+def _disabled_legacy_transport_route_transfer_impl(
     session,
     opcode_name: str,
     forced_destination_map: int | None = None,
 ) -> list[tuple[str, bytes]]:
+    state = _movement_state(session)
+    transport_guid = int(getattr(state, "transport_guid", 0) or 0)
+    Logger.info(
+        "[TransportBoundary] legacy_transfer_initiator_suppressed "
+        "source=movement opcode=%s player=%s transport_guid=0x%016X "
+        "forced_destination_map=%s",
+        str(opcode_name),
+        int(getattr(session, "char_guid", 0) or 0),
+        transport_guid & 0xFFFFFFFFFFFFFFFF,
+        "none" if forced_destination_map is None else int(forced_destination_map),
+    )
+    return []
     state = _movement_state(session)
     transport_guid = int(getattr(state, "transport_guid", 0) or 0)
 
@@ -2008,6 +2190,8 @@ def _maybe_start_transport_route_transfer(
         from server.modules.handlers.world.transport_runtime import (
             cached_transport_runtime_entry,
             ensure_linked_transport_destination_entry,
+            is_cross_map_boat_entry,
+            is_cross_map_zeppelin_entry,
             linked_transport_world_guid,
             runtime_transport_state_for_guid,
             transport_transfer_destination_map_for_guid,
@@ -2041,6 +2225,18 @@ def _maybe_start_transport_route_transfer(
         destination_guid = int(getattr(runtime_state, "guid", transport_guid) or transport_guid)
     else:
         destination_guid = int(linked_transport_world_guid(entry, map_id=destination_map))
+    transfer_check_id = (
+        f"check-{int(transport_guid)}-"
+        f"{int(getattr(runtime_state, 'path_progress_ms', 0) or 0)}"
+    )
+    passenger_membership = bool(
+        int(getattr(session, "char_guid", 0) or 0)
+        in (getattr(runtime_state, "passengers", None) or {})
+    )
+    logically_attached = bool(
+        getattr(session, "player_attached_to_transport", False)
+        or str(getattr(session, "transport_attach_state", "") or "") == "ATTACHED"
+    )
     passenger_transfer = get_movement_manager().begin_passenger_transfer(
         int(transport_guid),
         int(destination_guid),
@@ -2052,6 +2248,12 @@ def _maybe_start_transport_route_transfer(
             "[TransportTransfer] passenger transfer rejected player=%s transport=0x%016X",
             int(getattr(session, "char_guid", 0) or 0),
             transport_guid & 0xFFFFFFFFFFFFFFFF,
+        )
+        _transport_player_debug(
+            session,
+            "abort",
+            "[Transport] ABORT reason=passenger_transfer_rejected",
+            transfer_id=transfer_check_id,
         )
         return []
     local_x = float(passenger_transfer.local_x)
@@ -2125,8 +2327,19 @@ def _maybe_start_transport_route_transfer(
     player_y = destination_y + local_y
     player_z = destination_z + local_z
     player_o = destination_o + local_o
-
-    from server.modules.handlers.world.login.packets import build_login_packet
+    source_player_x = float(getattr(session, "x", 0.0) or 0.0)
+    source_player_y = float(getattr(session, "y", 0.0) or 0.0)
+    source_player_z = float(getattr(session, "z", 0.0) or 0.0)
+    source_player_o = float(getattr(session, "orientation", 0.0) or 0.0)
+    transfer_id = (
+        f"{int(getattr(session, 'char_guid', 0) or 0)}-"
+        f"{int(time.monotonic() * 1000.0)}"
+    )
+    session.transport_debug_transfer_id = transfer_id
+    is_boat = is_cross_map_boat_entry(destination_entry)
+    is_zeppelin = is_cross_map_zeppelin_entry(destination_entry)
+    transport_kind = "boat" if is_boat else "zeppelin" if is_zeppelin else "other"
+    diagnostic_transport = bool(is_boat or is_zeppelin)
 
     session.transport_transfer_pending = True
     session.teleport_pending = True
@@ -2137,6 +2350,7 @@ def _maybe_start_transport_route_transfer(
         f"{source_map}->{destination_map}"
     )
     session.pending_transport_transfer = {
+        "transfer_id": transfer_id,
         "source_guid": int(transport_guid),
         "destination_guid": int(destination_guid),
         "source_map": int(source_map),
@@ -2158,6 +2372,45 @@ def _maybe_start_transport_route_transfer(
         "final_o": float(player_o),
         "destination_entry": dict(destination_entry),
     }
+    if diagnostic_transport:
+        Logger.info(
+            "[TransportTransferDiag] start transfer_id=%s kind=%s source_guid=0x%016X "
+            "destination_guid=0x%016X source_map=%s destination_map=%s "
+            "player_world=(%.3f %.3f %.3f %.3f) local_offset=(%.3f %.3f %.3f %.3f) "
+            "transport_world=(%.3f %.3f %.3f %.3f) snapshot_world=(%.3f %.3f %.3f %.3f) "
+            "snapshot_base_source=%s",
+            transfer_id,
+            transport_kind,
+            transport_guid & 0xFFFFFFFFFFFFFFFF,
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+            source_map,
+            destination_map,
+            source_player_x,
+            source_player_y,
+            source_player_z,
+            source_player_o,
+            local_x,
+            local_y,
+            local_z,
+            local_o,
+            float(getattr(runtime_state, "x", 0.0) or 0.0),
+            float(getattr(runtime_state, "y", 0.0) or 0.0),
+            float(getattr(runtime_state, "z", 0.0) or 0.0),
+            float(getattr(runtime_state, "orientation", 0.0) or 0.0),
+            player_x,
+            player_y,
+            player_z,
+            player_o,
+            destination_base_source,
+        )
+        Logger.info(
+            "[TransportTransfer] transfer_begin transfer_id=%s transport_guid=0x%016X "
+            "player=%s route_phase=%s",
+            transfer_id,
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+            int(getattr(session, "char_guid", 0) or 0),
+            int(getattr(runtime_state, "path_progress_ms", 0) or 0),
+        )
     try:
         from server.modules.handlers.world.transport_runtime import record_transport_detach
 
@@ -2170,26 +2423,6 @@ def _maybe_start_transport_route_transfer(
     except Exception as exc:
         Logger.warning("[TransportTransfer] source lifecycle detach failed err=%s", exc)
     session.transport_attach_state = "TRANSFERRING"
-    clear_responses = _clear_loaded_world_objects_for_transfer(session)
-
-    session.map_id = int(destination_map)
-    session.x = float(player_x)
-    session.y = float(player_y)
-    session.z = float(player_z)
-    _log_orientation_write(
-        session,
-        writer="_maybe_start_transport_route_transfer",
-        target="session.orientation",
-        old_value=float(getattr(session, "orientation", 0.0) or 0.0),
-        new_value=float(player_o),
-        reason="route_transition_begin_worldport",
-    )
-    session.orientation = float(player_o)
-    session.persist_map_id = int(destination_map)
-    session.persist_x = float(player_x)
-    session.persist_y = float(player_y)
-    session.persist_z = float(player_z)
-    session.persist_orientation = float(player_o)
 
     state.has_transport_data = True
     state.transport_guid = int(destination_guid)
@@ -2252,32 +2485,57 @@ def _maybe_start_transport_route_transfer(
         player_z,
         player_o,
     )
-
-    ctx = type(
-        "Ctx",
-        (),
-        {
-            "map_id": int(destination_map),
-            "x": float(player_x),
-            "y": float(player_y),
-            "z": float(player_z),
-            "orientation": float(player_o),
-        },
-    )()
-    responses = list(clear_responses)
-    transfer_pending_payload = build_login_packet("SMSG_TRANSFER_PENDING", ctx)
-    new_world_payload = build_login_packet("SMSG_NEW_WORLD", ctx)
-    responses.extend(
-        [
-            ("SMSG_TRANSFER_PENDING", transfer_pending_payload),
-            ("SMSG_NEW_WORLD", new_world_payload),
+    Logger.info(
+        "[TransportTransfer] pre_worldport_transport_state "
+        "attached=%s runtime_passenger=%s has_transport_data=%s "
+        "transport_guid=0x%016X offset=(%.3f %.3f %.3f %.6f)",
+        bool(_player_attached_to_transport(session)),
+        bool(passenger_membership),
+        bool(getattr(state, "has_transport_data", False)),
+        int(getattr(state, "transport_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
+        float(getattr(state, "transport_x", 0.0) or 0.0),
+        float(getattr(state, "transport_y", 0.0) or 0.0),
+        float(getattr(state, "transport_z", 0.0) or 0.0),
+        float(getattr(state, "transport_orientation", 0.0) or 0.0),
+    )
+    if diagnostic_transport:
+        Logger.info(
+            "[TransportTransferDiag] before_new_world transfer_id=%s kind=%s "
+            "world=(%.3f %.3f %.3f %.3f) position_source=snapshot base_source=%s",
+            transfer_id,
+            transport_kind,
+            player_x,
+            player_y,
+            player_z,
+            player_o,
             (
-                "SMSG_MESSAGECHAT",
-                encode_skyfire_messagechat_system_payload(
-                    f"[TransportTransfer] {source_map} -> {destination_map}"
-                ),
+                "runtime_transport"
+                if destination_base_source == "runtime_state"
+                else "fallback"
             ),
-        ]
+        )
+    from server.modules.handlers.world.teleport.map_transfer import (
+        TeleportDestination,
+        apply_map_transfer,
+    )
+
+    responses = apply_map_transfer(
+        session,
+        TeleportDestination(
+            map_id=int(destination_map),
+            x=float(player_x),
+            y=float(player_y),
+            z=float(player_z),
+            orientation=float(player_o),
+            name=(
+                f"transport:{int(entry.get('entry', 0) or 0)}:"
+                f"{source_map}->{destination_map}"
+            ),
+        ),
+        reason="transport",
+        keep_transport=True,
+        source_map_id=int(source_map),
+        transport_entry=int(entry.get("entry", 0) or 0),
     )
     return responses
 
@@ -2294,6 +2552,118 @@ def _transfer_local_value(passenger_transfer, pending: dict, name: str) -> float
     return float(getattr(passenger_transfer, str(name), pending.get(str(name), 0.0)) or 0.0)
 
 
+def _log_transport_worldport_ack_diagnostics(session, pending: dict[str, Any] | None) -> None:
+    if not isinstance(pending, dict):
+        return
+    destination_entry = pending.get("destination_entry")
+    if not isinstance(destination_entry, dict):
+        return
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            is_cross_map_boat_entry,
+            is_cross_map_zeppelin_entry,
+            runtime_transport_state_for_guid,
+        )
+    except Exception:
+        return
+    is_boat = is_cross_map_boat_entry(destination_entry)
+    is_zeppelin = is_cross_map_zeppelin_entry(destination_entry)
+    if not (is_boat or is_zeppelin):
+        return
+
+    destination_guid = int(pending.get("destination_guid", 0) or 0)
+    runtime_state = runtime_transport_state_for_guid(destination_guid)
+    local_x = float(pending.get("local_x", 0.0) or 0.0)
+    local_y = float(pending.get("local_y", 0.0) or 0.0)
+    local_z = float(pending.get("local_z", 0.0) or 0.0)
+    local_o = float(pending.get("local_o", 0.0) or 0.0)
+    current = (
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+    )
+    if runtime_state is not None:
+        runtime_position = (
+            float(getattr(runtime_state, "x", 0.0) or 0.0),
+            float(getattr(runtime_state, "y", 0.0) or 0.0),
+            float(getattr(runtime_state, "z", 0.0) or 0.0),
+            float(getattr(runtime_state, "orientation", 0.0) or 0.0),
+        )
+        calculated = (
+            runtime_position[0] + local_x,
+            runtime_position[1] + local_y,
+            runtime_position[2] + local_z,
+            runtime_position[3] + local_o,
+        )
+        delta = math.dist(current[:3], calculated[:3])
+    else:
+        runtime_position = (0.0, 0.0, 0.0, 0.0)
+        calculated = (
+            float(pending.get("final_x", current[0]) or current[0]),
+            float(pending.get("final_y", current[1]) or current[1]),
+            float(pending.get("final_z", current[2]) or current[2]),
+            float(pending.get("final_o", current[3]) or current[3]),
+        )
+        delta = math.dist(current[:3], calculated[:3])
+
+    Logger.info(
+        "[TransportTransferDiag] worldport_ack transfer_id=%s kind=%s "
+        "destination_guid=0x%016X runtime_found=%s runtime_world=(%.3f %.3f %.3f) "
+        "runtime_orientation=%.3f local_offset=(%.3f %.3f %.3f %.3f) "
+        "current_world=(%.3f %.3f %.3f %.3f) calculated_world=(%.3f %.3f %.3f %.3f) "
+        "world_delta=%.3f",
+        str(pending.get("transfer_id", "unknown") or "unknown"),
+        "boat" if is_boat else "zeppelin",
+        destination_guid & 0xFFFFFFFFFFFFFFFF,
+        "true" if runtime_state is not None else "false",
+        runtime_position[0],
+        runtime_position[1],
+        runtime_position[2],
+        runtime_position[3],
+        local_x,
+        local_y,
+        local_z,
+        local_o,
+        *current,
+        *calculated,
+        delta,
+    )
+    Logger.info(
+        "[TransportTransfer] worldport_ack transfer_id=%s transport_guid=0x%016X "
+        "transport_found=%s retry=0",
+        str(pending.get("transfer_id", "unknown") or "unknown"),
+        destination_guid & 0xFFFFFFFFFFFFFFFF,
+        "true" if runtime_state is not None else "false",
+    )
+    if runtime_state is None:
+        Logger.info(
+            "[TransportTransfer] fallback transfer_id=%s transport_guid=0x%016X "
+            "reason=transport_not_found",
+            str(pending.get("transfer_id", "unknown") or "unknown"),
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+        )
+
+
+def _maybe_start_transport_route_transfer(
+    session,
+    opcode_name: str,
+    forced_destination_map: int | None = None,
+) -> list[tuple[str, bytes]]:
+    state = _movement_state(session)
+    transport_guid = int(getattr(state, "transport_guid", 0) or 0)
+    Logger.info(
+        "[TransportBoundary] legacy_transfer_initiator_suppressed "
+        "source=movement opcode=%s player=%s transport_guid=0x%016X "
+        "forced_destination_map=%s",
+        str(opcode_name),
+        int(getattr(session, "char_guid", 0) or 0),
+        transport_guid & 0xFFFFFFFFFFFFFFFF,
+        "none" if forced_destination_map is None else int(forced_destination_map),
+    )
+    return []
+
+
 def _complete_pending_transport_transfer(session) -> None:
     pending = getattr(session, "pending_transport_transfer", None)
     if not isinstance(pending, dict):
@@ -2304,44 +2674,22 @@ def _complete_pending_transport_transfer(session) -> None:
     state = _movement_state(session)
     destination_guid = int(pending.get("destination_guid", 0) or 0)
     destination_entry = pending.get("destination_entry")
-    source_guid = int(pending.get("source_guid", 0) or 0)
-    passenger_transfer = None
-    if source_guid > 0:
-        try:
-            from server.modules.handlers.world.movements.manager import get_movement_manager
-
-            passenger_transfer = get_movement_manager().complete_passenger_transfer(
-                source_guid,
-                int(getattr(session, "char_guid", 0) or 0),
-            )
-            get_movement_manager().complete_transfer(source_guid)
-        except Exception as exc:
-            Logger.warning("[TransportTransfer] movement transfer complete failed err=%s", exc)
     if destination_guid > 0:
         state.has_transport_data = True
         state.transport_guid = destination_guid
-        state.transport_x = _transfer_local_value(passenger_transfer, pending, "local_x")
-        state.transport_y = _transfer_local_value(passenger_transfer, pending, "local_y")
-        state.transport_z = _transfer_local_value(passenger_transfer, pending, "local_z")
-        state.transport_orientation = _transfer_local_value(passenger_transfer, pending, "local_o")
+        state.transport_x = _transfer_local_value(None, pending, "local_x")
+        state.transport_y = _transfer_local_value(None, pending, "local_y")
+        state.transport_z = _transfer_local_value(None, pending, "local_z")
+        state.transport_orientation = _transfer_local_value(None, pending, "local_o")
         loaded = getattr(session, "loaded_transport_entries", None)
         if not isinstance(loaded, dict):
             loaded = {}
             session.loaded_transport_entries = loaded
         if isinstance(destination_entry, dict):
             loaded[destination_guid] = dict(destination_entry)
-        try:
-            from server.modules.handlers.world.transport_runtime import record_transport_attach
-
-            record_transport_attach(
-                session,
-                destination_guid,
-                opcode_name="CMSG_MOVE_WORLDPORT_ACK",
-            )
-        except Exception as exc:
-            Logger.warning("[TransportTransfer] destination lifecycle attach failed err=%s", exc)
         Logger.info(
-            "[TransportTransfer] destination attach player=%s transport=0x%016X "
+            "[TransportBoundary] transfer_complete_preserve_attachment player=%s "
+            "transport=0x%016X "
             "local=(%.3f %.3f %.3f %.3f)",
             int(getattr(session, "char_guid", 0) or 0),
             destination_guid & 0xFFFFFFFFFFFFFFFF,
@@ -2350,19 +2698,9 @@ def _complete_pending_transport_transfer(session) -> None:
             float(state.transport_z),
             float(state.transport_orientation),
         )
-        Logger.info(
-            "[TRANSPORT_PASSENGER] player=%s transport=0x%016X relative_x=%.3f "
-            "relative_y=%.3f relative_z=%.3f relative_o=%.3f reattached=true",
-            int(getattr(session, "char_guid", 0) or 0),
-            destination_guid & 0xFFFFFFFFFFFFFFFF,
-            float(state.transport_x),
-            float(state.transport_y),
-            float(state.transport_z),
-            float(state.transport_orientation),
-        )
-        _verify_pending_boat_transfer_attachment(session, pending)
     Logger.info(
-        "[TransportTransfer] completed player=%s source_map=%s dest_map=%s node=%s route_phase=%s",
+        "[TransportBoundary] completed player=%s source_map=%s dest_map=%s "
+        "node=%s route_phase=%s",
         int(getattr(session, "char_guid", 0) or 0),
         int(pending.get("source_map", 0) or 0),
         int(pending.get("destination_map", 0) or 0),
@@ -2371,6 +2709,245 @@ def _complete_pending_transport_transfer(session) -> None:
     )
     session.pending_transport_transfer = None
     session.transport_transfer_pending = False
+    Logger.info(
+        "[TransportTransfer] transfer_state_cleared transfer_id=%s player=%s",
+        str(pending.get("transfer_id", "unknown") or "unknown"),
+        int(getattr(session, "char_guid", 0) or 0),
+    )
+
+
+def _disabled_legacy_queue_pending_transport_transfer_post_bootstrap(session) -> bool:
+    """Queue optional boat/zeppelin reattachment without mutating transfer state."""
+    if isinstance(getattr(session, "pending_transport_transfer", None), dict):
+        Logger.info(
+            "[TransportBoundary] post_bootstrap_reattach_not_queued "
+            "reason=boundary_lifecycle player=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+    return False
+    pending = getattr(session, "pending_transport_transfer", None)
+    if not isinstance(pending, dict):
+        return False
+    destination_entry = pending.get("destination_entry")
+    if not isinstance(destination_entry, dict):
+        return False
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            is_cross_map_boat_entry,
+            is_cross_map_zeppelin_entry,
+        )
+    except Exception:
+        return False
+    if not (
+        is_cross_map_boat_entry(destination_entry)
+        or is_cross_map_zeppelin_entry(destination_entry)
+    ):
+        return False
+
+    transfer_id = str(pending.get("transfer_id", "unknown") or "unknown")
+    destination_guid = int(pending.get("destination_guid", 0) or 0)
+    session.post_bootstrap_transport_reattach_request = {
+        "transfer_id": transfer_id,
+        "destination_guid": destination_guid,
+    }
+    Logger.info(
+        "[TransportTransfer] post_bootstrap_reattach_queued transfer_id=%s "
+        "transport_guid=0x%016X",
+        transfer_id,
+        destination_guid & 0xFFFFFFFFFFFFFFFF,
+    )
+    return True
+
+
+def _disabled_legacy_complete_queued_post_bootstrap_transport_reattach(
+    session,
+) -> list[tuple[str, bytes]]:
+    """Run a queued boat/zeppelin reattach after bootstrap packets were sent."""
+    if isinstance(getattr(session, "post_bootstrap_transport_reattach_request", None), dict):
+        Logger.info(
+            "[TransportBoundary] post_bootstrap_reattach_suppressed "
+            "reason=boundary_lifecycle player=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+        session.post_bootstrap_transport_reattach_request = None
+    return []
+    request = getattr(session, "post_bootstrap_transport_reattach_request", None)
+    if not isinstance(request, dict):
+        return []
+    session.post_bootstrap_transport_reattach_request = None
+
+    transfer_id = str(request.get("transfer_id", "unknown") or "unknown")
+    destination_guid = int(request.get("destination_guid", 0) or 0)
+    debug_responses: list[tuple[str, bytes]] = []
+
+    def add_debug(stage: str, text: str) -> None:
+        try:
+            from server.modules.handlers.world.transport_debug_messages import build_message
+
+            response = build_message(
+                session,
+                stage,
+                text,
+                transfer_id=transfer_id,
+            )
+            if response is not None:
+                debug_responses.append(response)
+        except Exception as exc:
+            Logger.warning("[TransportDebug] response failed stage=%s error=%s", stage, str(exc))
+    Logger.info(
+        "[TransportTransfer] post_bootstrap_reattach_attempt transfer_id=%s "
+        "transport_guid=0x%016X",
+        transfer_id,
+        destination_guid & 0xFFFFFFFFFFFFFFFF,
+    )
+
+    pending = getattr(session, "pending_transport_transfer", None)
+    if not isinstance(pending, dict):
+        Logger.warning(
+            "[TransportTransfer] post_bootstrap_reattach_failed transfer_id=%s "
+            "transport_guid=0x%016X reason=pending_missing",
+            transfer_id,
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+        )
+        add_debug(
+            "reattach",
+            "[Transport] REATTACH guid=0x%016X success=no" % (destination_guid & 0xFFFFFFFFFFFFFFFF),
+        )
+        return debug_responses
+    if (
+        str(pending.get("transfer_id", "unknown") or "unknown") != transfer_id
+        or int(pending.get("destination_guid", 0) or 0) != destination_guid
+    ):
+        Logger.warning(
+            "[TransportTransfer] post_bootstrap_reattach_failed transfer_id=%s "
+            "transport_guid=0x%016X reason=pending_changed",
+            transfer_id,
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+        )
+        add_debug(
+            "reattach",
+            "[Transport] REATTACH guid=0x%016X success=no" % (destination_guid & 0xFFFFFFFFFFFFFFFF),
+        )
+        return debug_responses
+
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            current_runtime_transport_state_for_guid,
+        )
+
+        runtime_state = current_runtime_transport_state_for_guid(destination_guid)
+    except Exception as exc:
+        runtime_state = None
+        runtime_error = str(exc)
+    else:
+        runtime_error = ""
+
+    if runtime_state is None:
+        Logger.warning(
+            "[TransportTransfer] post_bootstrap_reattach_failed transfer_id=%s "
+            "transport_guid=0x%016X reason=transport_not_found error=%s",
+            transfer_id,
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+            runtime_error,
+        )
+        session.pending_transport_transfer = None
+        session.transport_transfer_pending = False
+        add_debug(
+            "boat_lookup",
+            "[Transport] BOAT NOT FOUND guid=0x%016X" % (destination_guid & 0xFFFFFFFFFFFFFFFF),
+        )
+        add_debug(
+            "reattach",
+            "[Transport] REATTACH guid=0x%016X success=no" % (destination_guid & 0xFFFFFFFFFFFFFFFF),
+        )
+        return debug_responses
+
+    distance = math.sqrt(
+        (float(getattr(session, "x", 0.0) or 0.0) - float(getattr(runtime_state, "x", 0.0) or 0.0)) ** 2
+        + (float(getattr(session, "y", 0.0) or 0.0) - float(getattr(runtime_state, "y", 0.0) or 0.0)) ** 2
+        + (float(getattr(session, "z", 0.0) or 0.0) - float(getattr(runtime_state, "z", 0.0) or 0.0)) ** 2
+    )
+    add_debug(
+        "boat_lookup",
+        "[Transport] BOAT FOUND guid=0x%016X distance=%.3f runtime=(%.3f,%.3f,%.3f)"
+        % (
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+            distance,
+            float(getattr(runtime_state, "x", 0.0) or 0.0),
+            float(getattr(runtime_state, "y", 0.0) or 0.0),
+            float(getattr(runtime_state, "z", 0.0) or 0.0),
+        ),
+    )
+    add_debug(
+        "player_sync",
+        "[Transport] PLAYER SYNC player=(%.3f,%.3f,%.3f) boat=(%.3f,%.3f,%.3f) distance=%.3f"
+        % (
+            float(getattr(session, "x", 0.0) or 0.0),
+            float(getattr(session, "y", 0.0) or 0.0),
+            float(getattr(session, "z", 0.0) or 0.0),
+            float(getattr(runtime_state, "x", 0.0) or 0.0),
+            float(getattr(runtime_state, "y", 0.0) or 0.0),
+            float(getattr(runtime_state, "z", 0.0) or 0.0),
+            distance,
+        ),
+    )
+
+    try:
+        _complete_pending_transport_transfer(session)
+        responses = resync_movement(session)
+    except Exception as exc:
+        Logger.warning(
+            "[TransportTransfer] post_bootstrap_reattach_failed transfer_id=%s "
+            "transport_guid=0x%016X reason=exception error=%s",
+            transfer_id,
+            destination_guid & 0xFFFFFFFFFFFFFFFF,
+            str(exc),
+        )
+        session.pending_transport_transfer = None
+        session.transport_transfer_pending = False
+        add_debug(
+            "reattach",
+            "[Transport] REATTACH guid=0x%016X success=no" % (destination_guid & 0xFFFFFFFFFFFFFFFF),
+        )
+        return debug_responses
+
+    Logger.info(
+        "[TransportTransfer] post_bootstrap_reattach_success transfer_id=%s "
+        "transport_guid=0x%016X packets=%s",
+        transfer_id,
+        destination_guid & 0xFFFFFFFFFFFFFFFF,
+        len(responses),
+    )
+    add_debug(
+        "reattach",
+        "[Transport] REATTACH guid=0x%016X success=yes" % (destination_guid & 0xFFFFFFFFFFFFFFFF),
+    )
+    return debug_responses + responses
+
+
+def queue_pending_transport_transfer_post_bootstrap(session) -> bool:
+    """Boundary lifecycle does not queue late transport reattach work."""
+    if isinstance(getattr(session, "pending_transport_transfer", None), dict):
+        Logger.info(
+            "[TransportBoundary] post_bootstrap_reattach_not_queued "
+            "reason=boundary_lifecycle player=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+    return False
+
+
+def complete_queued_post_bootstrap_transport_reattach(
+    session,
+) -> list[tuple[str, bytes]]:
+    """Boundary lifecycle suppresses late transport reattach/resync packets."""
+    if isinstance(getattr(session, "post_bootstrap_transport_reattach_request", None), dict):
+        Logger.info(
+            "[TransportBoundary] post_bootstrap_reattach_suppressed "
+            "reason=boundary_lifecycle player=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+        )
+        session.post_bootstrap_transport_reattach_request = None
+    return []
 
 
 def _movement_flags_for_sync(session) -> int:
@@ -2897,17 +3474,137 @@ def _movement_debug_log(session, message: str, *args) -> None:
     Logger.info(message, *args)
 
 
+def _gameobject_collision_debug_log(message: str, *args) -> None:
+    try:
+        from server.modules.handlers.world.feature_config import gameobject_collision_debug_enabled
+
+        if gameobject_collision_debug_enabled():
+            Logger.info(message, *args)
+    except Exception:
+        return
+
+
+def _consume_geometry_shadow_contact_probe(
+    session,
+    opcode_name: str,
+    next_start: tuple[float, float, float],
+    *,
+    flags: int,
+    flags2: int,
+) -> None:
+    probe = getattr(session, "_geometry_shadow_contact_probe", None)
+    if not isinstance(probe, dict):
+        return
+    session._geometry_shadow_contact_probe = None
+    corrected = tuple(float(value) for value in probe["corrected_position"])
+    hit_position = tuple(float(value) for value in probe["hit_position"])
+    _gameobject_collision_debug_log(
+        "[GeometryShadow] correction_next collision_id=%s guid=%s entry=%s displayId=%s mesh=%s "
+        "next_opcode=%s next_flags=0x%X next_flags2=0x%X next_start=(%.6f %.6f %.6f) "
+        "distance_to_corrected=%.6f distance_to_hit=%.6f",
+        str(probe["collision_id"]),
+        int(probe["guid"]),
+        int(probe["entry"]),
+        int(probe["display_id"]),
+        str(probe["mesh"]),
+        str(opcode_name),
+        int(flags),
+        int(flags2),
+        float(next_start[0]),
+        float(next_start[1]),
+        float(next_start[2]),
+        math.dist(next_start, corrected),
+        math.dist(next_start, hit_position),
+    )
+
+
+def _active_geometry_wall_contact(
+    session,
+    current_position: tuple[float, float, float],
+    requested_position: tuple[float, float, float],
+    *,
+    now: float | None = None,
+):
+    state = _movement_state(session)
+    contact = getattr(state, "geometry_wall_contact", None)
+    if contact is None:
+        return None, None
+
+    current_time = float(time.monotonic() if now is None else now)
+    if current_time - float(contact.created_at) >= _GEOMETRY_WALL_CONTACT_TIMEOUT_SECONDS:
+        state.geometry_wall_contact = None
+        return None, "expired"
+    if math.dist(current_position, contact.corrected_position) > _GEOMETRY_WALL_CONTACT_POSITION_TOLERANCE:
+        state.geometry_wall_contact = None
+        return None, "diverged"
+
+    requested_delta = tuple(
+        float(requested_position[index]) - float(current_position[index])
+        for index in range(3)
+    )
+    contact_dot = sum(
+        float(contact.hit_normal[index]) * requested_delta[index]
+        for index in range(3)
+    )
+    if contact_dot >= 0.0:
+        state.geometry_wall_contact = None
+        return None, "released"
+    return contact, float(contact_dot)
+
+
+def _install_pending_geometry_wall_contact(session, *, now: float | None = None) -> None:
+    pending = getattr(session, "_pending_geometry_wall_contact", None)
+    session._pending_geometry_wall_contact = None
+    if not isinstance(pending, dict):
+        return
+    from server.session.world_session import GeometryWallContact
+
+    state = _movement_state(session)
+    state.geometry_wall_contact = GeometryWallContact(
+        object_guid=int(pending["object_guid"]),
+        hit_normal=tuple(float(value) for value in pending["hit_normal"]),
+        corrected_position=tuple(float(value) for value in pending["corrected_position"]),
+        created_at=float(time.monotonic() if now is None else now),
+    )
+
+
+def _sanitize_collision_reject_movement_state(session) -> tuple[int, int]:
+    state = _movement_state(session)
+    flags_before = int(getattr(state, "flags", 0) or 0)
+    flags2_before = int(getattr(state, "flags2", 0) or 0)
+    flags_after = flags_before & ~_GO_COLLISION_STOP_FLAGS
+    flags2_after = flags2_before & ~_MOVEMENTFLAG2_CIRCLE_RUN_SYNC
+    state.flags = int(flags_after)
+    state.flags2 = int(flags2_after)
+    state.is_ascending = False
+    state.is_descending = False
+    return int(flags_before), int(flags_after)
+
+
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
 _MAX_MOVEMENT_Z_DELTA = 100.0
 _STALE_MOVEMENT_TIMESTAMP_REJECT_MS = 10000
 _POSITION_SAVE_INTERVAL_SECONDS = 30.0
 _STATIONARY_EPSILON = 0.01
+_GEOMETRY_WALL_CONTACT_TIMEOUT_SECONDS = 1.0
+_GEOMETRY_WALL_CONTACT_POSITION_TOLERANCE = 0.10
 _SIM_TURN_RATE_RAD_PER_SEC = math.pi
 _GAMEOBJECT_STREAM_LOAD_RADIUS = 120.0
 _GAMEOBJECT_STREAM_UNLOAD_RADIUS = 150.0
 _GAMEOBJECT_STREAM_INTERVAL_SECONDS = 0.5
 _NPC_STREAM_UNLOAD_RADIUS = 150.0
 _NPC_STREAM_INTERVAL_SECONDS = 0.5
+_GAMEOBJECT_COLLISION_CONTACT_BACKOFF = 0.05
+_GO_COLLISION_STOP_FLAGS = (
+    _MOVEMENTFLAG_FORWARD
+    | _MOVEMENTFLAG_BACKWARD
+    | _MOVEMENTFLAG_STRAFE_LEFT
+    | _MOVEMENTFLAG_STRAFE_RIGHT
+    | _MOVEMENTFLAG_TURN_LEFT
+    | _MOVEMENTFLAG_TURN_RIGHT
+    | _MOVEMENTFLAG_ASCENDING
+    | _MOVEMENTFLAG_DESCENDING
+)
 def _player_guid(session) -> int:
     return int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
 
@@ -3039,6 +3736,9 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
             )
         )
         loaded_gameobjects.discard(int(guid))
+        loaded_gameobject_entries = getattr(session, "loaded_gameobject_entries", None)
+        if isinstance(loaded_gameobject_entries, dict):
+            loaded_gameobject_entries.pop(int(guid), None)
         if isinstance(loaded_transport_entries, dict):
             loaded_transport_entries.pop(int(guid), None)
 
@@ -4147,7 +4847,16 @@ def _accept_movement_update(
     z: float,
     orientation: float,
 ) -> bool:
+    session._last_movement_rejection = None
+    session._last_collision_correction = None
+    session._last_collision_flags_in = None
+    session._pending_geometry_wall_contact = None
     if not all(math.isfinite(value) for value in (x, y, z)):
+        session._last_movement_rejection = "nonfinite_position"
+        _gameobject_collision_debug_log(
+            "[GOCollision] bypass player=%s opcode=%s reason=nonfinite_position",
+            int(getattr(session, "char_guid", 0) or 0), opcode_name,
+        )
         _movement_debug_log(
             session,
             "MOVE_DEBUG guid=Player-%s opcode=%s rejection=nonfinite_position",
@@ -4161,12 +4870,21 @@ def _accept_movement_update(
     current_z = float(getattr(session, "z", 0.0) or 0.0)
 
     if current_x == 0.0 and current_y == 0.0 and current_z == 0.0:
+        _gameobject_collision_debug_log(
+            "[GOCollision] bypass player=%s opcode=%s reason=unset_authoritative_position",
+            int(getattr(session, "char_guid", 0) or 0), opcode_name,
+        )
         return True
 
     planar_delta = math.hypot(x - current_x, y - current_y)
     vertical_delta = abs(z - current_z)
 
     if planar_delta > _MAX_MOVEMENT_POSITION_DELTA or vertical_delta > _MAX_MOVEMENT_Z_DELTA:
+        session._last_movement_rejection = "implausible_delta"
+        _gameobject_collision_debug_log(
+            "[GOCollision] bypass player=%s opcode=%s reason=implausible_delta",
+            int(getattr(session, "char_guid", 0) or 0), opcode_name,
+        )
         log = Logger.debug if opcode_name in {"MSG_MOVE_FALL_LAND", "MSG_MOVE_HEARTBEAT"} else Logger.warning
         log(
             f"[Movement] ignoring implausible {opcode_name} update "
@@ -4184,7 +4902,329 @@ def _accept_movement_update(
         )
         return False
 
+    from server.modules.handlers.world.feature_config import (
+        GAMEOBJECT_COLLISION_MODE_LEGACY,
+        GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE,
+        gameobject_collision_debug_enabled,
+        gameobject_collision_enabled,
+        gameobject_collision_mode,
+    )
+    collision_mode = gameobject_collision_mode()
+    shadow_enabled = collision_mode != GAMEOBJECT_COLLISION_MODE_LEGACY
+    active_wall_contact = None
+    active_wall_contact_dot = None
+    if collision_mode == GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE:
+        active_wall_contact, active_wall_contact_dot = _active_geometry_wall_contact(
+            session,
+            (current_x, current_y, current_z),
+            (float(x), float(y), float(z)),
+        )
+    Logger.info(
+        "[GeometryShadow] config_enabled=%s authoritative_mode=%s player=%s opcode=%s",
+        "true" if shadow_enabled else "false",
+        collision_mode,
+        int(getattr(session, "char_guid", 0) or 0),
+        opcode_name,
+    )
+    if gameobject_collision_enabled():
+        from server.modules.handlers.world.collision import gameobject_collision_index
+        state = _movement_state(session)
+        session._last_collision_flags_in = (
+            int(getattr(state, "flags", 0) or 0),
+            int(getattr(state, "flags2", 0) or 0),
+        )
+        _gameobject_collision_debug_log(
+            "[GOCollision] query player=%s opcode=%s map=%s from=(%.3f %.3f %.3f) "
+            "to=(%.3f %.3f %.3f) registered=%s",
+            int(getattr(session, "char_guid", 0) or 0), opcode_name,
+            int(getattr(session, "map_id", 0) or 0),
+            current_x, current_y, current_z, float(x), float(y), float(z),
+            len(gameobject_collision_index),
+        )
+        collision = gameobject_collision_index.blocked(
+            int(getattr(session, "map_id", 0) or 0),
+            (current_x, current_y, current_z),
+            (float(x), float(y), float(z)),
+        )
+        legacy_resolved_end = (float(x), float(y), float(z))
+        collision_fraction = None
+        if collision is not None:
+            collision_fraction = collision.bounds.segment_intersection_fraction(
+                (current_x, current_y, current_z),
+                (float(x), float(y), float(z)),
+            )
+            dx = float(x) - current_x
+            dy = float(y) - current_y
+            dz = float(z) - current_z
+            segment_length = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+            if collision_fraction is not None and segment_length > 1e-6:
+                backoff_fraction = min(
+                    float(collision_fraction),
+                    _GAMEOBJECT_COLLISION_CONTACT_BACKOFF / segment_length,
+                )
+                contact_fraction = max(0.0, float(collision_fraction) - backoff_fraction)
+                corrected_x = current_x + (dx * contact_fraction)
+                corrected_y = current_y + (dy * contact_fraction)
+                corrected_z = current_z + (dz * contact_fraction)
+            else:
+                corrected_x = current_x
+                corrected_y = current_y
+                corrected_z = current_z
+            legacy_resolved_end = (float(corrected_x), float(corrected_y), float(corrected_z))
+            if gameobject_collision_debug_enabled():
+                Logger.info(
+                    "[GOCollision] %s player=%s guid=%s entry=%s reason=segment_intersection "
+                    "contact=(%.3f %.3f %.3f %.3f) fraction=%s",
+                    (
+                        "legacy_hit"
+                        if collision_mode == GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE
+                        else "block"
+                    ),
+                    int(getattr(session, "char_guid", 0) or 0),
+                    collision.guid,
+                    collision.entry,
+                    float(corrected_x),
+                    float(corrected_y),
+                    float(corrected_z),
+                    float(orientation),
+                    (
+                        "none"
+                        if collision_fraction is None
+                        else f"{float(collision_fraction):.4f}"
+                    ),
+                )
+        else:
+            _gameobject_collision_debug_log(
+                "[GOCollision] query clear player=%s opcode=%s",
+                int(getattr(session, "char_guid", 0) or 0), opcode_name,
+            )
+
+        shadow_comparison = None
+        if shadow_enabled:
+            from server.modules.handlers.world.collision.geometry_shadow import run_geometry_shadow_comparison
+
+            shadow_comparison = run_geometry_shadow_comparison(
+                session,
+                opcode_name,
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                start=(current_x, current_y, current_z),
+                end=(float(x), float(y), float(z)),
+                old_collision=collision,
+                old_resolved_end=legacy_resolved_end,
+                authoritative_mode=collision_mode,
+            )
+        else:
+            Logger.info("[GeometryShadow] skipped reason=config_disabled")
+
+        if collision_mode == GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE:
+            authoritative_hit = bool(shadow_comparison is not None and shadow_comparison.new_hit)
+            authoritative_resolved_end = (
+                (float(x), float(y), float(z))
+                if shadow_comparison is None
+                else tuple(float(value) for value in shadow_comparison.new_resolved_end)
+            )
+            if shadow_comparison is not None and not shadow_comparison.agreed:
+                Logger.info(
+                    "[GeometryShadow] authoritative_mode=shadow_authoritative diagnostic_only=true "
+                    "legacy_hit=%s shadow_hit=%s",
+                    "true" if shadow_comparison.old_hit else "false",
+                    "true" if shadow_comparison.new_hit else "false",
+                )
+            hit_instance_id = int(getattr(shadow_comparison, "new_instance_id", 0) or 0)
+            if active_wall_contact is not None and (
+                not authoritative_hit
+                or hit_instance_id == int(active_wall_contact.object_guid)
+            ):
+                session._last_movement_rejection = "gameobject_wall_contact"
+                _gameobject_collision_debug_log(
+                    "[GeometryShadow] wall_contact ignore object=%s dot=%.6f opcode=%s",
+                    int(active_wall_contact.object_guid),
+                    float(active_wall_contact_dot),
+                    str(opcode_name),
+                )
+                return False
+            if authoritative_hit:
+                hit_normal = getattr(shadow_comparison, "new_hit_normal", None)
+                if hit_normal is not None:
+                    session._pending_geometry_wall_contact = {
+                        "object_guid": hit_instance_id,
+                        "hit_normal": tuple(float(value) for value in hit_normal),
+                        "corrected_position": tuple(
+                            float(value) for value in authoritative_resolved_end
+                        ),
+                    }
+            if authoritative_hit and gameobject_collision_debug_enabled():
+                from server.modules.handlers.world.collision.geometry_shadow import (
+                    build_manual_trophy_authoritative_contact_probe,
+                )
+
+                probe = build_manual_trophy_authoritative_contact_probe(
+                    int(getattr(session, "map_id", 0) or 0),
+                    shadow_comparison,
+                )
+                if probe is not None:
+                    sequence = int(getattr(session, "_geometry_shadow_collision_sequence", 0) or 0) + 1
+                    session._geometry_shadow_collision_sequence = sequence
+                    probe["collision_id"] = f"{int(getattr(session, 'char_guid', 0) or 0)}-{sequence}"
+                    session._geometry_shadow_contact_probe = probe
+                    hit_position = probe["hit_position"]
+                    hit_normal = probe["hit_normal"]
+                    corrected_position = probe["corrected_position"]
+                    Logger.info(
+                        "[GeometryShadow] authoritative_correction collision_id=%s guid=%s entry=%s "
+                        "displayId=%s mesh=%s hit=(%.6f %.6f %.6f) normal=(%.6f %.6f %.6f) "
+                        "corrected=(%.6f %.6f %.6f) separation_distance=%.6f "
+                        "corrected_inside_world_aabb=%s corrected_inside_legacy_obb=%s",
+                        str(probe["collision_id"]),
+                        int(probe["guid"]),
+                        int(probe["entry"]),
+                        int(probe["display_id"]),
+                        str(probe["mesh"]),
+                        *hit_position,
+                        *hit_normal,
+                        *corrected_position,
+                        float(probe["separation_distance"]),
+                        "true" if probe["corrected_inside_world_aabb"] else "false",
+                        "true" if probe["corrected_inside_legacy_obb"] else "false",
+                    )
+        else:
+            authoritative_hit = collision is not None
+            authoritative_resolved_end = legacy_resolved_end
+
+        if authoritative_hit:
+            session._last_movement_rejection = "gameobject_collision"
+            session._last_collision_correction = (
+                float(authoritative_resolved_end[0]),
+                float(authoritative_resolved_end[1]),
+                float(authoritative_resolved_end[2]),
+                float(orientation),
+            )
+            return False
+    else:
+        Logger.info("[GeometryShadow] skipped reason=authoritative_collision_disabled")
+        _gameobject_collision_debug_log(
+            "[GOCollision] bypass player=%s opcode=%s reason=feature_disabled",
+            int(getattr(session, "char_guid", 0) or 0), opcode_name,
+        )
+
     return True
+
+
+def _build_collision_reject_responses(session, opcode_name: str) -> list[tuple[str, bytes]]:
+    if str(getattr(session, "_last_movement_rejection", "") or "") != "gameobject_collision":
+        return []
+
+    old_x = float(getattr(session, "x", 0.0) or 0.0)
+    old_y = float(getattr(session, "y", 0.0) or 0.0)
+    old_z = float(getattr(session, "z", 0.0) or 0.0)
+    old_o = float(getattr(session, "orientation", 0.0) or 0.0)
+    attempted = getattr(session, "_last_collision_attempt", None)
+    correction = getattr(session, "_last_collision_correction", None)
+    flags_in = getattr(session, "_last_collision_flags_in", None)
+    state = _movement_state(session)
+    counter_before = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
+    mover_guid = int(_movement_sync_guid(session) or 0)
+    correction_x = old_x
+    correction_y = old_y
+    correction_z = old_z
+    correction_o = old_o
+    if isinstance(correction, tuple) and len(correction) == 4:
+        correction_x = float(correction[0])
+        correction_y = float(correction[1])
+        correction_z = float(correction[2])
+        correction_o = float(correction[3])
+        session.x = correction_x
+        session.y = correction_y
+        session.z = correction_z
+        session.orientation = correction_o
+        state.x = correction_x
+        state.y = correction_y
+        state.z = correction_z
+        state.orientation = correction_o
+        _install_pending_geometry_wall_contact(session)
+    flags_before_reject = int(getattr(state, "flags", 0) or 0)
+    flags_before_reject2 = int(getattr(state, "flags2", 0) or 0)
+    flags_out_before, flags_out = _sanitize_collision_reject_movement_state(session)
+    flags2_out = int(getattr(state, "flags2", 0) or 0)
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+    session.near_teleport_pending = False
+    session.teleport_destination = None
+    _gameobject_collision_debug_log(
+        "[GOCollision] reject flags_in=0x%X flags2_in=0x%X flags_pre_correction=0x%X flags2_pre_correction=0x%X",
+        int(flags_in[0]) if isinstance(flags_in, tuple) and len(flags_in) == 2 else 0,
+        int(flags_in[1]) if isinstance(flags_in, tuple) and len(flags_in) == 2 else 0,
+        int(flags_before_reject),
+        int(flags_before_reject2),
+    )
+    _gameobject_collision_debug_log(
+        "[GOCollision] correction flags_out=0x%X flags2_out=0x%X cleared_directional=%s pos=(%.3f %.3f %.3f %.3f)",
+        int(flags_out),
+        int(flags2_out),
+        "yes" if int(flags_out) != int(flags_out_before) or int(flags2_out) != int(flags_before_reject2) else "no",
+        float(correction_x),
+        float(correction_y),
+        float(correction_z),
+        float(correction_o),
+    )
+    session._last_collision_stop_probe = (
+        float(correction_x),
+        float(correction_y),
+        float(correction_z),
+        float(correction_o),
+        int(flags_out),
+        int(flags2_out),
+    )
+    Logger.info(
+        "[GOCollision] correcting player=%s opcode=%s authoritative_old=(%.3f %.3f %.3f %.3f) "
+        "attempted=(%s) current_before_correction=(%.3f %.3f %.3f %.3f)",
+        int(getattr(session, "char_guid", 0) or 0),
+        str(opcode_name),
+        old_x,
+        old_y,
+        old_z,
+        old_o,
+        (
+            "none"
+            if not isinstance(attempted, tuple)
+            else "%.3f %.3f %.3f %.3f"
+            % (
+                float(attempted[0]),
+                float(attempted[1]),
+                float(attempted[2]),
+                float(attempted[3]),
+            )
+        ),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+    )
+    responses = list(build_same_map_teleport_self_resync_responses(session))
+    if not any(opcode == "SMSG_PLAYER_MOVE" for opcode, _payload in responses):
+        responses.extend(resync_movement(session))
+    Logger.info(
+        "[GOCollision] correction_dispatch player=%s opcode=%s mover_guid=0x%X "
+        "counter_before=%u packets=%s expected_ack=none pending=(near=%s world=%s teleport=%s)",
+        int(getattr(session, "char_guid", 0) or 0),
+        str(opcode_name),
+        mover_guid,
+        counter_before,
+        ",".join(opcode for opcode, _payload in responses) or "none",
+        bool(getattr(session, "near_teleport_pending", False)),
+        bool(getattr(session, "worldport_ack_pending", False)),
+        bool(getattr(session, "teleport_pending", False)),
+    )
+    Logger.info(
+        "[GOCollision] snapback player=%s opcode=%s correction=(%.3f %.3f %.3f %.3f)",
+        int(getattr(session, "char_guid", 0) or 0),
+        str(opcode_name),
+        correction_x,
+        correction_y,
+        correction_z,
+        correction_o,
+    )
+    return responses
 
 
 def parse_movement_info(
@@ -4263,20 +5303,18 @@ def _record_movement_packet_state(session, opcode_name: str, payload: bytes) -> 
         )
     else:
         _apply_movement_flags(state, opcode_name)
-        if bool(getattr(state, "has_transport_data", False)):
-            previous_guid = int(getattr(state, "transport_guid", 0) or 0)
-            Logger.info(
-                "[TRANSPORT_STATE] clear opcode=%s reason=no_skyfire_parse previous_tguid=0x%016X",
-                opcode_name,
-                previous_guid & 0xFFFFFFFFFFFFFFFF,
-            )
-            _clear_stale_transport_transfer_pending(
+        previous_guid = int(getattr(state, "transport_guid", 0) or 0)
+        previous_attached_guid = int(getattr(session, "transport_attached_guid", 0) or 0)
+        unknown_transport_guid = previous_guid or previous_attached_guid
+        if unknown_transport_guid:
+            _log_transport_parse_unknown_preserve(
                 session,
-                previous_guid,
-                reason="client_clear",
+                opcode_name,
+                unknown_transport_guid,
             )
-        state.has_transport_data = False
-        state.transport_guid = 0
+        else:
+            state.has_transport_data = False
+            state.transport_guid = 0
     if opcode_name == "MSG_MOVE_JUMP":
         fall_data = _extract_jump_fall_data(payload)
         if fall_data is not None:
@@ -4780,6 +5818,10 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     opcode_name = str(ctx.name or f"0x{int(ctx.opcode):04X}")
     server_receive_ts = int(time.time() * 1000.0) & 0xFFFFFFFF
     Logger.debug(f"[MOVE] opcode={opcode_name}")
+    starting_x = float(getattr(session, "x", 0.0) or 0.0)
+    starting_y = float(getattr(session, "y", 0.0) or 0.0)
+    starting_z = float(getattr(session, "z", 0.0) or 0.0)
+    starting_o = float(getattr(session, "orientation", 0.0) or 0.0)
     _consume_pending_teleport_on_movement(session, opcode_name)
     _clear_dance_emote_state_on_move(session, opcode_name)
     _apply_early_movement_cleanup(session, opcode_name)
@@ -4805,6 +5847,10 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             "MSG_MOVE_START_TURN_RIGHT",
             "MSG_MOVE_STOP_TURN",
         }:
+            _gameobject_collision_debug_log(
+                "[GOCollision] bypass player=%s opcode=%s reason=state_only_packet",
+                int(getattr(session, "char_guid", 0) or 0), opcode_name,
+            )
             if not _store_authoritative_movement(session, opcode_name, ctx.payload, None):
                 return 0, None
             state = _movement_state(session)
@@ -4846,6 +5892,10 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             f"[Movement] failed to parse {opcode_name} guid=0x{_player_guid(session):X} "
             f"payload_len={len(ctx.payload)}"
         )
+        _gameobject_collision_debug_log(
+            "[GOCollision] bypass player=%s opcode=%s reason=movement_parse_failed",
+            int(getattr(session, "char_guid", 0) or 0), opcode_name,
+        )
         return 0, None
 
     x, y, z, orientation = movement
@@ -4854,9 +5904,96 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     previous_z = float(getattr(session, "z", 0.0) or 0.0)
     previous_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
     previous_normalized_orientation = _normalize_orientation(previous_orientation)
+    state = _movement_state(session)
+    from server.modules.handlers.world.feature_config import (
+        gameobject_collision_enabled,
+    )
+    _consume_geometry_shadow_contact_probe(
+        session,
+        opcode_name,
+        (previous_x, previous_y, previous_z),
+        flags=int(getattr(state, "flags", 0) or 0),
+        flags2=int(getattr(state, "flags2", 0) or 0),
+    )
+    next_packet_probe = getattr(session, "_last_collision_stop_probe", None)
+    if isinstance(next_packet_probe, tuple) and len(next_packet_probe) == 6:
+        _gameobject_collision_debug_log(
+            "[GOCollision] next_packet pos=(%.3f %.3f %.3f %.3f) flags=0x%X flags2=0x%X opcode=%s",
+            float(previous_x),
+            float(previous_y),
+            float(previous_z),
+            float(previous_orientation),
+            int(getattr(state, "flags", 0) or 0),
+            int(getattr(state, "flags2", 0) or 0),
+            opcode_name,
+        )
+        session._last_collision_stop_probe = None
+    session._last_collision_attempt = (float(x), float(y), float(z), float(orientation))
+    go_collision_enabled = gameobject_collision_enabled()
+    _gameobject_collision_debug_log(
+        "[GOCollision] packet opcode=%s opcode_id=0x%04X player=%s name=%s "
+        "old=(%.3f %.3f %.3f %.3f) attempted=(%.3f %.3f %.3f %.3f) map=%s "
+        "flags=0x%X flags2=0x%X go_collision_enabled=%s query_will_execute=%s",
+        opcode_name,
+        int(ctx.opcode) & 0xFFFF,
+        int(getattr(session, "char_guid", 0) or 0),
+        str(getattr(session, "player_name", "") or ""),
+        previous_x,
+        previous_y,
+        previous_z,
+        previous_orientation,
+        float(x),
+        float(y),
+        float(z),
+        float(orientation),
+        int(getattr(session, "map_id", 0) or 0),
+        int(getattr(state, "flags", 0) or 0),
+        int(getattr(state, "flags2", 0) or 0),
+        "yes" if go_collision_enabled else "no",
+        "yes" if go_collision_enabled else "no",
+    )
+
+    next_packet_probe = getattr(session, "_last_collision_stop_probe", None)
+    if next_packet_probe is not None:
+        _gameobject_collision_debug_log(
+            "[GOCollision] next_packet pos=(%.3f %.3f %.3f %.3f) flags=0x%X flags2=0x%X opcode=%s",
+            float(previous_x),
+            float(previous_y),
+            float(previous_z),
+            float(previous_orientation),
+            int(getattr(state, "flags", 0) or 0),
+            int(getattr(state, "flags2", 0) or 0),
+            opcode_name,
+        )
+        session._last_collision_stop_probe = None
 
     if not _accept_movement_update(session, opcode_name, x, y, z, orientation):
-        return 0, None
+        reject_responses = _build_collision_reject_responses(session, opcode_name)
+        _gameobject_collision_debug_log(
+            "[GOCollision] reject_result opcode=%s return=false authoritative_final=(%.3f %.3f %.3f %.3f) "
+            "equals_old=%s equals_attempted=%s responses=%s",
+            opcode_name,
+            float(getattr(session, "x", 0.0) or 0.0),
+            float(getattr(session, "y", 0.0) or 0.0),
+            float(getattr(session, "z", 0.0) or 0.0),
+            float(getattr(session, "orientation", 0.0) or 0.0),
+            "yes"
+            if (
+                math.isclose(float(getattr(session, "x", 0.0) or 0.0), previous_x, abs_tol=1e-6)
+                and math.isclose(float(getattr(session, "y", 0.0) or 0.0), previous_y, abs_tol=1e-6)
+                and math.isclose(float(getattr(session, "z", 0.0) or 0.0), previous_z, abs_tol=1e-6)
+            )
+            else "no",
+            "yes"
+            if (
+                math.isclose(float(getattr(session, "x", 0.0) or 0.0), float(x), abs_tol=1e-6)
+                and math.isclose(float(getattr(session, "y", 0.0) or 0.0), float(y), abs_tol=1e-6)
+                and math.isclose(float(getattr(session, "z", 0.0) or 0.0), float(z), abs_tol=1e-6)
+            )
+            else "no",
+            len(reject_responses),
+        )
+        return 0, (reject_responses or None)
 
     adjusted_movement = (x, y, z, orientation)
 
@@ -5116,12 +6253,42 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         f"[MOVE] guid=0x{_player_guid(session):X} "
         f"pos=({session.x:.3f}, {session.y:.3f}, {session.z:.3f}) facing={session.orientation:.3f}"
     )
+    _gameobject_collision_debug_log(
+        "[GOCollision] finish opcode=%s player=%s start=(%.3f %.3f %.3f %.3f) "
+        "attempted=(%.3f %.3f %.3f %.3f) final=(%.3f %.3f %.3f %.3f) "
+        "equals_start=%s equals_attempted=%s",
+        opcode_name,
+        int(getattr(session, "char_guid", 0) or 0),
+        starting_x,
+        starting_y,
+        starting_z,
+        starting_o,
+        float(x),
+        float(y),
+        float(z),
+        float(orientation),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+        "yes"
+        if (
+            math.isclose(float(getattr(session, "x", 0.0) or 0.0), starting_x, abs_tol=1e-6)
+            and math.isclose(float(getattr(session, "y", 0.0) or 0.0), starting_y, abs_tol=1e-6)
+            and math.isclose(float(getattr(session, "z", 0.0) or 0.0), starting_z, abs_tol=1e-6)
+        )
+        else "no",
+        "yes"
+        if (
+            math.isclose(float(getattr(session, "x", 0.0) or 0.0), float(x), abs_tol=1e-6)
+            and math.isclose(float(getattr(session, "y", 0.0) or 0.0), float(y), abs_tol=1e-6)
+            and math.isclose(float(getattr(session, "z", 0.0) or 0.0), float(z), abs_tol=1e-6)
+        )
+        else "no",
+    )
     stream_responses = _maybe_stream_world_objects(session)
     if stream_responses:
         movement_responses.extend(stream_responses)
-    boat_transfer_responses = _maybe_start_transport_route_transfer(session, opcode_name)
-    if boat_transfer_responses:
-        movement_responses.extend(boat_transfer_responses)
     companion_responses = _maybe_move_companion_pet_for_opcode(session, opcode_name)
     if companion_responses:
         movement_responses.extend(companion_responses)
@@ -5216,6 +6383,15 @@ def _post_teleport_multiplayer_resync(
 
 @register("CMSG_MOVE_TELEPORT_ACK")
 def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
+    Logger.info(
+        "[Teleport] ack opcode=CMSG_MOVE_TELEPORT_ACK pending_before=(near=%s world=%s teleport=%s) "
+        "destination=%s player=%s",
+        bool(getattr(session, "near_teleport_pending", False)),
+        bool(getattr(session, "worldport_ack_pending", False)),
+        bool(getattr(session, "teleport_pending", False)),
+        str(getattr(session, "teleport_destination", "") or "?"),
+        int(getattr(session, "char_guid", 0) or 0),
+    )
     if not bool(getattr(session, "near_teleport_pending", False)):
         Logger.debug("[Teleport] ignoring unexpected CMSG_MOVE_TELEPORT_ACK")
         return 0, [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Teleport] unexpected near-teleport ack ignored"))]
@@ -5283,12 +6459,29 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
         Logger.debug("[Teleport] ignoring unexpected WORLDPORT_ACK")
         return 0, None
 
+    if bool(getattr(session, "_worldporttest_active", False)):
+        Logger.info(
+            "[WorldportTest] worldport_ack player=%s map=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            int(getattr(session, "map_id", 0) or 0),
+        )
+
     destination = str(getattr(session, "teleport_destination", "") or "?")
     # WORLDPORT_ACK only confirms the transfer packet. The loading screen
     # completion still owns the final world bootstrap and pending reset.
     session.near_teleport_pending = False
     session.worldport_ack_pending = False
-    _complete_pending_transport_transfer(session)
+    pending_transport_diagnostics = getattr(session, "pending_transport_transfer", None)
+    _log_transport_worldport_ack_diagnostics(session, pending_transport_diagnostics)
+    try:
+        _complete_pending_transport_transfer(session)
+    except Exception as exc:
+        session.pending_transport_transfer = None
+        session.transport_transfer_pending = False
+        Logger.warning(
+            "[TransportTransfer] post_worldport_reattach_failed error=%s",
+            str(exc),
+        )
 
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
@@ -5316,8 +6509,86 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
         )
     ]
     responses.extend(post_teleport_responses)
-    responses.extend(stream_world_objects_after_teleport(session, context="worldport-ack"))
+    streamed_world_responses = stream_world_objects_after_teleport(
+        session,
+        context="worldport-ack",
+    )
+    responses.extend(streamed_world_responses)
     responses.extend(_build_current_weather_response(session, reason="worldport-ack"))
+    if isinstance(pending_transport_diagnostics, dict):
+        destination_entry = pending_transport_diagnostics.get("destination_entry")
+        if isinstance(destination_entry, dict):
+            try:
+                from server.modules.handlers.world.transport_runtime import (
+                    is_cross_map_boat_entry,
+                    is_cross_map_zeppelin_entry,
+                    transport_passenger_attachment,
+                )
+
+                is_boat = is_cross_map_boat_entry(destination_entry)
+                is_zeppelin = is_cross_map_zeppelin_entry(destination_entry)
+                if is_boat or is_zeppelin:
+                    state = _movement_state(session)
+                    destination_guid = int(
+                        pending_transport_diagnostics.get("destination_guid", 0) or 0
+                    )
+                    runtime_attachment = transport_passenger_attachment(
+                        destination_guid,
+                        int(getattr(session, "char_guid", 0) or 0),
+                    )
+                    outbound_names = [name for name, _payload in responses]
+                    first_update = next(
+                        (
+                            name
+                            for name in outbound_names
+                            if name in {"SMSG_PLAYER_MOVE", "SMSG_UPDATE_OBJECT"}
+                        ),
+                        "none",
+                    )
+                    Logger.info(
+                        "[TransportTransferDiag] before_post_worldport_update transfer_id=%s "
+                        "kind=%s player_world=(%.3f %.3f %.3f %.3f) "
+                        "transport_guid=0x%016X local_offset=(%.3f %.3f %.3f %.3f) "
+                        "attached=%s runtime_attachment=%s first_update=%s "
+                        "self_movement_packet=%s world_sent=(%.3f %.3f %.3f %.3f)",
+                        str(
+                            pending_transport_diagnostics.get("transfer_id", "unknown")
+                            or "unknown"
+                        ),
+                        "boat" if is_boat else "zeppelin",
+                        float(getattr(session, "x", 0.0) or 0.0),
+                        float(getattr(session, "y", 0.0) or 0.0),
+                        float(getattr(session, "z", 0.0) or 0.0),
+                        float(getattr(session, "orientation", 0.0) or 0.0),
+                        int(getattr(state, "transport_guid", 0) or 0)
+                        & 0xFFFFFFFFFFFFFFFF,
+                        float(getattr(state, "transport_x", 0.0) or 0.0),
+                        float(getattr(state, "transport_y", 0.0) or 0.0),
+                        float(getattr(state, "transport_z", 0.0) or 0.0),
+                        float(getattr(state, "transport_orientation", 0.0) or 0.0),
+                        "true"
+                        if bool(getattr(state, "has_transport_data", False))
+                        and int(getattr(state, "transport_guid", 0) or 0)
+                        == destination_guid
+                        else "false",
+                        "true" if runtime_attachment is not None else "false",
+                        first_update,
+                        "true" if "SMSG_PLAYER_MOVE" in outbound_names else "false",
+                        float(getattr(session, "x", 0.0) or 0.0),
+                        float(getattr(session, "y", 0.0) or 0.0),
+                        float(getattr(session, "z", 0.0) or 0.0),
+                        float(getattr(session, "orientation", 0.0) or 0.0),
+                    )
+            except Exception as exc:
+                Logger.info(
+                    "[TransportTransferDiag] before_post_worldport_update transfer_id=%s "
+                    "return_reason=diagnostic_error error=%s",
+                    str(
+                        pending_transport_diagnostics.get("transfer_id", "unknown")
+                        or "unknown"
+                    ),
+                    str(exc),
+                )
     return 0, responses
 @register("CMSG_MOVE_FORCE_RUN_SPEED_CHANGE_ACK")
 def handle_move_force_run_speed_change_ack(session, _ctx: PacketContext) -> Tuple[int, Optional[bytes]]:

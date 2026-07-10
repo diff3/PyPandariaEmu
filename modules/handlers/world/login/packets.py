@@ -1453,6 +1453,15 @@ def build_SMSG_PHASE_SHIFT_CHANGE(_ctx=None) -> bytes:
 
 def build_SMSG_TRANSFER_PENDING(_ctx=None) -> bytes:
     ctx = _ctx or type("Ctx", (), {"map_id": 0})()
+    if bool(getattr(ctx, "has_transport", False)):
+        bits = BitWriter()
+        bits.write_bits(0, 1)  # unknown, SkyFire writes false
+        bits.write_bits(1, 1)  # transport context present
+        payload = bytearray(bits.getvalue())
+        payload.extend(struct.pack("<I", int(getattr(ctx, "map_id", 0) or 0)))
+        payload.extend(struct.pack("<I", int(getattr(ctx, "source_map_id", 0) or 0)))
+        payload.extend(struct.pack("<I", int(getattr(ctx, "transport_entry", 0) or 0)))
+        return bytes(payload)
     return _encode("SMSG_TRANSFER_PENDING", {
         "map_id": int(getattr(ctx, "map_id", 0) or 0),
     })

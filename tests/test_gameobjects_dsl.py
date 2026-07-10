@@ -1,6 +1,11 @@
+import json
+from pathlib import Path
+from unittest.mock import patch
+
 from DSL.modules.EncoderHandler import EncoderHandler
 from server.modules.handlers.world.bootstrap import gameobjects
 from server.modules.game.guid import GameObjectGuid, MoTransportGuid
+from server.modules.interpretation.utils import dsl_decode
 from shared.Logger import Logger
 
 
@@ -34,7 +39,8 @@ def _dsl_fields():
         gameobjects._build_gameobject_field_values(entry, world_guid=world_guid),
         mask_blocks=1,
     )
-    flags = gameobjects._GAMEOBJECT_CREATE_FLAGS
+    update_flags = gameobjects._gameobject_update_flags(entry)
+    flags = gameobjects.gameobject_defs.build_gameobject_create_flags(update_flags)
     return {
         "map_id": 1,
         "update_count": 1,
@@ -51,6 +57,7 @@ def _dsl_fields():
         "stationary_z": float(entry["z"]),
         "stationary_orientation": float(entry["orientation"]),
         "stationary_x": float(entry["x"]),
+        "has_transport_block": bool(update_flags & gameobjects._UPDATEFLAG_TRANSPORT),
         "movement_block_uint32": 0,
         "gameobject_rotation_packed": gameobjects._gameobject_rotation_packed(entry),
         "mask_blocks": len(mask_bytes) // 4,
@@ -96,7 +103,95 @@ def test_non_transport_create_movement_block_unchanged():
     assert gameobjects._gameobject_movement_block_uint32(entry) == 0
 
 
-def test_transport_gameobject_uses_start_open_state_and_full_health():
+def test_normal_gameobject_create_omits_transport_layout():
+    entry = {
+        **_entry(),
+        "type": 5,
+    }
+    update_flags = gameobjects._gameobject_update_flags(entry)
+    captured = {}
+    original_encode = EncoderHandler.encode_packet
+
+    def _capture(opcode_name, fields):
+        captured.update(fields)
+        return original_encode(opcode_name, fields)
+
+    with patch.object(EncoderHandler, "encode_packet", side_effect=_capture):
+        payload = gameobjects._build_gameobject_update_payload(
+            map_id=1,
+            entry=entry,
+            realm_id=1,
+        )
+
+    transport_fields = dict(captured)
+    transport_fields["has_transport_block"] = True
+    transport_payload = original_encode("GAMEOBJECT_CREATE", transport_fields)
+
+    assert update_flags == (
+        gameobjects._UPDATEFLAG_STATIONARY_POSITION
+        | gameobjects._UPDATEFLAG_ROTATION
+    )
+    assert bytes(captured[f"create_flag_{index}"] for index in range(6)) == bytes.fromhex(
+        "000000010040"
+    )
+    assert captured["has_transport_block"] is False
+    assert len(payload) == len(transport_payload) - 4
+
+
+def test_type_15_create_preserves_transport_layout():
+    entry = _entry()
+    update_flags = gameobjects._gameobject_update_flags(entry)
+
+    assert update_flags == (
+        gameobjects._UPDATEFLAG_TRANSPORT
+        | gameobjects._UPDATEFLAG_STATIONARY_POSITION
+        | gameobjects._UPDATEFLAG_ROTATION
+    )
+    assert gameobjects.gameobject_defs.build_gameobject_create_flags(update_flags) == bytes.fromhex(
+        "000000030040"
+    )
+
+
+def test_type_15_update_fields_match_mop_transport_state_and_anim_progress():
+    entry = {
+        **_entry(),
+        # Runtime-created type 15 transports currently arrive with these
+        # server-side defaults; packet packing must expose the 5.4.8 values.
+        "state": 0,
+        "animprogress": 0,
+    }
+    world_guid = MoTransportGuid.from_spawn_guid(entry["guid"])
+
+    fields = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
+
+    assert fields[gameobjects._GAMEOBJECT_FIELD_PERCENT_HEALTH] == 0x00000F01
+    assert fields[gameobjects._GAMEOBJECT_FIELD_STATE_SPELL_VISUAL_ID] == 0xFF000000
+    assert fields[gameobjects._GAMEOBJECT_FIELD_PERCENT_HEALTH] >> 24 == 0
+    assert fields[gameobjects._GAMEOBJECT_FIELD_PERCENT_HEALTH] & 0xFFFF == 0x0F01
+
+
+def test_type_15_update_fields_match_available_548_captures():
+    root = Path(__file__).resolve().parents[2]
+    capture_paths = (
+        root / "data/proxy/pandaria548/captures/debug/SMSG_UPDATE_OBJECT.json",
+        root / "data/proxy/skyfire548/captures/debug/SMSG_UPDATE_OBJECT.json",
+    )
+
+    for capture_path in capture_paths:
+        capture = json.loads(capture_path.read_text(encoding="utf-8"))
+        decoded = dsl_decode(
+            "SMSG_UPDATE_OBJECT",
+            bytes.fromhex(capture["hex_compact"]),
+            silent=True,
+        )
+        update = decoded["updates"][0]
+        captured_fields = dict(zip(update["mask"]["set_bits"], update["fields"]["u32"]))
+
+        assert captured_fields[gameobjects._GAMEOBJECT_FIELD_PERCENT_HEALTH] == 0x00000F01
+        assert captured_fields[gameobjects._GAMEOBJECT_FIELD_STATE_SPELL_VISUAL_ID] == 0xFF000000
+
+
+def test_transport_gameobject_uses_start_open_state_without_anim_progress_in_state_field():
     entry = {
         **_entry(),
         "entry": 4170,
@@ -116,7 +211,7 @@ def test_transport_gameobject_uses_start_open_state_and_full_health():
     assert gameobjects._effective_gameobject_state(entry) == 1
     assert percent_health & 0xFF == 1
     assert (percent_health >> 8) & 0xFF == 11
-    assert (percent_health >> 24) & 0xFF == 0xFF
+    assert (percent_health >> 24) & 0xFF == 0
     assert (state_spell_visual_id >> 24) & 0xFF == 0
     assert fields[gameobjects._GAMEOBJECT_FIELD_LEVEL] == 0
     assert fields[gameobjects._GAMEOBJECT_FIELD_FLAGS] & gameobjects._GO_FLAG_TRANSPORT

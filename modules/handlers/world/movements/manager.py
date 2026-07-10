@@ -486,7 +486,7 @@ class MovementManager:
                 int(passenger_id),
             )
             return None
-        attachment = source.passengers.pop(int(passenger_id), None)
+        attachment = source.passengers.get(int(passenger_id))
         if attachment is None:
             Logger.warning(
                 "[MovementManager] transfer without attach instance=0x%016X passenger=%s",
@@ -554,6 +554,8 @@ class MovementManager:
                 int(passenger_id),
             )
             return None
+        if int(transfer.destination_instance_id) != int(source_instance_id):
+            source.passengers.pop(int(passenger_id), None)
         self.attach_passenger(
             int(transfer.destination_instance_id),
             int(passenger_id),

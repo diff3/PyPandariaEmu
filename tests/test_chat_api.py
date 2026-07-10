@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -132,6 +134,98 @@ class ChatApiTest(unittest.TestCase):
             with patch("server.modules.api.server.Logger.success") as success:
                 api_server.run_api_server()
         success.assert_called_once()
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str = "",
+        body: dict | None = None,
+        headers: dict | None = None,
+    ):
+        handler_class = api_server.build_handler(token)
+        handler = object.__new__(handler_class)
+        encoded_body = b"" if body is None else json.dumps(body).encode("utf-8")
+        handler.path = path
+        handler.headers = dict(headers or {})
+        if encoded_body:
+            handler.headers["Content-Length"] = str(len(encoded_body))
+            handler.headers["Content-Type"] = "application/json"
+        handler.rfile = io.BytesIO(encoded_body)
+        handler.wfile = io.BytesIO()
+        response = {"status": None, "headers": {}}
+        handler.send_response = lambda status: response.__setitem__("status", status)
+        handler.send_header = lambda key, value: response["headers"].__setitem__(key, value)
+        handler.end_headers = lambda: None
+
+        getattr(handler, f"do_{method}")()
+        payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        return response["status"], payload
+
+    def test_api_documentation_lists_all_routes(self):
+        status, payload = self._request("GET", "/api")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["name"], "PyPandaria API")
+        self.assertEqual(payload["version"], "0.2")
+        self.assertFalse(payload["authentication_required"])
+        self.assertEqual(
+            {(route["method"], route["path"]) for route in payload["routes"]},
+            {
+                ("GET", "/api"),
+                ("GET", "/api/health"),
+                ("GET", "/api/chat/players"),
+                ("GET", "/api/chat/events"),
+                ("POST", "/api/chat/world"),
+                ("POST", "/api/chat/whisper"),
+            },
+        )
+
+    def test_api_documentation_uses_existing_token_authentication(self):
+        status, payload = self._request("GET", "/api", token="secret")
+        self.assertEqual(status, 401)
+        self.assertEqual(payload, {"error": "unauthorized"})
+
+        status, payload = self._request(
+            "GET",
+            "/api",
+            token="secret",
+            headers={"Authorization": "Bearer secret"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["authentication_required"])
+
+    def test_existing_api_routes_keep_their_responses(self):
+        status, payload = self._request("GET", "/api/health")
+        self.assertEqual((status, payload), (200, {"ok": True, "service": "api-server"}))
+
+        status, payload = self._request("GET", "/api/chat/players")
+        self.assertEqual((status, payload), (200, {"players": []}))
+
+        status, payload = self._request("GET", "/api/chat/events?after_id=0&limit=10")
+        self.assertEqual((status, payload), (200, {"events": []}))
+
+        status, payload = self._request(
+            "POST",
+            "/api/chat/world",
+            body={"author": "Bot", "source": "Test", "message": "World"},
+        )
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["ok"])
+
+        status, payload = self._request(
+            "POST",
+            "/api/chat/whisper",
+            body={
+                "target_name": "Alice",
+                "author": "Bot",
+                "source": "Test",
+                "message": "Whisper",
+            },
+        )
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["ok"])
 
 
 if __name__ == "__main__":

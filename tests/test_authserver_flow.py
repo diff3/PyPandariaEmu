@@ -1,4 +1,5 @@
 import socket
+import struct
 import time
 
 from server.authserver import (
@@ -9,6 +10,7 @@ from server.authserver import (
     previous_state,
     step_controller,
 )
+from server.modules.handlers.AuthHandlers import build_REALM_LIST_S
 from server.modules.protocol.PacketContext import PacketContext
 
 
@@ -32,6 +34,27 @@ def test_state_helpers_follow_expected_auth_flow():
     assert previous_state("REALM_LIST") == "AUTH_LOGON_PROOF"
     assert previous_state("AUTH_LOGON_PROOF") == "AUTH_LOGON_CHALLENGE"
     assert previous_state("AUTH_LOGON_CHALLENGE") == INITIAL_STATE
+
+
+def test_realm_list_size_counts_payload_after_three_byte_header():
+    packet = build_REALM_LIST_S([
+        {
+            "icon": 0,
+            "lock": 0,
+            "flag": 0x20,
+            "name": "PyPandaria",
+            "address": "192.168.11.30:8085",
+            "pop": 0.0,
+            "characters": 0,
+            "timezone": 1,
+            "realmid": 1,
+        }
+    ])
+
+    assert packet[0] == 0x10
+    assert len(packet) == 51
+    assert packet[1:3] == b"\x30\x00"
+    assert struct.unpack_from("<H", packet, 1)[0] == len(packet) - 3
 
 
 def test_step_controller_success_advances_state():

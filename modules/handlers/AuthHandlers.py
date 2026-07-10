@@ -497,11 +497,12 @@ def build_realmlist_entries(realms, account_id):
                 char_counts[realm.id] = char_count
 
         online = status_snapshot.get(realm.id, False)
+        encoded_flag = realm.flag
 
         entries.append({
             "icon": realm.icon,
             "lock": 0 if online else 1,
-            "flag": realm_flag(online),
+            "flag": encoded_flag,
             "name": realm.name,
             "address": f"{realm.address}:{realm.port}",
             "pop": 0.0,
@@ -509,6 +510,14 @@ def build_realmlist_entries(realms, account_id):
             "timezone": realm.timezone,
             "realmid": realm.id,
         })
+
+        Logger.debug(
+            "[REALM_LIST] realm_id=%s realm_name=%s db_flag=%s encoded_flag=%s",
+            realm.id,
+            realm.name,
+            realm.flag,
+            encoded_flag,
+        )
 
     return entries
 
@@ -564,14 +573,32 @@ def handle_REALM_LIST_C(ctx: PacketContext):
 def build_REALM_LIST_S(realm_entries) -> bytes:
     fields = {
         "cmd": 0x10,
-        "size": 48,
+        "size": 0,
         "unk1": 0,
         "realm_list_size": len(realm_entries),
         "realmlist": realm_entries,
         "unk2": 0x10,
         "unk3": 0x00,
     }
-    return EncoderHandler.encode_packet("REALM_LIST_S", fields)
+    packet = EncoderHandler.encode_packet("REALM_LIST_S", fields)
+    fields["size"] = len(packet) - 3
+    packet = EncoderHandler.encode_packet("REALM_LIST_S", fields)
+
+    realm_name = ""
+    realm_address = ""
+    if realm_entries:
+        realm_name = str(realm_entries[0].get("name", ""))
+        realm_address = str(realm_entries[0].get("address", ""))
+
+    Logger.debug(
+        "[Auth] REALM_LIST_S encoded\nlength=%s\nsize=%s\nrealm=%s\naddress=%s",
+        len(packet),
+        fields["size"],
+        realm_name,
+        realm_address,
+    )
+
+    return packet
 
 
 # ---- AUTH_RECONNECT_CHALLENGE -----------------------------------------

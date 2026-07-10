@@ -1161,6 +1161,16 @@ def _apply_fixplayer_destination(session, destination_name: str) -> str | None:
     y = float(destination["y"])
     z = float(destination["z"])
     orientation = float(destination["o"])
+    try:
+        from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
+
+        detach_session_transport_passenger(
+            session,
+            reason="teleport",
+            opcode_name="fixplayer",
+        )
+    except Exception as exc:
+        Logger.warning("[TransportDetach] fixplayer detach failed error=%s", str(exc))
     session.map_id = map_id
     session.x = x
     session.y = y
@@ -1310,6 +1320,9 @@ def _clear_loaded_world_objects_for_teleport(session, movement_handlers, *, map_
 
     session.last_gameobject_stream_at = 0.0
     session.last_npc_stream_at = 0.0
+    loaded_gameobject_entries = getattr(session, "loaded_gameobject_entries", None)
+    if isinstance(loaded_gameobject_entries, dict):
+        loaded_gameobject_entries.clear()
     return responses
 
 
@@ -1374,6 +1387,7 @@ def apply_player_state_change(
     map_id: int | None = None,
     set_flags: int | None = None,
     clear_flags: int | None = None,
+    suppress_worldport_cleanup: bool = False,
 ) -> list[tuple[str, bytes]]:
     """
     Mutate session state first, then derive the packets from that state.
@@ -1410,6 +1424,17 @@ def apply_player_state_change(
             release_current_chair(session, reason="teleport")
         except Exception as exc:
             Logger.debug("[CHAIR] release on teleport failed: %s", exc)
+        if not suppress_worldport_cleanup:
+            try:
+                from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
+
+                detach_session_transport_passenger(
+                    session,
+                    reason="teleport",
+                    opcode_name="chat_teleport",
+                )
+            except Exception as exc:
+                Logger.warning("[TransportDetach] chat teleport detach failed error=%s", str(exc))
 
         old_map_id = int(getattr(session, "map_id", 0) or 0)
         target_map_id = old_map_id if map_id is None else int(map_id)
@@ -1423,18 +1448,19 @@ def apply_player_state_change(
         ):
             pre_position_responses.extend(spells_handlers.dismount(session))
 
-        pre_position_responses.extend(
-            _clear_loaded_world_objects_for_teleport(
+        if not suppress_worldport_cleanup:
+            pre_position_responses.extend(
+                _clear_loaded_world_objects_for_teleport(
+                    session,
+                    movement_handlers,
+                    map_id=old_map_id,
+                )
+            )
+            force_player_visibility_destroy(
                 session,
-                movement_handlers,
+                reason="teleport-start",
                 map_id=old_map_id,
             )
-        )
-        force_player_visibility_destroy(
-            session,
-            reason="teleport-start",
-            map_id=old_map_id,
-        )
         session.x = float(x)
         session.y = float(y)
         session.z = float(z)

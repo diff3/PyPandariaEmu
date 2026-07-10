@@ -30,7 +30,12 @@ def _normalize_orientation(value: float) -> float:
     return float(orientation)
 
 
-def _reset_movement_for_teleport(session, destination: TeleportDestination) -> None:
+def _reset_movement_for_teleport(
+    session,
+    destination: TeleportDestination,
+    *,
+    keep_transport: bool = False,
+) -> None:
     try:
         from server.modules.handlers.world.opcodes import movement as movement_handlers
 
@@ -49,11 +54,29 @@ def _reset_movement_for_teleport(session, destination: TeleportDestination) -> N
     state.pitch = 0.0
     state.is_ascending = False
     state.is_descending = False
-    state.transport_guid = 0
-    state.transport_x = 0.0
-    state.transport_y = 0.0
-    state.transport_z = 0.0
-    state.transport_o = 0.0
+    if not keep_transport:
+        try:
+            from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
+
+            detach_session_transport_passenger(
+                session,
+                reason="teleport",
+                opcode_name="apply_map_transfer",
+            )
+        except Exception as exc:
+            Logger.warning("[TransportDetach] teleport detach failed error=%s", str(exc))
+            state.has_transport_data = False
+            state.transport_guid = 0
+            state.transport_x = 0.0
+            state.transport_y = 0.0
+            state.transport_z = 0.0
+            state.transport_orientation = 0.0
+            state.transport_o = 0.0
+            state.transport_time = 0
+            state.transport_time2 = 0
+            state.transport_time3 = 0
+            state.transport_seat = -1
+            state.transport_vehicle_id = 0
     state.has_fall_data = False
     state.has_fall_direction = False
     state.fall_time = 0
@@ -68,6 +91,9 @@ def apply_map_transfer(
     destination: TeleportDestination,
     *,
     reason: str,
+    keep_transport: bool = False,
+    source_map_id: int | None = None,
+    transport_entry: int | None = None,
 ) -> list[tuple[str, bytes]]:
     target = TeleportDestination(
         map_id=int(destination.map_id),
@@ -113,7 +139,7 @@ def apply_map_transfer(
     session._area_trigger_suppressed_until = (
         time.monotonic() + _POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS
     )
-    _reset_movement_for_teleport(session, target)
+    _reset_movement_for_teleport(session, target, keep_transport=keep_transport)
 
     # TODO: move chat command teleports onto this helper once the older command
     # path can be changed without altering its user-facing command feedback.
@@ -123,11 +149,44 @@ def apply_map_transfer(
         session,
         position=(target.x, target.y, target.z, target.orientation),
         map_id=target.map_id,
+        suppress_worldport_cleanup=bool(keep_transport),
     )
-    _reset_movement_for_teleport(session, target)
+    _reset_movement_for_teleport(session, target, keep_transport=keep_transport)
+    if keep_transport and transport_entry is not None:
+        from server.modules.handlers.world.login.packets import build_login_packet
+
+        source_for_packet = source_map if source_map_id is None else int(source_map_id)
+        transport_transfer_pending = (
+            "SMSG_TRANSFER_PENDING",
+            build_login_packet(
+                "SMSG_TRANSFER_PENDING",
+                type(
+                    "Ctx",
+                    (),
+                    {
+                        "map_id": int(target.map_id),
+                        "has_transport": True,
+                        "source_map_id": int(source_for_packet),
+                        "transport_entry": int(transport_entry),
+                    },
+                )(),
+            ),
+        )
+        responses = [
+            transport_transfer_pending if opcode == "SMSG_TRANSFER_PENDING" else (opcode, payload)
+            for opcode, payload in list(responses or [])
+        ]
+        Logger.info(
+            "[TransportWorldport] transfer_pending_transport "
+            "dest_map=%s source_map=%s transport_entry=%s keep_transport=true",
+            int(target.map_id),
+            int(source_for_packet),
+            int(transport_entry),
+        )
 
     Logger.info(
-        "[MapTransfer] reason=%s destination=%s same_map=%s map=%s pos=(%.3f %.3f %.3f %.6f)",
+        "[MapTransfer] reason=%s destination=%s same_map=%s map=%s "
+        "pos=(%.3f %.3f %.3f %.6f) keep_transport=%s",
         str(reason),
         str(target.name or "?"),
         int(same_map),
@@ -136,5 +195,6 @@ def apply_map_transfer(
         float(target.y),
         float(target.z),
         float(target.orientation),
+        int(bool(keep_transport)),
     )
     return list(responses or [])
