@@ -155,6 +155,298 @@ def test_get_gameobjects_near_cache_respects_limit():
     assert [entry["guid"] for entry in results] == [11, 12]
 
 
+def test_cache_restore_gameobject_spawn_replaces_only_affected_spawn():
+    DatabaseConnection = _import_database_connection()
+
+    DatabaseConnection._world_cache_loaded = True
+    DatabaseConnection._cache_gameobjects_loaded = True
+    DatabaseConnection._cache_gameobjects_by_map = {
+        0: [
+            {"guid": 11, "entry": 100, "map_id": 0, "map": 0, "x": 1.0, "y": 2.0},
+            {"guid": 12, "entry": 101, "map_id": 0, "map": 0, "x": 3.0, "y": 4.0},
+        ],
+        1: [
+            {"guid": 13, "entry": 102, "map_id": 1, "map": 1, "x": 5.0, "y": 6.0},
+        ],
+    }
+
+    DatabaseConnection._cache_restore_gameobject_spawn(
+        {"guid": 12, "entry": 101, "map_id": 0, "map": 0, "x": 30.0, "y": 40.0}
+    )
+
+    assert DatabaseConnection.get_gameobject_spawn(11)["x"] == 1.0
+    assert DatabaseConnection.get_gameobject_spawn(12)["x"] == 30.0
+    assert DatabaseConnection.get_gameobject_spawn(12)["y"] == 40.0
+    assert DatabaseConnection.get_gameobject_spawn(13)["x"] == 5.0
+
+
+def test_cached_gameobject_transform_update_entry_is_immediately_authoritative():
+    DatabaseConnection = _import_database_connection()
+
+    existing = {
+        "guid": 22,
+        "entry": 200,
+        "map_id": 1,
+        "map": 1,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 1.0,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+    }
+    DatabaseConnection._world_cache_loaded = True
+    DatabaseConnection._cache_gameobjects_loaded = True
+    DatabaseConnection._cache_gameobjects_by_map = {1: [dict(existing)]}
+
+    updated = dict(DatabaseConnection.get_gameobject_spawn(22))
+    updated.update(
+        {
+            "x": 100.0,
+            "y": 200.0,
+            "z": 300.0,
+            "orientation": 2.0,
+            "rotation0": 0.0,
+            "rotation1": 0.0,
+            "rotation2": DatabaseConnection._gameobject_rotation_from_orientation(2.0)[2],
+            "rotation3": DatabaseConnection._gameobject_rotation_from_orientation(2.0)[3],
+        }
+    )
+    DatabaseConnection._cache_restore_gameobject_spawn(updated)
+
+    fresh = DatabaseConnection.get_gameobject_spawn(22)
+
+    assert fresh["x"] == 100.0
+    assert fresh["y"] == 200.0
+    assert fresh["z"] == 300.0
+    assert fresh["orientation"] == 2.0
+    assert fresh["rotation2"] == DatabaseConnection._gameobject_rotation_from_orientation(2.0)[2]
+    assert fresh["rotation3"] == DatabaseConnection._gameobject_rotation_from_orientation(2.0)[3]
+
+
+def test_update_gameobject_spawn_transform_updates_loaded_cache_without_db_reload():
+    DatabaseConnection = _import_database_connection()
+
+    DatabaseConnection._world_cache_loaded = True
+    DatabaseConnection._cache_gameobjects_loaded = True
+    DatabaseConnection._cache_gameobjects_by_map = {
+        1: [
+            {
+                "guid": 33,
+                "entry": 300,
+                "map_id": 1,
+                "map": 1,
+                "x": 10.0,
+                "y": 20.0,
+                "z": 30.0,
+                "orientation": 1.0,
+                "rotation0": 0.0,
+                "rotation1": 0.0,
+                "rotation2": 0.0,
+                "rotation3": 1.0,
+                "size": 1.0,
+            }
+        ]
+    }
+
+    world_model = sys.modules["server.modules.database.WorldModel"]
+
+    class Field:
+        def __eq__(self, other):
+            return ("eq", other)
+
+    world_model.WorldGameObject.guid = Field()
+
+    class Row:
+        position_x = 10.0
+        position_y = 20.0
+        position_z = 30.0
+        orientation = 1.0
+        rotation0 = 0.0
+        rotation1 = 0.0
+        rotation2 = 0.0
+        rotation3 = 1.0
+
+    row = Row()
+
+    class Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return row
+
+    class Session:
+        committed = False
+        closed = False
+
+        def query(self, *args, **kwargs):
+            return Query()
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            raise AssertionError("rollback should not be called")
+
+        def close(self):
+            self.closed = True
+
+    db_session = Session()
+    DatabaseConnection.world = staticmethod(lambda: db_session)
+
+    updated = DatabaseConnection.update_gameobject_spawn_transform(
+        33,
+        x=100.0,
+        y=200.0,
+        z=300.0,
+        orientation=2.5,
+    )
+    fresh = DatabaseConnection.get_gameobject_spawn(33)
+
+    assert db_session.committed is True
+    assert db_session.closed is True
+    assert row.position_x == 100.0
+    assert row.position_y == 200.0
+    assert row.position_z == 300.0
+    assert row.orientation == 2.5
+    assert updated["x"] == 100.0
+    assert updated["y"] == 200.0
+    assert updated["z"] == 300.0
+    assert updated["orientation"] == 2.5
+    assert fresh["x"] == 100.0
+    assert fresh["y"] == 200.0
+    assert fresh["z"] == 300.0
+    assert fresh["orientation"] == 2.5
+
+
+def test_gameobject_candidate_uses_spawn_scale_before_template_size():
+    DatabaseConnection = _import_database_connection()
+
+    class Row:
+        guid = 55
+        id = 500
+        map = 1
+        position_x = 0.0
+        position_y = 0.0
+        position_z = 0.0
+        orientation = 0.0
+        rotation0 = 0.0
+        rotation1 = 0.0
+        rotation2 = 0.0
+        rotation3 = 1.0
+        animprogress = 255
+        state = 1
+        type = 5
+        displayId = 100
+        name = "Scaled Crate"
+        faction = 0
+        flags = 1
+        size = 1.0
+        scale = 2.5
+
+    candidate = DatabaseConnection._build_gameobject_candidate(Row())
+
+    assert candidate is not None
+    assert candidate["size"] == 2.5
+    assert candidate["template_size"] == 1.0
+
+
+def test_gameobject_candidate_falls_back_to_template_size_without_spawn_scale():
+    DatabaseConnection = _import_database_connection()
+
+    class Row:
+        guid = 56
+        id = 501
+        map = 1
+        position_x = 0.0
+        position_y = 0.0
+        position_z = 0.0
+        orientation = 0.0
+        rotation0 = 0.0
+        rotation1 = 0.0
+        rotation2 = 0.0
+        rotation3 = 1.0
+        animprogress = 255
+        state = 1
+        type = 5
+        displayId = 100
+        name = "Template Crate"
+        faction = 0
+        flags = 1
+        size = 1.75
+
+    candidate = DatabaseConnection._build_gameobject_candidate(Row())
+
+    assert candidate is not None
+    assert candidate["size"] == 1.75
+    assert candidate["template_size"] == 1.75
+
+
+def test_update_gameobject_spawn_scale_updates_only_target_cached_spawn():
+    DatabaseConnection = _import_database_connection()
+
+    DatabaseConnection._world_cache_loaded = True
+    DatabaseConnection._cache_gameobjects_loaded = True
+    DatabaseConnection._gameobject_scale_column_ready = True
+    DatabaseConnection._cache_gameobjects_by_map = {
+        1: [
+            {"guid": 70, "entry": 700, "map_id": 1, "map": 1, "x": 1.0, "y": 1.0, "size": 1.0},
+            {"guid": 71, "entry": 700, "map_id": 1, "map": 1, "x": 2.0, "y": 2.0, "size": 1.0},
+        ]
+    }
+
+    world_model = sys.modules["server.modules.database.WorldModel"]
+
+    class Field:
+        def __eq__(self, other):
+            return ("eq", other)
+
+    world_model.WorldGameObject.guid = Field()
+
+    class Row:
+        scale = 1.0
+
+    row = Row()
+
+    class Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return row
+
+    class Session:
+        committed = False
+        closed = False
+
+        def query(self, *args, **kwargs):
+            return Query()
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            raise AssertionError("rollback should not be called")
+
+        def close(self):
+            self.closed = True
+
+    db_session = Session()
+    DatabaseConnection.world = staticmethod(lambda: db_session)
+
+    updated = DatabaseConnection.update_gameobject_spawn_scale(71, 2.0)
+
+    assert db_session.committed is True
+    assert db_session.closed is True
+    assert row.scale == 2.0
+    assert updated["size"] == 2.0
+    assert DatabaseConnection.get_gameobject_spawn(70)["size"] == 1.0
+    assert DatabaseConnection.get_gameobject_spawn(71)["size"] == 2.0
+
+
 def test_get_creature_template_uses_preloaded_cache_without_db():
     DatabaseConnection = _import_database_connection()
 

@@ -150,6 +150,7 @@ class DatabaseConnection:
     _addon_tables_ready = False
     _mount_state_table_ready = False
     _achievement_tables_ready = False
+    _gameobject_scale_column_ready = False
     _db_signature = None
 
     @staticmethod
@@ -211,6 +212,34 @@ class DatabaseConnection:
         DatabaseConnection._addon_tables_ready = False
         DatabaseConnection._mount_state_table_ready = False
         DatabaseConnection._achievement_tables_ready = False
+        DatabaseConnection._gameobject_scale_column_ready = False
+
+    @staticmethod
+    def _ensure_gameobject_scale_column() -> None:
+        if DatabaseConnection._gameobject_scale_column_ready:
+            return
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable while ensuring gameobject.scale: {exc}")
+            return
+        try:
+            exists = session.execute(
+                text(
+                    "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'gameobject' "
+                    "AND COLUMN_NAME = 'scale'"
+                )
+            ).scalar()
+            if int(exists or 0) <= 0:
+                session.execute(text("ALTER TABLE gameobject ADD COLUMN scale FLOAT NOT NULL DEFAULT 1.0"))
+                session.commit()
+                Logger.info("[DB] added gameobject.scale column")
+            DatabaseConnection._gameobject_scale_column_ready = True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] failed ensuring gameobject.scale column: {exc}")
 
     @staticmethod
     def initialize():
@@ -468,6 +497,7 @@ class DatabaseConnection:
             ConfigLoader.load_config().get("worldserver", {}).get("preload_gameobjects", True)
         )
         if preload_gameobjects:
+            DatabaseConnection._ensure_gameobject_scale_column()
             try:
                 rows = (
                     session.query(
@@ -484,6 +514,7 @@ class DatabaseConnection:
                         WorldGameObject.rotation3,
                         WorldGameObject.animprogress,
                         WorldGameObject.state,
+                        WorldGameObject.scale,
                         WorldGameObjectTemplate.type,
                         WorldGameObjectTemplate.displayId,
                         WorldGameObjectTemplate.name,
@@ -1945,6 +1976,305 @@ class DatabaseConnection:
         return creatures
 
     @staticmethod
+    def search_creature_templates(search_text: str, *, limit: int = 20) -> list[dict]:
+        needle = str(search_text or "").strip()
+        if not needle:
+            return []
+        limit = max(1, min(int(limit or 20), 100))
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return []
+
+        stmt = text(
+            """
+            SELECT
+                entry,
+                name,
+                type
+            FROM creature_template
+            WHERE LOWER(name) LIKE LOWER(:needle)
+            ORDER BY LOWER(name), entry
+            LIMIT :limit
+            """
+        )
+        try:
+            rows = session.execute(
+                stmt,
+                {
+                    "needle": f"%{needle}%",
+                    "limit": int(limit),
+                },
+            ).mappings().all()
+        except Exception as exc:
+            Logger.warning(f"[DB] creature_template search failed text={needle!r}: {exc}")
+            return []
+        finally:
+            session.close()
+
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def get_creature_spawn(spawn_guid: int) -> dict | None:
+        if int(spawn_guid or 0) <= 0:
+            return None
+
+        if DatabaseConnection._world_cache_loaded and DatabaseConnection._cache_creatures_loaded:
+            for entries in (DatabaseConnection._cache_creatures_by_map or {}).values():
+                for entry in entries or ():
+                    if int(entry.get("guid", 0) or 0) == int(spawn_guid):
+                        return dict(entry)
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        try:
+            row = (
+                session.query(WorldCreature)
+                .filter(WorldCreature.guid == int(spawn_guid))
+                .first()
+            )
+        except Exception as exc:
+            Logger.warning(f"[DB] creature spawn lookup failed guid={spawn_guid}: {exc}")
+            return None
+        finally:
+            session.close()
+
+        if row is None:
+            return None
+        return DatabaseConnection._build_creature_candidate(row)
+
+    @staticmethod
+    def _cache_remove_creature_spawn(spawn_guid: int) -> None:
+        cache_by_map = getattr(DatabaseConnection, "_cache_creatures_by_map", None)
+        if not isinstance(cache_by_map, dict):
+            return
+        for map_id, entries in list(cache_by_map.items()):
+            cache_by_map[int(map_id)] = [
+                dict(entry)
+                for entry in (entries or ())
+                if int(entry.get("guid", 0) or 0) != int(spawn_guid)
+            ]
+
+    @staticmethod
+    def _cache_restore_creature_spawn(entry: dict) -> None:
+        cache_by_map = getattr(DatabaseConnection, "_cache_creatures_by_map", None)
+        if not isinstance(cache_by_map, dict):
+            return
+        spawn_guid = int(entry.get("guid", 0) or 0)
+        map_id = int(entry.get("map_id", entry.get("map", 0)) or 0)
+        if spawn_guid <= 0:
+            return
+        DatabaseConnection._cache_remove_creature_spawn(spawn_guid)
+        cache_by_map.setdefault(map_id, []).append(dict(entry))
+
+    @staticmethod
+    def delete_creature_spawn(spawn_guid: int) -> dict | None:
+        existing = DatabaseConnection.get_creature_spawn(int(spawn_guid))
+        if existing is None:
+            return None
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        try:
+            deleted = (
+                session.query(WorldCreature)
+                .filter(WorldCreature.guid == int(spawn_guid))
+                .delete(synchronize_session=False)
+            )
+            if int(deleted or 0) <= 0:
+                session.rollback()
+                return None
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] creature delete failed guid={spawn_guid}: {exc}")
+            return None
+        finally:
+            session.close()
+
+        DatabaseConnection._cache_remove_creature_spawn(int(spawn_guid))
+        return dict(existing)
+
+    @staticmethod
+    def restore_creature_spawn(entry: dict) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        spawn_guid = int(entry.get("guid", 0) or 0)
+        creature_entry = int(entry.get("entry", 0) or 0)
+        if spawn_guid <= 0 or creature_entry <= 0:
+            return False
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return False
+
+        try:
+            existing = session.query(WorldCreature).filter(WorldCreature.guid == spawn_guid).first()
+            if existing is not None:
+                session.delete(existing)
+                session.flush()
+            row = WorldCreature(
+                guid=spawn_guid,
+                id=creature_entry,
+                map=int(entry.get("map_id", entry.get("map", 0)) or 0),
+                spawnMask=int(entry.get("spawnMask", 1) or 1),
+                phaseId=int(entry.get("phaseId", 0) or 0),
+                phaseGroup=int(entry.get("phaseGroup", 0) or 0),
+                modelid=int(entry.get("modelid", 0) or 0),
+                equipment_id=int(entry.get("equipment_id", 0) or 0),
+                position_x=float(entry.get("x", 0.0) or 0.0),
+                position_y=float(entry.get("y", 0.0) or 0.0),
+                position_z=float(entry.get("z", 0.0) or 0.0),
+                orientation=float(entry.get("orientation", 0.0) or 0.0),
+                spawntimesecs=int(entry.get("spawntimesecs", 300) or 0),
+                spawndist=float(entry.get("spawndist", 0.0) or 0.0),
+                currentwaypoint=int(entry.get("currentwaypoint", 0) or 0),
+                curhealth=int(entry.get("curhealth", 1) or 1),
+                curmana=int(entry.get("curmana", 0) or 0),
+                MovementType=int(entry.get("movement_type", entry.get("MovementType", 0)) or 0),
+                npcflag=int(entry.get("npcflag", 0) or 0),
+                unit_flags=int(entry.get("unit_flags", 0) or 0),
+                dynamicflags=int(entry.get("dynamicflags", 0) or 0),
+            )
+            session.add(row)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] creature restore failed guid={spawn_guid}: {exc}")
+            return False
+        finally:
+            session.close()
+
+        DatabaseConnection._cache_restore_creature_spawn(dict(entry))
+        return True
+
+    @staticmethod
+    def create_creature_spawn(
+        entry: int,
+        *,
+        map_id: int,
+        x: float,
+        y: float,
+        z: float,
+        orientation: float,
+        spawn_mask: int = 1,
+        phase_id: int = 0,
+        phase_group: int = 0,
+        spawntimesecs: int = 300,
+        spawndist: float = 0.0,
+        movement_type: int = 0,
+    ) -> dict | None:
+        if int(entry or 0) <= 0:
+            return None
+        template = DatabaseConnection.get_creature_template(int(entry))
+        if template is None:
+            return None
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        spawn_guid = 0
+        try:
+            max_guid = session.query(WorldCreature.guid).order_by(WorldCreature.guid.desc()).first()
+            spawn_guid = int(max_guid[0] if max_guid else 0) + 1
+            row = WorldCreature(
+                guid=spawn_guid,
+                id=int(entry),
+                map=int(map_id),
+                spawnMask=int(spawn_mask or 1),
+                phaseId=int(phase_id or 0),
+                phaseGroup=int(phase_group or 0),
+                modelid=int(template.get("modelid1", 0) or 0),
+                equipment_id=0,
+                position_x=float(x),
+                position_y=float(y),
+                position_z=float(z),
+                orientation=float(orientation or 0.0),
+                spawntimesecs=int(spawntimesecs or 0),
+                spawndist=float(spawndist or 0.0),
+                currentwaypoint=0,
+                curhealth=1,
+                curmana=0,
+                MovementType=int(movement_type or 0),
+                npcflag=int(template.get("npcflag", 0) or 0),
+                unit_flags=0,
+                dynamicflags=0,
+            )
+            session.add(row)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] creature create failed entry={entry}: {exc}")
+            return None
+        finally:
+            session.close()
+
+        created = DatabaseConnection.get_creature_spawn(spawn_guid)
+        if created is not None:
+            DatabaseConnection._cache_restore_creature_spawn(dict(created))
+        return created
+
+    @staticmethod
+    def update_creature_spawn_transform(
+        spawn_guid: int,
+        *,
+        x: float | None = None,
+        y: float | None = None,
+        z: float | None = None,
+        orientation: float | None = None,
+    ) -> dict | None:
+        existing = DatabaseConnection.get_creature_spawn(int(spawn_guid))
+        if existing is None:
+            return None
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        try:
+            row = session.query(WorldCreature).filter(WorldCreature.guid == int(spawn_guid)).first()
+            if row is None:
+                session.rollback()
+                return None
+            if x is not None:
+                row.position_x = float(x)
+            if y is not None:
+                row.position_y = float(y)
+            if z is not None:
+                row.position_z = float(z)
+            if orientation is not None:
+                row.orientation = float(orientation)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] creature transform update failed guid={spawn_guid}: {exc}")
+            return None
+        finally:
+            session.close()
+
+        updated = DatabaseConnection.get_creature_spawn(int(spawn_guid))
+        if updated is not None:
+            DatabaseConnection._cache_restore_creature_spawn(dict(updated))
+        return updated
+
+    @staticmethod
     def get_gameobjects_near(
         map_id: int,
         x: float,
@@ -1990,6 +2320,7 @@ class DatabaseConnection:
             Logger.warning(f"[DB] World DB unavailable: {exc}")
             return []
 
+        DatabaseConnection._ensure_gameobject_scale_column()
         try:
             rows = (
                 session.query(
@@ -2006,6 +2337,7 @@ class DatabaseConnection:
                     WorldGameObject.rotation3,
                     WorldGameObject.animprogress,
                     WorldGameObject.state,
+                    WorldGameObject.scale,
                     WorldGameObjectTemplate.type,
                     WorldGameObjectTemplate.displayId,
                     WorldGameObjectTemplate.name,
@@ -2068,6 +2400,7 @@ class DatabaseConnection:
             Logger.warning(f"[DB] World DB unavailable: {exc}")
             return None
 
+        DatabaseConnection._ensure_gameobject_scale_column()
         try:
             row = (
                 session.query(
@@ -2088,6 +2421,7 @@ class DatabaseConnection:
                     WorldGameObject.spawntimesecs,
                     WorldGameObject.animprogress,
                     WorldGameObject.state,
+                    WorldGameObject.scale,
                     WorldGameObjectTemplate.type,
                     WorldGameObjectTemplate.displayId,
                     WorldGameObjectTemplate.name,
@@ -2130,6 +2464,10 @@ class DatabaseConnection:
         if flags == 0 and go_type == 5:
             return None
 
+        template_size = getattr(row, "size", 1.0)
+        spawn_scale = getattr(row, "scale", None)
+        effective_scale = spawn_scale if spawn_scale is not None else template_size
+
         return {
             "guid": int(getattr(row, "guid", 0) or 0),
             "entry": int(getattr(row, "id", 0) or 0),
@@ -2154,7 +2492,8 @@ class DatabaseConnection:
             "name": str(getattr(row, "name", "") or ""),
             "faction": int(getattr(row, "faction", 0) or 0),
             "flags": flags,
-            "size": float(getattr(row, "size", 1.0) or 1.0),
+            "size": float(effective_scale or 1.0),
+            "template_size": float(template_size or 1.0),
             **{
                 f"data{index}": int(getattr(row, f"data{index}", 0) or 0)
                 for index in range(24)
@@ -2233,10 +2572,12 @@ class DatabaseConnection:
             return False
 
         try:
+            DatabaseConnection._ensure_gameobject_scale_column()
             existing = session.query(WorldGameObject).filter(WorldGameObject.guid == spawn_guid).first()
             if existing is not None:
                 session.delete(existing)
                 session.flush()
+            spawn_scale = float(entry.get("size", entry.get("scale", 1.0)) or 1.0)
             row = WorldGameObject(
                 guid=spawn_guid,
                 id=go_entry,
@@ -2248,6 +2589,7 @@ class DatabaseConnection:
                 position_y=float(entry.get("y", 0.0) or 0.0),
                 position_z=float(entry.get("z", 0.0) or 0.0),
                 orientation=float(entry.get("orientation", 0.0) or 0.0),
+                scale=spawn_scale,
                 rotation0=float(entry.get("rotation0", 0.0) or 0.0),
                 rotation1=float(entry.get("rotation1", 0.0) or 0.0),
                 rotation2=float(entry.get("rotation2", 0.0) or 0.0),
@@ -2288,6 +2630,7 @@ class DatabaseConnection:
         state: int = 1,
         animprogress: int = 255,
         spawntimesecs: int = 300,
+        scale: float | None = None,
     ) -> dict | None:
         if int(entry or 0) <= 0:
             return None
@@ -2304,8 +2647,10 @@ class DatabaseConnection:
         rotation0, rotation1, rotation2, rotation3 = DatabaseConnection._gameobject_rotation_from_orientation(
             float(orientation or 0.0)
         )
+        spawn_scale = float(scale if scale is not None else template.get("size", 1.0) or 1.0)
         spawn_guid = 0
         try:
+            DatabaseConnection._ensure_gameobject_scale_column()
             max_guid = session.query(WorldGameObject.guid).order_by(WorldGameObject.guid.desc()).first()
             spawn_guid = int(max_guid[0] if max_guid else 0) + 1
             row = WorldGameObject(
@@ -2319,6 +2664,7 @@ class DatabaseConnection:
                 position_y=float(y),
                 position_z=float(z),
                 orientation=float(orientation or 0.0),
+                scale=spawn_scale,
                 rotation0=float(rotation0),
                 rotation1=float(rotation1),
                 rotation2=float(rotation2),
@@ -2362,7 +2708,8 @@ class DatabaseConnection:
                 "name": str(template.get("name", "") or ""),
                 "faction": int(template.get("faction", 0) or 0),
                 "flags": int(template.get("flags", 0) or 0),
-                "size": float(template.get("size", 1.0) or 1.0),
+                "size": float(spawn_scale or 1.0),
+                "template_size": float(template.get("size", 1.0) or 1.0),
                 **{
                     f"data{index}": int(template.get(f"data{index}", 0) or 0)
                     for index in range(24)
@@ -2419,10 +2766,99 @@ class DatabaseConnection:
         finally:
             session.close()
 
-        updated = DatabaseConnection.get_gameobject_spawn(int(spawn_guid))
+        updated = dict(existing)
+        if x is not None:
+            updated["x"] = float(x)
+        if y is not None:
+            updated["y"] = float(y)
+        if z is not None:
+            updated["z"] = float(z)
+        if orientation is not None:
+            rotation0, rotation1, rotation2, rotation3 = DatabaseConnection._gameobject_rotation_from_orientation(
+                float(orientation)
+            )
+            updated["orientation"] = float(orientation)
+            updated["rotation0"] = float(rotation0)
+            updated["rotation1"] = float(rotation1)
+            updated["rotation2"] = float(rotation2)
+            updated["rotation3"] = float(rotation3)
         if updated is not None:
             DatabaseConnection._cache_restore_gameobject_spawn(dict(updated))
         return updated
+
+    @staticmethod
+    def update_gameobject_spawn_scale(spawn_guid: int, size: float) -> dict | None:
+        if int(spawn_guid or 0) <= 0:
+            return None
+        size = max(0.01, float(size or 0.0))
+        existing = DatabaseConnection.get_gameobject_spawn(int(spawn_guid))
+        if existing is None:
+            return None
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return None
+
+        try:
+            DatabaseConnection._ensure_gameobject_scale_column()
+            row = session.query(WorldGameObject).filter(WorldGameObject.guid == int(spawn_guid)).first()
+            if row is None:
+                session.rollback()
+                return None
+            row.scale = float(size)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] gameobject spawn scale update failed guid={spawn_guid}: {exc}")
+            return None
+        finally:
+            session.close()
+
+        updated = dict(existing)
+        updated["size"] = float(size)
+        DatabaseConnection._cache_restore_gameobject_spawn(dict(updated))
+        return updated
+
+    @staticmethod
+    def update_gameobject_template_size(entry: int, size: float) -> bool:
+        if int(entry or 0) <= 0:
+            return False
+        size = max(0.01, float(size or 0.0))
+
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning(f"[DB] World DB unavailable: {exc}")
+            return False
+
+        try:
+            row = session.query(WorldGameObjectTemplate).filter(WorldGameObjectTemplate.entry == int(entry)).first()
+            if row is None:
+                session.rollback()
+                return False
+            row.size = float(size)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(f"[DB] gameobject template size update failed entry={entry}: {exc}")
+            return False
+        finally:
+            session.close()
+
+        cached_templates = getattr(DatabaseConnection, "_cache_gameobject_templates", None)
+        if isinstance(cached_templates, dict) and int(entry) in cached_templates:
+            cached_templates[int(entry)] = dict(cached_templates[int(entry)])
+            cached_templates[int(entry)]["size"] = float(size)
+        cache_by_map = getattr(DatabaseConnection, "_cache_gameobjects_by_map", None)
+        if isinstance(cache_by_map, dict):
+            for map_id, entries in list(cache_by_map.items()):
+                cache_by_map[int(map_id)] = [
+                    dict(spawn, size=float(size)) if int(spawn.get("entry", 0) or 0) == int(entry) else dict(spawn)
+                    for spawn in (entries or ())
+                ]
+        return True
 
     @staticmethod
     def _build_creature_template_entry(row) -> dict:

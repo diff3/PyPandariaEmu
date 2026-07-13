@@ -821,13 +821,13 @@ def cmd_gocollision(session, args: list[str]) -> list[tuple[str, bytes]]:
     return handler(session, sub_args)
 
 
-@register_command("go", ".go <info|list|search|add|del|undo|move|rotate|copy|place|history>", require_args=True)
+@register_command("go", ".go <info|list|search|add|select|current|clear|del|undo|move|rotate|scale|reload|copy|place|history>", require_args=True)
 def cmd_go(session, args: list[str]) -> list[tuple[str, bytes]]:
     gm_error = _require_gm(session)
     if gm_error is not None:
         return gm_error
     if not args:
-        return _notification_response("Usage: .go <info|list|search|add|del|undo|move|rotate|copy|place|history>")
+        return _notification_response("Usage: .go <info|list|search|add|select|current|clear|del|undo|move|rotate|scale|reload|copy|place|history>")
 
     from server.modules.handlers.world.features import go_editor
 
@@ -843,6 +843,16 @@ def cmd_go(session, args: list[str]) -> list[tuple[str, bytes]]:
         return go_editor.search(session, sub_args)
     if sub == "add":
         return go_editor.add(session, sub_args)
+    if sub == "select":
+        return go_editor.select(session, sub_args)
+    if sub == "current":
+        if sub_args:
+            return _notification_response("Usage: .go current")
+        return go_editor.current(session)
+    if sub == "clear":
+        if sub_args:
+            return _notification_response("Usage: .go clear")
+        return go_editor.clear(session)
     if sub == "del":
         if sub_args:
             return _notification_response("Usage: .go del")
@@ -859,6 +869,12 @@ def cmd_go(session, args: list[str]) -> list[tuple[str, bytes]]:
         if sub_args:
             return _notification_response("Usage: .go rotate")
         return go_editor.rotate(session)
+    if sub == "scale":
+        return go_editor.scale(session, sub_args)
+    if sub == "reload":
+        if sub_args:
+            return _notification_response("Usage: .go reload")
+        return go_editor.reload(session)
     if sub == "copy":
         if sub_args:
             return _notification_response("Usage: .go copy")
@@ -871,7 +887,70 @@ def cmd_go(session, args: list[str]) -> list[tuple[str, bytes]]:
         if sub_args:
             return _notification_response("Usage: .go history")
         return go_editor.history(session)
-    return _notification_response("Usage: .go <info|list|search|add|del|undo|move|rotate|copy|place|history>")
+    return _notification_response("Usage: .go <info|list|search|add|select|current|clear|del|undo|move|rotate|scale|reload|copy|place|history>")
+
+
+@register_command("npc", ".npc <info|list|search|add|select|current|clear|del|undo|move|rotate|copy|place|history>", require_args=True)
+def cmd_npc(session, args: list[str]) -> list[tuple[str, bytes]]:
+    gm_error = _require_gm(session)
+    if gm_error is not None:
+        return gm_error
+    if not args:
+        return _notification_response("Usage: .npc <info|list|search|add|select|current|clear|del|undo|move|rotate|copy|place|history>")
+
+    from server.modules.handlers.world.features import npc_editor
+
+    sub = str(args[0] or "").casefold()
+    sub_args = args[1:]
+    if sub == "info":
+        if sub_args:
+            return _notification_response("Usage: .npc info")
+        return npc_editor.info(session)
+    if sub == "list":
+        return npc_editor.list_nearby_command(session, sub_args)
+    if sub == "search":
+        return npc_editor.search(session, sub_args)
+    if sub == "add":
+        return npc_editor.add(session, sub_args)
+    if sub == "select":
+        return npc_editor.select(session, sub_args)
+    if sub == "current":
+        if sub_args:
+            return _notification_response("Usage: .npc current")
+        return npc_editor.current(session)
+    if sub == "clear":
+        if sub_args:
+            return _notification_response("Usage: .npc clear")
+        return npc_editor.clear(session)
+    if sub == "del":
+        if sub_args:
+            return _notification_response("Usage: .npc del")
+        return npc_editor.delete_selected(session)
+    if sub == "undo":
+        if sub_args:
+            return _notification_response("Usage: .npc undo")
+        return npc_editor.undo(session)
+    if sub == "move":
+        if sub_args:
+            return _notification_response("Usage: .npc move")
+        return npc_editor.move(session)
+    if sub == "rotate":
+        if sub_args:
+            return _notification_response("Usage: .npc rotate")
+        return npc_editor.rotate(session)
+    if sub == "copy":
+        if sub_args:
+            return _notification_response("Usage: .npc copy")
+        return npc_editor.copy(session)
+    if sub == "place":
+        if sub_args:
+            return _notification_response("Usage: .npc place")
+        return npc_editor.place(session)
+    if sub == "history":
+        if sub_args:
+            return _notification_response("Usage: .npc history")
+        return npc_editor.history(session)
+    return _notification_response("Usage: .npc <info|list|search|add|select|current|clear|del|undo|move|rotate|copy|place|history>")
 
 
 def _gameobject_cache_status() -> dict[str, int | bool]:
@@ -2517,7 +2596,11 @@ PRIMARY_COMMANDS = {
     "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", require_args=True),
     # "fixplayer": Command(handler=cmd_fixplayer, usage=".fixplayer [teleport]"),
     # "fixspeed": Command(handler=cmd_fixspeed, usage=".fixspeed", allow_args=False),
-    "go": Command(handler=cmd_go, usage=".go <info|list|search|add|del|undo|move|rotate|copy|place|history>", require_args=True),
+    "go": Command(
+        handler=cmd_go,
+        usage=".go <info|list|search|add|select|current|clear|del|undo|move|rotate|scale|reload|copy|place|history>",
+        require_args=True,
+    ),
     "gocollision": Command(handler=cmd_gocollision, usage=".gocollision <show <guid>|around <radius>|clear>"),
     "goto": Command(handler=cmd_goto, usage=".goto <player>", require_args=True),
     "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),
@@ -2527,6 +2610,11 @@ PRIMARY_COMMANDS = {
     "mapcheat": Command(handler=cmd_mapcheat, usage=".mapcheat <on|0>"),
     "morph": Command(handler=cmd_morph, usage=".morph <displayId|namel|list>", require_args=True),
     "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
+    "npc": Command(
+        handler=cmd_npc,
+        usage=".npc <info|list|search|add|select|current|clear|del|undo|move|rotate|copy|place|history>",
+        require_args=True,
+    ),
     "petbattle": Command(handler=cmd_petbattle, usage=".petbattle <start|stop|status>"),
     "pvg": Command(handler=cmd_plants_vs_ghouls, usage=".pvg <start|stop|status|plant <lane 1-5> <spitter|rocknut>>"),
     "roll": Command(handler=cmd_roll, usage=".roll"),

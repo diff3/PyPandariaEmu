@@ -824,3 +824,29 @@ def build_database_gameobject_responses(
             )
         responses.append(make_update_object_response(payload))
     return responses
+
+
+def build_gameobject_create_response(session, entry: Mapping[str, Any]) -> tuple[str, bytes]:
+    """Build the canonical single-GameObject CREATE_OBJECT response."""
+    map_id = int(entry.get("map_id", entry.get("map", getattr(session, "map_id", 0))) or 0)
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
+    return make_update_object_response(
+        _build_gameobject_update_payload(
+            map_id=map_id,
+            entry=entry,
+            realm_id=realm_id,
+        )
+    )
+
+
+def build_gameobject_destroy_response(session, world_guid: int) -> tuple[str, bytes]:
+    """Build the canonical out-of-range response used to unload a GameObject."""
+    from server.modules.handlers.world.opcodes.movement import _build_out_of_range_update_object_payload
+
+    return (
+        "SMSG_UPDATE_OBJECT",
+        _build_out_of_range_update_object_payload(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            guid=int(world_guid),
+        ),
+    )

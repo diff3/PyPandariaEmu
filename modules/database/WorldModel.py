@@ -34,6 +34,7 @@ class WorldGameObject(Base):
     position_y = Column(Float, nullable=False, default=0.0)
     position_z = Column(Float, nullable=False, default=0.0)
     orientation = Column(Float, nullable=False, default=0.0)
+    scale = Column(Float, nullable=False, default=1.0)
     rotation0 = Column(Float, nullable=False, default=0.0)
     rotation1 = Column(Float, nullable=False, default=0.0)
     rotation2 = Column(Float, nullable=False, default=0.0)

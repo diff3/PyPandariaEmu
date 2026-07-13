@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from server.modules.handlers.world.features import gameobject_clipboard
-from server.modules.handlers.world.features import gameobject_editor
+from server.modules.handlers.world.features.world_editor import clipboard as gameobject_clipboard
+from server.modules.handlers.world.features.world_editor import gameobject_editor
 
 
 find_nearest_editable_gameobject = gameobject_editor.find_nearest_editable_gameobject
@@ -15,6 +15,8 @@ move_gameobject = gameobject_editor.move
 rotate_gameobject = gameobject_editor.rotate
 restore_deleted_gameobject = gameobject_editor.restore_deleted_gameobject
 add_gameobject = gameobject_editor.create
+select_gameobject = gameobject_editor.select_nearest
+clear_selection = gameobject_editor.clear
 
 
 def info(session) -> list[tuple[str, bytes]]:
@@ -79,6 +81,16 @@ def rotate(session) -> list[tuple[str, bytes]]:
     return gameobject_editor.rotate_nearest(session)
 
 
+def scale(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if len(args) != 1:
+        return gameobject_editor.chat_lines(["[GMGo] Usage: .go scale <value>"])
+    try:
+        value = float(args[0])
+    except Exception:
+        return gameobject_editor.chat_lines(["[GMGo] Usage: .go scale <value>"])
+    return gameobject_editor.scale(session, value)
+
+
 def copy(session) -> list[tuple[str, bytes]]:
     return gameobject_clipboard.copy(session)
 
@@ -89,3 +101,27 @@ def place(session) -> list[tuple[str, bytes]]:
 
 def history(session) -> list[tuple[str, bytes]]:
     return gameobject_editor.history(session)
+
+
+def reload(session) -> list[tuple[str, bytes]]:
+    return gameobject_editor.reload(session)
+
+
+def select(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if len(args) > 1:
+        return gameobject_editor.chat_lines(["[GMGo] Usage: .go select [spawnid]"])
+    if not args:
+        return gameobject_editor.select_nearest(session)
+    try:
+        spawn_id = int(args[0])
+    except Exception:
+        return gameobject_editor.chat_lines(["[GMGo] Usage: .go select [spawnid]"])
+    return gameobject_editor.select_spawn(session, spawn_id)
+
+
+def current(session) -> list[tuple[str, bytes]]:
+    return gameobject_editor.current(session)
+
+
+def clear(session) -> list[tuple[str, bytes]]:
+    return gameobject_editor.clear(session)
