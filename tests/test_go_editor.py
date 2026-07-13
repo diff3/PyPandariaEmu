@@ -107,7 +107,10 @@ def _patch_packets(monkeypatch):
     monkeypatch.setattr(
         gameobject_editor.gameobject_runtime,
         "build_gameobject_destroy_response",
-        lambda _session, _guid: ("SMSG_UPDATE_OBJECT", b"destroy"),
+        lambda _session, _guid, **_kwargs: (
+            "SMSG_UPDATE_OBJECT",
+            b"destroy",
+        ),
     )
     monkeypatch.setattr(
         gameobject_editor.gameobject_runtime,
@@ -418,7 +421,10 @@ def test_go_move_broadcasts_live_recreate_to_loaded_peer(monkeypatch):
     monkeypatch.setattr(
         gameobject_editor.gameobject_runtime,
         "build_gameobject_destroy_response",
-        lambda _session, _guid: ("SMSG_UPDATE_OBJECT", b"destroy"),
+        lambda _session, _guid, **_kwargs: (
+            "SMSG_UPDATE_OBJECT",
+            b"destroy",
+        ),
     )
     monkeypatch.setattr(gameobject_editor.gameobject_runtime, "_invalidate_geometry_caches", lambda: None)
     def fake_visibility(target, loaded_guids=None):
@@ -455,7 +461,10 @@ def test_go_move_visibility_refresh_runs_for_nearby_peer_without_old_load(monkey
     monkeypatch.setattr(
         gameobject_editor.gameobject_runtime,
         "build_gameobject_destroy_response",
-        lambda _session, _guid: ("SMSG_UPDATE_OBJECT", b"destroy"),
+        lambda _session, _guid, **_kwargs: (
+            "SMSG_UPDATE_OBJECT",
+            b"destroy",
+        ),
     )
     monkeypatch.setattr(gameobject_editor.gameobject_runtime, "_invalidate_geometry_caches", lambda: None)
     refresh_sessions: list[object] = []
@@ -644,7 +653,10 @@ def test_go_reload_recreates_selected_runtime_from_database(monkeypatch):
     monkeypatch.setattr(
         gameobject_editor.gameobject_runtime,
         "build_gameobject_destroy_response",
-        lambda _session, _guid: ("SMSG_UPDATE_OBJECT", b"destroy"),
+        lambda _session, _guid, **_kwargs: (
+            "SMSG_UPDATE_OBJECT",
+            b"destroy",
+        ),
     )
     monkeypatch.setattr(gameobject_editor.gameobject_runtime, "_invalidate_geometry_caches", lambda: None)
     def fake_visibility(target, loaded_guids=None):

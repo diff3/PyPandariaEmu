@@ -15,7 +15,8 @@ from server.modules.handlers.world.bootstrap.gameobjects import (
 )
 from server.modules.handlers.world.runtime.gameobject import GameObject
 from server.modules.handlers.world.runtime.gameobject_store import (
-    resolve_gameobject_runtime,
+    gameobject_matches_mapping,
+    get_gameobject_runtime_store,
 )
 
 
@@ -72,14 +73,30 @@ def _runtime_object(
         if runtime_guid is None
         else int(runtime_guid)
     )
-    return resolve_gameobject_runtime(
+    stored = get_gameobject_runtime_store().get_by_spawn_id(
+        _entry_int(entry, "guid")
+    )
+    if stored is not None and gameobject_matches_mapping(
+        stored,
+        entry,
+        runtime_guid=resolved_runtime_guid,
+    ):
+        return stored
+    return GameObject.from_mapping(
         entry,
         runtime_guid=resolved_runtime_guid,
     )
 
 
-def _same_map_sessions(session, *map_ids: int) -> list[Any]:
-    wanted = {int(map_id) for map_id in map_ids if int(map_id) >= 0}
+def _same_map_sessions(
+    session,
+    *runtime_objects: GameObject,
+) -> list[Any]:
+    wanted = {
+        int(runtime_object.map_id)
+        for runtime_object in runtime_objects
+        if int(runtime_object.map_id) >= 0
+    }
     if not wanted:
         wanted.add(int(getattr(session, "map_id", 0) or 0))
     state = getattr(session, "global_state", None)
@@ -108,7 +125,9 @@ def _send_or_return(
     return []
 
 
-def _remove_session_visibility(target, runtime_guid: int, spawn_id: int) -> None:
+def _remove_session_visibility(target, runtime_object: GameObject) -> None:
+    runtime_guid = int(runtime_object.runtime_guid)
+    spawn_id = int(runtime_object.spawn_id)
     loaded = getattr(target, "loaded_gameobjects", None)
     if isinstance(loaded, set):
         loaded.discard(int(runtime_guid))
@@ -131,9 +150,7 @@ def _invalidate_geometry_caches() -> None:
         pass
 
 
-def _remove_collision(runtime_object: GameObject | None) -> bool:
-    if runtime_object is None:
-        return False
+def _remove_collision(runtime_object: GameObject) -> bool:
     try:
         from server.modules.handlers.world.collision import gameobject_collision_index
 
@@ -156,11 +173,9 @@ def _remove_collision(runtime_object: GameObject | None) -> bool:
 
 
 def _create_collision(
-    entry: dict[str, Any] | None,
-    runtime_object: GameObject | None,
+    runtime_object: GameObject,
+    entry: dict[str, Any],
 ) -> bool:
-    if not isinstance(entry, dict) or runtime_object is None:
-        return False
     restored = dict(entry)
     restored["world_guid"] = int(runtime_object.runtime_guid)
     try:
@@ -193,7 +208,11 @@ def _visibility_refresh_for_session(target) -> list[tuple[str, bytes]]:
     return list(build_database_gameobject_responses(target, loaded_guids=loaded))
 
 
-def _loaded_targets(sessions: list[Any], runtime_guid: int) -> list[Any]:
+def _loaded_targets(
+    sessions: list[Any],
+    runtime_object: GameObject,
+) -> list[Any]:
+    runtime_guid = int(runtime_object.runtime_guid)
     return [
         target
         for target in sessions
@@ -205,7 +224,6 @@ def _loaded_targets(sessions: list[Any], runtime_guid: int) -> list[Any]:
 def _log_result(
     *,
     operation: str,
-    spawn_id: int,
     runtime_object: GameObject | None,
     affected_sessions: int,
     old_runtime_object: GameObject | None = None,
@@ -233,7 +251,7 @@ def _log_result(
         "old_orientation=%.6f new_orientation=%.6f old_scale=%.3f new_scale=%.3f "
         "destroy_sent=%s create_sent=%s collision_removed=%s collision_created=%s",
         str(operation),
-        int(spawn_id),
+        int(runtime_object.spawn_id) if runtime_object else 0,
         int(runtime_object.entry) if runtime_object else 0,
         int(runtime_object.runtime_guid) & 0xFFFFFFFFFFFFFFFF
         if runtime_object
@@ -266,8 +284,8 @@ def spawn_persistent_gameobject(session, spawn_id: int) -> GameObjectSpawnRuntim
         return GameObjectSpawnRuntimeResult("spawn", int(spawn_id), None, 0)
     runtime_guid = int(runtime_object.runtime_guid)
     entry["world_guid"] = runtime_guid
-    sessions = _same_map_sessions(session, runtime_object.map_id)
-    collision_created = _create_collision(entry, runtime_object)
+    sessions = _same_map_sessions(session, runtime_object)
+    collision_created = _create_collision(runtime_object, entry)
     _invalidate_geometry_caches()
 
     responses: list[tuple[str, bytes]] = []
@@ -278,7 +296,6 @@ def spawn_persistent_gameobject(session, spawn_id: int) -> GameObjectSpawnRuntim
         responses.extend(_send_or_return(session, target, refresh))
     _log_result(
         operation="spawn",
-        spawn_id=int(spawn_id),
         runtime_object=runtime_object,
         affected_sessions=len(set(id(target) for target in sessions)),
         new_runtime_object=runtime_object,
@@ -314,21 +331,24 @@ def despawn_persistent_gameobject(
     if runtime_object is None:
         return GameObjectSpawnRuntimeResult("despawn", int(spawn_id), None, 0)
     runtime_guid = int(runtime_object.runtime_guid)
-    sessions = _same_map_sessions(session, runtime_object.map_id)
-    loaded = _loaded_targets(sessions, runtime_guid)
-    destroy = build_gameobject_destroy_response(session, runtime_guid)
+    sessions = _same_map_sessions(session, runtime_object)
+    loaded = _loaded_targets(sessions, runtime_object)
+    destroy = build_gameobject_destroy_response(
+        session,
+        runtime_guid,
+        gameobject=runtime_object,
+    )
     responses: list[tuple[str, bytes]] = []
     destroy_sent = 0
     for target in loaded:
         destroy_sent += 1
         responses.extend(_send_or_return(session, target, [destroy]))
     for target in sessions:
-        _remove_session_visibility(target, runtime_guid, int(spawn_id))
+        _remove_session_visibility(target, runtime_object)
     collision_removed = _remove_collision(runtime_object)
     _invalidate_geometry_caches()
     _log_result(
         operation="despawn",
-        spawn_id=int(spawn_id),
         runtime_object=runtime_object,
         affected_sessions=len(set(id(target) for target in sessions)),
         old_runtime_object=runtime_object,
@@ -372,21 +392,25 @@ def replace_persistent_gameobject(
     new_entry["world_guid"] = runtime_guid
     sessions = _same_map_sessions(
         session,
-        old_runtime_object.map_id,
-        new_runtime_object.map_id,
+        old_runtime_object,
+        new_runtime_object,
     )
-    loaded = _loaded_targets(sessions, runtime_guid)
-    destroy = build_gameobject_destroy_response(session, runtime_guid)
+    loaded = _loaded_targets(sessions, old_runtime_object)
+    destroy = build_gameobject_destroy_response(
+        session,
+        runtime_guid,
+        gameobject=old_runtime_object,
+    )
     responses: list[tuple[str, bytes]] = []
     destroy_sent = 0
     for target in loaded:
         destroy_sent += 1
         responses.extend(_send_or_return(session, target, [destroy]))
     for target in sessions:
-        _remove_session_visibility(target, runtime_guid, int(spawn_id))
+        _remove_session_visibility(target, old_runtime_object)
     collision_removed = _remove_collision(old_runtime_object)
     _invalidate_geometry_caches()
-    collision_created = _create_collision(new_entry, new_runtime_object)
+    collision_created = _create_collision(new_runtime_object, new_entry)
     _invalidate_geometry_caches()
 
     create_sent = 0
@@ -396,7 +420,6 @@ def replace_persistent_gameobject(
         responses.extend(_send_or_return(session, target, refresh))
     _log_result(
         operation="replace",
-        spawn_id=int(spawn_id),
         runtime_object=new_runtime_object,
         affected_sessions=len(set(id(target) for target in sessions)),
         old_runtime_object=old_runtime_object,
