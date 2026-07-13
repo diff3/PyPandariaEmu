@@ -107,6 +107,194 @@ def test_get_gameobjects_near_uses_preloaded_cache_without_db():
     assert [entry["guid"] for entry in results] == [1]
 
 
+def test_gameobject_preload_mirror_populates_stable_runtime_instances():
+    DatabaseConnection = _import_database_connection()
+    from server.modules.game.guid import GameObjectGuid
+    from server.modules.handlers.world.runtime.gameobject_store import (
+        get_gameobject_runtime_store,
+    )
+
+    authoritative_entry = {
+        "guid": 123,
+        "entry": 456,
+        "map_id": 1,
+        "map": 1,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 1.5,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "size": 1.25,
+        "type": 5,
+    }
+    cache = {1: [dict(authoritative_entry)]}
+
+    DatabaseConnection._populate_gameobject_runtime_store(cache)
+
+    store = get_gameobject_runtime_store()
+    runtime_guid = GameObjectGuid.from_spawn_guid(123, 1)
+    first = store.get(runtime_guid)
+    second = store.get_by_spawn_id(123)
+
+    assert first is not None
+    assert first is second
+    assert store.get(runtime_guid) is first
+    assert first.entry == 456
+    assert first.world_position == (10.0, 20.0, 30.0)
+    assert cache == {1: [authoritative_entry]}
+
+
+def test_world_cache_preload_populates_gameobject_runtime_store(monkeypatch):
+    DatabaseConnection = _import_database_connection()
+    from server.modules.game.guid import GameObjectGuid
+    from server.modules.handlers.world.runtime.gameobject_store import (
+        get_gameobject_runtime_store,
+    )
+
+    world_model = sys.modules["server.modules.database.WorldModel"]
+
+    class Field:
+        def __eq__(self, other):
+            return ("eq", other)
+
+        def is_(self, other):
+            return ("is", other)
+
+    for name in ("race", "class_", "itemid"):
+        setattr(world_model.PlayerCreateInfoItem, name, Field())
+    for name in ("race", "class_", "button", "action", "type"):
+        setattr(world_model.PlayerCreateInfoAction, name, Field())
+    for model in (
+        world_model.PlayerCreateInfoSpell,
+        world_model.PlayerCreateInfoSpellCustom,
+        world_model.PlayerCreateInfoSpellCast,
+    ):
+        model.__tablename__ = model.__name__
+        for name in ("racemask", "classmask", "spell"):
+            setattr(model, name, Field())
+    world_model.PlayerXpForLevel.lvl = Field()
+    world_model.PlayerXpForLevel.xp_for_next_level = Field()
+
+    for name in (
+        "guid",
+        "id",
+        "map",
+        "position_x",
+        "position_y",
+        "position_z",
+        "orientation",
+        "rotation0",
+        "rotation1",
+        "rotation2",
+        "rotation3",
+        "animprogress",
+        "state",
+        "scale",
+    ):
+        setattr(world_model.WorldGameObject, name, Field())
+    for name in (
+        "entry",
+        "type",
+        "displayId",
+        "name",
+        "faction",
+        "flags",
+        "size",
+    ):
+        setattr(world_model.WorldGameObjectTemplate, name, Field())
+    for index in range(24):
+        setattr(world_model.WorldGameObjectTemplate, f"data{index}", Field())
+    world_model.GameEventGameObject.guid = Field()
+
+    class Row:
+        guid = 321
+        id = 654
+        map = 1
+        position_x = 11.0
+        position_y = 22.0
+        position_z = 33.0
+        orientation = 1.25
+        rotation0 = 0.0
+        rotation1 = 0.0
+        rotation2 = 0.0
+        rotation3 = 1.0
+        animprogress = 255
+        state = 1
+        scale = 1.0
+        type = 5
+        displayId = 100
+        name = "Runtime Store Crate"
+        faction = 0
+        flags = 1
+        size = 1.0
+
+    for index in range(24):
+        setattr(Row, f"data{index}", 0)
+
+    gameobject_guid_field = world_model.WorldGameObject.guid
+
+    class Query:
+        def __init__(self, fields):
+            self.fields = fields
+
+        def join(self, *args, **kwargs):
+            return self
+
+        def outerjoin(self, *args, **kwargs):
+            return self
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            if self.fields and self.fields[0] is gameobject_guid_field:
+                return [Row()]
+            return []
+
+    class Session:
+        def query(self, *fields):
+            return Query(fields)
+
+    collision_module = types.ModuleType(
+        "server.modules.handlers.world.collision"
+    )
+    collision_module.build_gameobject_collision_index = lambda _entries: 0
+    collision_module.clear_gameobject_collision_index = lambda: None
+    monkeypatch.setitem(
+        sys.modules,
+        "server.modules.handlers.world.collision",
+        collision_module,
+    )
+    monkeypatch.setattr(
+        DatabaseConnection,
+        "_ensure_gameobject_scale_column",
+        staticmethod(lambda: None),
+    )
+    monkeypatch.setattr(
+        DatabaseConnection,
+        "world",
+        staticmethod(lambda: Session()),
+    )
+    DatabaseConnection._world_cache_loaded = False
+    get_gameobject_runtime_store().clear()
+
+    DatabaseConnection.preload_world_cache()
+
+    runtime_guid = GameObjectGuid.from_spawn_guid(321, 1)
+    by_runtime_guid = get_gameobject_runtime_store().get(runtime_guid)
+    by_spawn_id = get_gameobject_runtime_store().get_by_spawn_id(321)
+
+    assert DatabaseConnection._cache_gameobjects_loaded is True
+    assert DatabaseConnection._cache_gameobjects_by_map[1][0]["guid"] == 321
+    assert by_runtime_guid is not None
+    assert by_runtime_guid is by_spawn_id
+    assert by_runtime_guid.entry == 654
+    assert by_runtime_guid.world_position == (11.0, 22.0, 33.0)
+
+
 def test_fill_sparse_action_buttons_respects_saved_empty_slots():
     DatabaseConnection = _import_database_connection()
 

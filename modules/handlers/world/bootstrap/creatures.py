@@ -17,6 +17,7 @@ from server.modules.handlers.world.protocol.update_object.serializers import (
     serialize_create_object_entry,
     u32_from_float,
 )
+from server.modules.handlers.world.runtime.creature import Creature
 
 for _definition_name in creature_defs.__all__:
     globals()[f"_{_definition_name}"] = getattr(creature_defs, _definition_name)
@@ -268,6 +269,14 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
             "spawn_orientation": spawn_orientation,
             "orientation": runtime_orientation,
         }
+        runtime_creature = Creature.from_mapping(
+            {
+                **spawn,
+                "map_id": map_id,
+                "instance_id": int(getattr(session, "instance_id", 0) or 0),
+            },
+            runtime_guid=world_guid,
+        )
         npc_flags_by_guid = getattr(session, "npc_flags_by_guid", None)
         if not isinstance(npc_flags_by_guid, dict):
             npc_flags_by_guid = {}
@@ -279,11 +288,11 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
             npc_positions_by_guid = {}
             session.npc_positions_by_guid = npc_positions_by_guid
         npc_position = (
-            int(map_id),
-            float(spawn["x"]),
-            float(spawn["y"]),
-            float(spawn["z"]),
-            float(runtime_orientation),
+            int(runtime_creature.map_id),
+            float(runtime_creature.x),
+            float(runtime_creature.y),
+            float(runtime_creature.z),
+            float(runtime_creature.orientation),
         )
         npc_positions_by_guid[int(world_guid)] = npc_position
         npc_positions_by_guid[int(spawn_guid)] = npc_position
@@ -298,16 +307,16 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
         Logger.info(
             "[SPAWN_NPC] guid=%s world_guid=0x%016X entry=%s name=%s display=%s "
             "npcflag=0x%X pos=(%.2f %.2f %.2f) o=%.6f",
-            spawn["guid"],
-            world_guid & 0xFFFFFFFFFFFFFFFF,
-            spawn["entry"],
+            runtime_creature.spawn_id,
+            runtime_creature.runtime_guid & 0xFFFFFFFFFFFFFFFF,
+            runtime_creature.entry,
             str(template.get("name", "") or ""),
             _resolve_creature_display_id(spawn),
             int(spawn["npcflag"]),
-            spawn["x"],
-            spawn["y"],
-            spawn["z"],
-            float(runtime_orientation),
+            runtime_creature.x,
+            runtime_creature.y,
+            runtime_creature.z,
+            runtime_creature.orientation,
         )
 
         payload = _build_creature_update_payload(

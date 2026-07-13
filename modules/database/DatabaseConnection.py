@@ -191,7 +191,12 @@ class DatabaseConnection:
     @staticmethod
     def _reset_caches() -> None:
         from server.modules.handlers.world.collision import clear_gameobject_collision_index
+        from server.modules.handlers.world.runtime.gameobject_store import (
+            get_gameobject_runtime_store,
+        )
+
         clear_gameobject_collision_index()
+        get_gameobject_runtime_store().clear()
         DatabaseConnection._world_cache_loaded = False
         DatabaseConnection._cache_playercreateinfo = {}
         DatabaseConnection._cache_playercreateinfo_items = {}
@@ -539,6 +544,15 @@ class DatabaseConnection:
                     by_map.setdefault(int(candidate["map_id"]), []).append(candidate)
                 DatabaseConnection._cache_gameobjects_by_map = by_map
                 DatabaseConnection._cache_gameobjects_loaded = True
+                try:
+                    DatabaseConnection._populate_gameobject_runtime_store(by_map)
+                except Exception as exc:
+                    Logger.warning(f"[DB] gameobject runtime mirror failed: {exc}")
+                    from server.modules.handlers.world.runtime.gameobject_store import (
+                        get_gameobject_runtime_store,
+                    )
+
+                    get_gameobject_runtime_store().clear()
                 from server.modules.handlers.world.collision import build_gameobject_collision_index
                 build_gameobject_collision_index(by_map)
                 Logger.info(
@@ -550,11 +564,21 @@ class DatabaseConnection:
                 Logger.warning(f"[DB] gameobject preload failed: {exc}")
                 DatabaseConnection._cache_gameobjects_by_map = {}
                 DatabaseConnection._cache_gameobjects_loaded = False
+                from server.modules.handlers.world.runtime.gameobject_store import (
+                    get_gameobject_runtime_store,
+                )
+
+                get_gameobject_runtime_store().clear()
                 from server.modules.handlers.world.collision import clear_gameobject_collision_index
                 clear_gameobject_collision_index()
         else:
             DatabaseConnection._cache_gameobjects_by_map = {}
             DatabaseConnection._cache_gameobjects_loaded = False
+            from server.modules.handlers.world.runtime.gameobject_store import (
+                get_gameobject_runtime_store,
+            )
+
+            get_gameobject_runtime_store().clear()
             from server.modules.handlers.world.collision import clear_gameobject_collision_index
             clear_gameobject_collision_index()
             Logger.info("[DB] gameobject preload disabled by config")
@@ -567,6 +591,11 @@ class DatabaseConnection:
 
     @staticmethod
     def reload_world_cache() -> None:
+        from server.modules.handlers.world.runtime.gameobject_store import (
+            get_gameobject_runtime_store,
+        )
+
+        get_gameobject_runtime_store().clear()
         DatabaseConnection._world_cache_loaded = False
         DatabaseConnection._cache_playercreateinfo = {}
         DatabaseConnection._cache_playercreateinfo_items = {}
@@ -584,6 +613,30 @@ class DatabaseConnection:
         DatabaseConnection._cache_gameobjects_by_map = {}
         DatabaseConnection._cache_gameobjects_loaded = False
         DatabaseConnection.preload_world_cache()
+
+    @staticmethod
+    def _populate_gameobject_runtime_store(entries_by_map: dict[int, list[dict]]) -> None:
+        """Mirror authoritative persistent cache entries into runtime objects."""
+        from server.modules.game.guid import GameObjectGuid, MoTransportGuid
+        from server.modules.handlers.world.runtime.gameobject import GameObject
+        from server.modules.handlers.world.runtime.gameobject_store import (
+            get_gameobject_runtime_store,
+        )
+
+        store = get_gameobject_runtime_store()
+        store.clear()
+        for entries in entries_by_map.values():
+            for entry in entries or ():
+                spawn_id = int(entry.get("guid", 0) or 0)
+                world_guid = int(entry.get("world_guid", 0) or 0)
+                if world_guid <= 0:
+                    go_type = int(entry.get("type", -1) or -1)
+                    if go_type == 15 or bool(entry.get("use_transport_guid")):
+                        world_guid = int(MoTransportGuid.from_spawn_guid(spawn_id))
+                    else:
+                        realm_id = int(entry.get("realm_id", 1) or 1)
+                        world_guid = int(GameObjectGuid.from_spawn_guid(spawn_id, realm_id))
+                store.add(GameObject.from_mapping(entry, runtime_guid=world_guid))
 
     # AUTH DB SESSION
     @staticmethod
