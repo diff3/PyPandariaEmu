@@ -12,6 +12,9 @@ from shared.Logger import Logger
 from server.modules.game.guid import CreatureGuid, GameObjectGuid, GuidHelper, MoTransportGuid
 from server.modules.handlers.world.bootstrap.gameobjects import build_database_gameobject_responses
 from server.modules.handlers.world.bootstrap.playerobjects import build_single_u32_update_object_payload
+from server.modules.handlers.world.runtime.gameobject_store import (
+    resolve_gameobject_runtime,
+)
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
@@ -3691,13 +3694,21 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
     for entry in keep_entries:
         entry = prepare_runtime_transport_entry(entry)
         if int(entry.get("type", 0) or 0) == 15 or bool(entry.get("use_transport_guid")):
-            keep_guids.add(
-                int(MoTransportGuid.from_spawn_guid(int(entry.get("guid", 0) or 0)))
+            runtime_guid = int(
+                MoTransportGuid.from_spawn_guid(int(entry.get("guid", 0) or 0))
             )
         else:
-            keep_guids.add(
-                int(GameObjectGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), realm_id))
+            runtime_guid = int(
+                GameObjectGuid.from_spawn_guid(
+                    int(entry.get("guid", 0) or 0),
+                    realm_id,
+                )
             )
+        runtime_object = resolve_gameobject_runtime(
+            entry,
+            runtime_guid=runtime_guid,
+        )
+        keep_guids.add(int(runtime_object.runtime_guid))
     try:
         from server.modules.handlers.world.transport_runtime import synthetic_transport_entries_near
 

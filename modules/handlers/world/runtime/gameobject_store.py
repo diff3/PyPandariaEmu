@@ -6,8 +6,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any, Mapping
 
 from server.modules.handlers.world.runtime.gameobject import GameObject
+from server.modules.handlers.world.runtime.runtime_object import (
+    _mapping_float,
+    _mapping_int,
+)
 
 
 class GameObjectRuntimeStore:
@@ -83,3 +88,50 @@ _GAMEOBJECT_RUNTIME_STORE = GameObjectRuntimeStore()
 def get_gameobject_runtime_store() -> GameObjectRuntimeStore:
     """Return the process-wide passive GameObject runtime store."""
     return _GAMEOBJECT_RUNTIME_STORE
+
+
+def gameobject_matches_mapping(
+    gameobject: GameObject,
+    mapping: Mapping[str, Any],
+    *,
+    runtime_guid: int,
+) -> bool:
+    """Return whether a passive runtime mirror matches authoritative data."""
+    map_id = _mapping_int(mapping, "map_id", _mapping_int(mapping, "map"))
+    return (
+        int(gameobject.runtime_guid) == int(runtime_guid)
+        and int(gameobject.spawn_id) == _mapping_int(mapping, "guid")
+        and int(gameobject.entry) == _mapping_int(mapping, "entry")
+        and int(gameobject.map_id) == map_id
+        and int(gameobject.instance_id) == _mapping_int(mapping, "instance_id")
+        and float(gameobject.x) == _mapping_float(mapping, "x")
+        and float(gameobject.y) == _mapping_float(mapping, "y")
+        and float(gameobject.z) == _mapping_float(mapping, "z")
+        and float(gameobject.orientation) == _mapping_float(mapping, "orientation")
+        and gameobject.rotation
+        == (
+            _mapping_float(mapping, "rotation0"),
+            _mapping_float(mapping, "rotation1"),
+            _mapping_float(mapping, "rotation2"),
+            _mapping_float(mapping, "rotation3"),
+        )
+        and float(gameobject.scale) == _mapping_float(mapping, "size", 1.0)
+    )
+
+
+def resolve_gameobject_runtime(
+    mapping: Mapping[str, Any],
+    *,
+    runtime_guid: int,
+) -> GameObject:
+    """Reuse a matching stored mirror or construct a temporary fallback."""
+    stored = get_gameobject_runtime_store().get_by_spawn_id(
+        _mapping_int(mapping, "guid")
+    )
+    if stored is not None and gameobject_matches_mapping(
+        stored,
+        mapping,
+        runtime_guid=runtime_guid,
+    ):
+        return stored
+    return GameObject.from_mapping(mapping, runtime_guid=runtime_guid)

@@ -1,8 +1,13 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 import sys
 import types
 from types import SimpleNamespace
+
+import pytest
 
 database_module = types.ModuleType("server.modules.database.DatabaseConnection")
 database_module.DatabaseConnection = type(
@@ -15,6 +20,18 @@ database_module.DatabaseConnection = type(
 sys.modules["server.modules.database.DatabaseConnection"] = database_module
 
 from server.modules.handlers.world.runtime import gameobject_spawns
+from server.modules.handlers.world.runtime.gameobject import GameObject
+from server.modules.handlers.world.runtime.gameobject_store import (
+    get_gameobject_runtime_store,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_runtime_store():
+    store = get_gameobject_runtime_store()
+    store.clear()
+    yield
+    store.clear()
 
 
 def _session() -> SimpleNamespace:
@@ -76,6 +93,94 @@ def _patch_runtime(monkeypatch, entry):
         return [("SMSG_UPDATE_OBJECT", b"create")]
 
     monkeypatch.setattr(gameobject_spawns, "build_database_gameobject_responses", fake_visibility)
+
+
+def test_runtime_object_reuses_preloaded_instance_without_duplicate(monkeypatch):
+    session = _session()
+    entry = _entry()
+    stored = GameObject.from_mapping(
+        entry,
+        runtime_guid=int(entry["world_guid"]),
+    )
+    get_gameobject_runtime_store().add(stored)
+    original_from_mapping = GameObject.from_mapping
+    constructed = []
+
+    def track_construction(cls, mapping, *, runtime_guid=0):
+        constructed.append((mapping, runtime_guid))
+        return original_from_mapping(mapping, runtime_guid=runtime_guid)
+
+    monkeypatch.setattr(
+        GameObject,
+        "from_mapping",
+        classmethod(track_construction),
+    )
+
+    first = gameobject_spawns._runtime_object(session, dict(entry))
+    second = gameobject_spawns._runtime_object(session, dict(entry))
+
+    assert first is stored
+    assert second is stored
+    assert first is second
+    assert constructed == []
+
+
+def test_runtime_object_falls_back_when_store_has_no_spawn(monkeypatch):
+    session = _session()
+    entry = _entry()
+    original_from_mapping = GameObject.from_mapping
+    constructed = []
+
+    def track_construction(cls, mapping, *, runtime_guid=0):
+        constructed.append((mapping, runtime_guid))
+        return original_from_mapping(mapping, runtime_guid=runtime_guid)
+
+    monkeypatch.setattr(
+        GameObject,
+        "from_mapping",
+        classmethod(track_construction),
+    )
+
+    runtime_object = gameobject_spawns._runtime_object(session, dict(entry))
+
+    assert runtime_object is not None
+    assert runtime_object.runtime_guid == int(entry["world_guid"])
+    assert runtime_object.spawn_id == int(entry["guid"])
+    assert len(constructed) == 1
+
+
+def test_runtime_object_falls_back_when_authoritative_mapping_changed(monkeypatch):
+    session = _session()
+    cached_entry = _entry(x=12.0)
+    authoritative_entry = _entry(x=50.0)
+    stored = GameObject.from_mapping(
+        cached_entry,
+        runtime_guid=int(cached_entry["world_guid"]),
+    )
+    get_gameobject_runtime_store().add(stored)
+    original_from_mapping = GameObject.from_mapping
+    constructed = []
+
+    def track_construction(cls, mapping, *, runtime_guid=0):
+        constructed.append((mapping, runtime_guid))
+        return original_from_mapping(mapping, runtime_guid=runtime_guid)
+
+    monkeypatch.setattr(
+        GameObject,
+        "from_mapping",
+        classmethod(track_construction),
+    )
+
+    runtime_object = gameobject_spawns._runtime_object(
+        session,
+        authoritative_entry,
+    )
+
+    assert runtime_object is not None
+    assert runtime_object is not stored
+    assert runtime_object.x == 50.0
+    assert stored.x == 12.0
+    assert len(constructed) == 1
 
 
 def test_replace_persistent_gameobject_destroys_old_then_refreshes_visibility(monkeypatch):

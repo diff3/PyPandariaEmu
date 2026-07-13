@@ -1,10 +1,17 @@
 import json
+import struct
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from DSL.modules.EncoderHandler import EncoderHandler
 from server.modules.handlers.world.bootstrap import gameobjects
-from server.modules.game.guid import GameObjectGuid, MoTransportGuid
+from server.modules.game.guid import GameObjectGuid, GuidHelper, MoTransportGuid
+from server.modules.handlers.world.runtime.gameobject import GameObject
+from server.modules.handlers.world.runtime.gameobject_store import (
+    get_gameobject_runtime_store,
+)
 from server.modules.interpretation.utils import dsl_decode
 from shared.Logger import Logger
 
@@ -81,6 +88,225 @@ def test_gameobject_update_payload_uses_dsl_compatible_layout():
     payload = gameobjects._build_gameobject_update_payload(map_id=1, entry=_entry(), realm_id=1)
     fields = _dsl_fields()
     assert payload == EncoderHandler.encode_packet("GAMEOBJECT_CREATE", fields)
+
+
+def test_create_packet_runtime_object_path_matches_mapping_fallback(monkeypatch):
+    entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+    }
+    runtime_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+    runtime_object = GameObject.from_mapping(
+        entry,
+        runtime_guid=runtime_guid,
+    )
+    store = get_gameobject_runtime_store()
+    store.clear()
+    try:
+        fallback_payload = gameobjects._build_gameobject_update_payload(
+            map_id=1,
+            entry=entry,
+            realm_id=1,
+        )
+
+        def reject_temporary_construction(cls, mapping, *, runtime_guid=0):
+            raise AssertionError("matching runtime object must be consumed directly")
+
+        monkeypatch.setattr(
+            GameObject,
+            "from_mapping",
+            classmethod(reject_temporary_construction),
+        )
+        runtime_payload = gameobjects._build_gameobject_update_payload(
+            map_id=1,
+            entry=entry,
+            realm_id=1,
+            gameobject=runtime_object,
+        )
+    finally:
+        store.clear()
+
+    assert runtime_payload == fallback_payload
+
+
+def test_create_packet_reuses_preloaded_runtime_store_object(monkeypatch):
+    entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+    }
+    runtime_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+    runtime_object = GameObject.from_mapping(
+        entry,
+        runtime_guid=runtime_guid,
+    )
+    store = get_gameobject_runtime_store()
+    store.clear()
+    store.add(runtime_object)
+
+    def reject_temporary_construction(cls, mapping, *, runtime_guid=0):
+        raise AssertionError("preloaded packet path must not create a duplicate")
+
+    monkeypatch.setattr(
+        GameObject,
+        "from_mapping",
+        classmethod(reject_temporary_construction),
+    )
+    try:
+        payload = gameobjects._build_gameobject_update_payload(
+            map_id=1,
+            entry=entry,
+            realm_id=1,
+        )
+    finally:
+        store.clear()
+
+    assert payload
+
+
+def test_values_packet_runtime_object_path_matches_mapping_fallback():
+    entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+    }
+    runtime_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+    runtime_object = GameObject.from_mapping(
+        entry,
+        runtime_guid=runtime_guid,
+    )
+    store = get_gameobject_runtime_store()
+    store.clear()
+    try:
+        fallback_payload = gameobjects._build_gameobject_values_update_payload(
+            map_id=1,
+            entry=entry,
+            realm_id=1,
+        )
+        runtime_payload = gameobjects._build_gameobject_values_update_payload(
+            map_id=1,
+            entry=entry,
+            realm_id=1,
+            gameobject=runtime_object,
+        )
+    finally:
+        store.clear()
+
+    assert runtime_payload == fallback_payload
+
+
+def test_create_response_runtime_object_path_matches_mapping_fallback():
+    entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+    }
+    runtime_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+    runtime_object = GameObject.from_mapping(
+        entry,
+        runtime_guid=runtime_guid,
+    )
+    session = SimpleNamespace(map_id=1, realm_id=1)
+    store = get_gameobject_runtime_store()
+    store.clear()
+    try:
+        fallback_response = gameobjects.build_gameobject_create_response(
+            session,
+            entry,
+        )
+        runtime_response = gameobjects.build_gameobject_create_response(
+            session,
+            entry,
+            gameobject=runtime_object,
+        )
+    finally:
+        store.clear()
+
+    assert runtime_response == fallback_response
+
+
+def test_destroy_response_runtime_object_path_matches_guid_path(monkeypatch):
+    entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+    }
+    runtime_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+    runtime_object = GameObject.from_mapping(
+        entry,
+        runtime_guid=runtime_guid,
+    )
+    session = SimpleNamespace(map_id=1)
+    movement_module = ModuleType(
+        "server.modules.handlers.world.opcodes.movement"
+    )
+    def build_out_of_range_payload(*, map_id, guid):
+        payload = bytearray()
+        payload += struct.pack("<HI", int(map_id) & 0xFFFF, 1)
+        payload += struct.pack("<B", 3)
+        payload += struct.pack("<I", 1)
+        payload += GuidHelper.pack(int(guid) & 0xFFFFFFFFFFFFFFFF)
+        return bytes(payload)
+
+    movement_module._build_out_of_range_update_object_payload = (
+        build_out_of_range_payload
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "server.modules.handlers.world.opcodes.movement",
+        movement_module,
+    )
+
+    guid_response = gameobjects.build_gameobject_destroy_response(
+        session,
+        runtime_guid,
+    )
+    runtime_response = gameobjects.build_gameobject_destroy_response(
+        session,
+        runtime_guid,
+        gameobject=runtime_object,
+    )
+
+    assert runtime_response == guid_response
+
+
+def test_create_packet_without_preload_constructs_temporary_fallback(monkeypatch):
+    entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+    }
+    store = get_gameobject_runtime_store()
+    store.clear()
+    original_from_mapping = GameObject.from_mapping
+    constructions = []
+
+    def track_construction(cls, mapping, *, runtime_guid=0):
+        constructions.append((dict(mapping), int(runtime_guid)))
+        return original_from_mapping(mapping, runtime_guid=runtime_guid)
+
+    monkeypatch.setattr(
+        GameObject,
+        "from_mapping",
+        classmethod(track_construction),
+    )
+    try:
+        gameobjects._build_gameobject_update_payload(
+            map_id=1,
+            entry=entry,
+            realm_id=1,
+        )
+    finally:
+        store.clear()
+
+    assert len(constructions) == 1
 
 
 def test_mo_transport_create_movement_block_uses_path_progress():

@@ -338,6 +338,119 @@ def test_build_database_gameobject_responses_marks_bootstrap_creates_loaded(monk
     assert expected_guid in session.loaded_transport_entries
 
 
+def test_gameobject_visibility_reuses_runtime_mirror_without_packet_or_cache_changes(
+    monkeypatch,
+):
+    gameobjects = _import_gameobjects()
+    from server.modules.handlers.world.runtime.gameobject import GameObject
+    from server.modules.handlers.world.runtime.gameobject_store import (
+        get_gameobject_runtime_store,
+    )
+
+    entry = {
+        "guid": 77,
+        "entry": 100,
+        "map_id": 1,
+        "map": 1,
+        "x": 100.0,
+        "y": 200.0,
+        "z": 30.0,
+        "orientation": 0.75,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "display_id": 1234,
+        "flags": 1,
+        "size": 1.25,
+        "type": 5,
+        "state": 1,
+        "animprogress": 255,
+        "faction": 0,
+    }
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_gameobjects_near",
+        staticmethod(lambda *args, **kwargs: [dict(entry)]),
+    )
+    store = get_gameobject_runtime_store()
+    store.clear()
+    original_from_mapping = GameObject.from_mapping
+    constructions = []
+
+    def track_construction(cls, mapping, *, runtime_guid=0):
+        constructions.append((dict(mapping), int(runtime_guid)))
+        return original_from_mapping(mapping, runtime_guid=runtime_guid)
+
+    monkeypatch.setattr(
+        GameObject,
+        "from_mapping",
+        classmethod(track_construction),
+    )
+
+    fallback_session = SimpleNamespace(
+        map_id=1,
+        x=100.0,
+        y=200.0,
+        realm_id=1,
+    )
+    fallback_responses = gameobjects.build_database_gameobject_responses(
+        fallback_session
+    )
+    fallback_known = set(fallback_session.loaded_gameobjects)
+    fallback_entries = dict(fallback_session.loaded_gameobject_entries)
+
+    assert len(constructions) == 1
+
+    runtime_guid = int(gameobjects.GameObjectGuid.from_spawn_guid(77, 1))
+    stored = original_from_mapping(entry, runtime_guid=runtime_guid)
+    store.add(stored)
+    constructions.clear()
+    resolved = []
+    original_resolve = gameobjects.resolve_gameobject_runtime
+
+    def capture_resolution(mapping, *, runtime_guid):
+        runtime_object = original_resolve(
+            mapping,
+            runtime_guid=runtime_guid,
+        )
+        resolved.append(runtime_object)
+        return runtime_object
+
+    monkeypatch.setattr(
+        gameobjects,
+        "resolve_gameobject_runtime",
+        capture_resolution,
+    )
+    stored_session = SimpleNamespace(
+        map_id=1,
+        x=100.0,
+        y=200.0,
+        realm_id=1,
+    )
+
+    stored_responses = gameobjects.build_database_gameobject_responses(
+        stored_session
+    )
+    stored_entries_before_repeat = dict(
+        stored_session.loaded_gameobject_entries
+    )
+    repeated_responses = gameobjects.build_database_gameobject_responses(
+        stored_session,
+        loaded_guids=stored_session.loaded_gameobjects,
+    )
+
+    assert stored_responses == fallback_responses
+    assert repeated_responses == []
+    assert stored_session.loaded_gameobjects == fallback_known
+    assert stored_session.loaded_gameobject_entries == fallback_entries
+    assert stored_session.loaded_gameobject_entries == stored_entries_before_repeat
+    assert resolved == [stored, stored]
+    assert constructions == []
+    store.clear()
+
+
 def test_database_transport_bootstrap_uses_authoritative_runtime_entry(monkeypatch):
     gameobjects = _import_gameobjects()
     session = SimpleNamespace(map_id=1, x=50.0, y=0.0, realm_id=1)

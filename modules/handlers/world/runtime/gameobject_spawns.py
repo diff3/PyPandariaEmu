@@ -14,6 +14,9 @@ from server.modules.handlers.world.bootstrap.gameobjects import (
     build_gameobject_destroy_response,
 )
 from server.modules.handlers.world.runtime.gameobject import GameObject
+from server.modules.handlers.world.runtime.gameobject_store import (
+    resolve_gameobject_runtime,
+)
 
 
 GAMEOBJECT_TYPE_MO_TRANSPORT = 15
@@ -61,16 +64,17 @@ def _runtime_object(
     *,
     runtime_guid: int | None = None,
 ) -> GameObject | None:
-    """Build shared runtime state without changing the external entry API."""
+    """Reuse a matching persistent mirror, with temporary fallback."""
     if not isinstance(entry, dict):
         return None
-    return GameObject.from_mapping(
+    resolved_runtime_guid = (
+        _runtime_guid(session, entry)
+        if runtime_guid is None
+        else int(runtime_guid)
+    )
+    return resolve_gameobject_runtime(
         entry,
-        runtime_guid=(
-            _runtime_guid(session, entry)
-            if runtime_guid is None
-            else int(runtime_guid)
-        ),
+        runtime_guid=resolved_runtime_guid,
     )
 
 
