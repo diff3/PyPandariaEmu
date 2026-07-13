@@ -4,6 +4,8 @@
 from server.modules.handlers.world.runtime.gameobject import GameObject
 from server.modules.handlers.world.runtime.gameobject_store import (
     GameObjectRuntimeStore,
+    gameobject_identity_matches_mapping,
+    gameobject_matches_mapping,
 )
 
 
@@ -40,6 +42,19 @@ def test_store_retains_identical_object_for_both_identity_lookups():
     assert list(store) == [gameobject]
 
 
+def test_store_exposes_mutated_runtime_object_without_replacement():
+    store = GameObjectRuntimeStore()
+    gameobject = store.add(_gameobject())
+
+    gameobject.set_position(40.0, 50.0, 60.0)
+    gameobject.set_state(2)
+
+    assert store.get(gameobject.runtime_guid) is gameobject
+    assert store.get_by_spawn_id(gameobject.spawn_id) is gameobject
+    assert store.get(gameobject.runtime_guid).world_position == (40.0, 50.0, 60.0)
+    assert store.get(gameobject.runtime_guid).state == 2
+
+
 def test_store_removes_runtime_and_spawn_identity_lookups():
     store = GameObjectRuntimeStore()
     gameobject = store.add(_gameobject())
@@ -63,3 +78,29 @@ def test_store_clear_removes_all_gameobjects():
     assert list(store) == []
     assert store.get(1001) is None
     assert store.get_by_spawn_id(102) is None
+
+
+def test_identity_match_does_not_treat_live_transform_as_persistent_identity():
+    gameobject = _gameobject()
+    persistent_mapping = {
+        "guid": gameobject.spawn_id,
+        "entry": gameobject.entry,
+        "map_id": gameobject.map_id,
+        "instance_id": gameobject.instance_id,
+        "x": 99.0,
+        "y": 88.0,
+        "z": 77.0,
+        "orientation": 2.5,
+        "size": 1.75,
+    }
+
+    assert gameobject_identity_matches_mapping(
+        gameobject,
+        persistent_mapping,
+        runtime_guid=gameobject.runtime_guid,
+    )
+    assert not gameobject_matches_mapping(
+        gameobject,
+        persistent_mapping,
+        runtime_guid=gameobject.runtime_guid,
+    )

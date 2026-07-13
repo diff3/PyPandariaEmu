@@ -375,8 +375,22 @@ def test_despawn_persistent_gameobject_clears_visibility_without_create(monkeypa
 def test_despawn_lifecycle_uses_runtime_object_and_preserves_order(monkeypatch):
     session = _session()
     entry = _entry()
+    live_entry = _entry(
+        x=88.0,
+        y=77.0,
+        z=66.0,
+        orientation=2.25,
+        size=1.5,
+        display_id=4321,
+        state=2,
+        flags=17,
+        faction=35,
+        artkit=9,
+        animprogress=127,
+        type=5,
+    )
     stored = GameObject.from_mapping(
-        entry,
+        live_entry,
         runtime_guid=int(entry["world_guid"]),
     )
     get_gameobject_runtime_store().add(stored)
@@ -439,6 +453,16 @@ def test_despawn_lifecycle_uses_runtime_object_and_preserves_order(monkeypatch):
     assert events[0][1] is stored
     assert events[2][1] is stored
     assert events[3][1] is stored
+    assert stored.transform == ((88.0, 77.0, 66.0), 2.25, 1.5)
+    assert (
+        stored.display_id,
+        stored.state,
+        stored.flags,
+        stored.faction,
+        stored.art_kit,
+        stored.animation_progress,
+        stored.gameobject_type,
+    ) == (4321, 2, 17, 35, 9, 127, 5)
 
 
 def test_replace_lifecycle_preserves_runtime_object_phase_order(monkeypatch):

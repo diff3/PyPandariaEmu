@@ -18,6 +18,7 @@ from server.modules.handlers.world.protocol.update_object.serializers import (
 )
 from server.modules.handlers.world.runtime.gameobject import GameObject
 from server.modules.handlers.world.runtime.gameobject_store import (
+    gameobject_identity_matches_mapping,
     gameobject_matches_mapping,
     resolve_gameobject_runtime,
 )
@@ -204,10 +205,17 @@ def _gameobject_rotation_packed(
     return int(packed) & 0x1FFFFF
 
 
-def _gameobject_update_flags(entry: Mapping[str, Any]) -> int:
+def _gameobject_update_flags(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None = None,
+) -> int:
     """Return SkyFire-style update flags for the create movement blocks."""
     flags = _UPDATEFLAG_STATIONARY_POSITION | _UPDATEFLAG_ROTATION
-    gameobject_type = _entry_int(entry, "type") & 0xFF
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    ) & 0xFF
     if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         flags |= _UPDATEFLAG_TRANSPORT
     return int(flags)
@@ -231,6 +239,7 @@ def _quaternion_yaw(x: float, y: float, z: float, w: float) -> float:
 def _log_gameobject_orientation_debug(
     entry: Mapping[str, Any],
     *,
+    gameobject: GameObject,
     stationary_orientation: float,
     packet_rotation: tuple[float, float, float, float],
     packed_rotation: int,
@@ -238,19 +247,19 @@ def _log_gameobject_orientation_debug(
     if not _gameobject_orientation_debug_enabled():
         return
 
-    raw_rotation = _raw_rotation_components(entry)
+    raw_rotation = _raw_rotation_components(entry, gameobject)
     Logger.info(
         "GO_DEBUG entry=%s display=%s type=%s pos=(%.3f %.3f %.3f) "
         "yaw=%.6f db_quat=(%.6f %.6f %.6f %.6f) "
         "packet_quat=(%.6f %.6f %.6f %.6f) converted_yaw=%.6f "
         "packet_yaw=%.6f packed=%s",
-        _entry_int(entry, "entry"),
-        _entry_int(entry, "display_id"),
-        _entry_int(entry, "type"),
-        _entry_float(entry, "x"),
-        _entry_float(entry, "y"),
-        _entry_float(entry, "z"),
-        _normalize_orientation(_entry_float(entry, "orientation")),
+        int(gameobject.entry),
+        int(gameobject.display_id),
+        int(gameobject.gameobject_type),
+        float(gameobject.x),
+        float(gameobject.y),
+        float(gameobject.z),
+        _normalize_orientation(gameobject.orientation),
         raw_rotation[0],
         raw_rotation[1],
         raw_rotation[2],
@@ -266,24 +275,52 @@ def _log_gameobject_orientation_debug(
     )
 
 
-def _gameobject_movement_block_uint32(entry: Mapping[str, Any]) -> int:
+def _gameobject_movement_block_uint32(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None = None,
+) -> int:
     """Return the extra movement block value required by the create flags."""
-    gameobject_type = _entry_int(entry, "type") & 0xFF
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    ) & 0xFF
     if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         return _effective_transport_path_progress(entry)
     return _GAMEOBJECT_MOVEMENT_BLOCK_UINT32
 
 
-def _is_deeprun_visible_subway_entry(entry: Mapping[str, Any]) -> bool:
+def _is_deeprun_visible_subway_entry(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None = None,
+) -> bool:
+    map_id = int(gameobject.map_id) if gameobject is not None else _entry_map_id(entry)
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    )
+    gameobject_entry = (
+        int(gameobject.entry)
+        if gameobject is not None
+        else _entry_int(entry, "entry")
+    )
     return (
-        _entry_map_id(entry) == 369
-        and _entry_int(entry, "type") == _GAMEOBJECT_TYPE_TRANSPORT
-        and _entry_int(entry, "entry") in _DEEPRUN_VISIBLE_ENTRY_IDS
+        map_id == 369
+        and gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT
+        and gameobject_entry in _DEEPRUN_VISIBLE_ENTRY_IDS
     )
 
 
-def _client_transport_period(entry: Mapping[str, Any]) -> int:
-    gameobject_type = _entry_int(entry, "type") & 0xFF
+def _client_transport_period(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None = None,
+) -> int:
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    ) & 0xFF
     if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
         return _entry_int(entry, "data0")
     return _entry_int(entry, "transport_period", _entry_int(entry, "data0"))
@@ -296,13 +333,20 @@ def _effective_transport_path_progress(entry: Mapping[str, Any]) -> int:
     return int(path_progress) & 0xFFFFFFFF
 
 
-def _gameobject_dynamic_flags(entry: Mapping[str, Any]) -> int:
+def _gameobject_dynamic_flags(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None = None,
+) -> int:
     """Pack GO dynamic flags; transport path progress lives in the high half."""
-    gameobject_type = _entry_int(entry, "type") & 0xFF
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    ) & 0xFF
     if gameobject_type != _GAMEOBJECT_TYPE_MO_TRANSPORT:
         return 0
 
-    period = _client_transport_period(entry)
+    period = _client_transport_period(entry, gameobject)
     if period <= 0:
         return 0xFFFF0000
 
@@ -311,9 +355,16 @@ def _gameobject_dynamic_flags(entry: Mapping[str, Any]) -> int:
     return path_progress << 16
 
 
-def _effective_gameobject_state(entry: Mapping[str, Any]) -> int:
+def _effective_gameobject_state(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None = None,
+) -> int:
     """Return the client-visible GO state after type-specific initialization."""
-    gameobject_type = _entry_int(entry, "type") & 0xFF
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    ) & 0xFF
     if gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT:
         start_open = _entry_int(entry, "data1") != 0
         return _GO_STATE_ACTIVE if start_open else _GO_STATE_READY
@@ -321,19 +372,44 @@ def _effective_gameobject_state(entry: Mapping[str, Any]) -> int:
         # MoP 5.4.8 transport creates use GO_STATE_READY even when the
         # synthetic runtime entry has not supplied a client-visible state.
         return _GO_STATE_READY
+    if gameobject is not None:
+        return int(gameobject.state) & 0xFF
     return _entry_int(entry, "state") & 0xFF
 
 
-def _pack_gameobject_percent_health(entry: Mapping[str, Any]) -> int:
-    state = _effective_gameobject_state(entry)
-    gameobject_type = _entry_int(entry, "type") & 0xFF
+def _pack_gameobject_percent_health(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None = None,
+) -> int:
+    state = _effective_gameobject_state(entry, gameobject)
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    ) & 0xFF
     return state | (gameobject_type << 8)
 
 
-def _pack_gameobject_state_spell_visual_id(entry: Mapping[str, Any]) -> int:
-    artkit = _entry_int(entry, "artkit") & 0xFF
-    animprogress = _entry_int(entry, "animprogress") & 0xFF
-    if (_entry_int(entry, "type") & 0xFF) == _GAMEOBJECT_TYPE_MO_TRANSPORT:
+def _pack_gameobject_state_spell_visual_id(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None = None,
+) -> int:
+    artkit = (
+        int(gameobject.art_kit)
+        if gameobject is not None
+        else _entry_int(entry, "artkit")
+    ) & 0xFF
+    animprogress = (
+        int(gameobject.animation_progress)
+        if gameobject is not None
+        else _entry_int(entry, "animprogress")
+    ) & 0xFF
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    ) & 0xFF
+    if gameobject_type == _GAMEOBJECT_TYPE_MO_TRANSPORT:
         # Both available 5.4.8 transport captures carry full animation
         # progress, including for runtime-created cross-map transports.
         animprogress = _GO_HEALTH_FULL
@@ -361,15 +437,26 @@ def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
     )
 
 
-def _transport_runtime_packet_entry(entry: Mapping[str, Any]) -> Mapping[str, Any]:
+def _transport_runtime_packet_entry(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None = None,
+) -> Mapping[str, Any]:
     """Overlay transport packet fields from RuntimeTransportState when available."""
     if bool(entry.get("_bootstrap_runtime_transform_pinned")):
         return entry
-    gameobject_type = _entry_int(entry, "type")
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    )
     if gameobject_type not in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         return entry
 
-    world_guid = _resolve_world_guid(entry, _entry_int(entry, "realm_id", 1))
+    world_guid = (
+        int(gameobject.runtime_guid)
+        if gameobject is not None
+        else _resolve_world_guid(entry, _entry_int(entry, "realm_id", 1))
+    )
     if world_guid <= 0:
         return entry
 
@@ -427,16 +514,38 @@ def _resolve_packet_gameobject(
     gameobject: GameObject | None,
 ) -> GameObject:
     """Resolve matching passive runtime state without changing cache authority."""
+    if gameobject is not None:
+        world_guid = int(gameobject.runtime_guid)
+        identity_mapping = {
+            "guid": entry.get("guid", 0),
+            "entry": entry.get("entry", 0),
+            "map_id": _entry_map_id(entry, int(map_id)),
+            "instance_id": entry.get("instance_id", 0),
+        }
+        gameobject_type = int(gameobject.gameobject_type) & 0xFF
+        uses_transport_runtime = gameobject_type in (
+            _GAMEOBJECT_TYPE_TRANSPORT,
+            _GAMEOBJECT_TYPE_MO_TRANSPORT,
+        )
+        matcher = (
+            gameobject_matches_mapping
+            if uses_transport_runtime
+            else gameobject_identity_matches_mapping
+        )
+        matching_mapping: Mapping[str, Any] = identity_mapping
+        if uses_transport_runtime:
+            transport_mapping = dict(entry)
+            transport_mapping["map_id"] = _entry_map_id(entry, int(map_id))
+            matching_mapping = transport_mapping
+        if matcher(
+            gameobject,
+            matching_mapping,
+            runtime_guid=world_guid,
+        ):
+            return gameobject
     world_guid = _resolve_world_guid(entry, realm_id)
     packet_mapping = dict(entry)
     packet_mapping["map_id"] = _entry_map_id(entry, int(map_id))
-
-    if gameobject is not None and gameobject_matches_mapping(
-        gameobject,
-        packet_mapping,
-        runtime_guid=world_guid,
-    ):
-        return gameobject
     return resolve_gameobject_runtime(
         packet_mapping,
         runtime_guid=world_guid,
@@ -450,8 +559,16 @@ def _build_gameobject_field_values(
     gameobject: GameObject | None = None,
 ) -> dict[int, int]:
     """Build update-field values for a single GameObject create packet."""
-    gameobject_type = _entry_int(entry, "type") & 0xFF
-    gameobject_flags = _entry_int(entry, "flags")
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    ) & 0xFF
+    gameobject_flags = (
+        int(gameobject.flags)
+        if gameobject is not None
+        else _entry_int(entry, "flags")
+    )
     if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         gameobject_flags |= _GO_FLAG_TRANSPORT
     field_values: dict[int, int] = {
@@ -463,24 +580,37 @@ def _build_gameobject_field_values(
             if gameobject is not None
             else _entry_int(entry, "entry")
         ),
-        _OBJECT_FIELD_DYNAMIC_FLAGS: _gameobject_dynamic_flags(entry),
+        _OBJECT_FIELD_DYNAMIC_FLAGS: _gameobject_dynamic_flags(entry, gameobject),
         _OBJECT_FIELD_SCALE: _u32_from_float(
             gameobject.scale
             if gameobject is not None
             else _entry_float(entry, "size", 1.0)
         ),
-        _GAMEOBJECT_FIELD_DISPLAY_ID: _entry_int(entry, "display_id"),
+        _GAMEOBJECT_FIELD_DISPLAY_ID: (
+            int(gameobject.display_id)
+            if gameobject is not None
+            else _entry_int(entry, "display_id")
+        ),
         _GAMEOBJECT_FIELD_FLAGS: gameobject_flags,
-        _GAMEOBJECT_FIELD_PERCENT_HEALTH: _pack_gameobject_percent_health(entry),
-        _GAMEOBJECT_FIELD_STATE_SPELL_VISUAL_ID: _pack_gameobject_state_spell_visual_id(entry),
+        _GAMEOBJECT_FIELD_PERCENT_HEALTH: _pack_gameobject_percent_health(
+            entry,
+            gameobject,
+        ),
+        _GAMEOBJECT_FIELD_STATE_SPELL_VISUAL_ID: (
+            _pack_gameobject_state_spell_visual_id(entry, gameobject)
+        ),
     }
     if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         field_values[_GAMEOBJECT_FIELD_LEVEL] = _entry_int(
             entry,
             "transport_period",
-            _client_transport_period(entry),
+            _client_transport_period(entry, gameobject),
         )
-    faction = _entry_int(entry, "faction")
+    faction = (
+        int(gameobject.faction)
+        if gameobject is not None
+        else _entry_int(entry, "faction")
+    )
     if faction != 0:
         field_values[_GAMEOBJECT_FIELD_FACTION] = faction
     for offset, value in enumerate(_rotation_components(entry, gameobject)):
@@ -497,7 +627,7 @@ def _build_gameobject_update_payload(
     gameobject: GameObject | None = None,
 ) -> bytes:
     """Encode a GameObject CREATE_OBJECT payload through the DSL definition."""
-    entry = _transport_runtime_packet_entry(entry)
+    entry = _transport_runtime_packet_entry(entry, gameobject)
     gameobject = _resolve_packet_gameobject(
         entry,
         map_id=map_id,
@@ -506,7 +636,7 @@ def _build_gameobject_update_payload(
     )
     world_guid = int(gameobject.runtime_guid)
     packet_map_id = int(gameobject.map_id)
-    update_flags = _gameobject_update_flags(entry)
+    update_flags = _gameobject_update_flags(entry, gameobject)
     create_flags = gameobject_defs.build_gameobject_create_flags(update_flags)
     field_values = _build_gameobject_field_values(
         entry,
@@ -526,12 +656,14 @@ def _build_gameobject_update_payload(
     packed_rotation = _gameobject_rotation_packed(entry, gameobject)
     _log_gameobject_orientation_debug(
         entry,
+        gameobject=gameobject,
         stationary_orientation=stationary_orientation,
         packet_rotation=packet_rotation,
         packed_rotation=packed_rotation,
     )
     _log_mo_transport_create_debug(
         entry,
+        gameobject=gameobject,
         world_guid=world_guid,
         packet_map_id=int(packet_map_id),
         packet_x=stationary_x,
@@ -539,9 +671,10 @@ def _build_gameobject_update_payload(
         packet_z=stationary_z,
         packet_orientation=stationary_orientation,
     )
-    movement_block_uint32 = _gameobject_movement_block_uint32(entry)
+    movement_block_uint32 = _gameobject_movement_block_uint32(entry, gameobject)
     _log_deeprun_create_audit(
         entry,
+        gameobject=gameobject,
         world_guid=world_guid,
         packet_map_id=int(packet_map_id),
         update_flags=update_flags,
@@ -586,7 +719,7 @@ def _build_gameobject_values_update_payload(
     gameobject: GameObject | None = None,
 ) -> bytes:
     """Encode a minimal GameObject VALUES update for an already-created object."""
-    entry = _transport_runtime_packet_entry(entry)
+    entry = _transport_runtime_packet_entry(entry, gameobject)
     gameobject = _resolve_packet_gameobject(
         entry,
         map_id=map_id,
@@ -636,6 +769,7 @@ def _build_gameobject_values_update_payload(
 def _log_mo_transport_create_debug(
     entry: Mapping[str, Any],
     *,
+    gameobject: GameObject | None = None,
     world_guid: int,
     packet_map_id: int,
     packet_x: float,
@@ -643,7 +777,12 @@ def _log_mo_transport_create_debug(
     packet_z: float,
     packet_orientation: float,
 ) -> None:
-    if _entry_int(entry, "type") != _GAMEOBJECT_TYPE_MO_TRANSPORT:
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    )
+    if gameobject_type != _GAMEOBJECT_TYPE_MO_TRANSPORT:
         return
 
     runtime_state = None
@@ -658,7 +797,7 @@ def _log_mo_transport_create_debug(
         Logger.warning(
             "[MO_TRANSPORT_CREATE] runtime lookup failed world_guid=0x%016X entry=%s err=%s",
             int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-            _entry_int(entry, "entry"),
+            int(gameobject.entry) if gameobject is not None else _entry_int(entry, "entry"),
             exc,
         )
 
@@ -702,8 +841,8 @@ def _log_mo_transport_create_debug(
         "packet_pos=(%.3f %.3f %.3f %.3f) phase_ms=%s "
         "transport_path_progress=%s",
         int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-        _entry_int(entry, "entry"),
-        _entry_int(entry, "type"),
+        int(gameobject.entry) if gameobject is not None else _entry_int(entry, "entry"),
+        gameobject_type,
         source_path,
         "yes" if runtime_found else "no",
         int(runtime_map),
@@ -723,6 +862,7 @@ def _log_mo_transport_create_debug(
 def _log_deeprun_create_audit(
     entry: Mapping[str, Any],
     *,
+    gameobject: GameObject | None = None,
     world_guid: int,
     packet_map_id: int,
     update_flags: int,
@@ -730,7 +870,7 @@ def _log_deeprun_create_audit(
     movement_block_uint32: int,
     field_values: Mapping[int, int],
 ) -> None:
-    if not _is_deeprun_visible_subway_entry(entry):
+    if not _is_deeprun_visible_subway_entry(entry, gameobject):
         return
 
     Logger.info(
@@ -742,8 +882,12 @@ def _log_deeprun_create_audit(
         _entry_int(entry, "guid"),
         int(world_guid) & 0xFFFFFFFFFFFFFFFF,
         int(packet_map_id),
-        _entry_int(entry, "display_id"),
-        _entry_int(entry, "type"),
+        int(gameobject.display_id)
+        if gameobject is not None
+        else _entry_int(entry, "display_id"),
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type"),
         int(update_flags) & 0xFFFF,
         bytes(create_flags).hex(),
         "yes" if (update_flags & _UPDATEFLAG_TRANSPORT) else "no",
@@ -751,7 +895,7 @@ def _log_deeprun_create_audit(
         "yes" if (update_flags & _UPDATEFLAG_ROTATION) else "no",
         _entry_int(entry, "data0"),
         _entry_int(entry, "data1"),
-        _effective_gameobject_state(entry),
+        _effective_gameobject_state(entry, gameobject),
         _entry_int(entry, "transport_period", _entry_int(entry, "data0")),
         int(movement_block_uint32) & 0xFFFFFFFF,
         int(field_values.get(_OBJECT_FIELD_DYNAMIC_FLAGS, 0)) & 0xFFFFFFFF,
@@ -925,14 +1069,14 @@ def build_database_gameobject_responses(
                 "payload=%s pos=(%.2f %.2f %.2f) o=%.3f",
                 runtime_object.spawn_id,
                 runtime_object.entry,
-                int(entry.get("type", 0) or 0),
+                runtime_object.gameobject_type,
                 len(payload),
                 runtime_object.x,
                 runtime_object.y,
                 runtime_object.z,
                 runtime_object.orientation,
             )
-        if int(entry.get("type", 0) or 0) == 11:
+        if int(runtime_object.gameobject_type) == 11:
             _transport_debug_log(
                 "[TransportElevator] stream create guid=%s entry=%s payload=%s "
                 "pos=(%.2f %.2f %.2f)",
@@ -943,7 +1087,7 @@ def build_database_gameobject_responses(
                 runtime_object.y,
                 runtime_object.z,
             )
-        if int(entry.get("type", 0) or 0) == 15:
+        if int(runtime_object.gameobject_type) == 15:
             _transport_debug_log(
                 "[WorldTransport] stream create guid=%s entry=%s payload=%s "
                 "pos=(%.2f %.2f %.2f) o=%.3f",

@@ -48,6 +48,13 @@ def test_gameobject_inherits_shared_runtime_identity_and_transform():
             "rotation2": 0.3,
             "rotation3": 0.9,
             "size": 1.25,
+            "display_id": 3015,
+            "state": 1,
+            "flags": 40,
+            "faction": 35,
+            "artkit": 7,
+            "animprogress": 255,
+            "type": 5,
         },
         runtime_guid=0xF11000000000007B,
     )
@@ -67,6 +74,103 @@ def test_gameobject_inherits_shared_runtime_identity_and_transform():
     assert gameobject.orientation == 1.5
     assert gameobject.rotation == (0.1, 0.2, 0.3, 0.9)
     assert gameobject.scale == 1.25
+    assert gameobject.display_id == 3015
+    assert gameobject.state == 1
+    assert gameobject.flags == 40
+    assert gameobject.faction == 35
+    assert gameobject.art_kit == 7
+    assert gameobject.animation_progress == 255
+    assert gameobject.gameobject_type == 5
+
+
+def test_gameobject_runtime_snapshot_retains_no_mapping_reference():
+    mapping = {
+        "guid": 123,
+        "entry": 456,
+        "map_id": 1,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 1.5,
+        "size": 1.25,
+        "display_id": 3015,
+        "state": 1,
+        "flags": 40,
+        "faction": 35,
+        "artkit": 7,
+        "animprogress": 255,
+        "type": 5,
+    }
+    gameobject = GameObject.from_mapping(mapping, runtime_guid=789)
+
+    mapping.update(
+        display_id=0,
+        state=0,
+        flags=0,
+        faction=0,
+        artkit=0,
+        animprogress=0,
+        type=0,
+    )
+
+    assert gameobject.display_id == 3015
+    assert gameobject.state == 1
+    assert gameobject.flags == 40
+    assert gameobject.faction == 35
+    assert gameobject.art_kit == 7
+    assert gameobject.animation_progress == 255
+    assert gameobject.gameobject_type == 5
+
+
+def test_gameobject_setters_mutate_only_runtime_state():
+    mapping = {
+        "guid": 123,
+        "entry": 456,
+        "map_id": 1,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 1.5,
+        "rotation0": 0.1,
+        "rotation1": 0.2,
+        "rotation2": 0.3,
+        "rotation3": 0.9,
+        "size": 1.25,
+        "display_id": 3015,
+        "state": 1,
+        "flags": 40,
+        "faction": 35,
+        "artkit": 7,
+        "animprogress": 255,
+        "type": 5,
+    }
+    persistent_snapshot = dict(mapping)
+    gameobject = GameObject.from_mapping(mapping, runtime_guid=789)
+
+    gameobject.set_position(11.0, 22.0, 33.0)
+    gameobject.set_orientation(2.5)
+    gameobject.set_rotation((0.4, 0.3, 0.2, 0.8))
+    gameobject.set_scale(1.75)
+    gameobject.set_state(2)
+    gameobject.set_flags(17)
+    gameobject.set_display_id(4321)
+    gameobject.set_faction(14)
+    gameobject.set_art_kit(9)
+    gameobject.set_animation_progress(127)
+    gameobject.set_gameobject_type(3)
+
+    assert gameobject.world_position == (11.0, 22.0, 33.0)
+    assert gameobject.orientation == 2.5
+    assert gameobject.rotation == (0.4, 0.3, 0.2, 0.8)
+    assert gameobject.scale == 1.75
+    assert gameobject.state == 2
+    assert gameobject.flags == 17
+    assert gameobject.display_id == 4321
+    assert gameobject.faction == 14
+    assert gameobject.art_kit == 9
+    assert gameobject.animation_progress == 127
+    assert gameobject.gameobject_type == 3
+    assert mapping == persistent_snapshot
 
 
 def test_spawned_world_object_constructs_persistent_identity():

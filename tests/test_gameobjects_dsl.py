@@ -131,6 +131,173 @@ def test_create_packet_runtime_object_path_matches_mapping_fallback(monkeypatch)
     assert runtime_payload == fallback_payload
 
 
+def test_create_packet_uses_runtime_object_live_transform():
+    persistent_entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+    }
+    live_entry = {
+        **persistent_entry,
+        "x": 101.25,
+        "y": -202.5,
+        "z": 33.75,
+        "orientation": 1.25,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.5850972729404622,
+        "rotation3": 0.8109631195052179,
+        "size": 1.75,
+    }
+    runtime_guid = GameObjectGuid.from_spawn_guid(
+        persistent_entry["guid"],
+        1,
+    )
+    runtime_object = GameObject.from_mapping(
+        live_entry,
+        runtime_guid=runtime_guid,
+    )
+    store = get_gameobject_runtime_store()
+    store.clear()
+    try:
+        persistent_payload = gameobjects._build_gameobject_update_payload(
+            map_id=1,
+            entry=persistent_entry,
+            realm_id=1,
+        )
+        runtime_payload = gameobjects._build_gameobject_update_payload(
+            map_id=1,
+            entry=persistent_entry,
+            realm_id=1,
+            gameobject=runtime_object,
+        )
+        live_mapping_payload = gameobjects._build_gameobject_update_payload(
+            map_id=1,
+            entry=live_entry,
+            realm_id=1,
+        )
+    finally:
+        store.clear()
+
+    assert runtime_payload == live_mapping_payload
+    assert runtime_payload != persistent_payload
+
+
+def test_create_packet_observes_mutated_runtime_object_state():
+    persistent_entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+        "artkit": 0,
+    }
+    expected_entry = {
+        **persistent_entry,
+        "x": 101.25,
+        "y": -202.5,
+        "z": 33.75,
+        "orientation": 1.25,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.5850972729404622,
+        "rotation3": 0.8109631195052179,
+        "size": 1.75,
+        "display_id": 4321,
+        "state": 2,
+        "flags": 17,
+        "faction": 35,
+        "artkit": 9,
+        "animprogress": 127,
+        "type": 3,
+    }
+    runtime_guid = GameObjectGuid.from_spawn_guid(
+        persistent_entry["guid"],
+        1,
+    )
+    runtime_object = GameObject.from_mapping(
+        persistent_entry,
+        runtime_guid=runtime_guid,
+    )
+    runtime_object.set_position(101.25, -202.5, 33.75)
+    runtime_object.set_orientation(1.25)
+    runtime_object.set_rotation(
+        (0.0, 0.0, 0.5850972729404622, 0.8109631195052179)
+    )
+    runtime_object.set_scale(1.75)
+    runtime_object.set_display_id(4321)
+    runtime_object.set_state(2)
+    runtime_object.set_flags(17)
+    runtime_object.set_faction(35)
+    runtime_object.set_art_kit(9)
+    runtime_object.set_animation_progress(127)
+    runtime_object.set_gameobject_type(3)
+
+    runtime_payload = gameobjects._build_gameobject_update_payload(
+        map_id=1,
+        entry=persistent_entry,
+        realm_id=1,
+        gameobject=runtime_object,
+    )
+    expected_payload = gameobjects._build_gameobject_update_payload(
+        map_id=1,
+        entry=expected_entry,
+        realm_id=1,
+    )
+
+    assert runtime_payload == expected_payload
+    assert persistent_entry["x"] != runtime_object.x
+    assert persistent_entry["display_id"] != runtime_object.display_id
+
+
+def test_create_packet_resolves_mutated_object_from_runtime_store():
+    persistent_entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+    }
+    runtime_guid = GameObjectGuid.from_spawn_guid(
+        persistent_entry["guid"],
+        1,
+    )
+    runtime_object = GameObject.from_mapping(
+        persistent_entry,
+        runtime_guid=runtime_guid,
+    )
+    runtime_object.set_position(101.25, -202.5, 33.75)
+    runtime_object.set_state(2)
+    runtime_object.set_display_id(4321)
+    expected_entry = {
+        **persistent_entry,
+        "x": 101.25,
+        "y": -202.5,
+        "z": 33.75,
+        "state": 2,
+        "display_id": 4321,
+    }
+    store = get_gameobject_runtime_store()
+    store.clear()
+    expected_payload = gameobjects._build_gameobject_update_payload(
+        map_id=1,
+        entry=expected_entry,
+        realm_id=1,
+    )
+    store.add(runtime_object)
+    try:
+        runtime_payload = gameobjects._build_gameobject_update_payload(
+            map_id=1,
+            entry=persistent_entry,
+            realm_id=1,
+        )
+    finally:
+        store.clear()
+
+    assert runtime_payload == expected_payload
+    assert persistent_entry["x"] != runtime_object.x
+    assert persistent_entry["state"] != runtime_object.state
+
+
 def test_create_packet_reuses_preloaded_runtime_store_object(monkeypatch):
     entry = {
         **_entry(),
@@ -165,6 +332,56 @@ def test_create_packet_reuses_preloaded_runtime_store_object(monkeypatch):
         store.clear()
 
     assert payload
+
+
+def test_create_packet_does_not_read_runtime_snapshot_fields_from_mapping():
+    entry = {
+        **_entry(),
+        "map_id": 1,
+        "map": 1,
+        "type": 5,
+        "display_id": 4321,
+        "state": 2,
+        "flags": 17,
+        "faction": 35,
+        "artkit": 9,
+        "animprogress": 127,
+    }
+    runtime_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+    runtime_object = GameObject.from_mapping(
+        entry,
+        runtime_guid=runtime_guid,
+    )
+    expected = gameobjects._build_gameobject_update_payload(
+        map_id=1,
+        entry=entry,
+        realm_id=1,
+        gameobject=runtime_object,
+    )
+    migrated_fields = {
+        "type",
+        "display_id",
+        "state",
+        "flags",
+        "faction",
+        "artkit",
+        "animprogress",
+    }
+
+    class RuntimeFieldRejectingMapping(dict):
+        def get(self, key, default=None):
+            if key in migrated_fields:
+                raise AssertionError(f"packet mapping read runtime field {key}")
+            return super().get(key, default)
+
+    actual = gameobjects._build_gameobject_update_payload(
+        map_id=1,
+        entry=RuntimeFieldRejectingMapping(entry),
+        realm_id=1,
+        gameobject=runtime_object,
+    )
+
+    assert actual == expected
 
 
 def test_values_packet_runtime_object_path_matches_mapping_fallback():

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Passive lifetime store for persistent runtime GameObjects."""
+"""Lifetime store for persistent runtime GameObjects."""
 
 from __future__ import annotations
 
@@ -16,11 +16,13 @@ from server.modules.handlers.world.runtime.runtime_object import (
 
 
 class GameObjectRuntimeStore:
-    """Own long-lived mirrors of authoritative persistent spawn mappings.
+    """Own long-lived GameObjects initialized from persistent spawn mappings.
 
-    The store provides identity-based retention and lookup only. It does not
-    own persistence, visibility, packets, collision, lifecycle, updates, world
-    membership, or gameplay behavior.
+    Retained GameObjects own their mutable runtime values while the mappings
+    remain persistence-authoritative. The store provides identity-based
+    retention and lookup only. It does not own persistence, visibility,
+    packets, collision, lifecycle, updates, world membership, or gameplay
+    behavior.
     """
 
     def __init__(self) -> None:
@@ -90,13 +92,13 @@ def get_gameobject_runtime_store() -> GameObjectRuntimeStore:
     return _GAMEOBJECT_RUNTIME_STORE
 
 
-def gameobject_matches_mapping(
+def gameobject_identity_matches_mapping(
     gameobject: GameObject,
     mapping: Mapping[str, Any],
     *,
     runtime_guid: int,
 ) -> bool:
-    """Return whether a passive runtime mirror matches authoritative data."""
+    """Return whether a mapping describes the same runtime GameObject."""
     map_id = _mapping_int(mapping, "map_id", _mapping_int(mapping, "map"))
     return (
         int(gameobject.runtime_guid) == int(runtime_guid)
@@ -104,6 +106,22 @@ def gameobject_matches_mapping(
         and int(gameobject.entry) == _mapping_int(mapping, "entry")
         and int(gameobject.map_id) == map_id
         and int(gameobject.instance_id) == _mapping_int(mapping, "instance_id")
+    )
+
+
+def gameobject_matches_mapping(
+    gameobject: GameObject,
+    mapping: Mapping[str, Any],
+    *,
+    runtime_guid: int,
+) -> bool:
+    """Return whether identity and transform match authoritative data."""
+    return (
+        gameobject_identity_matches_mapping(
+            gameobject,
+            mapping,
+            runtime_guid=runtime_guid,
+        )
         and float(gameobject.x) == _mapping_float(mapping, "x")
         and float(gameobject.y) == _mapping_float(mapping, "y")
         and float(gameobject.z) == _mapping_float(mapping, "z")
@@ -116,6 +134,14 @@ def gameobject_matches_mapping(
             _mapping_float(mapping, "rotation3"),
         )
         and float(gameobject.scale) == _mapping_float(mapping, "size", 1.0)
+        and int(gameobject.display_id) == _mapping_int(mapping, "display_id")
+        and int(gameobject.state) == _mapping_int(mapping, "state")
+        and int(gameobject.flags) == _mapping_int(mapping, "flags")
+        and int(gameobject.faction) == _mapping_int(mapping, "faction")
+        and int(gameobject.art_kit) == _mapping_int(mapping, "artkit")
+        and int(gameobject.animation_progress)
+        == _mapping_int(mapping, "animprogress")
+        and int(gameobject.gameobject_type) == _mapping_int(mapping, "type")
     )
 
 
@@ -124,14 +150,24 @@ def resolve_gameobject_runtime(
     *,
     runtime_guid: int,
 ) -> GameObject:
-    """Reuse a matching stored mirror or construct a temporary fallback."""
+    """Reuse stored runtime state or construct a temporary fallback.
+
+    Ordinary persistent GameObjects use identity-only matching because their
+    mutable values are runtime-authoritative. Transport projections retain
+    full mapping matching because their runtime state is supplied by the
+    existing transport subsystem.
+    """
     stored = get_gameobject_runtime_store().get_by_spawn_id(
         _mapping_int(mapping, "guid")
     )
-    if stored is not None and gameobject_matches_mapping(
-        stored,
-        mapping,
-        runtime_guid=runtime_guid,
-    ):
-        return stored
+    if stored is not None:
+        mapping_type = _mapping_int(mapping, "type")
+        uses_transport_projection = mapping_type in (11, 15)
+        matcher = (
+            gameobject_matches_mapping
+            if uses_transport_projection
+            else gameobject_identity_matches_mapping
+        )
+        if matcher(stored, mapping, runtime_guid=runtime_guid):
+            return stored
     return GameObject.from_mapping(mapping, runtime_guid=runtime_guid)

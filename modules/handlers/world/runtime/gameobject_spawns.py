@@ -15,6 +15,7 @@ from server.modules.handlers.world.bootstrap.gameobjects import (
 )
 from server.modules.handlers.world.runtime.gameobject import GameObject
 from server.modules.handlers.world.runtime.gameobject_store import (
+    gameobject_identity_matches_mapping,
     gameobject_matches_mapping,
     get_gameobject_runtime_store,
 )
@@ -54,9 +55,12 @@ def _runtime_guid(session, entry: dict[str, Any] | None) -> int:
         return world_guid
     spawn_id = _entry_int(entry, "guid")
     go_type = _entry_int(entry, "type", -1)
-    if go_type == GAMEOBJECT_TYPE_MO_TRANSPORT or bool(entry.get("use_transport_guid")):
+    if go_type == GAMEOBJECT_TYPE_MO_TRANSPORT or bool(
+        entry.get("use_transport_guid")
+    ):
         return int(MoTransportGuid.from_spawn_guid(spawn_id))
-    return int(GameObjectGuid.from_spawn_guid(spawn_id, int(getattr(session, "realm_id", 1) or 1)))
+    realm_id = int(getattr(session, "realm_id", 1) or 1)
+    return int(GameObjectGuid.from_spawn_guid(spawn_id, realm_id))
 
 
 def _runtime_object(
@@ -64,8 +68,14 @@ def _runtime_object(
     entry: dict[str, Any] | None,
     *,
     runtime_guid: int | None = None,
+    require_mapping_transform: bool = True,
 ) -> GameObject | None:
-    """Reuse a matching persistent mirror, with temporary fallback."""
+    """Resolve lifecycle state with an unchanged temporary fallback.
+
+    New persistent representations require the cached transform to match.
+    Existing live representations may use identity-only matching because their
+    inherited GameObject transform is runtime-authoritative.
+    """
     if not isinstance(entry, dict):
         return None
     resolved_runtime_guid = (
@@ -76,12 +86,18 @@ def _runtime_object(
     stored = get_gameobject_runtime_store().get_by_spawn_id(
         _entry_int(entry, "guid")
     )
-    if stored is not None and gameobject_matches_mapping(
-        stored,
-        entry,
-        runtime_guid=resolved_runtime_guid,
-    ):
-        return stored
+    if stored is not None:
+        matcher = (
+            gameobject_matches_mapping
+            if require_mapping_transform
+            else gameobject_identity_matches_mapping
+        )
+        if matcher(
+            stored,
+            entry,
+            runtime_guid=resolved_runtime_guid,
+        ):
+            return stored
     return GameObject.from_mapping(
         entry,
         runtime_guid=resolved_runtime_guid,
@@ -327,7 +343,11 @@ def despawn_persistent_gameobject(
     )
     if entry is None:
         return GameObjectSpawnRuntimeResult("despawn", int(spawn_id), None, 0)
-    runtime_object = _runtime_object(session, entry)
+    runtime_object = _runtime_object(
+        session,
+        entry,
+        require_mapping_transform=False,
+    )
     if runtime_object is None:
         return GameObjectSpawnRuntimeResult("despawn", int(spawn_id), None, 0)
     runtime_guid = int(runtime_object.runtime_guid)
@@ -386,6 +406,7 @@ def replace_persistent_gameobject(
         session,
         old_entry,
         runtime_guid=runtime_guid,
+        require_mapping_transform=False,
     )
     if old_runtime_object is None:
         return GameObjectSpawnRuntimeResult("replace", int(spawn_id), None, 0)
