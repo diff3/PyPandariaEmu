@@ -18,6 +18,7 @@ from server.modules.handlers.world.runtime import (
     get_flight_path_runtime_store,
 )
 from server.modules.handlers.world.state.runtime import is_player_world_active
+from server.modules.protocol.packet_batch import PacketBatch
 
 
 def _quiet_logger():
@@ -1695,6 +1696,10 @@ def test_move_spline_done_cross_map_leg_starts_worldport(monkeypatch):
     ]
     assert responses[0][1] == b"SMSG_TRANSFER_PENDING|0|-10.0|-20.0|5.0"
     assert responses[1][1] == b"SMSG_NEW_WORLD|0|-10.0|-20.0|5.0"
+    assert isinstance(responses, PacketBatch)
+    assert responses.transition_bound is True
+    assert responses.transition_generation == 1
+    assert responses.transition_owner == "taxi_worldport"
     assert session.map_id == 0
     assert (session.x, session.y, session.z) == (-10.0, -20.0, 5.0)
     assert session.movement_state.x == -10.0

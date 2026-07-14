@@ -8,6 +8,10 @@ import time
 from dataclasses import dataclass
 
 from shared.Logger import Logger
+from server.modules.protocol.packet_batch import (
+    bind_packet_batch_to_current_transition,
+    preserve_packet_batch_metadata,
+)
 
 
 _POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS = 2.0
@@ -151,10 +155,16 @@ def apply_map_transfer(
                 )(),
             ),
         )
-        responses = [
-            transport_transfer_pending if opcode == "SMSG_TRANSFER_PENDING" else (opcode, payload)
+        replaced_responses = [
+            (
+                transport_transfer_pending
+                if opcode == "SMSG_TRANSFER_PENDING"
+                else (opcode, payload)
+            )
             for opcode, payload in list(responses or [])
         ]
+        responses = preserve_packet_batch_metadata(responses, replaced_responses)
+        responses = bind_packet_batch_to_current_transition(session, responses)
         Logger.info(
             "[TransportWorldport] transfer_pending_transport "
             "dest_map=%s source_map=%s transport_entry=%s keep_transport=true",
@@ -176,4 +186,4 @@ def apply_map_transfer(
         float(target.orientation),
         int(bool(keep_transport)),
     )
-    return list(responses or [])
+    return preserve_packet_batch_metadata(responses, responses)

@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from server.modules.protocol.packet_batch import PacketBatch
+
 replay_module = types.ModuleType("server.modules.handlers.world.bootstrap.replay")
 replay_module.build_database_gameobject_responses = lambda *args, **kwargs: []
 replay_module.build_multi_u32_update_object_payload = lambda *args, **kwargs: b""
@@ -4008,7 +4010,13 @@ def test_transport_boundary_event_worldports_attached_passenger_once(monkeypatch
     )
     _add_boundary_event(state, destination_map=0)
     sent: list[tuple[str, bytes]] = []
-    session.send_response = lambda responses: sent.extend(responses)
+    sent_batches = []
+
+    def capture_batch(responses):
+        sent_batches.append(responses)
+        sent.extend(responses)
+
+    session.send_response = capture_batch
     monkeypatch.setattr(
         transport_runtime,
         "_find_transport_passenger_session",
@@ -4032,9 +4040,20 @@ def test_transport_boundary_event_worldports_attached_passenger_once(monkeypatch
     assert session.map_id == 0
     assert session.movement_state.transport_guid == world_guid
     assert session.world_transition_owner == "transport_worldport"
+    assert isinstance(sent_batches[-1], PacketBatch)
+    assert sent_batches[-1].transition_bound is True
+    assert sent_batches[-1].transition_owner == "transport_worldport"
+    assert sent_batches[-1].transition_generation == (
+        session.world_transition_generation
+    )
     assert session.pending_transport_transfer["world_transition_generation"] == (
         session.world_transition_generation
     )
+    boundary_key = tuple(
+        session.pending_transport_transfer["boundary_event_key"]
+    )
+    assert boundary_key in state.active_boundary_events
+    assert boundary_key not in state.handled_boundary_events
 
     assert transport_runtime.transport_crossed_map_boundary(
         world_guid,
@@ -4068,7 +4087,14 @@ def test_transport_boundary_starts_again_after_bootstrap_completion(monkeypatch)
         world_guid,
         previous_map_id=1,
     ) is True
+    boundary_key = tuple(
+        session.pending_transport_transfer["boundary_event_key"]
+    )
+    assert boundary_key in state.active_boundary_events
+    assert boundary_key not in state.handled_boundary_events
     assert movement.complete_pending_transport_transfer(session) is True
+    assert boundary_key not in state.active_boundary_events
+    assert boundary_key in state.handled_boundary_events
     assert session.transport_transfer_pending is False
     assert session.transport_attach_state == transport_runtime.ATTACH_STATE_ATTACHED
     assert transport_runtime.transport_passenger_attachment(world_guid, 1) is not None
@@ -4081,6 +4107,32 @@ def test_transport_boundary_starts_again_after_bootstrap_completion(monkeypatch)
     ) is True
     assert [name for name, _payload in sent].count("SMSG_TRANSFER_PENDING") == 2
     assert [name for name, _payload in sent].count("SMSG_NEW_WORLD") == 2
+
+
+def test_failed_boundary_handling_restores_event_for_retry(monkeypatch):
+    _session, state, world_guid = _transport_boundary_transfer_session(
+        monkeypatch,
+        source_map=1,
+        destination_map=0,
+        passenger=True,
+    )
+    _add_boundary_event(state, destination_map=0, phase_ms=1000)
+    event = state.lifecycle_events[0]
+    event_key = transport_runtime._boundary_event_key(event)
+    state.active_boundary_events.add(event_key)
+    pending = {
+        "source_guid": world_guid,
+        "destination_guid": world_guid,
+        "boundary_event_key": event_key,
+    }
+
+    assert transport_runtime.restore_transport_boundary_event(
+        pending,
+        reason="safe_fallback_rejected",
+    ) is True
+    assert event_key not in state.active_boundary_events
+    assert event_key not in state.handled_boundary_events
+    assert transport_runtime._latest_unhandled_boundary_event(state) is event
 
 
 def test_transport_boundary_owns_one_transition_for_all_attached_passengers(monkeypatch):

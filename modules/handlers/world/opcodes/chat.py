@@ -9,6 +9,10 @@ from DSL.modules.bitsHandler import BitWriter
 from DSL.modules.EncoderHandler import EncoderHandler
 from shared.Logger import Logger
 from server.modules.protocol.PacketContext import PacketContext
+from server.modules.protocol.packet_batch import (
+    bind_packet_batch_to_current_transition,
+    preserve_packet_batch_metadata,
+)
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.login.packets import build_login_packet
 from server.modules.game.guid import GuidHelper
@@ -967,7 +971,7 @@ def _append_feedback_response(
 ) -> list[tuple[str, bytes]]:
     merged = list(responses or [])
     merged.extend(_notification_response(message))
-    return merged
+    return preserve_packet_batch_metadata(responses, merged)
 
 
 def _build_forced_inventory_slot_resend_responses(session) -> list[tuple[str, bytes]]:
@@ -1512,39 +1516,53 @@ def apply_player_state_change(
             session.near_teleport_pending = True
             teleport_responses = apply_state_and_resync(
                 session,
-                [("SMSG_MOVE_TELEPORT", movement_handlers.build_same_map_teleport_payload(session))],
+                [
+                    (
+                        "SMSG_MOVE_TELEPORT",
+                        movement_handlers.build_same_map_teleport_payload(
+                            session
+                        ),
+                    )
+                ],
             )
-            return pre_position_responses + teleport_responses
+            return bind_packet_batch_to_current_transition(
+                session,
+                pre_position_responses + teleport_responses,
+            )
 
         session.teleport_pending = True
         session.worldport_ack_pending = True
         session.near_teleport_pending = False
-        return pre_position_responses + [
-            (
-                "SMSG_TRANSFER_PENDING",
-                build_login_packet(
+        return bind_packet_batch_to_current_transition(
+            session,
+            pre_position_responses
+            + [
+                (
                     "SMSG_TRANSFER_PENDING",
-                    type("Ctx", (), {"map_id": int(target_map_id)})(),
+                    build_login_packet(
+                        "SMSG_TRANSFER_PENDING",
+                        type("Ctx", (), {"map_id": int(target_map_id)})(),
+                    ),
                 ),
-            ),
-            (
-                "SMSG_NEW_WORLD",
-                build_login_packet(
+                (
                     "SMSG_NEW_WORLD",
-                    type(
-                        "Ctx",
-                        (),
-                        {
-                            "map_id": int(target_map_id),
-                            "x": float(x),
-                            "y": float(y),
-                            "z": float(z),
-                            "orientation": float(orientation),
-                        },
-                    )(),
+                    build_login_packet(
+                        "SMSG_NEW_WORLD",
+                        type(
+                            "Ctx",
+                            (),
+                            {
+                                "map_id": int(target_map_id),
+                                "x": float(x),
+                                "y": float(y),
+                                "z": float(z),
+                                "orientation": float(orientation),
+                            },
+                        )(),
+                    ),
                 ),
-            ),
-        ]
+            ],
+        )
 
     responses = _build_field_update_responses(session, field_updates)
 

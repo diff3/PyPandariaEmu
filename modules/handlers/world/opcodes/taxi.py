@@ -40,6 +40,9 @@ from server.modules.handlers.world.transport_runtime import (
     clear_player_transport_state,
 )
 from server.modules.protocol.PacketContext import PacketContext
+from server.modules.protocol.packet_batch import (
+    bind_packet_batch_to_current_transition,
+)
 
 
 _TAXI_NODE_STATUS_KNOWN = 1
@@ -1110,7 +1113,7 @@ def _begin_cross_map_taxi_transfer(
         getattr(session, "pending_taxi_transfer", None),
         [opcode for opcode, _payload in responses],
     )
-    return responses
+    return bind_packet_batch_to_current_transition(session, responses)
 
 
 def continue_pending_cross_map_taxi(session) -> list[tuple[str, bytes]]:

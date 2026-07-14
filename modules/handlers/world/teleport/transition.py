@@ -9,6 +9,7 @@ def _begin_world_transition(session, owner: str) -> int:
     session.world_transition_generation = generation
     session.world_transition_owner = str(owner)
     session.world_transition_loading_generation = generation
+    session.world_transition_status = "ACTIVE"
     return generation
 
 
@@ -84,6 +85,56 @@ def pending_transition_is_current(session, pending) -> bool:
 
 def complete_world_transition(session) -> None:
     """Retire completion guards after the active transition has bootstrapped."""
+    generation = int(
+        getattr(session, "world_transition_generation", 0) or 0
+    )
+    owner = str(getattr(session, "world_transition_owner", "") or "")
+    session.world_transition_status = "COMPLETED"
+    session.world_transition_terminal_state = "COMPLETED"
+    session.world_transition_terminal_generation = generation
+    session.world_transition_terminal_owner = owner
     session.world_transition_owner = None
     session.world_transition_ignore_worldport_ack = False
     session.world_transition_loading_generation = 0
+
+
+def fail_world_transition(
+    session,
+    *,
+    expected_generation: int,
+    expected_owner: str,
+    reason: str,
+) -> bool:
+    """Fail the current transition without touching a newer owner."""
+    current_generation = int(
+        getattr(session, "world_transition_generation", 0) or 0
+    )
+    current_owner = str(
+        getattr(session, "world_transition_owner", "") or ""
+    )
+    if (
+        current_generation != int(expected_generation)
+        or current_owner != str(expected_owner)
+    ):
+        return False
+
+    session.world_transition_status = "FAILED"
+    session.world_transition_terminal_state = "FAILED"
+    session.world_transition_terminal_generation = current_generation
+    session.world_transition_terminal_owner = current_owner
+    session.world_transition_failure_reason = str(reason)
+
+    # Advance the generation before releasing ownership so delayed callbacks
+    # and unsent packet batches from the failed transition become stale.
+    session.world_transition_generation = current_generation + 1
+    session.world_transition_owner = None
+    session.world_transition_loading_generation = 0
+    session.world_transition_ignore_worldport_ack = True
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+    session.near_teleport_pending = False
+    session.teleport_destination = None
+    session.loading_screen_visible = False
+    session.loading_screen_done = False
+    session.post_loading_sent = False
+    return True

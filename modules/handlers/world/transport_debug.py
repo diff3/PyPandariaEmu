@@ -33,6 +33,7 @@ class TransportDebugEvent(str, Enum):
     PENDING_TRANSFER_TIMEOUT = "pending_transfer_timeout"
     UNEXPECTED_DETACH = "unexpected_detach"
     STALE_GENERATION_IGNORED = "stale_generation_ignored"
+    PACKET_BATCH_DISCARDED = "packet_batch_discarded"
     LATE_ACK_IGNORED = "late_ack_ignored"
     BOOTSTRAP_SKIPPED = "bootstrap_skipped"
     BOOTSTRAP_REJECTED = "bootstrap_rejected"

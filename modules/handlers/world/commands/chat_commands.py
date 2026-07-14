@@ -62,6 +62,7 @@ from server.modules.handlers.world.title_service import (
     resolve_title_bit,
     title_is_known,
 )
+from server.modules.protocol.packet_batch import preserve_packet_batch_metadata
 
 CommandHandler = Callable[[Any, list[str]], list[tuple[str, bytes]]]
 
@@ -197,7 +198,7 @@ def _append_feedback_response(
         return helper(responses, message)
     merged = list(responses or [])
     merged.extend(_notification_response(message))
-    return merged
+    return preserve_packet_batch_metadata(responses, merged)
 
 
 def _build_login_inventory_sync(session) -> list[tuple[str, bytes]]:

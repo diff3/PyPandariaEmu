@@ -2639,6 +2639,17 @@ def complete_pending_transport_transfer(session) -> bool:
         int(pending.get("node_index", 0) or 0),
         int(pending.get("route_phase", 0) or 0),
     )
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            finalize_transport_boundary_event,
+        )
+
+        finalize_transport_boundary_event(pending, outcome="completed")
+    except Exception as exc:
+        Logger.warning(
+            "[TransportBoundary] completion finalization failed error=%s",
+            str(exc),
+        )
     session.pending_transport_transfer = None
     session.transport_transfer_pending = False
     if destination_guid > 0:

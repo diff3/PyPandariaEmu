@@ -14,6 +14,10 @@ from enum import Enum, auto
 from shared.Logger import Logger
 from shared.ConfigLoader import ConfigLoader
 from server.modules.protocol.PacketContext import PacketContext
+from server.modules.protocol.packet_batch import (
+    PacketBatch,
+    send_packet_batch_under_lock,
+)
 from server.modules.protocol.ServerOutput import (
     project_name,
     log_raw_packet,
@@ -492,7 +496,36 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
         if not normalized:
             return
 
-        with send_lock:
+        def _log_discarded_transition_batch(batch: PacketBatch) -> None:
+            try:
+                from server.modules.handlers.world.transport_debug import (
+                    TransportDebugEvent,
+                    log_transport_event,
+                )
+
+                log_transport_event(
+                    TransportDebugEvent.PACKET_BATCH_DISCARDED,
+                    player_guid=int(getattr(conn_session, "char_guid", 0) or 0),
+                    reason="transition_ownership_changed",
+                    batch_generation=batch.transition_generation,
+                    batch_owner=str(batch.transition_owner or "none"),
+                    current_generation=int(
+                        getattr(conn_session, "world_transition_generation", 0)
+                        or 0
+                    ),
+                    current_owner=str(
+                        getattr(conn_session, "world_transition_owner", "")
+                        or "none"
+                    ),
+                    packets=len(normalized),
+                )
+            except Exception as exc:
+                Logger.debug(
+                    "[PacketBatch] discard diagnostic failed error=%s",
+                    str(exc),
+                )
+
+        def _send_locked_batch() -> None:
             for item in normalized:
                 if len(item) == 2:
                     opcode_name, payload = item
@@ -547,6 +580,14 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
 
                 target_sock.sendall(header)
                 target_sock.sendall(payload)
+
+        send_packet_batch_under_lock(
+            conn_session,
+            responses,
+            send_lock,
+            _send_locked_batch,
+            on_discard=_log_discarded_transition_batch,
+        )
 
     conn_session.global_state = global_state
     conn_session.send_response = lambda responses: _send_normalized_responses(sock, responses)

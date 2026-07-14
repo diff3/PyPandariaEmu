@@ -14,6 +14,7 @@ from DSL.modules.bitsHandler import BitInterPreter, BitWriter
 from server.modules.interpretation.utils import dsl_decode
 from server.modules.handlers.world.state.global_state import GlobalState
 from server.modules.handlers.world.runtime import Player, get_player_runtime_store
+from server.modules.protocol.packet_batch import PacketBatch
 from server.session.world_session import WorldSession
 
 
@@ -3406,6 +3407,10 @@ def test_manual_teleport_supersedes_incomplete_transport_worldport(monkeypatch):
         ("SMSG_TRANSFER_PENDING", b"SMSG_TRANSFER_PENDING|530"),
         ("SMSG_NEW_WORLD", b"SMSG_NEW_WORLD|530"),
     ]
+    assert isinstance(responses, PacketBatch)
+    assert responses.transition_bound is True
+    assert responses.transition_generation == 1
+    assert responses.transition_owner == "ordinary_teleport"
     assert alice.world_transition_generation == 1
     assert alice.world_transition_owner == "ordinary_teleport"
     assert alice.world_transition_ignore_worldport_ack is True

@@ -388,6 +388,11 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     session.world_transition_loading_generation = 0
     session.world_transition_owner = None
     session.world_transition_ignore_worldport_ack = False
+    session.world_transition_status = "IDLE"
+    session.world_transition_terminal_state = None
+    session.world_transition_terminal_generation = 0
+    session.world_transition_terminal_owner = None
+    session.world_transition_failure_reason = None
     try:
         from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
 
@@ -969,6 +974,131 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     return responses
 
 
+def _current_transport_worldport_matches(session, pending: object) -> bool:
+    """Return whether pending data still owns this transport generation."""
+    if not isinstance(pending, dict):
+        return False
+    return (
+        str(getattr(session, "world_transition_owner", "") or "")
+        == "transport_worldport"
+        and int(pending.get("world_transition_generation", 0) or 0)
+        == int(getattr(session, "world_transition_generation", 0) or 0)
+    )
+
+
+def _fail_transport_worldport_bootstrap(
+    session,
+    pending: dict | None,
+    *,
+    reason: str,
+) -> list[tuple[str, bytes]]:
+    """Terminally fail a current transport worldport and start safe fallback."""
+    if not isinstance(pending, dict):
+        return []
+
+    from server.modules.handlers.world.teleport.transition import (
+        fail_world_transition,
+    )
+
+    expected_generation = int(
+        pending.get(
+            "world_transition_generation",
+            getattr(session, "world_transition_generation", 0),
+        )
+        or 0
+    )
+    failed = fail_world_transition(
+        session,
+        expected_generation=expected_generation,
+        expected_owner="transport_worldport",
+        reason=str(reason),
+    )
+    if not failed:
+        Logger.info(
+            "[TeleportTransition] transport failure ignored owner=%s "
+            "generation=%s expected_generation=%s",
+            str(getattr(session, "world_transition_owner", "") or "none"),
+            int(getattr(session, "world_transition_generation", 0) or 0),
+            expected_generation,
+        )
+        return []
+
+    from server.modules.handlers.world.transport_runtime import (
+        clear_player_transport_state,
+        finalize_transport_boundary_event,
+        restore_transport_boundary_event,
+    )
+
+    session.pending_transport_transfer = None
+    session.transport_transfer_pending = False
+    clear_player_transport_state(
+        session,
+        reason="worldport_failed",
+        opcode_name="bootstrap_failure",
+    )
+
+    safe_map = int(pending.get("safe_map", pending.get("source_map", 0)) or 0)
+    safe_values = tuple(
+        pending.get(key)
+        for key in (
+            "safe_x",
+            "safe_y",
+            "safe_z",
+            "safe_o",
+        )
+    )
+    if any(value is None for value in safe_values):
+        Logger.error(
+            "[TeleportTransition] transport fallback unavailable player=%s "
+            "generation=%s reason=missing_safe_position",
+            int(getattr(session, "char_guid", 0) or 0),
+            expected_generation,
+        )
+        restore_transport_boundary_event(
+            pending,
+            reason="missing_safe_position",
+        )
+        return []
+
+    from server.modules.handlers.world.teleport.map_transfer import (
+        TeleportDestination,
+        apply_map_transfer,
+    )
+
+    safe_x, safe_y, safe_z, safe_o = (
+        float(value) for value in safe_values
+    )
+    try:
+        responses = apply_map_transfer(
+            session,
+            TeleportDestination(
+                map_id=safe_map,
+                x=safe_x,
+                y=safe_y,
+                z=safe_z,
+                orientation=safe_o,
+                name="transport-worldport-fallback",
+            ),
+            reason="transport_worldport_failure",
+        )
+    except Exception:
+        restore_transport_boundary_event(
+            pending,
+            reason="safe_fallback_rejected",
+        )
+        raise
+    finalize_transport_boundary_event(pending, outcome="failed_fallback")
+    Logger.warning(
+        "[TeleportTransition] transport worldport failed; fallback started "
+        "player=%s failed_generation=%s fallback_generation=%s map=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        expected_generation,
+        int(getattr(session, "world_transition_generation", 0) or 0),
+        safe_map,
+    )
+    return responses
+
+
 @register("CMSG_AUTH_SESSION")
 def handle_auth_session(session, ctx: PacketContext):
     decoded = log_cmsg(ctx)
@@ -1442,6 +1572,14 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
                 (time.monotonic() - context_started) * 1000.0,
                 str(exc),
             )
+            pending = getattr(session, "pending_transport_transfer", None)
+            if _current_transport_worldport_matches(session, pending):
+                fallback_responses = _fail_transport_worldport_bootstrap(
+                    session,
+                    pending,
+                    reason=str(exc),
+                )
+                return 0, fallback_responses or None
             raise
         Logger.info(
             "[LoadingScreenTrace] trace_id=%s stage=login_context event=leaving elapsed_ms=%.3f",
@@ -1472,6 +1610,13 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
                 (time.monotonic() - handler_started) * 1000.0,
                 str(exc),
             )
+            if _current_transport_worldport_matches(session, pending):
+                fallback_responses = _fail_transport_worldport_bootstrap(
+                    session,
+                    pending,
+                    reason=str(exc),
+                )
+                return 0, fallback_responses or None
             raise
         responses.insert(
             0,

@@ -50,6 +50,7 @@ from server.modules.handlers.world.transport_debug import (
     log_transport_event,
     transport_location,
 )
+from server.modules.protocol.packet_batch import PacketBatch
 
 GAMEOBJECT_TYPE_TRANSPORT = 11
 GAMEOBJECT_TYPE_MO_TRANSPORT = 15
@@ -97,6 +98,35 @@ def _transport_debug_log(message: str, *args) -> None:
     if not transport_movement_debug_enabled():
         return
     Logger.info(message, *args)
+
+
+def _transport_transition_identity(session: Any) -> tuple[int, str]:
+    return (
+        int(getattr(session, "world_transition_generation", 0) or 0),
+        str(getattr(session, "world_transition_owner", "") or ""),
+    )
+
+
+def _bind_transport_batch_to_active_transition(
+    session: Any,
+    responses,
+    *,
+    transition_identity: tuple[int, str] | None = None,
+):
+    """Bind transport packets only when a transition currently owns them."""
+    generation, owner = (
+        _transport_transition_identity(session)
+        if transition_identity is None
+        else transition_identity
+    )
+    if not owner or generation <= 0:
+        return responses
+    return PacketBatch(
+        responses,
+        transition_bound=True,
+        transition_generation=generation,
+        transition_owner=owner,
+    )
 
 
 @dataclass(frozen=True)
@@ -176,6 +206,7 @@ class RuntimeTransportState:
     clock_model: str = ""
     clock_started_at_ms: int = 0
     handled_boundary_events: set[tuple[int, int, int | None]] = field(default_factory=set)
+    active_boundary_events: set[tuple[int, int, int | None]] = field(default_factory=set)
     transport: Transport | None = field(default=None, repr=False, compare=False)
     elevator: Elevator | None = field(default=None, repr=False, compare=False)
 
@@ -1628,6 +1659,7 @@ def clear_player_transport_state(
     unrelated movement values.
     """
     char_guid = int(getattr(session, "char_guid", 0) or 0)
+    pending_transition = getattr(session, "pending_transport_transfer", None)
     candidate_guids = {_current_session_transport_guid(session)}
 
     for value in (
@@ -1684,6 +1716,11 @@ def clear_player_transport_state(
             pending_transfers.pop(char_guid, None)
 
     session.transport_transfer_pending = False
+    if isinstance(pending_transition, dict):
+        finalize_transport_boundary_event(
+            pending_transition,
+            outcome=f"cancelled:{reason}",
+        )
     session.pending_transport_transfer = None
     session.post_bootstrap_transport_reattach_request = None
     session.transport_debug_transfer_id = ""
@@ -2195,6 +2232,7 @@ def _push_autonomous_transport_visibility(
         moved_entry["transport_period"] = int(state.route_period_ms)
 
     for session in iter_in_world_sessions(map_id=transport_map):
+        transition_identity = _transport_transition_identity(session)
         if not bool(getattr(session, "gameobjects_visible", True)):
             continue
         if not _transport_phase_matches_session(session, moved_entry):
@@ -2257,7 +2295,12 @@ def _push_autonomous_transport_visibility(
                 realm_id=realm_id,
                 transport=transport,
             )
-        _send_responses(session, [make_update_object_response(payload)])
+        responses = _bind_transport_batch_to_active_transition(
+            session,
+            [make_update_object_response(payload)],
+            transition_identity=transition_identity,
+        )
+        _send_responses(session, responses)
 
     _mark_transport_update_sent(state)
 
@@ -2296,6 +2339,7 @@ def _build_visible_transport_updates(
     force: bool = False,
     context: str = "runtime_update",
 ) -> list[tuple[str, bytes]]:
+    transition_identity = _transport_transition_identity(session)
     if not bool(getattr(session, "gameobjects_visible", True)):
         _log_transport_discovery_summary(
             session,
@@ -2584,7 +2628,11 @@ def _build_visible_transport_updates(
                 context=f"{context}_lifecycle_spawn",
             )
         )
-    return responses
+    return _bind_transport_batch_to_active_transition(
+        session,
+        responses,
+        transition_identity=transition_identity,
+    )
 
 
 def _build_new_visible_transport_creates(
@@ -2712,6 +2760,83 @@ def _boundary_event_key(event: MovementLifecycleEvent) -> tuple[int, int, int | 
     )
 
 
+def finalize_transport_boundary_event(
+    pending: dict[str, Any] | None,
+    *,
+    outcome: str,
+) -> bool:
+    """Retire one in-flight boundary after a terminal passenger outcome."""
+    if not isinstance(pending, dict):
+        return False
+    raw_key = pending.get("boundary_event_key")
+    if not isinstance(raw_key, (tuple, list)) or len(raw_key) != 3:
+        return False
+    event_key = (
+        int(raw_key[0]),
+        int(raw_key[1]),
+        None if raw_key[2] is None else int(raw_key[2]),
+    )
+    world_guid = int(
+        pending.get("source_guid", 0)
+        or pending.get("destination_guid", 0)
+        or 0
+    )
+    state = runtime_transport_state_for_guid(world_guid)
+    if state is None:
+        return False
+    active = getattr(state, "active_boundary_events", None)
+    if isinstance(active, set):
+        active.discard(event_key)
+    handled = getattr(state, "handled_boundary_events", None)
+    if not isinstance(handled, set):
+        handled = set()
+        state.handled_boundary_events = handled
+    handled.add(event_key)
+    _transport_debug_log(
+        "[TransportBoundary] terminal event=%s guid=0x%016X outcome=%s",
+        event_key,
+        world_guid & 0xFFFFFFFFFFFFFFFF,
+        str(outcome),
+    )
+    return True
+
+
+def restore_transport_boundary_event(
+    pending: dict[str, Any] | None,
+    *,
+    reason: str,
+) -> bool:
+    """Return an in-flight boundary to retryable state after failed handling."""
+    if not isinstance(pending, dict):
+        return False
+    raw_key = pending.get("boundary_event_key")
+    if not isinstance(raw_key, (tuple, list)) or len(raw_key) != 3:
+        return False
+    event_key = (
+        int(raw_key[0]),
+        int(raw_key[1]),
+        None if raw_key[2] is None else int(raw_key[2]),
+    )
+    world_guid = int(
+        pending.get("source_guid", 0)
+        or pending.get("destination_guid", 0)
+        or 0
+    )
+    state = runtime_transport_state_for_guid(world_guid)
+    if state is None:
+        return False
+    active = getattr(state, "active_boundary_events", None)
+    if isinstance(active, set):
+        active.discard(event_key)
+    _transport_debug_log(
+        "[TransportBoundary] restored event=%s guid=0x%016X reason=%s",
+        event_key,
+        world_guid & 0xFFFFFFFFFFFFFFFF,
+        str(reason),
+    )
+    return True
+
+
 def _latest_unhandled_boundary_event(
     state: RuntimeTransportState,
 ) -> MovementLifecycleEvent | None:
@@ -2722,6 +2847,9 @@ def _latest_unhandled_boundary_event(
         key = _boundary_event_key(event)
         handled = getattr(state, "handled_boundary_events", None)
         if isinstance(handled, set) and key in handled:
+            return None
+        active = getattr(state, "active_boundary_events", None)
+        if isinstance(active, set) and key in active:
             return None
         return event
     return None
@@ -2839,8 +2967,13 @@ def _start_boundary_worldport_for_passenger(
     from_map: int,
     to_map: int,
     transfer_id: str,
+    boundary_event_key: tuple[int, int, int | None] | None = None,
 ) -> bool:
     player_guid = int(getattr(session, "char_guid", 0) or 0)
+    source_player_x = float(getattr(session, "x", 0.0) or 0.0)
+    source_player_y = float(getattr(session, "y", 0.0) or 0.0)
+    source_player_z = float(getattr(session, "z", 0.0) or 0.0)
+    source_player_o = float(getattr(session, "orientation", 0.0) or 0.0)
     has_pending_transfer = bool(getattr(session, "transport_transfer_pending", False))
     has_pending_payload = isinstance(
         getattr(session, "pending_transport_transfer", None),
@@ -2951,6 +3084,12 @@ def _start_boundary_worldport_for_passenger(
         "final_z": world_z,
         "final_o": world_o,
         "destination_entry": dict(destination_entry),
+        "safe_map": int(from_map),
+        "safe_x": float(source_player_x),
+        "safe_y": float(source_player_y),
+        "safe_z": float(source_player_z),
+        "safe_o": float(source_player_o),
+        "boundary_event_key": boundary_event_key,
     }
     session.transport_attach_state = ATTACH_STATE_TRANSFERRING
     session.transport_debug_transfer_id = transfer_id
@@ -3050,6 +3189,9 @@ def transport_crossed_map_boundary(
         return False
     handled = getattr(state, "handled_boundary_events", None)
     if isinstance(handled, set) and _boundary_event_key(event) in handled:
+        return False
+    active = getattr(state, "active_boundary_events", None)
+    if isinstance(active, set) and _boundary_event_key(event) in active:
         return False
     to_map = getattr(event, "target_map_id", None)
     if to_map is None:
@@ -3162,6 +3304,7 @@ def transport_crossed_map_boundary(
             from_map=from_map,
             to_map=to_map,
             transfer_id=transfer_id,
+            boundary_event_key=_boundary_event_key(event),
         ):
             worldports_started += 1
 
@@ -3169,7 +3312,15 @@ def transport_crossed_map_boundary(
     if not isinstance(handled, set):
         handled = set()
         state.handled_boundary_events = handled
-    handled.add(_boundary_event_key(event))
+    active = getattr(state, "active_boundary_events", None)
+    if not isinstance(active, set):
+        active = set()
+        state.active_boundary_events = active
+    event_key = _boundary_event_key(event)
+    if worldports_started:
+        active.add(event_key)
+    elif not passengers:
+        handled.add(event_key)
     get_world_transport_manager().update_entry_transform_from_state(state)
 
     destination_visibility_created = 0
