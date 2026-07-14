@@ -2192,6 +2192,43 @@ class DatabaseConnection:
         cache_by_map.setdefault(map_id, []).append(dict(entry))
 
     @staticmethod
+    def _creature_save_snapshot(
+        existing: dict,
+        requested: dict,
+        synchronized_fields: tuple[str, ...],
+    ) -> dict:
+        """Use runtime state at the explicit Creature save boundary."""
+        if not synchronized_fields:
+            return dict(requested)
+        from server.modules.handlers.world.runtime.creature_persistence import (
+            creature_persistence_snapshot,
+        )
+        from server.modules.handlers.world.runtime.creature_store import (
+            get_creature_runtime_store,
+        )
+
+        runtime_object = get_creature_runtime_store().get_by_spawn_id(
+            int(existing.get("guid", 0) or 0)
+        )
+        if runtime_object is None:
+            return dict(requested)
+        if (
+            int(runtime_object.spawn_id) != int(existing.get("guid", 0) or 0)
+            or int(runtime_object.entry) != int(existing.get("entry", 0) or 0)
+        ):
+            return dict(requested)
+        runtime_snapshot = creature_persistence_snapshot(
+            runtime_object,
+            existing,
+        )
+        if any(
+            runtime_snapshot.get(field) != requested.get(field)
+            for field in synchronized_fields
+        ):
+            return dict(requested)
+        return runtime_snapshot
+
+    @staticmethod
     def delete_creature_spawn(spawn_guid: int) -> dict | None:
         existing = DatabaseConnection.get_creature_spawn(int(spawn_guid))
         if existing is None:
@@ -2360,6 +2397,26 @@ class DatabaseConnection:
         if existing is None:
             return None
 
+        requested = dict(existing)
+        synchronized_fields: list[str] = []
+        if x is not None:
+            requested["x"] = float(x)
+            synchronized_fields.append("x")
+        if y is not None:
+            requested["y"] = float(y)
+            synchronized_fields.append("y")
+        if z is not None:
+            requested["z"] = float(z)
+            synchronized_fields.append("z")
+        if orientation is not None:
+            requested["orientation"] = float(orientation)
+            synchronized_fields.append("orientation")
+        persistence_snapshot = DatabaseConnection._creature_save_snapshot(
+            existing,
+            requested,
+            tuple(synchronized_fields),
+        )
+
         try:
             session = DatabaseConnection.world()
         except Exception as exc:
@@ -2372,13 +2429,13 @@ class DatabaseConnection:
                 session.rollback()
                 return None
             if x is not None:
-                row.position_x = float(x)
+                row.position_x = float(persistence_snapshot["x"])
             if y is not None:
-                row.position_y = float(y)
+                row.position_y = float(persistence_snapshot["y"])
             if z is not None:
-                row.position_z = float(z)
+                row.position_z = float(persistence_snapshot["z"])
             if orientation is not None:
-                row.orientation = float(orientation)
+                row.orientation = float(persistence_snapshot["orientation"])
             session.commit()
         except Exception as exc:
             session.rollback()
@@ -2387,9 +2444,8 @@ class DatabaseConnection:
         finally:
             session.close()
 
-        updated = DatabaseConnection.get_creature_spawn(int(spawn_guid))
-        if updated is not None:
-            DatabaseConnection._cache_restore_creature_spawn(dict(updated))
+        updated = dict(persistence_snapshot)
+        DatabaseConnection._cache_restore_creature_spawn(dict(updated))
         return updated
 
     @staticmethod

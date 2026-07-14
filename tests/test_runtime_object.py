@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
+
 from server.modules.handlers.world.runtime.creature import Creature
+from server.modules.handlers.world.runtime.creature_persistence import (
+    creature_persistence_snapshot,
+)
 from server.modules.handlers.world.runtime.gameobject import GameObject
 from server.modules.handlers.world.runtime.gameobject_persistence import (
     gameobject_persistence_snapshot,
@@ -318,6 +323,51 @@ def test_creature_runtime_snapshot_retains_no_mapping_reference():
     assert creature.x == 11.0
     assert creature.display_id == 1437
     assert creature.npc_flags == 0x2000
+
+
+def test_creature_setters_and_persistence_snapshot_use_runtime_authority():
+    mapping = {
+        "guid": 321,
+        "entry": 654,
+        "map_id": 1,
+        "x": 11.0,
+        "y": 22.0,
+        "z": 33.0,
+        "orientation": 2.5,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "size": 1.0,
+        "modelid": 1437,
+        "npcflag": 0x2000,
+        "spawntimesecs": 300,
+    }
+    original_mapping = dict(mapping)
+    creature = Creature.from_mapping(mapping, runtime_guid=789)
+
+    creature.set_position(44.0, 55.0, 66.0)
+    creature.set_orientation(-1.0)
+    creature.set_rotation((0.1, 0.2, 0.3, 0.9))
+    creature.set_scale(1.5)
+    creature.set_display_id(4321)
+    creature.set_npc_flags(0x4000)
+    snapshot = creature_persistence_snapshot(creature, mapping)
+
+    assert creature.world_position == (44.0, 55.0, 66.0)
+    assert math.isclose(creature.orientation, math.tau - 1.0)
+    assert creature.rotation == (0.1, 0.2, 0.3, 0.9)
+    assert creature.scale == 1.5
+    assert creature.display_id == 4321
+    assert creature.npc_flags == 0x4000
+    assert snapshot["x"] == 44.0
+    assert snapshot["y"] == 55.0
+    assert snapshot["z"] == 66.0
+    assert snapshot["orientation"] == creature.orientation
+    assert snapshot["modelid"] == 4321
+    assert snapshot["npcflag"] == 0x4000
+    assert snapshot["spawntimesecs"] == 300
+    assert mapping == original_mapping
 
 
 def test_creature_uses_runtime_object_transform_and_distance_helpers():

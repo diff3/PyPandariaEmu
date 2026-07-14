@@ -40,6 +40,9 @@ from server.modules.handlers.world.features.world_editor import creature_editor
 from server.modules.handlers.world.features.world_editor import gameobject_editor
 from server.modules.handlers.world.features.world_editor import history as gameobject_history
 from server.modules.handlers.world.features.world_editor import selection
+from server.modules.handlers.world.runtime.creature_store import (
+    get_creature_runtime_store,
+)
 from server.modules.handlers.world.runtime.gameobject_store import (
     get_gameobject_runtime_store,
 )
@@ -47,10 +50,13 @@ from server.modules.handlers.world.runtime.gameobject_store import (
 
 @pytest.fixture(autouse=True)
 def _clear_gameobject_runtime_store():
-    store = get_gameobject_runtime_store()
-    store.clear()
+    gameobject_store = get_gameobject_runtime_store()
+    creature_store = get_creature_runtime_store()
+    gameobject_store.clear()
+    creature_store.clear()
     yield
-    store.clear()
+    gameobject_store.clear()
+    creature_store.clear()
 
 
 def _session() -> SimpleNamespace:
@@ -778,6 +784,141 @@ def test_npc_select_uses_creature_selection(monkeypatch):
     assert selected is not None
     assert selected["spawn_id"] == 44
     assert selected["entry"] == 55
+
+
+def test_repeated_npc_moves_mutate_same_long_lived_creature(monkeypatch):
+    session = _session()
+    entry = {
+        "guid": 44,
+        "entry": 55,
+        "map_id": 1,
+        "x": 12.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 0.0,
+        "modelid": 1437,
+        "npcflag": 0x2000,
+    }
+    persisted = dict(entry)
+    packet_objects = []
+    monkeypatch.setattr(
+        creature_editor.DatabaseConnection,
+        "get_creature_template",
+        lambda _entry: {"name": "Wolf", "modelid1": 1437},
+    )
+
+    def update_transform(_guid, **values):
+        persisted.update(values)
+        return dict(persisted)
+
+    monkeypatch.setattr(
+        creature_editor.DatabaseConnection,
+        "update_creature_spawn_transform",
+        update_transform,
+    )
+    monkeypatch.setattr(
+        creature_editor,
+        "destroy_payload",
+        lambda _session, _guid: ("SMSG_UPDATE_OBJECT", b"destroy"),
+    )
+    monkeypatch.setattr(
+        creature_editor,
+        "create_payload",
+        lambda _session, _entry, creature=None: (
+            packet_objects.append(creature)
+            or ("SMSG_UPDATE_OBJECT", b"create")
+        ),
+    )
+    monkeypatch.setattr(
+        creature_editor,
+        "dispatch_to_peers",
+        lambda *_args, **_kwargs: None,
+    )
+
+    first_responses, first_updated = creature_editor.move(session, entry)
+    session.x, session.y, session.z = 40.0, 50.0, 60.0
+    second_responses, second_updated = creature_editor.move(
+        session,
+        dict(first_updated),
+    )
+    stored = get_creature_runtime_store().get_by_spawn_id(entry["guid"])
+
+    assert first_updated is not None
+    assert second_updated is not None
+    assert packet_objects[0] is packet_objects[1]
+    assert stored is packet_objects[0]
+    assert stored.world_position == (40.0, 50.0, 60.0)
+    assert [payload for _opcode, payload in first_responses[:2]] == [
+        b"destroy",
+        b"create",
+    ]
+    assert [payload for _opcode, payload in second_responses[:2]] == [
+        b"destroy",
+        b"create",
+    ]
+
+
+def test_npc_rotate_mutates_runtime_before_persistence(monkeypatch):
+    session = _session()
+    session.orientation = 2.25
+    entry = {
+        "guid": 44,
+        "entry": 55,
+        "map_id": 1,
+        "x": 12.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 0.0,
+        "modelid": 1437,
+        "npcflag": 0x2000,
+    }
+    calls = []
+    packet_objects = []
+    monkeypatch.setattr(
+        creature_editor.DatabaseConnection,
+        "get_creature_template",
+        lambda _entry: {"name": "Wolf", "modelid1": 1437},
+    )
+
+    def update_transform(_guid, **values):
+        calls.append(dict(values))
+        return {**entry, **values}
+
+    monkeypatch.setattr(
+        creature_editor.DatabaseConnection,
+        "update_creature_spawn_transform",
+        update_transform,
+    )
+    monkeypatch.setattr(
+        creature_editor,
+        "destroy_payload",
+        lambda _session, _guid: ("SMSG_UPDATE_OBJECT", b"destroy"),
+    )
+    monkeypatch.setattr(
+        creature_editor,
+        "create_payload",
+        lambda _session, _entry, creature=None: (
+            packet_objects.append(creature)
+            or ("SMSG_UPDATE_OBJECT", b"create")
+        ),
+    )
+    monkeypatch.setattr(
+        creature_editor,
+        "dispatch_to_peers",
+        lambda *_args, **_kwargs: None,
+    )
+
+    responses, updated = creature_editor.rotate(session, entry)
+    stored = get_creature_runtime_store().get_by_spawn_id(entry["guid"])
+
+    assert updated is not None
+    assert calls == [{"orientation": 2.25}]
+    assert stored is packet_objects[0]
+    assert stored.orientation == 2.25
+    assert [payload for _opcode, payload in responses[:2]] == [
+        b"destroy",
+        b"create",
+    ]
 
 
 def test_gameobject_and_creature_selection_are_exclusive():

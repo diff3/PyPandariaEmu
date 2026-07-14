@@ -790,6 +790,94 @@ def test_get_creature_template_uses_preloaded_cache_without_db():
     assert result == {"entry": 123, "name": "Stormwind Guard", "modelid1": 19724}
 
 
+def test_creature_transform_save_serializes_long_lived_runtime_state():
+    DatabaseConnection = _import_database_connection()
+    from server.modules.handlers.world.runtime.creature import Creature
+    from server.modules.handlers.world.runtime.creature_store import (
+        get_creature_runtime_store,
+    )
+
+    existing = {
+        "guid": 44,
+        "entry": 400,
+        "map_id": 1,
+        "map": 1,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 1.0,
+        "modelid": 1437,
+        "npcflag": 0x2000,
+    }
+    DatabaseConnection._world_cache_loaded = True
+    DatabaseConnection._cache_creatures_loaded = True
+    DatabaseConnection._cache_creatures_by_map = {1: [dict(existing)]}
+    world_model = sys.modules["server.modules.database.WorldModel"]
+
+    class Field:
+        def __eq__(self, other):
+            return ("eq", other)
+
+    world_model.WorldCreature.guid = Field()
+
+    class Row:
+        position_x = 10.0
+        position_y = 20.0
+        position_z = 30.0
+        orientation = 1.0
+
+    row = Row()
+
+    class Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return row
+
+    class Session:
+        def query(self, *args, **kwargs):
+            return Query()
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            raise AssertionError("rollback should not be called")
+
+        def close(self):
+            return None
+
+    DatabaseConnection.world = staticmethod(Session)
+    runtime_object = Creature.from_mapping(existing, runtime_guid=4444)
+    runtime_object.set_position(100.0, 200.0, 300.0)
+    runtime_object.set_orientation(2.5)
+    runtime_object.set_display_id(4321)
+    runtime_object.set_npc_flags(0x4000)
+    store = get_creature_runtime_store()
+    store.clear()
+    store.add(runtime_object)
+    try:
+        updated = DatabaseConnection.update_creature_spawn_transform(
+            44,
+            x=100.0,
+            y=200.0,
+            z=300.0,
+            orientation=2.5,
+        )
+    finally:
+        store.clear()
+
+    assert row.position_x == 100.0
+    assert row.position_y == 200.0
+    assert row.position_z == 300.0
+    assert row.orientation == 2.5
+    assert updated["modelid"] == 4321
+    assert updated["npcflag"] == 0x4000
+    assert DatabaseConnection.get_creature_spawn(44)["modelid"] == 4321
+    assert DatabaseConnection.get_creature_spawn(44)["npcflag"] == 0x4000
+
+
 def test_get_creatures_near_uses_preloaded_cache_without_db():
     DatabaseConnection = _import_database_connection()
 

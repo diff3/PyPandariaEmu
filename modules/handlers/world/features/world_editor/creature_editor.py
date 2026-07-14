@@ -10,6 +10,14 @@ from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_
 from server.modules.handlers.world.features.world_editor import clipboard as editor_clipboard
 from server.modules.handlers.world.features.world_editor import history as editor_history
 from server.modules.handlers.world.features.world_editor import selection
+from server.modules.handlers.world.runtime.creature import Creature
+from server.modules.handlers.world.runtime.creature_persistence import (
+    creature_persistence_snapshot,
+)
+from server.modules.handlers.world.runtime.creature_store import (
+    get_creature_runtime_store,
+    resolve_creature_runtime,
+)
 
 
 DEFAULT_SEARCH_RADIUS = selection.DEFAULT_SEARCH_RADIUS
@@ -127,17 +135,53 @@ def destroy_payload(session, world_guid: int) -> tuple[str, bytes]:
     )
 
 
-def create_payload(session, entry: dict[str, Any]) -> tuple[str, bytes]:
+def _runtime_object_for_entry(
+    session,
+    entry: dict[str, Any],
+    *,
+    template: dict[str, Any] | None = None,
+) -> Creature:
+    """Return and retain the live Creature for a persistent spawn."""
+    world_guid = int(world_guid_for_entry(session, entry))
+    store = get_creature_runtime_store()
+    runtime_mapping = dict(entry)
+    if isinstance(template, dict):
+        runtime_mapping["template"] = template
+    elif not isinstance(runtime_mapping.get("template"), dict):
+        runtime_mapping["template"] = (
+            DatabaseConnection.get_creature_template(
+                entry_int(runtime_mapping, "entry")
+            )
+            or {}
+        )
+    runtime_object = resolve_creature_runtime(
+        runtime_mapping,
+        runtime_guid=world_guid,
+    )
+    return store.add(runtime_object)
+
+
+def create_payload(
+    session,
+    entry: dict[str, Any],
+    creature: Creature | None = None,
+) -> tuple[str, bytes]:
     world_guid = world_guid_for_entry(session, entry)
     created = dict(entry)
     created["world_guid"] = int(world_guid)
     template = DatabaseConnection.get_creature_template(entry_int(created, "entry")) or {}
     created["template"] = template
+    runtime_object = creature or _runtime_object_for_entry(
+        session,
+        created,
+        template=template,
+    )
     return make_update_object_response(
         _build_creature_update_payload(
             map_id=int(created.get("map_id", created.get("map", getattr(session, "map_id", 0))) or 0),
             entry=created,
             realm_id=int(getattr(session, "realm_id", 1) or 1),
+            creature=runtime_object,
         )
     )
 
@@ -168,12 +212,18 @@ def remove_runtime_references(session, entry: dict[str, Any], world_guid: int) -
                 values.pop(int(spawn_id), None)
 
 
-def add_runtime_references(session, entry: dict[str, Any], world_guid: int) -> None:
+def add_runtime_references(
+    session,
+    entry: dict[str, Any],
+    world_guid: int,
+) -> Creature:
+    runtime_object = _runtime_object_for_entry(session, entry)
     loaded = getattr(session, "loaded_npcs", None)
     if not isinstance(loaded, set):
         loaded = set()
         session.loaded_npcs = loaded
     loaded.add(int(world_guid))
+    return runtime_object
 
 
 def show_info(session, entry: dict[str, Any], distance: float | None = None) -> list[str]:
@@ -303,8 +353,8 @@ def create(session, creature_entry: int, source: dict[str, Any] | None = None, *
     if created is None:
         return chat_lines([f"[GMNpc] Unknown Creature template: {int(creature_entry)}"]), None
     world_guid = world_guid_for_entry(session, created)
-    add_runtime_references(session, created, world_guid)
-    create_response = create_payload(session, created)
+    runtime_object = add_runtime_references(session, created, world_guid)
+    create_response = create_payload(session, created, runtime_object)
     dispatch_to_peers(session, create_response, None)
     log_action(operation, session, created, world_guid)
     editor_history.push(session, operation, created, object_type=CREATURE_TYPE, runtime_guid=world_guid)
@@ -321,6 +371,7 @@ def delete(session, entry: dict[str, Any]) -> tuple[list[tuple[str, bytes]], dic
     deleted = DatabaseConnection.delete_creature_spawn(entry_int(entry, "guid"))
     if deleted is None:
         return chat_lines(["[GMNpc] Delete failed."]), None
+    get_creature_runtime_store().remove(int(world_guid))
     destroy = destroy_payload(session, world_guid)
     dispatch_to_peers(session, destroy, world_guid)
     remove_runtime_references(session, deleted, world_guid)
@@ -361,8 +412,8 @@ def restore_deleted_creature(session, undo_entry: dict[str, Any]) -> list[tuple[
     if not DatabaseConnection.restore_creature_spawn(undo_entry):
         return chat_lines(["[GMNpc] Undo failed."])
     world_guid = world_guid_for_entry(session, undo_entry)
-    add_runtime_references(session, undo_entry, world_guid)
-    create_response = create_payload(session, undo_entry)
+    runtime_object = add_runtime_references(session, undo_entry, world_guid)
+    create_response = create_payload(session, undo_entry, runtime_object)
     dispatch_to_peers(session, create_response, None)
     log_action("UNDO", session, undo_entry, world_guid)
     editor_history.push(session, "UNDO", undo_entry, object_type=CREATURE_TYPE, runtime_guid=world_guid)
@@ -383,20 +434,28 @@ def undo(session) -> list[tuple[str, bytes]]:
 def move(session, entry: dict[str, Any]) -> tuple[list[tuple[str, bytes]], dict[str, Any] | None]:
     px, py, pz, _orientation = player_position(session)
     previous = dict(entry)
-    world_guid = world_guid_for_entry(session, entry)
+    runtime_object = _runtime_object_for_entry(session, entry)
+    world_guid = int(runtime_object.runtime_guid)
     destroy = destroy_payload(session, world_guid)
+    previous_position = runtime_object.world_position
+    runtime_object.set_position(px, py, pz)
+    persistence_snapshot = creature_persistence_snapshot(
+        runtime_object,
+        entry,
+    )
     updated = DatabaseConnection.update_creature_spawn_transform(
         entry_int(entry, "guid"),
-        x=px,
-        y=py,
-        z=pz,
+        x=float(persistence_snapshot["x"]),
+        y=float(persistence_snapshot["y"]),
+        z=float(persistence_snapshot["z"]),
     )
     if updated is None:
+        runtime_object.set_position(*previous_position)
         return chat_lines(["[GMNpc] Move failed."]), None
     updated["world_guid"] = int(world_guid)
     remove_runtime_references(session, entry, world_guid)
     add_runtime_references(session, updated, world_guid)
-    create_response = create_payload(session, updated)
+    create_response = create_payload(session, updated, runtime_object)
     dispatch_to_peers(session, destroy, world_guid)
     dispatch_to_peers(session, create_response, None)
     log_action("MOVE", session, updated, world_guid)
@@ -423,18 +482,26 @@ def move_selected(session) -> list[tuple[str, bytes]]:
 def rotate(session, entry: dict[str, Any]) -> tuple[list[tuple[str, bytes]], dict[str, Any] | None]:
     _px, _py, _pz, orientation = player_position(session)
     previous = dict(entry)
-    world_guid = world_guid_for_entry(session, entry)
+    runtime_object = _runtime_object_for_entry(session, entry)
+    world_guid = int(runtime_object.runtime_guid)
     destroy = destroy_payload(session, world_guid)
+    previous_orientation = float(runtime_object.orientation)
+    runtime_object.set_orientation(orientation)
+    persistence_snapshot = creature_persistence_snapshot(
+        runtime_object,
+        entry,
+    )
     updated = DatabaseConnection.update_creature_spawn_transform(
         entry_int(entry, "guid"),
-        orientation=orientation,
+        orientation=float(persistence_snapshot["orientation"]),
     )
     if updated is None:
+        runtime_object.set_orientation(previous_orientation)
         return chat_lines(["[GMNpc] Rotate failed."]), None
     updated["world_guid"] = int(world_guid)
     remove_runtime_references(session, entry, world_guid)
     add_runtime_references(session, updated, world_guid)
-    create_response = create_payload(session, updated)
+    create_response = create_payload(session, updated, runtime_object)
     dispatch_to_peers(session, destroy, world_guid)
     dispatch_to_peers(session, create_response, None)
     log_action("ROTATE", session, updated, world_guid)

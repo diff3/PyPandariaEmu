@@ -589,6 +589,13 @@ def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
     assert captured["entry"]["y"] == 2000.0
     assert captured["entry"]["z"] == 99.0
     assert captured["creature"] is not None
+    from server.modules.handlers.world.runtime.creature_store import (
+        get_creature_runtime_store,
+    )
+
+    store = get_creature_runtime_store()
+    assert store.get_by_spawn_id(68) is captured["creature"]
+    store.clear()
 
 
 def test_creature_visibility_reuses_runtime_store_snapshot(monkeypatch):
@@ -768,6 +775,130 @@ def test_creature_packet_does_not_read_migrated_state_from_mapping():
     )
 
     assert actual == expected
+
+
+def test_creature_packet_observes_mutated_runtime_state():
+    creatures = _import_creatures()
+    from server.modules.handlers.world.runtime.creature import Creature
+
+    persistent_entry = {
+        "guid": 68,
+        "entry": 2457,
+        "map_id": 1,
+        "instance_id": 0,
+        "x": -8903.01,
+        "y": 641.83,
+        "z": 99.62,
+        "spawn_orientation": 1.0,
+        "orientation": 1.0,
+        "modelid": 1437,
+        "npcflag": 0x2000,
+        "template": {"modelid1": 1437, "npcflag": 0x4},
+    }
+    runtime_guid = creatures.CreatureGuid.from_spawn_guid(68, 1)
+    runtime_creature = Creature.from_mapping(
+        persistent_entry,
+        runtime_guid=runtime_guid,
+    )
+    runtime_creature.set_position(100.0, 200.0, 300.0)
+    runtime_creature.set_orientation(2.5)
+    runtime_creature.set_display_id(4321)
+    runtime_creature.set_npc_flags(0x4000)
+    live_mapping = {
+        **persistent_entry,
+        "x": 100.0,
+        "y": 200.0,
+        "z": 300.0,
+        "orientation": 2.5,
+        "modelid": 4321,
+        "npcflag": 0x4000,
+    }
+
+    runtime_payload = creatures._build_creature_update_payload(
+        map_id=1,
+        entry=persistent_entry,
+        realm_id=1,
+        creature=runtime_creature,
+    )
+    live_mapping_payload = creatures._build_creature_update_payload(
+        map_id=1,
+        entry=live_mapping,
+        realm_id=1,
+    )
+
+    assert runtime_payload == live_mapping_payload
+
+
+def test_creature_visibility_uses_mutated_runtime_authority(monkeypatch):
+    creatures = _import_creatures()
+    from server.modules.handlers.world.runtime.creature import Creature
+    from server.modules.handlers.world.runtime.creature_store import (
+        get_creature_runtime_store,
+    )
+
+    session = SimpleNamespace(
+        npcs_visible=True,
+        map_id=1,
+        instance_id=0,
+        x=0.0,
+        y=0.0,
+        realm_id=1,
+    )
+    entry = {
+        "guid": 68,
+        "entry": 2457,
+        "modelid": 1437,
+        "npcflag": 0x2000,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 1.0,
+    }
+    template = {"name": "Historian", "modelid1": 1437, "npcflag": 0x4}
+    runtime_guid = creatures.CreatureGuid.from_spawn_guid(68, 1)
+    runtime_creature = Creature.from_mapping(
+        {**entry, "template": template, "map_id": 1},
+        runtime_guid=runtime_guid,
+    )
+    runtime_creature.set_position(100.0, 200.0, 300.0)
+    runtime_creature.set_orientation(2.5)
+    runtime_creature.set_npc_flags(0x4000)
+    store = get_creature_runtime_store()
+    store.clear()
+    store.add(runtime_creature)
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creatures_near",
+        staticmethod(lambda *args, **kwargs: [dict(entry)]),
+    )
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creature_template",
+        staticmethod(lambda _entry: dict(template)),
+    )
+    captured = []
+
+    def capture_payload(*, map_id, entry, realm_id, creature=None):
+        captured.append(creature)
+        return b"npc"
+
+    monkeypatch.setattr(creatures, "_build_creature_update_payload", capture_payload)
+    try:
+        responses = creatures.build_database_creature_responses(session)
+    finally:
+        store.clear()
+
+    assert responses == [("SMSG_UPDATE_OBJECT", b"npc")]
+    assert captured == [runtime_creature]
+    assert session.npc_positions_by_guid[runtime_guid] == (
+        1,
+        100.0,
+        200.0,
+        300.0,
+        2.5,
+    )
+    assert session.npc_flags_by_guid[runtime_guid] == 0x4000
 
 
 def test_build_database_creature_responses_tracks_loaded_world_guid(monkeypatch):

@@ -97,3 +97,22 @@ def test_resolver_fallback_constructs_when_global_store_has_no_match():
     assert isinstance(resolved, Creature)
     assert resolved.runtime_guid == 1001
     assert resolved.spawn_id == 101
+
+
+def test_resolver_reuses_mutated_runtime_authority_by_identity():
+    mapping = _mapping()
+    store = get_creature_runtime_store()
+    store.clear()
+    stored = store.add(Creature.from_mapping(mapping, runtime_guid=1001))
+    stored.set_position(40.0, 50.0, 60.0)
+    stored.set_display_id(4321)
+    stored.set_npc_flags(0x4000)
+    try:
+        resolved = resolve_creature_runtime(mapping, runtime_guid=1001)
+    finally:
+        store.clear()
+
+    assert resolved is stored
+    assert resolved.world_position == (40.0, 50.0, 60.0)
+    assert resolved.display_id == 4321
+    assert resolved.npc_flags == 0x4000

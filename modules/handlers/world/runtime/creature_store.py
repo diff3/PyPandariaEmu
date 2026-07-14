@@ -24,7 +24,7 @@ from server.modules.handlers.world.runtime.spawned_world_object import (
 
 
 class CreatureRuntimeStore(RuntimeStore[Creature]):
-    """Own long-lived snapshots of authoritative persistent Creature data.
+    """Own long-lived runtime-authoritative persistent Creatures.
 
     The store provides identity-based retention and lookup only. It does not
     own persistence, visibility, packets, lifecycle, updates, world
@@ -39,7 +39,7 @@ class CreatureRuntimeStore(RuntimeStore[Creature]):
         runtime_guid: int,
     ) -> bool:
         """Validate the snapshot according to existing Creature rules."""
-        return creature_matches_mapping(
+        return creature_identity_matches_mapping(
             creature,
             mapping,
             runtime_guid=runtime_guid,
@@ -122,7 +122,7 @@ def resolve_creature_runtime(
     *,
     runtime_guid: int,
 ) -> Creature:
-    """Reuse a matching stored Creature or construct a temporary fallback."""
+    """Reuse the live Creature by identity or construct its fallback."""
     return get_creature_runtime_store().resolve(
         mapping,
         runtime_guid=runtime_guid,

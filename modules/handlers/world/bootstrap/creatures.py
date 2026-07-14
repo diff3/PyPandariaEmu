@@ -20,6 +20,7 @@ from server.modules.handlers.world.protocol.update_object.serializers import (
 from server.modules.handlers.world.runtime.creature import Creature
 from server.modules.handlers.world.runtime.creature_store import (
     creature_identity_matches_mapping,
+    get_creature_runtime_store,
     resolve_creature_runtime,
 )
 
@@ -218,6 +219,7 @@ def _build_creature_update_payload(
         creature=creature,
     )
     world_guid = int(creature.runtime_guid)
+    packet_map_id = int(creature.map_id)
     raw_guid = GuidHelper.to_le_bytes(world_guid)
     mask_bytes, field_bytes = _build_fixed_u32_field_block(
         _build_creature_field_values(
@@ -274,7 +276,7 @@ def _build_creature_update_payload(
     )
 
     payload = bytearray()
-    payload += struct.pack("<HI", int(map_id) & 0xFFFF, 1)
+    payload += struct.pack("<HI", packet_map_id & 0xFFFF, 1)
     payload += _build_create_update_object_entry(
         guid=world_guid,
         object_type=_CREATURE_OBJECT_TYPE,
@@ -351,12 +353,13 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
             runtime_mapping,
             runtime_guid=world_guid,
         )
+        get_creature_runtime_store().add(runtime_creature)
         npc_flags_by_guid = getattr(session, "npc_flags_by_guid", None)
         if not isinstance(npc_flags_by_guid, dict):
             npc_flags_by_guid = {}
             session.npc_flags_by_guid = npc_flags_by_guid
-        npc_flags_by_guid[int(world_guid)] = int(spawn["npcflag"])
-        npc_flags_by_guid[int(spawn_guid)] = int(spawn["npcflag"])
+        npc_flags_by_guid[int(world_guid)] = int(runtime_creature.npc_flags)
+        npc_flags_by_guid[int(spawn_guid)] = int(runtime_creature.npc_flags)
         npc_positions_by_guid = getattr(session, "npc_positions_by_guid", None)
         if not isinstance(npc_positions_by_guid, dict):
             npc_positions_by_guid = {}
@@ -385,8 +388,8 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
             runtime_creature.runtime_guid & 0xFFFFFFFFFFFFFFFF,
             runtime_creature.entry,
             str(template.get("name", "") or ""),
-            _resolve_creature_display_id(spawn),
-            int(spawn["npcflag"]),
+            runtime_creature.display_id,
+            runtime_creature.npc_flags,
             runtime_creature.x,
             runtime_creature.y,
             runtime_creature.z,

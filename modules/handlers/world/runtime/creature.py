@@ -53,15 +53,16 @@ def _mapping_creature_npc_flags(data: Mapping[str, Any]) -> int:
 
 @dataclass(slots=True)
 class Creature(SpawnedWorldObject):
-    """A thin world-object representation for a Creature.
+    """A mutable runtime representation for a persistent Creature.
 
     Persistent-spawn identity comes from ``SpawnedWorldObject``. Generic
     runtime identity and geometry come from ``RuntimeObject`` through
-    ``WorldObject``. The effective display ID and NPC flags are immutable
-    runtime snapshot values already required by CREATE. Other Creature
-    metadata, visibility, packet building, persistence, editor behavior,
-    gameplay, and lifecycle orchestration remain in their existing
-    subsystems.
+    ``WorldObject``. The object owns live identity, transform, effective
+    display ID, and NPC flags. Its source mapping is a persistence snapshot,
+    not mutable live state. Explicit setters mutate only this object and do not
+    persist, send packets, update visibility, notify AI, or orchestrate
+    lifecycle behavior. Other Creature metadata and all gameplay behavior
+    remain in their existing subsystems.
     """
 
     display_id: int = 15476
@@ -98,3 +99,38 @@ class Creature(SpawnedWorldObject):
             display_id=_mapping_creature_display_id(data),
             npc_flags=_mapping_creature_npc_flags(data),
         )
+
+    def set_position(self, x: float, y: float, z: float) -> None:
+        """Set this Creature's runtime world position only."""
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+
+    def set_orientation(self, orientation: float) -> None:
+        """Set this Creature's normalized runtime orientation only."""
+        self.orientation = _normalized_creature_orientation(orientation)
+
+    def set_rotation(
+        self,
+        rotation: tuple[float, float, float, float],
+    ) -> None:
+        """Set this Creature's four-component runtime rotation only."""
+        rotation0, rotation1, rotation2, rotation3 = rotation
+        self.rotation = (
+            float(rotation0),
+            float(rotation1),
+            float(rotation2),
+            float(rotation3),
+        )
+
+    def set_scale(self, scale: float) -> None:
+        """Set this Creature's runtime scale only."""
+        self.scale = float(scale)
+
+    def set_display_id(self, display_id: int) -> None:
+        """Set this Creature's effective runtime display ID only."""
+        self.display_id = int(display_id)
+
+    def set_npc_flags(self, npc_flags: int) -> None:
+        """Set this Creature's effective runtime NPC flags only."""
+        self.npc_flags = int(npc_flags)

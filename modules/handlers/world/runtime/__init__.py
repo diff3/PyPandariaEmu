@@ -4,6 +4,9 @@
 """Shared runtime representations and lifecycle services."""
 
 from server.modules.handlers.world.runtime.creature import Creature
+from server.modules.handlers.world.runtime.creature_persistence import (
+    creature_persistence_snapshot,
+)
 from server.modules.handlers.world.runtime.creature_store import (
     CreatureRuntimeStore,
     get_creature_runtime_store,
@@ -35,6 +38,7 @@ __all__ = [
     "WorldObject",
     "get_creature_runtime_store",
     "get_gameobject_runtime_store",
+    "creature_persistence_snapshot",
     "gameobject_persistence_snapshot",
     "resolve_spawned_world_object",
 ]
