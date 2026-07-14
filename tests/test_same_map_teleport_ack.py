@@ -52,13 +52,167 @@ class _FakeSession:
 
 @pytest.fixture(autouse=True)
 def _stub_teleport_visibility_stream(monkeypatch, request):
-    if request.node.name == "test_post_teleport_visibility_stream_bypasses_movement_throttle":
+    if request.node.name in {
+        "test_post_teleport_visibility_stream_bypasses_movement_throttle",
+        "test_world_transition_gate_suspends_periodic_streaming_but_not_bootstrap",
+    }:
         return
     monkeypatch.setattr(
         movement,
         "stream_world_objects_after_teleport",
         lambda _session, *, context: [],
     )
+
+
+def _transition_session(owner: str = "transport_worldport"):
+    return SimpleNamespace(
+        char_guid=7,
+        realm_id=1,
+        world_guid=7,
+        login_state="IN_WORLD",
+        map_id=530,
+        instance_id=0,
+        x=100.0,
+        y=200.0,
+        z=300.0,
+        orientation=1.25,
+        world_transition_generation=1,
+        world_transition_loading_generation=1,
+        world_transition_owner=owner,
+        world_transition_ignore_worldport_ack=False,
+        teleport_pending=True,
+        worldport_ack_pending=True,
+        near_teleport_pending=False,
+        loaded_gameobjects=set(),
+        loaded_transport_entries={},
+        loaded_npcs=set(),
+        position_dirty=True,
+        last_position_save_at=0.0,
+        send_response=lambda _responses: None,
+    )
+
+
+def test_world_transition_gate_suspends_normal_movement_side_effects(monkeypatch):
+    from server.modules.handlers.world.state.runtime import is_player_world_active
+
+    session = _transition_session()
+    destination = (session.map_id, session.x, session.y, session.z, session.orientation)
+    calls = []
+    monkeypatch.setattr(
+        movement,
+        "parse_movement_info",
+        lambda *_args: calls.append("parse") or (1.0, 2.0, 3.0, 0.5),
+    )
+    monkeypatch.setattr(
+        movement,
+        "discover_area",
+        lambda *_args: calls.append("explore") or [],
+    )
+    monkeypatch.setattr(
+        movement,
+        "_save_session_position",
+        lambda *_args, **_kwargs: calls.append("save") or True,
+    )
+
+    status, responses = movement.handle_movement_packet(
+        session,
+        SimpleNamespace(
+            name="MSG_MOVE_HEARTBEAT",
+            opcode=0,
+            payload=b"",
+            decoded={},
+        ),
+    )
+
+    assert is_player_world_active(session) is False
+    assert (session.map_id, session.x, session.y, session.z, session.orientation) == destination
+    assert (status, responses) == (0, None)
+    assert movement._maybe_discover_current_area(session) == []
+    assert movement._maybe_periodic_position_save(
+        session,
+        position_save_interval_seconds=0.0,
+    ) is False
+    assert calls == []
+
+
+def test_world_transition_gate_suspends_periodic_streaming_but_not_bootstrap(
+    monkeypatch,
+):
+    session = _transition_session()
+    calls = []
+    monkeypatch.setattr(
+        movement,
+        "_maybe_stream_gameobjects",
+        lambda _session: calls.append("gameobjects")
+        or [("SMSG_UPDATE_OBJECT", b"go")],
+    )
+    monkeypatch.setattr(
+        movement,
+        "_maybe_stream_npcs",
+        lambda _session: calls.append("creatures")
+        or [("SMSG_UPDATE_OBJECT", b"creature")],
+    )
+
+    assert movement._maybe_stream_world_objects(session) == []
+    assert calls == []
+    assert movement.stream_world_objects_after_teleport(
+        session,
+        context="worldport-loading-complete",
+    ) == [
+        ("SMSG_UPDATE_OBJECT", b"go"),
+        ("SMSG_UPDATE_OBJECT", b"creature"),
+    ]
+    assert calls == ["gameobjects", "creatures"]
+
+
+def test_manual_taxi_and_transport_transitions_share_world_activity_gate():
+    from server.modules.handlers.world.state.runtime import is_player_world_active
+    from server.modules.handlers.world.teleport.transition import (
+        begin_ordinary_teleport_transition,
+        begin_taxi_worldport_transition,
+        begin_transport_worldport_transition,
+        complete_world_transition,
+    )
+
+    session = _transition_session(owner="")
+    session.world_transition_generation = 0
+    session.world_transition_loading_generation = 0
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+
+    assert is_player_world_active(session) is True
+    assert begin_ordinary_teleport_transition(session) == 1
+    assert is_player_world_active(session) is False
+    complete_world_transition(session)
+    assert is_player_world_active(session) is True
+
+    assert begin_taxi_worldport_transition(session) == 2
+    assert is_player_world_active(session) is False
+    complete_world_transition(session)
+    assert is_player_world_active(session) is True
+
+    assert begin_transport_worldport_transition(session) == 3
+    assert is_player_world_active(session) is False
+    begin_ordinary_teleport_transition(session)
+    assert session.world_transition_generation == 4
+    assert session.world_transition_owner == "ordinary_teleport"
+    assert is_player_world_active(session) is False
+
+
+def test_world_transition_gate_excludes_session_from_visibility_and_region_targets():
+    from server.modules.handlers.world.state import runtime as world_runtime
+
+    transitioning = _transition_session()
+    active = _transition_session(owner="")
+    active.world_transition_generation = 0
+    active.world_transition_loading_generation = 0
+    region = SimpleNamespace(players=[transitioning, active])
+    transitioning.region = region
+    active.region = region
+
+    assert world_runtime._is_session_in_world(transitioning) is False
+    assert world_runtime._is_session_in_world(active) is True
+    assert world_runtime.iter_region_sessions(region=region) == [active]
 
 
 def test_first_movement_packet_keeps_teleport_pending_until_ack(monkeypatch):
@@ -145,7 +299,9 @@ def test_first_valid_movement_packet_clears_stale_near_teleport_pending(monkeypa
     assert session.near_teleport_pending is False
 
 
-def test_movement_clears_stale_near_teleport_before_transport_transfer(monkeypatch):
+def test_movement_clears_stale_near_teleport_without_starting_transport_transfer(
+    monkeypatch,
+):
     session = _FakeSession()
     session.teleport_pending = False
     session.near_teleport_pending = True
@@ -186,7 +342,7 @@ def test_movement_clears_stale_near_teleport_before_transport_transfer(monkeypat
     assert status == 0
     assert responses is None
     assert session.near_teleport_pending is False
-    assert transfer_checks == [False]
+    assert transfer_checks == []
 
 
 def test_same_map_teleport_payload_matches_pandaria548_capture_layout():
@@ -323,7 +479,8 @@ def test_post_teleport_visibility_stream_bypasses_movement_throttle(monkeypatch)
     monkeypatch.setattr(
         movement,
         "_maybe_stream_world_objects",
-        lambda target: calls.append("stream") or [("SMSG_UPDATE_OBJECT", b"visible-without-move")],
+        lambda target, **_kwargs: calls.append("stream")
+        or [("SMSG_UPDATE_OBJECT", b"visible-without-move")],
     )
 
     responses = movement.stream_world_objects_after_teleport(session, context="test")
@@ -476,6 +633,85 @@ def test_worldport_ack_keeps_teleport_pending_for_loading_screen_completion(monk
     ]
     assert calls == [(session, "worldport-ack")]
     assert stream_calls == ["worldport-ack"]
+
+
+def test_superseded_transport_worldport_ack_cannot_consume_manual_transition(monkeypatch):
+    session = _FakeSession()
+    session.map_id = 530
+    session.instance_id = 0
+    session.x = 10.0
+    session.y = 20.0
+    session.z = 30.0
+    session.orientation = 1.5
+    session.teleport_pending = True
+    session.near_teleport_pending = False
+    session.worldport_ack_pending = True
+    session.teleport_destination = "manual:530:10:20:30:1.5"
+    session.transport_transfer_pending = False
+    session.pending_transport_transfer = None
+    session.world_transition_generation = 2
+    session.world_transition_owner = "ordinary_teleport"
+    session.world_transition_ignore_worldport_ack = True
+    session.world_transition_loading_generation = 2
+
+    side_effects = []
+    monkeypatch.setattr(
+        movement,
+        "_complete_pending_transport_transfer",
+        lambda target: side_effects.append("reattach"),
+    )
+    monkeypatch.setattr(
+        movement,
+        "stream_world_objects_after_teleport",
+        lambda target, *, context: side_effects.append(context) or [],
+    )
+
+    status, responses = movement.handle_move_worldport_ack(session, None)
+
+    assert status == 0
+    assert responses is None
+    assert side_effects == []
+    assert session.teleport_pending is True
+    assert session.worldport_ack_pending is True
+    assert session.teleport_destination == "manual:530:10:20:30:1.5"
+    assert session.pending_transport_transfer is None
+    assert session.transport_transfer_pending is False
+    assert (session.map_id, session.instance_id) == (530, 0)
+    assert (session.x, session.y, session.z, session.orientation) == (
+        10.0,
+        20.0,
+        30.0,
+        1.5,
+    )
+
+
+def test_superseded_transport_completion_callback_cannot_reattach_player():
+    session = _FakeSession()
+    session.world_transition_generation = 2
+    session.transport_transfer_pending = True
+    session.pending_transport_transfer = {
+        "world_transition_generation": 1,
+        "destination_guid": 77,
+        "local_x": 4.0,
+        "local_y": 5.0,
+        "local_z": 6.0,
+        "local_o": 0.7,
+    }
+    session.movement_state = SimpleNamespace(
+        has_transport_data=False,
+        transport_guid=0,
+        transport_x=0.0,
+        transport_y=0.0,
+        transport_z=0.0,
+        transport_orientation=0.0,
+    )
+
+    movement._complete_pending_transport_transfer(session)
+
+    assert session.pending_transport_transfer is None
+    assert session.transport_transfer_pending is False
+    assert session.movement_state.has_transport_data is False
+    assert session.movement_state.transport_guid == 0
 
 
 def test_areatrigger_same_map_can_teleport_again_after_movement_resumes(monkeypatch):

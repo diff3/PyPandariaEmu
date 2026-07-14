@@ -17,6 +17,7 @@ from server.modules.handlers.world.runtime import (
     FlightPath,
     get_flight_path_runtime_store,
 )
+from server.modules.handlers.world.state.runtime import is_player_world_active
 
 
 def _quiet_logger():
@@ -1702,7 +1703,12 @@ def test_move_spline_done_cross_map_leg_starts_worldport(monkeypatch):
         "destination_map": 0,
         "source_node": 24,
         "destination_node": 25,
+        "world_transition_generation": 1,
     }
+    assert session.world_transition_owner == "taxi_worldport"
+    assert session.world_transition_generation == 1
+    assert session.world_transition_loading_generation == 1
+    assert is_player_world_active(session) is False
     assert session.taxi_state.active is True
     assert session.taxi_state.phase == "TAXI_TRANSFER"
     assert session.teleport_pending is True

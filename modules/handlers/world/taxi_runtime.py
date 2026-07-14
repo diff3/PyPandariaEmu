@@ -433,6 +433,7 @@ def taxi_tick(session, *, now: float | None = None) -> bool:
         return False
     if bool(getattr(state, "completed", False)) or bool(getattr(state, "cancelled", False)):
         return False
+    generation = int(getattr(state, "generation", 0) or 0)
 
     path = state.path
     current_time = time.monotonic() if now is None else float(now)
@@ -518,6 +519,14 @@ def taxi_tick(session, *, now: float | None = None) -> bool:
         )
         state.last_node_logged = int(segment_index)
 
+    if (
+        getattr(session, "taxi_state", None) is not state
+        or int(getattr(session, "_taxi_generation", 0) or 0) != generation
+        or not bool(getattr(state, "active", False))
+        or bool(getattr(state, "cancelled", False))
+    ):
+        return False
+
     if traveled >= path.total_length and abs(float(applied_z) - raw_z) <= 0.001:
         _complete_taxi(session, state)
         return False
@@ -527,7 +536,12 @@ def taxi_tick(session, *, now: float | None = None) -> bool:
     return True
 
 
-def cancel_taxi_flight(session, reason: str = "cancelled") -> None:
+def cancel_taxi_flight(
+    session,
+    reason: str = "cancelled",
+    *,
+    send_updates: bool = True,
+) -> None:
     state = getattr(session, "taxi_state", None)
     if state is None:
         return
@@ -539,7 +553,8 @@ def cancel_taxi_flight(session, reason: str = "cancelled") -> None:
     session.player_travel_state = TAXI_STATE_NORMAL
     session._taxi_generation = int(getattr(session, "_taxi_generation", 0) or 0) + 1
     _restore_pre_taxi_state(session, state)
-    _send_self_movement(session)
+    if send_updates:
+        _send_self_movement(session)
     Logger.warning(
         "[TAXI] cancelled player=%s reason=%s",
         int(getattr(session, "char_guid", 0) or 0),

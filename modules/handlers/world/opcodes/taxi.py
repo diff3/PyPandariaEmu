@@ -1023,11 +1023,17 @@ def _begin_cross_map_taxi_transfer(
         state.active = True
         state.phase = "TAXI_TRANSFER"
 
+    from server.modules.handlers.world.teleport.transition import (
+        begin_taxi_worldport_transition,
+    )
+
+    transition_generation = begin_taxi_worldport_transition(session)
     session.pending_taxi_transfer = {
         "source_map": int(source_map),
         "destination_map": int(destination_map),
         "source_node": int(source_node),
         "destination_node": int(destination_node),
+        "world_transition_generation": int(transition_generation),
     }
     session.teleport_pending = True
     session.worldport_ack_pending = True

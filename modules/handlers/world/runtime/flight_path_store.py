@@ -5,45 +5,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 
 from server.modules.handlers.world.runtime.flight_path import (
     FlightPath,
     flight_path_runtime_guid,
 )
+from server.modules.handlers.world.runtime.runtime_store import RuntimeGuidStore
 
 
-class FlightPathRuntimeStore:
+class FlightPathRuntimeStore(RuntimeGuidStore[FlightPath]):
     """Retain FlightPaths without owning flight simulation or lifecycle."""
-
-    def __init__(self) -> None:
-        self._by_runtime_guid: dict[int, FlightPath] = {}
-
-    def add(self, flight_path: FlightPath) -> FlightPath:
-        """Retain and return a FlightPath under its runtime GUID."""
-        self._by_runtime_guid[int(flight_path.runtime_guid)] = flight_path
-        return flight_path
-
-    def remove(self, runtime_guid: int) -> FlightPath | None:
-        """Remove and return a FlightPath, if present."""
-        return self._by_runtime_guid.pop(int(runtime_guid), None)
-
-    def get(self, runtime_guid: int) -> FlightPath | None:
-        """Return a FlightPath by runtime GUID."""
-        return self._by_runtime_guid.get(int(runtime_guid))
-
-    def contains(self, runtime_guid: int) -> bool:
-        """Return whether a FlightPath is retained."""
-        return int(runtime_guid) in self._by_runtime_guid
-
-    def clear(self) -> None:
-        """Remove every retained FlightPath."""
-        self._by_runtime_guid.clear()
-
-    def __iter__(self) -> Iterator[FlightPath]:
-        """Iterate over retained FlightPaths."""
-        return iter(self._by_runtime_guid.values())
 
 
 _FLIGHT_PATH_RUNTIME_STORE = FlightPathRuntimeStore()

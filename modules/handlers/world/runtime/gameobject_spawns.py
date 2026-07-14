@@ -15,8 +15,6 @@ from server.modules.handlers.world.bootstrap.gameobjects import (
 )
 from server.modules.handlers.world.runtime.gameobject import GameObject
 from server.modules.handlers.world.runtime.gameobject_store import (
-    gameobject_identity_matches_mapping,
-    gameobject_matches_mapping,
     get_gameobject_runtime_store,
 )
 
@@ -83,24 +81,10 @@ def _runtime_object(
         if runtime_guid is None
         else int(runtime_guid)
     )
-    stored = get_gameobject_runtime_store().get_by_spawn_id(
-        _entry_int(entry, "guid")
-    )
-    if stored is not None:
-        matcher = (
-            gameobject_matches_mapping
-            if require_mapping_transform
-            else gameobject_identity_matches_mapping
-        )
-        if matcher(
-            stored,
-            entry,
-            runtime_guid=resolved_runtime_guid,
-        ):
-            return stored
-    return GameObject.from_mapping(
+    return get_gameobject_runtime_store().resolve(
         entry,
         runtime_guid=resolved_runtime_guid,
+        require_mapping_transform=require_mapping_transform,
     )
 
 

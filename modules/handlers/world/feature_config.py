@@ -11,6 +11,7 @@ from shared.Logger import Logger
 
 CONFIG_ENABLE_ELEVATORS = "Transport.EnableElevators"
 CONFIG_ENABLE_MOVING_TRANSPORTS = "Transport.EnableMovingTransports"
+CONFIG_DEBUG_TRANSPORT_LIFECYCLE = "Transport.DebugLifecycle"
 CONFIG_DEBUG_TRANSPORT_MOVEMENT = "Transport.DebugMovement"
 CONFIG_DEBUG_TRANSPORT_MESSAGES = "Transport.DebugMessages"
 CONFIG_AUTONOMOUS_TRANSPORT_VISIBILITY = "Transport.AutonomousVisibility"
@@ -45,6 +46,7 @@ GAMEOBJECT_COLLISION_MODES = frozenset(
 _DEFAULTS: dict[str, bool] = {
     CONFIG_ENABLE_ELEVATORS: True,
     CONFIG_ENABLE_MOVING_TRANSPORTS: True,
+    CONFIG_DEBUG_TRANSPORT_LIFECYCLE: False,
     CONFIG_DEBUG_TRANSPORT_MOVEMENT: False,
     CONFIG_DEBUG_TRANSPORT_MESSAGES: False,
     CONFIG_AUTONOMOUS_TRANSPORT_VISIBILITY: False,
@@ -105,6 +107,10 @@ def elevators_enabled() -> bool:
 
 def moving_transports_enabled() -> bool:
     return feature_enabled(CONFIG_ENABLE_MOVING_TRANSPORTS)
+
+
+def transport_lifecycle_debug_enabled() -> bool:
+    return feature_enabled(CONFIG_DEBUG_TRANSPORT_LIFECYCLE)
 
 
 def transport_movement_debug_enabled() -> bool:
@@ -202,6 +208,10 @@ def geometry_contact_separation_epsilon() -> float:
 def log_effective_world_feature_config() -> None:
     Logger.info("[Config] Elevators: %s", "enabled" if elevators_enabled() else "disabled")
     Logger.info("[Config] Moving transports: %s", "enabled" if moving_transports_enabled() else "disabled")
+    Logger.info(
+        "[Config] Transport lifecycle debug: %s",
+        "enabled" if transport_lifecycle_debug_enabled() else "disabled",
+    )
     Logger.info(
         "[Config] Transport movement debug: %s",
         "enabled" if transport_movement_debug_enabled() else "disabled",

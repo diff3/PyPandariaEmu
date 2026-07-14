@@ -108,9 +108,15 @@ def apply_map_transfer(
             Logger.warning("[PetBattle] map-transfer cleanup failed: %s", exc)
 
     session.teleport_destination = target.name or str(reason)
-    session.near_teleport_pending = same_map
-    session.teleport_pending = not same_map
-    session.worldport_ack_pending = not same_map
+    if keep_transport and not same_map:
+        from server.modules.handlers.world.teleport.transition import (
+            begin_transport_worldport_transition,
+        )
+
+        transition_generation = begin_transport_worldport_transition(session)
+        pending_transport = getattr(session, "pending_transport_transfer", None)
+        if isinstance(pending_transport, dict):
+            pending_transport["world_transition_generation"] = transition_generation
     session._area_trigger_suppressed_until = (
         time.monotonic() + _POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS
     )

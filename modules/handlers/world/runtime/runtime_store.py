@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Generic identity-indexed lifetime storage for spawned runtime objects."""
+"""Generic identity-indexed lifetime storage for runtime objects."""
 
 from __future__ import annotations
 
@@ -9,7 +9,48 @@ from collections.abc import Iterator
 from typing import Generic, Protocol, TypeVar
 
 
-class _RuntimeStoreEntry(Protocol):
+class _RuntimeGuidEntry(Protocol):
+    """Structural identity required by ``RuntimeGuidStore``."""
+
+    runtime_guid: int
+
+
+RuntimeGuidEntryT = TypeVar("RuntimeGuidEntryT", bound=_RuntimeGuidEntry)
+
+
+class RuntimeGuidStore(Generic[RuntimeGuidEntryT]):
+    """Retain runtime objects under runtime GUID identity only."""
+
+    def __init__(self) -> None:
+        self._by_runtime_guid: dict[int, RuntimeGuidEntryT] = {}
+
+    def add(self, runtime_object: RuntimeGuidEntryT) -> RuntimeGuidEntryT:
+        """Retain and return an object under its runtime GUID."""
+        self._by_runtime_guid[int(runtime_object.runtime_guid)] = runtime_object
+        return runtime_object
+
+    def remove(self, runtime_guid: int) -> RuntimeGuidEntryT | None:
+        """Remove and return the object for a runtime GUID, if present."""
+        return self._by_runtime_guid.pop(int(runtime_guid), None)
+
+    def get(self, runtime_guid: int) -> RuntimeGuidEntryT | None:
+        """Return the retained object for a runtime GUID."""
+        return self._by_runtime_guid.get(int(runtime_guid))
+
+    def contains(self, runtime_guid: int) -> bool:
+        """Return whether a runtime GUID is retained."""
+        return int(runtime_guid) in self._by_runtime_guid
+
+    def clear(self) -> None:
+        """Remove all retained objects."""
+        self._by_runtime_guid.clear()
+
+    def __iter__(self) -> Iterator[RuntimeGuidEntryT]:
+        """Iterate over retained runtime objects."""
+        return iter(self._by_runtime_guid.values())
+
+
+class _RuntimeStoreEntry(_RuntimeGuidEntry, Protocol):
     """Structural identity required by ``RuntimeStore``."""
 
     runtime_guid: int
@@ -19,7 +60,7 @@ class _RuntimeStoreEntry(Protocol):
 RuntimeEntryT = TypeVar("RuntimeEntryT", bound=_RuntimeStoreEntry)
 
 
-class RuntimeStore(Generic[RuntimeEntryT]):
+class RuntimeStore(RuntimeGuidStore[RuntimeEntryT]):
     """Retain runtime objects under runtime and persistent spawn identities.
 
     The store owns only indexes and object lifetime. It does not know concrete
@@ -28,7 +69,7 @@ class RuntimeStore(Generic[RuntimeEntryT]):
     """
 
     def __init__(self) -> None:
-        self._by_runtime_guid: dict[int, RuntimeEntryT] = {}
+        super().__init__()
         self._runtime_guid_by_spawn_id: dict[int, int] = {}
 
     def add(self, runtime_object: RuntimeEntryT) -> RuntimeEntryT:
@@ -61,10 +102,6 @@ class RuntimeStore(Generic[RuntimeEntryT]):
             self._runtime_guid_by_spawn_id.pop(spawn_id, None)
         return runtime_object
 
-    def get(self, runtime_guid: int) -> RuntimeEntryT | None:
-        """Return the retained object for a runtime GUID."""
-        return self._by_runtime_guid.get(int(runtime_guid))
-
     def get_by_spawn_id(self, spawn_id: int) -> RuntimeEntryT | None:
         """Return the retained object for a persistent spawn ID."""
         runtime_guid = self._runtime_guid_by_spawn_id.get(int(spawn_id))
@@ -72,15 +109,7 @@ class RuntimeStore(Generic[RuntimeEntryT]):
             return None
         return self._by_runtime_guid.get(runtime_guid)
 
-    def contains(self, runtime_guid: int) -> bool:
-        """Return whether a runtime GUID is retained."""
-        return int(runtime_guid) in self._by_runtime_guid
-
     def clear(self) -> None:
         """Remove all retained objects and identity indexes."""
-        self._by_runtime_guid.clear()
+        super().clear()
         self._runtime_guid_by_spawn_id.clear()
-
-    def __iter__(self) -> Iterator[RuntimeEntryT]:
-        """Iterate over retained runtime objects."""
-        return iter(self._by_runtime_guid.values())

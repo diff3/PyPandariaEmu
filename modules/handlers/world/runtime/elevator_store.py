@@ -5,42 +5,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any, Mapping
 
 from server.modules.handlers.world.runtime.elevator import Elevator
+from server.modules.handlers.world.runtime.runtime_store import RuntimeGuidStore
 
 
-class ElevatorRuntimeStore:
+class ElevatorRuntimeStore(RuntimeGuidStore[Elevator]):
     """Retain long-lived elevators without owning their simulation."""
-
-    def __init__(self) -> None:
-        self._by_runtime_guid: dict[int, Elevator] = {}
-
-    def add(self, elevator: Elevator) -> Elevator:
-        """Retain and return an elevator under its runtime GUID."""
-        self._by_runtime_guid[int(elevator.runtime_guid)] = elevator
-        return elevator
-
-    def remove(self, runtime_guid: int) -> Elevator | None:
-        """Remove and return an elevator, if present."""
-        return self._by_runtime_guid.pop(int(runtime_guid), None)
-
-    def get(self, runtime_guid: int) -> Elevator | None:
-        """Return an elevator by runtime GUID."""
-        return self._by_runtime_guid.get(int(runtime_guid))
-
-    def contains(self, runtime_guid: int) -> bool:
-        """Return whether an elevator is retained."""
-        return int(runtime_guid) in self._by_runtime_guid
-
-    def clear(self) -> None:
-        """Remove every retained elevator."""
-        self._by_runtime_guid.clear()
-
-    def __iter__(self) -> Iterator[Elevator]:
-        """Iterate over retained elevators."""
-        return iter(self._by_runtime_guid.values())
 
 
 _ELEVATOR_RUNTIME_STORE = ElevatorRuntimeStore()

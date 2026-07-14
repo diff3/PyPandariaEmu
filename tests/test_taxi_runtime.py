@@ -206,6 +206,34 @@ def test_flight_completion_and_cancellation_unregister_runtime(monkeypatch):
     assert store.contains(7) is False
 
 
+def test_cancelled_taxi_tick_cannot_overwrite_teleport_destination(monkeypatch):
+    _disable_taxi_side_effects(monkeypatch)
+    session = _taxi_session()
+    _start_test_flight(session)
+    stale_state = session.taxi_state
+
+    taxi_runtime.cancel_taxi_flight(
+        session,
+        "ordinary_teleport",
+        send_updates=False,
+    )
+    session.map_id = 0
+    session.x = 100.0
+    session.y = 200.0
+    session.z = 300.0
+    session.orientation = 1.25
+
+    assert stale_state is not None
+    assert taxi_runtime.taxi_tick(session, now=101.0) is False
+    assert (session.map_id, session.x, session.y, session.z, session.orientation) == (
+        0,
+        100.0,
+        200.0,
+        300.0,
+        1.25,
+    )
+
+
 def test_taxi_position_boundary_updates_runtime_player():
     session = _taxi_session()
     session.instance_id = 9

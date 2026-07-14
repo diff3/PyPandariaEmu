@@ -10,6 +10,11 @@ import time
 from shared.Logger import Logger
 
 from server.modules.handlers.world.feature_config import transport_movement_debug_enabled
+from server.modules.handlers.world.transport_debug import (
+    TransportDebugEvent,
+    log_transport_event,
+    transport_location,
+)
 
 from .cache import get_movement_cache
 from .evaluator import evaluate_template
@@ -73,7 +78,7 @@ class MovementManager:
         state = self.instances.get(int(instance_id))
         if state is None:
             return None
-        
+
         template = self.templates.get(str(state.instance.template_id))
         if template is None:
             return None
@@ -81,16 +86,16 @@ class MovementManager:
         # Här är nyckeln: Vi ignorerar state.instance.started_at_ms
         # och använder direkt local_elapsed_ms som "phase"
         # evaluate_template förväntar sig ofta "now". Vi måste lura den.
-        
+
         # Om evaluate_template gör: phase = now - started_at
         # Då måste vi skicka in "now" så att (now - started_at) = local_elapsed_ms
         # => now = local_elapsed_ms + started_at
-        
+
         fake_now = local_elapsed_ms + int(state.instance.started_at_ms)
-        
+
         return self.evaluate(
             template,
-            server_time_ms=fake_now, # Lura systemet att "nu" är detta
+            server_time_ms=fake_now,  # Lura systemet att "nu" är detta
             phase_offset_ms=int(state.instance.phase_offset_ms),
         )
 
@@ -202,7 +207,7 @@ class MovementManager:
             server_time_ms=server_time_ms,
             phase_offset_ms=int(state.instance.phase_offset_ms),
         )
-    
+
     def evaluate_instance(
         self,
         instance_id: int,
@@ -235,7 +240,7 @@ class MovementManager:
                 state.instance.phase_offset_ms
             ),
         )
-    
+
     def tick_instance(
         self,
         instance_id: int,
@@ -753,6 +758,30 @@ class MovementManager:
         )
         state.lifecycle_events = (*state.lifecycle_events[-15:], event)
         self.event_history[int(state.instance.instance_id)] = state.lifecycle_events
+        template = self.templates.get(str(state.instance.template_id))
+        station_node = bool(
+            template is not None
+            and 0 <= int(node_index) < len(template.nodes)
+            and (
+                bool(template.nodes[int(node_index)].station)
+                or int(node_index) in set(template.station_nodes)
+            )
+        )
+        if station_node and event_type in {
+            MovementLifecycleEventType.ARRIVED,
+            MovementLifecycleEventType.DEPARTED,
+        }:
+            map_id = int(template.nodes[int(node_index)].map_id)
+            log_transport_event(
+                TransportDebugEvent.ARRIVED
+                if event_type == MovementLifecycleEventType.ARRIVED
+                else TransportDebugEvent.LEAVING,
+                transport_guid=int(state.instance.instance_id),
+                location=transport_location(
+                    map_id=map_id,
+                    node_index=int(node_index),
+                ),
+            )
         if transport_movement_debug_enabled():
             Logger.info(
                 "[MovementEvent] instance=0x%016X event=%s phase=%s node=%s target_map=%s %s",

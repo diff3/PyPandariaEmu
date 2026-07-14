@@ -430,6 +430,32 @@ def iter_active_sessions(state=None) -> list:
     return list(getattr(scoped_state, "sessions", set()) or ())
 
 
+def is_player_world_active(session) -> bool:
+    """Return whether normal world gameplay may consume this session.
+
+    World-transition ownership is retired only after successful destination
+    bootstrap.  A committed destination transform or region membership does
+    not make normal gameplay active while that ownership remains live.
+    """
+    if session is None:
+        return False
+
+    transition_owner = str(
+        getattr(session, "world_transition_owner", "") or ""
+    )
+    loading_generation = int(
+        getattr(session, "world_transition_loading_generation", 0) or 0
+    )
+    if transition_owner or loading_generation > 0:
+        return False
+
+    login_state = getattr(session, "login_state", None)
+    if login_state is None:
+        return True
+    login_state_value = getattr(login_state, "value", login_state)
+    return str(login_state_value or "") == "IN_WORLD"
+
+
 def _is_session_in_world(session) -> bool:
     login_state = getattr(session, "login_state", None)
     login_state_value = getattr(login_state, "value", login_state)
@@ -438,6 +464,7 @@ def _is_session_in_world(session) -> bool:
         and callable(getattr(session, "send_response", None))
         and str(login_state_value or "") == "IN_WORLD"
         and _session_guid(session) > 0
+        and is_player_world_active(session)
     )
 
 
@@ -462,21 +489,15 @@ def iter_region_sessions(target_session=None, *, region=None, map_id: int | None
         target_region = region_manager.get_region(int(map_id))
     if target_region is None:
         return []
-    return list(getattr(target_region, "players", ()) or ())
+    return [
+        session
+        for session in list(getattr(target_region, "players", ()) or ())
+        if is_player_world_active(session)
+    ]
 
 
 def _session_guid(session) -> int:
     return int(resolve_player_runtime(session).character_guid)
-
-
-def _resolve_player_packet_runtime(
-    session,
-    player: Player | None = None,
-) -> Player:
-    """Reuse the stored Player or construct the unregistered fallback."""
-    if player is not None:
-        return player
-    return resolve_player_runtime(session)
 
 
 def _normalized_explored_zones(raw: str | None, *, size: int = _PLAYER_EXPLORED_ZONES_SIZE) -> list[int]:
@@ -502,7 +523,8 @@ def build_explored_zones_update_response(
 ) -> tuple[str, bytes] | None:
     from server.modules.handlers.world.bootstrap.playerobjects import build_multi_u32_update_object_payload
 
-    player = _resolve_player_packet_runtime(session, player)
+    if player is None:
+        player = resolve_player_runtime(session)
     guid = int(player.character_guid)
     if guid <= 0:
         return None
@@ -681,6 +703,9 @@ def broadcast_system_message(
 
 def broadcast_region_weather(target_session, weather_type: int, density: float, abrupt: int = 0, *, announce: str | None = None) -> None:
     from server.modules.handlers.world.login.packets import build_login_packet
+
+    if not is_player_world_active(target_session):
+        return
 
     zone_id = _resolve_weather_zone_id(target_session)
     weather_state = {
@@ -897,7 +922,7 @@ def _build_player_move_response(source_session) -> tuple[str, bytes] | None:
 
     payload = build_smsg_player_move_payload(
         source_session,
-        player=_resolve_player_packet_runtime(source_session),
+        player=resolve_player_runtime(source_session),
     )
     if not payload:
         return None

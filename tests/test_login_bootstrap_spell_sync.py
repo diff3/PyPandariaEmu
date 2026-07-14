@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 import sys
@@ -156,6 +159,138 @@ def test_normal_bootstrap_has_no_transport_sync_side_effects() -> None:
     assert login_handlers._sync_pending_transport_before_player_bootstrap(session) is False
     assert (session.x, session.y, session.z, session.orientation) == (1.0, 2.0, 3.0, 0.4)
     assert getattr(state, "has_transport_data", False) is False
+
+
+def test_replacement_worldport_loading_completion_bootstraps_manual_destination(
+    monkeypatch,
+) -> None:
+    from server.modules.handlers.world.teleport.transition import (
+        complete_world_transition,
+    )
+    from server.modules.handlers.world.state.runtime import is_player_world_active
+
+    session = SimpleNamespace(
+        char_guid=1,
+        world_guid=0x1000000000000001,
+        login_state=LoginState.IN_WORLD,
+        map_id=530,
+        instance_id=0,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=1.5,
+        teleport_pending=True,
+        worldport_ack_pending=True,
+        near_teleport_pending=False,
+        teleport_destination="manual:530:10:20:30:1.5",
+        loading_screen_visible=False,
+        loading_screen_done=False,
+        post_loading_sent=False,
+        world_transition_generation=2,
+        world_transition_owner="ordinary_teleport",
+        world_transition_ignore_worldport_ack=True,
+        world_transition_loading_generation=2,
+        pending_transport_transfer=None,
+        transport_transfer_pending=False,
+    )
+    ctx = SimpleNamespace(
+        name="CMSG_LOADING_SCREEN_NOTIFY",
+        payload=b"",
+        decoded={},
+    )
+    showing_values = iter((0,))
+    bootstrap_calls = []
+
+    monkeypatch.setattr(login_handlers, "log_cmsg", lambda _ctx: {})
+    monkeypatch.setattr(
+        login_handlers,
+        "_decode_loading_screen_showing",
+        lambda _decoded, _payload: next(showing_values),
+    )
+    monkeypatch.setattr(login_handlers, "_resolve_session_ids", lambda _session: None)
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda _session: SimpleNamespace(),
+    )
+
+    def queue_manual_destination(target, _ctx):
+        assert is_player_world_active(target) is False
+        bootstrap_calls.append(
+            (
+                target.map_id,
+                target.instance_id,
+                target.x,
+                target.y,
+                target.z,
+                target.orientation,
+            )
+        )
+        target.teleport_pending = False
+        target.worldport_ack_pending = False
+        target.teleport_destination = None
+        complete_world_transition(target)
+        return [("SMSG_UPDATE_OBJECT", b"manual-destination-visible")]
+
+    monkeypatch.setattr(
+        login_handlers,
+        "_queue_teleport_world_transition",
+        queue_manual_destination,
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode(),
+    )
+
+    complete_status, complete_responses = login_handlers.handle_loading_screen_notify(
+        session,
+        ctx,
+    )
+    assert complete_status == 0
+    assert bootstrap_calls == [(530, 0, 10.0, 20.0, 30.0, 1.5)]
+    assert complete_responses[-1] == (
+        "SMSG_UPDATE_OBJECT",
+        b"manual-destination-visible",
+    )
+    assert session.teleport_pending is False
+    assert session.worldport_ack_pending is False
+    assert session.pending_transport_transfer is None
+    assert session.transport_transfer_pending is False
+    assert session.world_transition_owner is None
+    assert session.world_transition_ignore_worldport_ack is False
+    assert is_player_world_active(session) is True
+    assert (session.map_id, session.instance_id) == (530, 0)
+    assert (session.x, session.y, session.z, session.orientation) == (
+        10.0,
+        20.0,
+        30.0,
+        1.5,
+    )
+
+
+def test_superseded_transport_snapshot_cannot_enter_player_bootstrap() -> None:
+    state = MovementState()
+    session = SimpleNamespace(
+        world_transition_generation=2,
+        transport_transfer_pending=True,
+        pending_transport_transfer={
+            "world_transition_generation": 1,
+            "destination_guid": 77,
+            "destination_entry": {"entry": 20808},
+            "local_x": 4.0,
+            "local_y": 5.0,
+            "local_z": 6.0,
+            "local_o": 0.7,
+        },
+        movement_state=state,
+    )
+
+    assert login_handlers._sync_pending_transport_before_player_bootstrap(session) is False
+    assert session.pending_transport_transfer is None
+    assert session.transport_transfer_pending is False
+    assert getattr(state, "has_transport_data", False) is False
+    assert int(getattr(state, "transport_guid", 0) or 0) == 0
 
 
 def test_transport_bootstrap_player_create_uses_runtime_position_with_transport_block(
@@ -733,6 +868,7 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
 def test_worldport_loading_completion_streams_world_objects_immediately(monkeypatch) -> None:
     from server.modules.handlers.world import transport_runtime
     from server.modules.handlers.world.opcodes import movement as movement_handlers
+    from server.modules.handlers.world.state.runtime import is_player_world_active
 
     session = SimpleNamespace(
         loading_screen_done=False,
@@ -749,9 +885,15 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
         loaded_transport_entries={},
         loaded_npcs=set(),
         transport_transfer_pending=True,
+        login_state=LoginState.IN_WORLD,
+        world_transition_generation=1,
+        world_transition_loading_generation=1,
+        world_transition_owner="transport_worldport",
+        world_transition_ignore_worldport_ack=False,
         pending_transport_transfer={
             "transfer_id": "1-post-bootstrap",
             "destination_guid": 0x1FC0000000000007,
+            "world_transition_generation": 1,
             "destination_entry": {
                 "entry": 20808,
                 "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
@@ -772,24 +914,37 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
     monkeypatch.setattr(login_handlers, "trigger_inventory_activation", lambda _session: [])
     monkeypatch.setattr(login_handlers, "build_explored_zones_update_response", lambda _session: None)
     monkeypatch.setattr(transport_runtime, "build_bootstrap_transport_value_updates", lambda _session: [])
+    def stream_during_bootstrap(target, *, context):
+        assert is_player_world_active(target) is False
+        calls.append(context)
+        return [("SMSG_UPDATE_OBJECT", b"visible-now")]
+
     monkeypatch.setattr(
         movement_handlers,
         "stream_world_objects_after_teleport",
-        lambda _session, *, context: calls.append(context) or [("SMSG_UPDATE_OBJECT", b"visible-now")],
+        stream_during_bootstrap,
     )
     responses = login_handlers._queue_teleport_world_transition(session, ctx)
 
     assert calls == ["worldport-loading-complete"]
     assert responses[0] == ("SMSG_UPDATE_OBJECT", b"visible-now")
     assert (session.x, session.y, session.z, session.orientation) == (10.0, 20.0, 30.0, 0.5)
-    assert session.pending_transport_transfer["transfer_id"] == "1-post-bootstrap"
-    assert session.transport_transfer_pending is True
+    assert session.pending_transport_transfer is None
+    assert session.transport_transfer_pending is False
+    assert session.transport_attach_state == transport_runtime.ATTACH_STATE_ATTACHED
+    assert session.transport_attached_guid == 0x1FC0000000000007
+    assert is_player_world_active(session) is True
     assert not hasattr(session, "post_bootstrap_transport_reattach_request")
 
+    before_late_ack = dict(vars(session))
+    assert movement_handlers.handle_move_worldport_ack(session, SimpleNamespace()) == (0, None)
+    assert vars(session) == before_late_ack
 
-def test_worldport_bootstrap_return_is_not_blocked_by_reattach_queue_failure(monkeypatch) -> None:
+
+def test_failed_worldport_bootstrap_does_not_complete_transport_transfer(monkeypatch) -> None:
     from server.modules.handlers.world import transport_runtime
     from server.modules.handlers.world.opcodes import movement as movement_handlers
+    from server.modules.handlers.world.state.runtime import is_player_world_active
 
     pending = {"transfer_id": "1-fail", "destination_guid": 7}
     session = SimpleNamespace(
@@ -803,6 +958,11 @@ def test_worldport_bootstrap_return_is_not_blocked_by_reattach_queue_failure(mon
         loaded_npcs=set(),
         pending_transport_transfer=pending,
         transport_transfer_pending=True,
+        login_state=LoginState.IN_WORLD,
+        world_transition_generation=1,
+        world_transition_loading_generation=1,
+        world_transition_owner="transport_worldport",
+        world_transition_ignore_worldport_ack=False,
     )
     ctx = SimpleNamespace()
 
@@ -818,18 +978,16 @@ def test_worldport_bootstrap_return_is_not_blocked_by_reattach_queue_failure(mon
     monkeypatch.setattr(
         movement_handlers,
         "stream_world_objects_after_teleport",
-        lambda _session, *, context: [("SMSG_UPDATE_OBJECT", b"bootstrap")],
-    )
-    monkeypatch.setattr(
-        movement_handlers,
-        "queue_pending_transport_transfer_post_bootstrap",
-        lambda _session: (_ for _ in ()).throw(RuntimeError("reattach queue failed")),
+        lambda _session, *, context: (_ for _ in ()).throw(
+            RuntimeError("bootstrap failed")
+        ),
     )
 
-    responses = login_handlers._queue_teleport_world_transition(session, ctx)
+    with pytest.raises(RuntimeError, match="bootstrap failed"):
+        login_handlers._queue_teleport_world_transition(session, ctx)
 
-    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"bootstrap")
     assert session.pending_transport_transfer is pending
     assert session.transport_transfer_pending is True
-    assert session.teleport_pending is False
-    assert session.worldport_ack_pending is False
+    assert session.teleport_pending is True
+    assert session.worldport_ack_pending is True
+    assert is_player_world_active(session) is False

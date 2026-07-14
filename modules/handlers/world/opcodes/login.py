@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 import time
@@ -68,6 +71,10 @@ from server.modules.handlers.world.runtime.player import Player
 from server.modules.handlers.world.runtime.player_store import (
     get_player_runtime_store,
     resolve_player_runtime,
+)
+from server.modules.handlers.world.transport_debug import (
+    TransportDebugEvent,
+    log_transport_event,
 )
 
 _CINEMATIC_SEQUENCE_BY_RACE = {
@@ -377,6 +384,10 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     session.worldport_ack_pending = False
     session.teleport_destination = None
     session.near_teleport_pending = False
+    session.world_transition_generation = 0
+    session.world_transition_loading_generation = 0
+    session.world_transition_owner = None
+    session.world_transition_ignore_worldport_ack = False
     try:
         from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
 
@@ -417,13 +428,8 @@ def _reset_loaded_world_object_state(session) -> None:
 
 def _build_world_login_context(session) -> WorldLoginContext:
     ctx = WorldLoginContext.from_session(session)
-    ctx.player_runtime = _resolve_player_packet_runtime(session)
+    ctx.player_runtime = resolve_player_runtime(session)
     return ctx
-
-
-def _resolve_player_packet_runtime(session) -> Player:
-    """Reuse the logged-in Player or build an unregistered packet fallback."""
-    return resolve_player_runtime(session)
 
 
 def _resolve_opening_cinematic_id(race: int) -> int:
@@ -468,7 +474,7 @@ def _is_pre_player_login_state(state: Optional[LoginState]) -> bool:
 def build_player_bootstrap_packets(session) -> list[tuple[str, bytes]]:
     """Build the player's initial world object packets from live session state."""
     ctx = _build_world_login_context(session)
-    player = _resolve_player_packet_runtime(session)
+    player = resolve_player_runtime(session)
     ctx.player_runtime = player
     responses: list[tuple[str, bytes]] = []
 
@@ -559,6 +565,28 @@ def _sync_pending_transport_before_player_bootstrap(session) -> bool:
     session._player_bootstrap_runtime_transport = None
     pending = getattr(session, "pending_transport_transfer", None)
     if not isinstance(pending, dict):
+        return False
+
+    from server.modules.handlers.world.teleport.transition import (
+        pending_transition_is_current,
+    )
+
+    if not pending_transition_is_current(session, pending):
+        log_transport_event(
+            TransportDebugEvent.STALE_GENERATION_IGNORED,
+            transport_guid=int(pending.get("destination_guid", 0) or 0),
+            player_guid=int(getattr(session, "char_guid", 0) or 0),
+            transfer_id=str(pending.get("transfer_id", "") or ""),
+            reason="pre_bootstrap_generation_mismatch",
+        )
+        Logger.info(
+            "[TeleportTransition] ignoring superseded pre-bootstrap transport "
+            "pending_generation=%s current_generation=%s",
+            pending.get("world_transition_generation"),
+            int(getattr(session, "world_transition_generation", 0) or 0),
+        )
+        session.pending_transport_transfer = None
+        session.transport_transfer_pending = False
         return False
 
     destination_entry = pending.get("destination_entry")
@@ -899,17 +927,18 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     )
     responses.extend(taxi_responses)
 
+    pending_transport = getattr(session, "pending_transport_transfer", None)
+    movement_handlers.complete_pending_transport_transfer(session)
     session.loading_screen_done = True
     session.post_loading_sent = True
     session.teleport_pending = False
     session.worldport_ack_pending = False
     session.teleport_destination = None
-    Logger.info(
-        "[TransportTransfer] bootstrap_complete trace_id=%s packets=%s",
-        trace_id,
-        len(responses),
+    from server.modules.handlers.world.teleport.transition import (
+        complete_world_transition,
     )
-    pending_transport = getattr(session, "pending_transport_transfer", None)
+
+    complete_world_transition(session)
     if isinstance(pending_transport, dict):
         try:
             from server.modules.handlers.world.transport_debug_messages import build_message
@@ -929,12 +958,6 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
                 responses.append(debug_response)
         except Exception as exc:
             Logger.warning("[TransportDebug] world-loaded message failed error=%s", str(exc))
-    if isinstance(getattr(session, "pending_transport_transfer", None), dict):
-        Logger.info(
-            "[TransportBoundary] post_bootstrap_reattach_skipped "
-            "reason=boundary_lifecycle player=%s",
-            int(getattr(session, "char_guid", 0) or 0),
-        )
     Logger.info(
         "[LoadingScreenTrace] trace_id=%s stage=bootstrap event=leaving "
         "elapsed_ms=%.3f packets=%s empty=%s",
@@ -1332,8 +1355,13 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
     showing = _decode_loading_screen_showing(decoded, ctx.payload)
     _resolve_session_ids(session)
 
+    from server.modules.handlers.world.teleport.transition import (
+        mark_world_transition_loading_started,
+    )
+
     session.loading_screen_visible = bool(showing)
     if showing:
+        mark_world_transition_loading_started(session)
         _set_login_state(session, LoginState.LOADING_SCREEN)
         Logger.info("[WorldHandlers] LOADING_SCREEN_NOTIFY show=1")
         Logger.info(
@@ -1423,6 +1451,20 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
         try:
             responses = _queue_teleport_world_transition(session, login_ctx)
         except Exception as exc:
+            pending = getattr(session, "pending_transport_transfer", None)
+            log_transport_event(
+                TransportDebugEvent.BOOTSTRAP_REJECTED,
+                transport_guid=int(
+                    (pending.get("destination_guid", 0) or 0)
+                    if isinstance(pending, dict)
+                    else 0
+                ),
+                player_guid=int(getattr(session, "char_guid", 0) or 0),
+                transfer_id=str(
+                    pending.get("transfer_id", "") if isinstance(pending, dict) else ""
+                ),
+                reason=str(exc),
+            )
             Logger.info(
                 "[LoadingScreenTrace] trace_id=%s stage=bootstrap event=exception "
                 "elapsed_ms=%.3f error=%s",
@@ -1457,6 +1499,17 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
             )
         return 0, responses
     if getattr(session, "post_loading_sent", False):
+        pending = getattr(session, "pending_transport_transfer", None)
+        log_transport_event(
+            TransportDebugEvent.BOOTSTRAP_SKIPPED,
+            transport_guid=int(
+                (pending.get("destination_guid", 0) or 0)
+                if isinstance(pending, dict)
+                else 0
+            ),
+            player_guid=int(getattr(session, "char_guid", 0) or 0),
+            reason="duplicate_loading_completion",
+        )
         Logger.info("[WorldHandlers] LOADING_SCREEN_NOTIFY show=0 after bootstrap; ignoring duplicate")
         Logger.info(
             "[LoadingScreenTrace] trace_id=%s stage=handler event=leaving "

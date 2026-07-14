@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 import math
@@ -44,10 +47,16 @@ from server.modules.handlers.world.state.runtime import (
     build_same_map_teleport_self_resync_responses,
     dispatch_responses_to_sessions,
     force_bilateral_visibility_resync,
+    is_player_world_active,
     refresh_region_weather,
 )
 from server.modules.handlers.world.login.packets import build_login_packet
 from server.modules.handlers.world.features.deeprun_collision import clamp_deeprun_player_z
+from server.modules.handlers.world.transport_debug import (
+    TransportDebugEvent,
+    log_transport_event,
+    transport_location,
+)
 
 
 def _transport_movement_debug_enabled() -> bool:
@@ -1761,56 +1770,8 @@ def _log_orientation_write(
 def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[str, Any]) -> None:
     state = _movement_state(session)
     previous_guid = int(getattr(state, "transport_guid", 0) or 0)
-    previous_attached_guid = int(getattr(session, "transport_attached_guid", 0) or 0)
     parsed_has_transport = bool(parsed.get("has_transport_data"))
     parsed_transport_guid = int(parsed.get("transport_guid", 0) or 0)
-    if previous_guid or previous_attached_guid:
-        would_detach = (
-            not parsed_has_transport
-            or (
-                previous_guid > 0
-                and parsed_transport_guid > 0
-                and parsed_transport_guid != previous_guid
-            )
-        )
-        try:
-            from server.modules.handlers.world.transport_runtime import log_transport_attachment_lifetime
-
-            log_transport_attachment_lifetime(
-                "MOVEMENT",
-                session=session,
-                world_guid=previous_guid or previous_attached_guid,
-                reason=f"opcode={opcode_name}",
-                local_offset=(
-                    float(parsed.get("transport_x", 0.0) or 0.0),
-                    float(parsed.get("transport_y", 0.0) or 0.0),
-                    float(parsed.get("transport_z", 0.0) or 0.0),
-                    float(parsed.get("transport_orientation", 0.0) or 0.0),
-                ) if parsed_has_transport else None,
-                movement_packet_has_transport=parsed_has_transport,
-                movement_transport_guid=parsed_transport_guid,
-                would_detach=would_detach,
-                detach_occurred=would_detach,
-            )
-        except Exception as exc:
-            Logger.warning("[TransportAttachment] movement diagnostic failed err=%s", str(exc))
-    if (
-        not bool(getattr(session, "_transport_bootstrap_first_movement_logged", False))
-        and (
-            previous_guid
-            or isinstance(getattr(session, "pending_transport_transfer", None), dict)
-            or bool(getattr(session, "transport_debug_transfer_id", ""))
-        )
-    ):
-        session._transport_bootstrap_first_movement_logged = True
-        Logger.info(
-            "[TransportBootstrap] first_movement opcode=%s transport=%s "
-            "guid=0x%016X previous_guid=0x%016X",
-            opcode_name,
-            "yes" if bool(parsed.get("has_transport_data")) else "no",
-            int(parsed.get("transport_guid", 0) or 0) & 0xFFFFFFFFFFFFFFFF,
-            previous_guid & 0xFFFFFFFFFFFFFFFF,
-        )
 
     if (
         bool(getattr(session, "_worldporttest_active", False))
@@ -1825,7 +1786,25 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
 
     if not bool(parsed.get("has_transport_data")):
         if previous_guid:
-            _log_transport_passenger_detach(session, previous_guid, opcode_name)
+            if _has_active_transport_transition(session):
+                session._transport_missing_metadata_guid = 0
+                session._transport_missing_metadata_count = 0
+                return
+            missing_guid = int(
+                getattr(session, "_transport_missing_metadata_guid", 0) or 0
+            )
+            missing_count = int(
+                getattr(session, "_transport_missing_metadata_count", 0) or 0
+            )
+            if missing_guid != previous_guid:
+                missing_count = 0
+            missing_count += 1
+            session._transport_missing_metadata_guid = previous_guid
+            session._transport_missing_metadata_count = missing_count
+            if missing_count < _TRANSPORT_METADATA_MISSING_CONFIRMATION_PACKETS:
+                return
+            session._transport_missing_metadata_guid = 0
+            session._transport_missing_metadata_count = 0
             try:
                 from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
 
@@ -1841,11 +1820,6 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
                 )
             except Exception as exc:
                 Logger.warning("[TransportDetach] lifecycle notify failed err=%s", exc)
-            Logger.info(
-                "[TRANSPORT_STATE] clear opcode=%s previous_tguid=0x%016X",
-                opcode_name,
-                previous_guid & 0xFFFFFFFFFFFFFFFF,
-            )
             _clear_stale_transport_transfer_pending(
                 session,
                 previous_guid,
@@ -1866,6 +1840,8 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
         return
 
     transport_guid = int(parsed.get("transport_guid", 0) or 0)
+    session._transport_missing_metadata_guid = 0
+    session._transport_missing_metadata_count = 0
     if previous_guid != transport_guid:
         if previous_guid:
             try:
@@ -1918,49 +1894,16 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
     state.transport_vehicle_id = int(parsed.get("transport_vehicle_id", 0) or 0)
 
     if previous_guid != transport_guid:
-        _log_transport_passenger_attach(session, transport_guid, opcode_name)
         try:
             from server.modules.handlers.world.transport_runtime import record_transport_attach
 
             record_transport_attach(session, transport_guid, opcode_name=opcode_name)
         except Exception as exc:
             Logger.warning("[TransportAttach] lifecycle notify failed err=%s", exc)
-    _transport_debug_log(
-        "[TransportOffset] opcode=%s tguid=0x%016X "
-        "offset=(%.3f %.3f %.3f) torient=%.3f time=%u seat=%s",
-        opcode_name,
-        transport_guid & 0xFFFFFFFFFFFFFFFF,
-        float(state.transport_x),
-        float(state.transport_y),
-        float(state.transport_z),
-        float(state.transport_orientation),
-        int(state.transport_time),
-        int(state.transport_seat),
-    )
 
 
 def _log_transport_parse_unknown_preserve(session, opcode_name: str, transport_guid: int) -> None:
-    try:
-        from server.modules.handlers.world.transport_runtime import runtime_transport_state_for_guid
-
-        runtime_state = runtime_transport_state_for_guid(int(transport_guid))
-        passengers = getattr(runtime_state, "passengers", None) if runtime_state is not None else None
-        runtime_present = bool(
-            isinstance(passengers, dict)
-            and int(getattr(session, "char_guid", 0) or 0) in passengers
-        )
-    except Exception:
-        runtime_present = False
-    Logger.info(
-        "[TransportAttachment] event=MOVEMENT_PARSE_UNKNOWN "
-        "player=%s opcode=%s transport_guid=0x%016X "
-        "runtime_passenger_present=%s action=preserve_attachment "
-        "reason=no_skyfire_parse",
-        int(getattr(session, "char_guid", 0) or 0),
-        str(opcode_name),
-        int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
-        str(runtime_present).lower(),
-    )
+    _ = session, opcode_name, transport_guid
 
 
 def _transport_entry_for_guid(session, transport_guid: int) -> dict[str, Any] | None:
@@ -2008,16 +1951,6 @@ def _is_real_runtime_elevator_entry(entry: dict[str, Any] | None) -> bool:
     )
 
 
-def _is_deeprun_tram_entry(entry: dict[str, Any] | None) -> bool:
-    if not isinstance(entry, dict):
-        return False
-    try:
-        from server.modules.handlers.world.transport_runtime import is_deeprun_tram_entry
-    except Exception:
-        return False
-    return bool(is_deeprun_tram_entry(entry))
-
-
 def _has_loaded_real_runtime_elevator(session) -> bool:
     loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
     return bool(isinstance(loaded_transport_entries, dict) and any(
@@ -2025,56 +1958,6 @@ def _has_loaded_real_runtime_elevator(session) -> bool:
         for entry in loaded_transport_entries.values()
         if isinstance(entry, dict)
     ))
-
-
-def _log_transport_passenger_attach(session, transport_guid: int, opcode_name: str) -> None:
-    entry = _transport_entry_for_guid(session, int(transport_guid))
-    if _is_deeprun_tram_entry(entry):
-        Logger.info(
-            "[Tram] passenger attach opcode=%s char=%s tguid=0x%016X "
-            "local=(%.3f %.3f %.3f)",
-            str(opcode_name),
-            int(getattr(session, "char_guid", 0) or 0),
-            int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
-            float(getattr(_movement_state(session), "transport_x", 0.0) or 0.0),
-            float(getattr(_movement_state(session), "transport_y", 0.0) or 0.0),
-            float(getattr(_movement_state(session), "transport_z", 0.0) or 0.0),
-        )
-        return
-    if not _is_real_runtime_elevator_entry(entry):
-        return
-    Logger.info(
-        "[WorldElevator] passenger attached opcode=%s char=%s tguid=0x%016X "
-        "entry=%s local=(%.3f %.3f %.3f)",
-        str(opcode_name),
-        int(getattr(session, "char_guid", 0) or 0),
-        int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
-        int(entry.get("entry", 0) or 0),
-        float(getattr(_movement_state(session), "transport_x", 0.0) or 0.0),
-        float(getattr(_movement_state(session), "transport_y", 0.0) or 0.0),
-        float(getattr(_movement_state(session), "transport_z", 0.0) or 0.0),
-    )
-
-
-def _log_transport_passenger_detach(session, transport_guid: int, opcode_name: str) -> None:
-    entry = _transport_entry_for_guid(session, int(transport_guid))
-    if _is_deeprun_tram_entry(entry):
-        Logger.info(
-            "[Tram] passenger detach opcode=%s char=%s tguid=0x%016X",
-            str(opcode_name),
-            int(getattr(session, "char_guid", 0) or 0),
-            int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
-        )
-        return
-    if not _is_real_runtime_elevator_entry(entry):
-        return
-    Logger.info(
-        "[WorldElevator] passenger detached opcode=%s char=%s tguid=0x%016X entry=%s",
-        str(opcode_name),
-        int(getattr(session, "char_guid", 0) or 0),
-        int(transport_guid) & 0xFFFFFFFFFFFFFFFF,
-        int(entry.get("entry", 0) or 0),
-    )
 
 
 def _clear_transport_state(session) -> None:
@@ -2677,12 +2560,43 @@ def _maybe_start_transport_route_transfer(
     return []
 
 
-def _complete_pending_transport_transfer(session) -> None:
+def complete_pending_transport_transfer(session) -> bool:
+    """Complete the current transport-owned worldport, if one is pending.
+
+    Destination bootstrap is the canonical completion boundary.  The worldport
+    ACK handler also calls this helper as a compatibility path, so completion
+    must remain safe when bootstrap has already retired the transfer.
+    """
     pending = getattr(session, "pending_transport_transfer", None)
     if not isinstance(pending, dict):
         session.pending_transport_transfer = None
         session.transport_transfer_pending = False
-        return
+        return False
+
+    from server.modules.handlers.world.teleport.transition import (
+        pending_transition_is_current,
+    )
+
+    if not pending_transition_is_current(session, pending):
+        log_transport_event(
+            TransportDebugEvent.STALE_GENERATION_IGNORED,
+            transport_guid=int(pending.get("destination_guid", 0) or 0),
+            player_guid=int(getattr(session, "char_guid", 0) or 0),
+            transfer_id=str(pending.get("transfer_id", "") or ""),
+            reason=(
+                f"pending:{pending.get('world_transition_generation')} "
+                f"current:{int(getattr(session, 'world_transition_generation', 0) or 0)}"
+            ),
+        )
+        _transport_debug_log(
+            "[TeleportTransition] ignoring superseded transport completion "
+            "pending_generation=%s current_generation=%s",
+            pending.get("world_transition_generation"),
+            int(getattr(session, "world_transition_generation", 0) or 0),
+        )
+        session.pending_transport_transfer = None
+        session.transport_transfer_pending = False
+        return False
 
     state = _movement_state(session)
     destination_guid = int(pending.get("destination_guid", 0) or 0)
@@ -2700,7 +2614,12 @@ def _complete_pending_transport_transfer(session) -> None:
             session.loaded_transport_entries = loaded
         if isinstance(destination_entry, dict):
             loaded[destination_guid] = dict(destination_entry)
-        Logger.info(
+        session.transport_attach_state = "ATTACHED"
+        session.transport_attached_guid = destination_guid
+        session.transport_attach_source_map = int(
+            pending.get("destination_map", getattr(session, "map_id", 0)) or 0
+        )
+        _transport_debug_log(
             "[TransportBoundary] transfer_complete_preserve_attachment player=%s "
             "transport=0x%016X "
             "local=(%.3f %.3f %.3f %.3f)",
@@ -2711,7 +2630,7 @@ def _complete_pending_transport_transfer(session) -> None:
             float(state.transport_z),
             float(state.transport_orientation),
         )
-    Logger.info(
+    _transport_debug_log(
         "[TransportBoundary] completed player=%s source_map=%s dest_map=%s "
         "node=%s route_phase=%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -2722,11 +2641,34 @@ def _complete_pending_transport_transfer(session) -> None:
     )
     session.pending_transport_transfer = None
     session.transport_transfer_pending = False
-    Logger.info(
+    if destination_guid > 0:
+        event_fields = {
+            "transport_guid": destination_guid,
+            "player_guid": int(getattr(session, "char_guid", 0) or 0),
+            "transfer_id": str(pending.get("transfer_id", "") or ""),
+            "destination": transport_location(
+                map_id=int(pending.get("destination_map", getattr(session, "map_id", 0)) or 0)
+            ),
+        }
+        log_transport_event(
+            TransportDebugEvent.PASSENGER_TRANSFER_COMPLETED,
+            **event_fields,
+        )
+        log_transport_event(
+            TransportDebugEvent.WORLDPORT_COMPLETED,
+            **event_fields,
+        )
+    _transport_debug_log(
         "[TransportTransfer] transfer_state_cleared transfer_id=%s player=%s",
         str(pending.get("transfer_id", "unknown") or "unknown"),
         int(getattr(session, "char_guid", 0) or 0),
     )
+    return True
+
+
+def _complete_pending_transport_transfer(session) -> bool:
+    """Compatibility alias for existing internal callers and tests."""
+    return complete_pending_transport_transfer(session)
 
 
 def _disabled_legacy_queue_pending_transport_transfer_post_bootstrap(session) -> bool:
@@ -2906,7 +2848,7 @@ def _disabled_legacy_complete_queued_post_bootstrap_transport_reattach(
     )
 
     try:
-        _complete_pending_transport_transfer(session)
+        complete_pending_transport_transfer(session)
         responses = resync_movement(session)
     except Exception as exc:
         Logger.warning(
@@ -3455,6 +3397,15 @@ def _is_teleporting(session) -> bool:
     )
 
 
+def _has_active_transport_transition(session) -> bool:
+    return bool(
+        getattr(session, "transport_transfer_pending", False)
+        or isinstance(getattr(session, "pending_transport_transfer", None), dict)
+        or str(getattr(session, "world_transition_owner", "") or "")
+        == "transport_worldport"
+    )
+
+
 def _maybe_clear_stale_near_teleport_pending_on_movement(session, opcode_name: str) -> None:
     if not bool(getattr(session, "near_teleport_pending", False)):
         return
@@ -3625,6 +3576,7 @@ _GAMEOBJECT_STREAM_INTERVAL_SECONDS = 0.5
 _NPC_STREAM_UNLOAD_RADIUS = 150.0
 _NPC_STREAM_INTERVAL_SECONDS = 0.5
 _GAMEOBJECT_COLLISION_CONTACT_BACKOFF = 0.05
+_TRANSPORT_METADATA_MISSING_CONFIRMATION_PACKETS = 2
 _GO_COLLISION_STOP_FLAGS = (
     _MOVEMENTFLAG_FORWARD
     | _MOVEMENTFLAG_BACKWARD
@@ -3862,7 +3814,13 @@ def _maybe_stream_npcs(session) -> list[tuple[str, bytes]]:
     return responses
 
 
-def _maybe_stream_world_objects(session) -> list[tuple[str, bytes]]:
+def _maybe_stream_world_objects(
+    session,
+    *,
+    transition_bootstrap: bool = False,
+) -> list[tuple[str, bytes]]:
+    if not transition_bootstrap and not is_player_world_active(session):
+        return []
     responses = []
     responses.extend(_maybe_stream_gameobjects(session))
     responses.extend(_maybe_stream_npcs(session))
@@ -3880,7 +3838,10 @@ def stream_world_objects_after_teleport(
 
     session.last_gameobject_stream_at = 0.0
     session.last_npc_stream_at = 0.0
-    responses = _maybe_stream_world_objects(session)
+    responses = _maybe_stream_world_objects(
+        session,
+        transition_bootstrap=True,
+    )
 
     after_gameobjects = set(getattr(session, "loaded_gameobjects", set()) or set())
     after_npcs = set(getattr(session, "loaded_npcs", set()) or set())
@@ -5184,10 +5145,11 @@ def _build_collision_reject_responses(session, opcode_name: str) -> list[tuple[s
     flags_before_reject2 = int(getattr(state, "flags2", 0) or 0)
     flags_out_before, flags_out = _sanitize_collision_reject_movement_state(session)
     flags2_out = int(getattr(state, "flags2", 0) or 0)
-    session.teleport_pending = False
-    session.worldport_ack_pending = False
-    session.near_teleport_pending = False
-    session.teleport_destination = None
+    if not _has_active_transport_transition(session):
+        session.teleport_pending = False
+        session.worldport_ack_pending = False
+        session.near_teleport_pending = False
+        session.teleport_destination = None
     _gameobject_collision_debug_log(
         "[GOCollision] reject flags_in=0x%X flags2_in=0x%X flags_pre_correction=0x%X flags2_pre_correction=0x%X",
         int(flags_in[0]) if isinstance(flags_in, tuple) and len(flags_in) == 2 else 0,
@@ -5690,6 +5652,18 @@ def _remember_saved_position(session, now: float | None = None) -> None:
 def _save_session_position(session, *, reason: str, online: int | None = None, force: bool = False) -> bool:
     if not getattr(session, "char_guid", None) or not getattr(session, "realm_id", None):
         return False
+    if (
+        str(reason) not in {"disconnect", "logout"}
+        and not is_player_world_active(session)
+    ):
+        Logger.debug(
+            "[POS_SAVE] suspended player=%s reason=%s transition_owner=%s generation=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            str(reason),
+            str(getattr(session, "world_transition_owner", "") or ""),
+            int(getattr(session, "world_transition_generation", 0) or 0),
+        )
+        return False
 
     now = time.time()
     position_dirty = bool(getattr(session, "position_dirty", False))
@@ -5759,6 +5733,8 @@ def _save_current_position_like_command(
 
 
 def _maybe_discover_current_area(session) -> list[tuple[str, bytes]]:
+    if not is_player_world_active(session):
+        return []
     try:
         area_id = int(
             getattr(session, "current_area", 0)
@@ -5806,6 +5782,8 @@ def _maybe_periodic_position_save(
     *,
     position_save_interval_seconds: float = _POSITION_SAVE_INTERVAL_SECONDS,
 ) -> bool:
+    if not is_player_world_active(session):
+        return False
     if not getattr(session, "position_dirty", False):
         return False
     now = time.time()
@@ -5861,6 +5839,15 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     starting_z = float(getattr(session, "z", 0.0) or 0.0)
     starting_o = float(getattr(session, "orientation", 0.0) or 0.0)
     _consume_pending_teleport_on_movement(session, opcode_name)
+    if not is_player_world_active(session):
+        Logger.debug(
+            "[Movement] suspended opcode=%s player=%s transition_owner=%s generation=%s",
+            opcode_name,
+            int(getattr(session, "char_guid", 0) or 0),
+            str(getattr(session, "world_transition_owner", "") or ""),
+            int(getattr(session, "world_transition_generation", 0) or 0),
+        )
+        return 0, None
     _clear_dance_emote_state_on_move(session, opcode_name)
     _apply_early_movement_cleanup(session, opcode_name)
     movement_responses: list[tuple[str, bytes]] = []
@@ -6159,21 +6146,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         bool(orientation_accepted),
     )
 
-    transport_guid = int(getattr(state, "transport_guid", 0) or 0)
-    if transport_guid and _transport_movement_debug_enabled():
-        Logger.debug(
-            "[TransportOffset] opcode=%s tguid=0x%016X offset=(%.3f %.3f %.3f) "
-            "world=(%.3f %.3f %.3f)",
-            opcode_name,
-            transport_guid & 0xFFFFFFFFFFFFFFFF,
-            float(getattr(state, "transport_x", 0.0) or 0.0),
-            float(getattr(state, "transport_y", 0.0) or 0.0),
-            float(getattr(state, "transport_z", 0.0) or 0.0),
-            float(x),
-            float(y),
-            float(z),
-        )
-
     state.x = float(x)
     state.y = float(y)
     state.z = float(z)
@@ -6336,6 +6308,8 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
 @register("MSG_MOVE_SET_FACING")
 def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Optional[bytes]]:
     _consume_pending_teleport_on_movement(session, "MSG_MOVE_SET_FACING")
+    if not is_player_world_active(session):
+        return 0, None
     payload = bytes(ctx.payload or b"")
     if len(payload) < 4:
         Logger.warning("[Movement] MSG_MOVE_SET_FACING payload too short")
@@ -6437,6 +6411,11 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
     destination = str(getattr(session, "teleport_destination", "") or "?")
     session.near_teleport_pending = False
     session.worldport_ack_pending = False
+    from server.modules.handlers.world.teleport.transition import (
+        complete_world_transition,
+    )
+
+    complete_world_transition(session)
     fixspeed_pending = bool(getattr(session, "fixspeed_pending", False))
     session.fixspeed_pending = False
     _capture_persist_position_from_session(session)
@@ -6494,7 +6473,29 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
 @register("CMSG_MOVE_WORLDPORT_ACK")
 def handle_move_worldport_ack(session, _ctx: PacketContext):
     if not bool(getattr(session, "worldport_ack_pending", False)):
+        log_transport_event(
+            TransportDebugEvent.LATE_ACK_IGNORED,
+            transport_guid=int(
+                getattr(getattr(session, "movement_state", None), "transport_guid", 0)
+                or 0
+            ),
+            player_guid=int(getattr(session, "char_guid", 0) or 0),
+            reason="no_worldport_pending",
+        )
         Logger.debug("[Teleport] ignoring unexpected WORLDPORT_ACK")
+        return 0, None
+
+    from server.modules.handlers.world.teleport.transition import (
+        should_ignore_worldport_ack,
+    )
+
+    if should_ignore_worldport_ack(session):
+        Logger.info(
+            "[TeleportTransition] ignoring superseded WORLDPORT_ACK "
+            "generation=%s destination=%s",
+            int(getattr(session, "world_transition_generation", 0) or 0),
+            str(getattr(session, "teleport_destination", "") or "?"),
+        )
         return 0, None
 
     if bool(getattr(session, "_worldporttest_active", False)):
@@ -6512,7 +6513,7 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
     pending_transport_diagnostics = getattr(session, "pending_transport_transfer", None)
     _log_transport_worldport_ack_diagnostics(session, pending_transport_diagnostics)
     try:
-        _complete_pending_transport_transfer(session)
+        complete_pending_transport_transfer(session)
     except Exception as exc:
         session.pending_transport_transfer = None
         session.transport_transfer_pending = False
@@ -6547,12 +6548,15 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
         )
     ]
     responses.extend(post_teleport_responses)
-    streamed_world_responses = stream_world_objects_after_teleport(
-        session,
-        context="worldport-ack",
-    )
-    responses.extend(streamed_world_responses)
-    responses.extend(_build_current_weather_response(session, reason="worldport-ack"))
+    if is_player_world_active(session):
+        streamed_world_responses = stream_world_objects_after_teleport(
+            session,
+            context="worldport-ack",
+        )
+        responses.extend(streamed_world_responses)
+        responses.extend(
+            _build_current_weather_response(session, reason="worldport-ack")
+        )
     if isinstance(pending_transport_diagnostics, dict):
         destination_entry = pending_transport_diagnostics.get("destination_entry")
         if isinstance(destination_entry, dict):

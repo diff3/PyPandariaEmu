@@ -34,11 +34,14 @@ class GameObjectRuntimeStore(RuntimeStore[GameObject]):
         mapping: Mapping[str, Any],
         *,
         runtime_guid: int,
+        require_mapping_transform: bool | None = None,
     ) -> bool:
         """Validate the snapshot according to existing GameObject rules."""
+        if require_mapping_transform is None:
+            require_mapping_transform = _mapping_int(mapping, "type") in (11, 15)
         matcher = (
             gameobject_matches_mapping
-            if _mapping_int(mapping, "type") in (11, 15)
+            if require_mapping_transform
             else gameobject_identity_matches_mapping
         )
         return matcher(gameobject, mapping, runtime_guid=runtime_guid)
@@ -48,13 +51,27 @@ class GameObjectRuntimeStore(RuntimeStore[GameObject]):
         mapping: Mapping[str, Any],
         *,
         runtime_guid: int,
+        require_mapping_transform: bool | None = None,
     ) -> GameObject:
         """Reuse matching runtime state or construct the existing fallback."""
+        def snapshot_compatible(
+            runtime_object: GameObject,
+            source: Mapping[str, Any],
+            *,
+            runtime_guid: int,
+        ) -> bool:
+            return self.snapshot_matches(
+                runtime_object,
+                source,
+                runtime_guid=runtime_guid,
+                require_mapping_transform=require_mapping_transform,
+            )
+
         return resolve_spawned_world_object(
             mapping,
             runtime_guid=runtime_guid,
             store=self,
-            snapshot_compatible=self.snapshot_matches,
+            snapshot_compatible=snapshot_compatible,
             fallback_factory=GameObject.from_mapping,
         )
 
@@ -124,6 +141,7 @@ def resolve_gameobject_runtime(
     mapping: Mapping[str, Any],
     *,
     runtime_guid: int,
+    require_mapping_transform: bool | None = None,
 ) -> GameObject:
     """Reuse stored runtime state or construct a temporary fallback.
 
@@ -135,4 +153,5 @@ def resolve_gameobject_runtime(
     return get_gameobject_runtime_store().resolve(
         mapping,
         runtime_guid=runtime_guid,
+        require_mapping_transform=require_mapping_transform,
     )

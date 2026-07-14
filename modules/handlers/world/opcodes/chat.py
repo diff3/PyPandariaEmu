@@ -1164,13 +1164,8 @@ def _apply_fixplayer_destination(session, destination_name: str) -> str | None:
     y = float(destination["y"])
     z = float(destination["z"])
     orientation = float(destination["o"])
-    from server.modules.handlers.world.transport_runtime import (
-        clear_player_transport_state,
-    )
-
-    clear_player_transport_state(
+    _cancel_ordinary_teleport_runtime_state(
         session,
-        reason="teleport",
         opcode_name="fixplayer",
     )
     session.map_id = map_id
@@ -1326,7 +1321,39 @@ def _clear_loaded_world_objects_for_teleport(session, movement_handlers, *, map_
     loaded_gameobject_entries = getattr(session, "loaded_gameobject_entries", None)
     if isinstance(loaded_gameobject_entries, dict):
         loaded_gameobject_entries.clear()
+    if isinstance(loaded_transport_entries, dict):
+        loaded_transport_entries.clear()
     return responses
+
+
+def _cancel_ordinary_teleport_runtime_state(session, *, opcode_name: str) -> None:
+    """Cancel transitions superseded by an ordinary player teleport."""
+    from server.modules.handlers.world.taxi_runtime import cancel_taxi_flight
+    from server.modules.handlers.world.teleport.transition import (
+        begin_ordinary_teleport_transition,
+    )
+    from server.modules.handlers.world.transport_runtime import (
+        clear_player_transport_state,
+    )
+
+    replacement_destination = getattr(session, "teleport_destination", None)
+    begin_ordinary_teleport_transition(session)
+    cancel_taxi_flight(
+        session,
+        "ordinary_teleport",
+        send_updates=False,
+    )
+    session.pending_taxi_transfer = None
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+    session.near_teleport_pending = False
+    session.teleport_destination = None
+    clear_player_transport_state(
+        session,
+        reason="teleport",
+        opcode_name=str(opcode_name),
+    )
+    session.teleport_destination = replacement_destination
 
 
 def build_display_id_responses(session, display_id: int) -> list[tuple[str, bytes]]:
@@ -1428,13 +1455,8 @@ def apply_player_state_change(
         except Exception as exc:
             Logger.debug("[CHAIR] release on teleport failed: %s", exc)
         if not suppress_worldport_cleanup:
-            from server.modules.handlers.world.transport_runtime import (
-                clear_player_transport_state,
-            )
-
-            clear_player_transport_state(
+            _cancel_ordinary_teleport_runtime_state(
                 session,
-                reason="teleport",
                 opcode_name="chat_teleport",
             )
 
@@ -1488,26 +1510,11 @@ def apply_player_state_change(
             session.teleport_pending = False
             session.worldport_ack_pending = False
             session.near_teleport_pending = True
-            saved = movement_handlers._save_session_position(
-                session,
-                reason="near-teleport-start",
-                online=1,
-                force=True,
-            )
-            if not saved:
-                Logger.warning(
-                    "[Teleport] same-map position persist fallback failed destination=%s",
-                    str(getattr(session, "teleport_destination", "") or "?"),
-                )
             teleport_responses = apply_state_and_resync(
                 session,
                 [("SMSG_MOVE_TELEPORT", movement_handlers.build_same_map_teleport_payload(session))],
             )
-            visibility_responses = movement_handlers.stream_world_objects_after_teleport(
-                session,
-                context="near-teleport-start",
-            )
-            return pre_position_responses + teleport_responses + visibility_responses
+            return pre_position_responses + teleport_responses
 
         session.teleport_pending = True
         session.worldport_ack_pending = True

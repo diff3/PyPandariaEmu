@@ -210,6 +210,10 @@ class WorldSession:
     worldport_ack_pending: bool = False
     teleport_destination: Optional[str] = None
     near_teleport_pending: bool = False
+    world_transition_generation: int = 0
+    world_transition_loading_generation: int = 0
+    world_transition_owner: Optional[str] = None
+    world_transition_ignore_worldport_ack: bool = False
     transport_transfer_pending: bool = False
     pending_transport_transfer: Optional[Dict[str, Any]] = None
     post_bootstrap_transport_reattach_request: Optional[Dict[str, Any]] = None

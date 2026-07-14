@@ -6,10 +6,19 @@ from dataclasses import dataclass
 from server.modules.handlers.world.runtime.creature_store import (
     CreatureRuntimeStore,
 )
+from server.modules.handlers.world.runtime.elevator_store import (
+    ElevatorRuntimeStore,
+)
+from server.modules.handlers.world.runtime.flight_path_store import (
+    FlightPathRuntimeStore,
+)
 from server.modules.handlers.world.runtime.gameobject_store import (
     GameObjectRuntimeStore,
 )
-from server.modules.handlers.world.runtime.runtime_store import RuntimeStore
+from server.modules.handlers.world.runtime.runtime_store import (
+    RuntimeGuidStore,
+    RuntimeStore,
+)
 from server.modules.handlers.world.runtime.spawned_world_object import (
     SpawnedWorldObject,
     resolve_spawned_world_object,
@@ -25,8 +34,12 @@ class StoredRuntimeEntry:
 def test_concrete_runtime_stores_share_generic_index_implementation():
     assert issubclass(GameObjectRuntimeStore, RuntimeStore)
     assert issubclass(CreatureRuntimeStore, RuntimeStore)
+    assert issubclass(ElevatorRuntimeStore, RuntimeGuidStore)
+    assert issubclass(FlightPathRuntimeStore, RuntimeGuidStore)
     assert "add" not in GameObjectRuntimeStore.__dict__
     assert "add" not in CreatureRuntimeStore.__dict__
+    assert "add" not in ElevatorRuntimeStore.__dict__
+    assert "add" not in FlightPathRuntimeStore.__dict__
 
 
 def test_spawned_world_object_resolver_reuses_or_constructs_as_needed():
