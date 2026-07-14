@@ -22,6 +22,8 @@ from server.modules.handlers.world.runtime.gameobject_store import (
     gameobject_matches_mapping,
     resolve_gameobject_runtime,
 )
+from server.modules.handlers.world.runtime.runtime_object import RuntimeObject
+from server.modules.handlers.world.runtime.transport import Transport
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
 from server.modules.handlers.world.feature_config import transport_movement_debug_enabled
@@ -57,6 +59,18 @@ def _transport_debug_log(message: str, *args) -> None:
     Logger.info(message, *args)
 
 
+def _manager_transport_for_guid(world_guid: int) -> Transport | None:
+    """Return an existing manager-owned Transport when runtime is available."""
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            get_world_transport_manager,
+        )
+
+        return get_world_transport_manager().transport_for_guid(int(world_guid))
+    except Exception:
+        return None
+
+
 def _u32_from_float(value: float) -> int:
     """Pack a float into a little-endian uint32 value."""
     return u32_from_float(value)
@@ -71,7 +85,7 @@ def _normalize_orientation(orientation: float) -> float:
 
 def _rotation_has_quaternion(
     entry: Mapping[str, Any],
-    gameobject: GameObject | None = None,
+    gameobject: RuntimeObject | None = None,
 ) -> bool:
     if gameobject is not None:
         return any(
@@ -86,7 +100,7 @@ def _rotation_has_quaternion(
 
 def _raw_rotation_components(
     entry: Mapping[str, Any],
-    gameobject: GameObject | None = None,
+    gameobject: RuntimeObject | None = None,
 ) -> tuple[float, float, float, float]:
     if gameobject is not None:
         return tuple(float(value) for value in gameobject.rotation)
@@ -159,7 +173,7 @@ def _pack_gameobject_rotation(x: float, y: float, z: float, w: float) -> int:
 
 def _stationary_orientation(
     entry: Mapping[str, Any],
-    gameobject: GameObject | None = None,
+    gameobject: RuntimeObject | None = None,
 ) -> float:
     """Return DB spawn yaw in radians, normalized to the client-friendly range."""
     if gameobject is not None:
@@ -169,7 +183,7 @@ def _stationary_orientation(
 
 def _rotation_components(
     entry: Mapping[str, Any],
-    gameobject: GameObject | None = None,
+    gameobject: RuntimeObject | None = None,
 ) -> tuple[float, float, float, float]:
     raw_rotation = _raw_rotation_components(entry, gameobject)
     if _rotation_has_quaternion(
@@ -193,7 +207,7 @@ def _rotation_components(
 
 def _gameobject_rotation_packed(
     entry: Mapping[str, Any],
-    gameobject: GameObject | None = None,
+    gameobject: RuntimeObject | None = None,
 ) -> int:
     orientation = _stationary_orientation(entry, gameobject)
     atan_pow = math.atan(math.pow(2.0, -20.0))
@@ -440,6 +454,7 @@ def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
 def _transport_runtime_packet_entry(
     entry: Mapping[str, Any],
     gameobject: GameObject | None = None,
+    transport: Transport | None = None,
 ) -> Mapping[str, Any]:
     """Overlay transport packet fields from RuntimeTransportState when available."""
     if bool(entry.get("_bootstrap_runtime_transform_pinned")):
@@ -452,26 +467,32 @@ def _transport_runtime_packet_entry(
     if gameobject_type not in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         return entry
 
-    world_guid = (
-        int(gameobject.runtime_guid)
-        if gameobject is not None
-        else _resolve_world_guid(entry, _entry_int(entry, "realm_id", 1))
+    world_guid = int(
+        transport.runtime_guid
+        if transport is not None
+        else (
+            gameobject.runtime_guid
+            if gameobject is not None
+            else _resolve_world_guid(entry, _entry_int(entry, "realm_id", 1))
+        )
     )
     if world_guid <= 0:
         return entry
 
-    try:
-        from server.modules.handlers.world.transport_runtime import runtime_transport_state_for_guid
+    state = transport.runtime_state if transport is not None else None
+    if state is None:
+        try:
+            from server.modules.handlers.world.transport_runtime import runtime_transport_state_for_guid
 
-        state = runtime_transport_state_for_guid(world_guid)
-    except Exception as exc:
-        Logger.warning(
-            "[TRANSPORT_CREATE] runtime state lookup failed world_guid=0x%016X type=%s err=%s",
-            world_guid & 0xFFFFFFFFFFFFFFFF,
-            int(gameobject_type),
-            exc,
-        )
-        return entry
+            state = runtime_transport_state_for_guid(world_guid)
+        except Exception as exc:
+            Logger.warning(
+                "[TRANSPORT_CREATE] runtime state lookup failed world_guid=0x%016X type=%s err=%s",
+                world_guid & 0xFFFFFFFFFFFFFFFF,
+                int(gameobject_type),
+                exc,
+            )
+            return entry
 
     if state is None:
         return entry
@@ -557,6 +578,7 @@ def _build_gameobject_field_values(
     *,
     world_guid: int,
     gameobject: GameObject | None = None,
+    transport: Transport | None = None,
 ) -> dict[int, int]:
     """Build update-field values for a single GameObject create packet."""
     gameobject_type = (
@@ -576,13 +598,17 @@ def _build_gameobject_field_values(
         _OBJECT_FIELD_GUID_HIGH: (int(world_guid) >> 32) & 0xFFFFFFFF,
         _OBJECT_FIELD_TYPE: 33,
         _OBJECT_FIELD_ENTRY: (
-            int(gameobject.entry)
+            int(transport.entry)
+            if transport is not None
+            else int(gameobject.entry)
             if gameobject is not None
             else _entry_int(entry, "entry")
         ),
         _OBJECT_FIELD_DYNAMIC_FLAGS: _gameobject_dynamic_flags(entry, gameobject),
         _OBJECT_FIELD_SCALE: _u32_from_float(
-            gameobject.scale
+            transport.scale
+            if transport is not None
+            else gameobject.scale
             if gameobject is not None
             else _entry_float(entry, "size", 1.0)
         ),
@@ -613,10 +639,55 @@ def _build_gameobject_field_values(
     )
     if faction != 0:
         field_values[_GAMEOBJECT_FIELD_FACTION] = faction
-    for offset, value in enumerate(_rotation_components(entry, gameobject)):
+    rotation_object = transport if transport is not None else gameobject
+    for offset, value in enumerate(_rotation_components(entry, rotation_object)):
         if value != 0.0:
             field_values[_GAMEOBJECT_FIELD_ROTATION_START + offset] = _u32_from_float(value)
     return field_values
+
+
+def _packet_transform_object(
+    entry: Mapping[str, Any],
+    gameobject: GameObject,
+    transport: Transport | None,
+) -> RuntimeObject:
+    """Select the existing packet-visible transform without changing rules."""
+    if transport is None:
+        return gameobject
+    if bool(entry.get("_bootstrap_runtime_transform_pinned")):
+        return gameobject
+    if bool(entry.get("client_driven_transport_animation")):
+        return gameobject
+    return transport
+
+
+def _resolve_packet_transport(
+    entry: Mapping[str, Any],
+    gameobject: GameObject | None,
+    transport: Transport | None,
+) -> Transport | None:
+    """Resolve the manager-owned Transport without creating new state."""
+    if transport is not None:
+        return transport
+    gameobject_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    )
+    if gameobject_type not in (
+        _GAMEOBJECT_TYPE_TRANSPORT,
+        _GAMEOBJECT_TYPE_MO_TRANSPORT,
+    ):
+        return None
+    world_guid = (
+        int(gameobject.runtime_guid)
+        if gameobject is not None
+        else _resolve_world_guid(entry, _entry_int(entry, "realm_id", 1))
+    )
+    try:
+        return _manager_transport_for_guid(world_guid)
+    except Exception:
+        return None
 
 
 def _build_gameobject_update_payload(
@@ -625,35 +696,43 @@ def _build_gameobject_update_payload(
     entry: Mapping[str, Any],
     realm_id: int,
     gameobject: GameObject | None = None,
+    transport: Transport | None = None,
 ) -> bytes:
     """Encode a GameObject CREATE_OBJECT payload through the DSL definition."""
-    entry = _transport_runtime_packet_entry(entry, gameobject)
+    transport = _resolve_packet_transport(entry, gameobject, transport)
+    entry = _transport_runtime_packet_entry(entry, gameobject, transport)
     gameobject = _resolve_packet_gameobject(
         entry,
         map_id=map_id,
         realm_id=realm_id,
         gameobject=gameobject,
     )
-    world_guid = int(gameobject.runtime_guid)
-    packet_map_id = int(gameobject.map_id)
+    transform_object = _packet_transform_object(entry, gameobject, transport)
+    world_guid = int(transform_object.runtime_guid)
+    packet_map_id = int(transform_object.map_id)
     update_flags = _gameobject_update_flags(entry, gameobject)
     create_flags = gameobject_defs.build_gameobject_create_flags(update_flags)
     field_values = _build_gameobject_field_values(
         entry,
         world_guid=world_guid,
         gameobject=gameobject,
+        transport=(
+            transport
+            if transform_object is transport
+            else None
+        ),
     )
     mask_bytes, field_bytes = _build_fixed_u32_field_block(
         field_values,
         mask_blocks=_GAMEOBJECT_MASK_BLOCKS,
     )
 
-    stationary_y = float(gameobject.y)
-    stationary_z = float(gameobject.z)
-    stationary_orientation = _stationary_orientation(entry, gameobject)
-    stationary_x = float(gameobject.x)
-    packet_rotation = _rotation_components(entry, gameobject)
-    packed_rotation = _gameobject_rotation_packed(entry, gameobject)
+    stationary_y = float(transform_object.y)
+    stationary_z = float(transform_object.z)
+    stationary_orientation = _stationary_orientation(entry, transform_object)
+    stationary_x = float(transform_object.x)
+    packet_rotation = _rotation_components(entry, transform_object)
+    packed_rotation = _gameobject_rotation_packed(entry, transform_object)
     _log_gameobject_orientation_debug(
         entry,
         gameobject=gameobject,
@@ -717,21 +796,29 @@ def _build_gameobject_values_update_payload(
     entry: Mapping[str, Any],
     realm_id: int,
     gameobject: GameObject | None = None,
+    transport: Transport | None = None,
 ) -> bytes:
     """Encode a minimal GameObject VALUES update for an already-created object."""
-    entry = _transport_runtime_packet_entry(entry, gameobject)
+    transport = _resolve_packet_transport(entry, gameobject, transport)
+    entry = _transport_runtime_packet_entry(entry, gameobject, transport)
     gameobject = _resolve_packet_gameobject(
         entry,
         map_id=map_id,
         realm_id=realm_id,
         gameobject=gameobject,
     )
-    world_guid = int(gameobject.runtime_guid)
-    packet_map_id = int(gameobject.map_id)
+    transform_object = _packet_transform_object(entry, gameobject, transport)
+    world_guid = int(transform_object.runtime_guid)
+    packet_map_id = int(transform_object.map_id)
     all_fields = _build_gameobject_field_values(
         entry,
         world_guid=world_guid,
         gameobject=gameobject,
+        transport=(
+            transport
+            if transform_object is transport
+            else None
+        ),
     )
     changed_fields: dict[int, int] = {}
 
@@ -946,7 +1033,7 @@ def build_database_gameobject_responses(
     if not isinstance(loaded_gameobject_entries, dict):
         loaded_gameobject_entries = {}
         session.loaded_gameobject_entries = loaded_gameobject_entries
-    filtered_entries: list[tuple[GameObject, dict]] = []
+    filtered_entries: list[tuple[GameObject, dict, Transport | None]] = []
     for entry in entries:
         entry = prepare_runtime_transport_entry(entry)
         if int(entry.get("type", 0) or 0) == 15:
@@ -996,7 +1083,13 @@ def build_database_gameobject_responses(
                 entry,
                 runtime_guid=world_guid,
             )
-        filtered_entries.append((runtime_object, entry))
+        filtered_entries.append(
+            (
+                runtime_object,
+                entry,
+                _manager_transport_for_guid(world_guid),
+            )
+        )
         loaded_gameobject_entries[world_guid] = dict(entry)
         if seen is not None:
             seen.add(world_guid)
@@ -1017,13 +1110,19 @@ def build_database_gameobject_responses(
             entry,
             runtime_guid=world_guid,
         )
-        filtered_entries.append((runtime_object, entry))
         loaded_gameobject_entries[world_guid] = dict(entry)
         register_loaded_transport_entry(
             session,
             entry,
             world_guid=world_guid,
             map_id=int(entry.get("map", map_id) or map_id),
+        )
+        filtered_entries.append(
+            (
+                runtime_object,
+                entry,
+                _manager_transport_for_guid(world_guid),
+            )
         )
         if seen is not None:
             seen.add(world_guid)
@@ -1042,7 +1141,7 @@ def build_database_gameobject_responses(
         y,
     )
     responses: list[tuple[str, bytes]] = []
-    for runtime_object, entry in filtered_entries:
+    for runtime_object, entry, transport in filtered_entries:
         entry = cached_transport_runtime_entry(session, entry)
         packet_runtime_guid = int(
             entry.get("world_guid", runtime_object.runtime_guid)
@@ -1062,6 +1161,7 @@ def build_database_gameobject_responses(
             entry=entry,
             realm_id=realm_id,
             gameobject=runtime_object,
+            transport=transport,
         )
         if bool(entry.get("synthetic_transport")):
             _transport_debug_log(

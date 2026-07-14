@@ -72,6 +72,9 @@ from server.modules.handlers.world.movements.types import (
     MovementLifecycleEventType,
 )
 from server.modules.handlers.world.opcodes import movement
+from server.modules.handlers.world.runtime.runtime_object import RuntimeObject
+from server.modules.handlers.world.runtime.transport import Transport
+from server.modules.handlers.world.runtime.world_object import WorldObject
 from server.session.world_session import MovementState
 
 
@@ -168,6 +171,169 @@ def _install_runtime_update_test_transport(monkeypatch, entry: dict):
 
     monkeypatch.setattr(transport_runtime, "cached_transport_runtime_entry", moved_entry)
     return state
+
+
+def _registered_runtime_transport() -> tuple[
+    dict,
+    transport_runtime.RuntimeTransportState,
+    Transport,
+]:
+    entry = {
+        **_loaded_mo_transport_entry(),
+        "map_id": 1,
+        "home_map": 1,
+        "runtime_route": [
+            (1, 0.0, 0.0, 0.0, 0.0, 0),
+            (1, 10.0, 0.0, 0.0, 0.0, 1000),
+        ],
+    }
+    manager = transport_runtime.get_world_transport_manager()
+    state = manager.register_transport(entry, source="test")
+    assert state is not None
+    transport = manager.transport_for_guid(int(entry["world_guid"]))
+    assert transport is not None
+    return entry, state, transport
+
+
+def test_transport_runtime_object_has_stable_shared_identity():
+    _reset_transport_states()
+    entry, state, transport = _registered_runtime_transport()
+    manager = transport_runtime.get_world_transport_manager()
+
+    assert isinstance(transport, Transport)
+    assert isinstance(transport, WorldObject)
+    assert isinstance(transport, RuntimeObject)
+    assert transport.runtime_state is state
+    assert state.transport is transport
+    assert transport.runtime_guid == int(entry["world_guid"])
+    assert transport.entry == int(entry["entry"])
+    assert transport.spawn_id == int(entry["guid"])
+    assert manager.transport_for_guid(int(entry["world_guid"])) is transport
+
+    duplicate = manager.register_transport(entry, source="duplicate-test")
+
+    assert duplicate is state
+    assert manager.transport_for_guid(int(entry["world_guid"])) is transport
+    assert state.transport is transport
+
+
+def test_transport_runtime_object_publishes_transform_without_owning_clocks():
+    _reset_transport_states()
+    _entry, state, transport = _registered_runtime_transport()
+    manager = transport_runtime.get_world_transport_manager()
+    original_route = state.route
+    state.path_progress_ms = 375
+    state.map_id = 0
+    state.x = 101.25
+    state.y = -202.5
+    state.z = 33.75
+    state.orientation = 1.25
+
+    synchronized = manager.sync_transport_object(state)
+
+    assert synchronized is transport
+    assert transport.map_id == 0
+    assert transport.world_position == (101.25, -202.5, 33.75)
+    assert transport.orientation == 1.25
+    assert transport.runtime_state.path_progress_ms == 375
+    assert transport.runtime_state.route is original_route
+    assert not hasattr(transport, "path_progress_ms")
+    assert not hasattr(transport, "route")
+
+
+def test_transport_visibility_reuses_manager_runtime_object(monkeypatch):
+    _reset_transport_states()
+    entry, _state, transport = _registered_runtime_transport()
+    world_guid = int(entry["world_guid"])
+    captured: list[Transport | None] = []
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "_sync_transport_state_from_movement_cache",
+        lambda _state: None,
+    )
+
+    def capture_create(*, transport=None, **_kwargs):
+        captured.append(transport)
+        return b"transport-create"
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "_build_gameobject_update_payload",
+        capture_create,
+    )
+    session = SimpleNamespace(
+        char_guid=30,
+        gameobjects_visible=True,
+        map_id=1,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        realm_id=1,
+        loaded_gameobjects=set(),
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        {world_guid: dict(entry)},
+        force=True,
+    )
+
+    assert len(responses) == 1
+    assert captured == [transport]
+    assert world_guid in session.loaded_gameobjects
+
+
+def test_transport_packet_path_is_byte_identical(monkeypatch):
+    _reset_transport_states()
+    entry, state, transport = _registered_runtime_transport()
+    state.x = 3.5
+    state.y = 4.5
+    state.z = 5.5
+    state.orientation = 0.75
+    state.path_progress_ms = 250
+    transport_runtime.get_world_transport_manager().sync_transport_object(state)
+    moved_entry = {
+        **entry,
+        "map": state.map_id,
+        "map_id": state.map_id,
+        "x": state.x,
+        "y": state.y,
+        "z": state.z,
+        "orientation": state.orientation,
+        "transport_path_progress": state.path_progress_ms,
+    }
+    monkeypatch.setattr(
+        gameobjects,
+        "_manager_transport_for_guid",
+        lambda _world_guid: None,
+    )
+
+    mapping_payload = gameobjects._build_gameobject_update_payload(
+        map_id=state.map_id,
+        entry=moved_entry,
+        realm_id=1,
+    )
+    runtime_payload = gameobjects._build_gameobject_update_payload(
+        map_id=state.map_id,
+        entry=moved_entry,
+        realm_id=1,
+        transport=transport,
+    )
+    mapping_values_payload = gameobjects._build_gameobject_values_update_payload(
+        map_id=state.map_id,
+        entry=moved_entry,
+        realm_id=1,
+    )
+    runtime_values_payload = gameobjects._build_gameobject_values_update_payload(
+        map_id=state.map_id,
+        entry=moved_entry,
+        realm_id=1,
+        transport=transport,
+    )
+
+    assert runtime_payload == mapping_payload
+    assert runtime_values_payload == mapping_values_payload
 
 
 def test_runtime_transport_lifecycle_create_values_destroy_create(monkeypatch):

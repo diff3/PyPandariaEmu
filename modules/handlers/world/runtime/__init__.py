@@ -25,6 +25,7 @@ from server.modules.handlers.world.runtime.spawned_world_object import (
     SpawnedWorldObject,
     resolve_spawned_world_object,
 )
+from server.modules.handlers.world.runtime.transport import Transport
 from server.modules.handlers.world.runtime.world_object import WorldObject
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "RuntimeObject",
     "RuntimeStore",
     "SpawnedWorldObject",
+    "Transport",
     "WorldObject",
     "get_creature_runtime_store",
     "get_gameobject_runtime_store",
