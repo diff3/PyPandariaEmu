@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from shared.Logger import Logger
@@ -8,6 +9,14 @@ from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_
 from server.modules.handlers.world.features.world_editor import history as editor_history
 from server.modules.handlers.world.features.world_editor import selection
 from server.modules.handlers.world.runtime import gameobject_spawns as gameobject_runtime
+from server.modules.handlers.world.runtime.gameobject import GameObject
+from server.modules.handlers.world.runtime.gameobject_persistence import (
+    gameobject_persistence_snapshot,
+)
+from server.modules.handlers.world.runtime.gameobject_store import (
+    gameobject_identity_matches_mapping,
+    get_gameobject_runtime_store,
+)
 
 
 DEFAULT_SEARCH_RADIUS = selection.DEFAULT_SEARCH_RADIUS
@@ -118,6 +127,34 @@ def selected_entry(session) -> dict[str, Any] | None:
 
 def _no_selection() -> list[tuple[str, bytes]]:
     return chat_lines(["[GMGo] No GameObject selected."])
+
+
+def _runtime_object_for_edit(
+    session,
+    entry: dict[str, Any],
+) -> GameObject:
+    """Return and retain the existing runtime object for one editor operation."""
+    runtime_guid = int(world_guid_for_entry(session, entry))
+    store = get_gameobject_runtime_store()
+    runtime_object = store.get_by_spawn_id(entry_int(entry, "guid"))
+    if runtime_object is not None and gameobject_identity_matches_mapping(
+        runtime_object,
+        entry,
+        runtime_guid=runtime_guid,
+    ):
+        return runtime_object
+    runtime_object = GameObject.from_mapping(
+        entry,
+        runtime_guid=runtime_guid,
+    )
+    return store.add(runtime_object)
+
+
+def _rotation_from_orientation(
+    orientation: float,
+) -> tuple[float, float, float, float]:
+    yaw = float(orientation)
+    return 0.0, 0.0, math.sin(yaw * 0.5), math.cos(yaw * 0.5)
 
 
 def _select_entry(session, entry: dict[str, Any]) -> list[tuple[str, bytes]]:
@@ -292,6 +329,7 @@ def delete(session, entry: dict[str, Any]) -> tuple[list[tuple[str, bytes]], dic
     deleted = DatabaseConnection.delete_gameobject_spawn(entry_int(entry, "guid"))
     if deleted is None:
         return chat_lines(["[GMGo] Delete failed."]), None
+    get_gameobject_runtime_store().remove(int(world_guid))
     selected = selection.get_selection(session, selection.GAMEOBJECT_TYPE)
     if selected is not None and entry_int(selected, "spawn_id") == entry_int(deleted, "guid"):
         selection.clear_selection(session, selection.GAMEOBJECT_TYPE)
@@ -349,14 +387,22 @@ def undo(session) -> list[tuple[str, bytes]]:
 def move(session, entry: dict[str, Any]) -> tuple[list[tuple[str, bytes]], dict[str, Any] | None]:
     px, py, pz, _orientation = player_position(session)
     previous = dict(entry)
-    world_guid = world_guid_for_entry(session, entry)
+    runtime_object = _runtime_object_for_edit(session, entry)
+    world_guid = int(runtime_object.runtime_guid)
+    previous_position = runtime_object.world_position
+    runtime_object.set_position(px, py, pz)
+    persistence_snapshot = gameobject_persistence_snapshot(
+        runtime_object,
+        entry,
+    )
     updated = DatabaseConnection.update_gameobject_spawn_transform(
         entry_int(entry, "guid"),
-        x=px,
-        y=py,
-        z=pz,
+        x=float(persistence_snapshot["x"]),
+        y=float(persistence_snapshot["y"]),
+        z=float(persistence_snapshot["z"]),
     )
     if updated is None:
+        runtime_object.set_position(*previous_position)
         return chat_lines(["[GMGo] Move failed."]), None
     result = gameobject_runtime.replace_persistent_gameobject(
         session,
@@ -390,12 +436,23 @@ def move_nearest(session) -> list[tuple[str, bytes]]:
 def rotate(session, entry: dict[str, Any]) -> tuple[list[tuple[str, bytes]], dict[str, Any] | None]:
     _px, _py, _pz, orientation = player_position(session)
     previous = dict(entry)
-    world_guid = world_guid_for_entry(session, entry)
+    runtime_object = _runtime_object_for_edit(session, entry)
+    world_guid = int(runtime_object.runtime_guid)
+    previous_orientation = float(runtime_object.orientation)
+    previous_rotation = runtime_object.rotation
+    runtime_object.set_orientation(orientation)
+    runtime_object.set_rotation(_rotation_from_orientation(orientation))
+    persistence_snapshot = gameobject_persistence_snapshot(
+        runtime_object,
+        entry,
+    )
     updated = DatabaseConnection.update_gameobject_spawn_transform(
         entry_int(entry, "guid"),
-        orientation=orientation,
+        orientation=float(persistence_snapshot["orientation"]),
     )
     if updated is None:
+        runtime_object.set_orientation(previous_orientation)
+        runtime_object.set_rotation(previous_rotation)
         return chat_lines(["[GMGo] Rotate failed."]), None
     result = gameobject_runtime.replace_persistent_gameobject(
         session,
@@ -432,8 +489,19 @@ def scale(session, value: float) -> list[tuple[str, bytes]]:
         return _no_selection()
     previous = dict(entry)
     new_scale = max(0.01, float(value or 0.0))
-    updated = DatabaseConnection.update_gameobject_spawn_scale(entry_int(entry, "guid"), new_scale)
+    runtime_object = _runtime_object_for_edit(session, entry)
+    previous_scale = float(runtime_object.scale)
+    runtime_object.set_scale(new_scale)
+    persistence_snapshot = gameobject_persistence_snapshot(
+        runtime_object,
+        entry,
+    )
+    updated = DatabaseConnection.update_gameobject_spawn_scale(
+        entry_int(entry, "guid"),
+        float(persistence_snapshot["size"]),
+    )
     if updated is None:
+        runtime_object.set_scale(previous_scale)
         return chat_lines(["[GMGo] Scale failed."])
     world_guid = world_guid_for_entry(session, updated)
     result = gameobject_runtime.replace_persistent_gameobject(

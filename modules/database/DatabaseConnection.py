@@ -194,8 +194,12 @@ class DatabaseConnection:
         from server.modules.handlers.world.runtime.gameobject_store import (
             get_gameobject_runtime_store,
         )
+        from server.modules.handlers.world.runtime.creature_store import (
+            get_creature_runtime_store,
+        )
 
         clear_gameobject_collision_index()
+        get_creature_runtime_store().clear()
         get_gameobject_runtime_store().clear()
         DatabaseConnection._world_cache_loaded = False
         DatabaseConnection._cache_playercreateinfo = {}
@@ -483,6 +487,18 @@ class DatabaseConnection:
                     by_map.setdefault(int(candidate["map_id"]), []).append(candidate)
                 DatabaseConnection._cache_creatures_by_map = by_map
                 DatabaseConnection._cache_creatures_loaded = True
+                try:
+                    DatabaseConnection._populate_creature_runtime_store(
+                        by_map,
+                        DatabaseConnection._cache_creature_templates,
+                    )
+                except Exception as exc:
+                    Logger.warning(f"[DB] creature runtime mirror failed: {exc}")
+                    from server.modules.handlers.world.runtime.creature_store import (
+                        get_creature_runtime_store,
+                    )
+
+                    get_creature_runtime_store().clear()
                 Logger.info(
                     "[DB] preloaded %s creature spawns across %s maps",
                     sum(len(entries) for entries in by_map.values()),
@@ -492,10 +508,20 @@ class DatabaseConnection:
                 Logger.warning(f"[DB] creature preload failed: {exc}")
                 DatabaseConnection._cache_creatures_by_map = {}
                 DatabaseConnection._cache_creatures_loaded = False
+                from server.modules.handlers.world.runtime.creature_store import (
+                    get_creature_runtime_store,
+                )
+
+                get_creature_runtime_store().clear()
         else:
             DatabaseConnection._cache_creature_templates = {}
             DatabaseConnection._cache_creatures_by_map = {}
             DatabaseConnection._cache_creatures_loaded = False
+            from server.modules.handlers.world.runtime.creature_store import (
+                get_creature_runtime_store,
+            )
+
+            get_creature_runtime_store().clear()
             Logger.info("[DB] creature preload disabled by config")
 
         preload_gameobjects = bool(
@@ -591,10 +617,14 @@ class DatabaseConnection:
 
     @staticmethod
     def reload_world_cache() -> None:
+        from server.modules.handlers.world.runtime.creature_store import (
+            get_creature_runtime_store,
+        )
         from server.modules.handlers.world.runtime.gameobject_store import (
             get_gameobject_runtime_store,
         )
 
+        get_creature_runtime_store().clear()
         get_gameobject_runtime_store().clear()
         DatabaseConnection._world_cache_loaded = False
         DatabaseConnection._cache_playercreateinfo = {}
@@ -613,6 +643,41 @@ class DatabaseConnection:
         DatabaseConnection._cache_gameobjects_by_map = {}
         DatabaseConnection._cache_gameobjects_loaded = False
         DatabaseConnection.preload_world_cache()
+
+    @staticmethod
+    def _populate_creature_runtime_store(
+        entries_by_map: dict[int, list[dict]],
+        templates_by_entry: dict[int, dict] | None = None,
+    ) -> None:
+        """Mirror authoritative Creature cache entries into runtime objects."""
+        from server.modules.game.guid import CreatureGuid
+        from server.modules.handlers.world.runtime.creature import Creature
+        from server.modules.handlers.world.runtime.creature_store import (
+            get_creature_runtime_store,
+        )
+
+        templates = templates_by_entry if isinstance(templates_by_entry, dict) else {}
+        store = get_creature_runtime_store()
+        store.clear()
+        for entries in entries_by_map.values():
+            for entry in entries or ():
+                runtime_mapping = dict(entry)
+                template = templates.get(int(runtime_mapping.get("entry", 0) or 0))
+                if isinstance(template, dict):
+                    runtime_mapping["template"] = template
+                spawn_id = int(runtime_mapping.get("guid", 0) or 0)
+                world_guid = int(runtime_mapping.get("world_guid", 0) or 0)
+                if world_guid <= 0:
+                    realm_id = int(runtime_mapping.get("realm_id", 1) or 1)
+                    world_guid = int(
+                        CreatureGuid.from_spawn_guid(spawn_id, realm_id)
+                    )
+                store.add(
+                    Creature.from_mapping(
+                        runtime_mapping,
+                        runtime_guid=world_guid,
+                    )
+                )
 
     @staticmethod
     def _populate_gameobject_runtime_store(entries_by_map: dict[int, list[dict]]) -> None:
@@ -2578,6 +2643,43 @@ class DatabaseConnection:
         cache_by_map.setdefault(map_id, []).append(dict(entry))
 
     @staticmethod
+    def _gameobject_save_snapshot(
+        existing: dict,
+        requested: dict,
+        synchronized_fields: tuple[str, ...],
+    ) -> dict:
+        """Use runtime state at the explicit GameObject save boundary."""
+        if not synchronized_fields:
+            return dict(requested)
+        from server.modules.handlers.world.runtime.gameobject_persistence import (
+            gameobject_persistence_snapshot,
+        )
+        from server.modules.handlers.world.runtime.gameobject_store import (
+            get_gameobject_runtime_store,
+        )
+
+        runtime_object = get_gameobject_runtime_store().get_by_spawn_id(
+            int(existing.get("guid", 0) or 0)
+        )
+        if runtime_object is None:
+            return dict(requested)
+        if (
+            int(runtime_object.spawn_id) != int(existing.get("guid", 0) or 0)
+            or int(runtime_object.entry) != int(existing.get("entry", 0) or 0)
+        ):
+            return dict(requested)
+        runtime_snapshot = gameobject_persistence_snapshot(
+            runtime_object,
+            existing,
+        )
+        if any(
+            runtime_snapshot.get(field) != requested.get(field)
+            for field in synchronized_fields
+        ):
+            return dict(requested)
+        return runtime_snapshot
+
+    @staticmethod
     def delete_gameobject_spawn(spawn_guid: int) -> dict | None:
         existing = DatabaseConnection.get_gameobject_spawn(int(spawn_guid))
         if existing is None:
@@ -2785,6 +2887,33 @@ class DatabaseConnection:
         if existing is None:
             return None
 
+        requested = dict(existing)
+        synchronized_fields: list[str] = []
+        if x is not None:
+            requested["x"] = float(x)
+            synchronized_fields.append("x")
+        if y is not None:
+            requested["y"] = float(y)
+            synchronized_fields.append("y")
+        if z is not None:
+            requested["z"] = float(z)
+            synchronized_fields.append("z")
+        if orientation is not None:
+            rotation = DatabaseConnection._gameobject_rotation_from_orientation(
+                float(orientation)
+            )
+            requested["orientation"] = float(orientation)
+            requested["rotation0"] = float(rotation[0])
+            requested["rotation1"] = float(rotation[1])
+            requested["rotation2"] = float(rotation[2])
+            requested["rotation3"] = float(rotation[3])
+            synchronized_fields.append("orientation")
+        persistence_snapshot = DatabaseConnection._gameobject_save_snapshot(
+            existing,
+            requested,
+            tuple(synchronized_fields),
+        )
+
         try:
             session = DatabaseConnection.world()
         except Exception as exc:
@@ -2797,20 +2926,17 @@ class DatabaseConnection:
                 session.rollback()
                 return None
             if x is not None:
-                row.position_x = float(x)
+                row.position_x = float(persistence_snapshot["x"])
             if y is not None:
-                row.position_y = float(y)
+                row.position_y = float(persistence_snapshot["y"])
             if z is not None:
-                row.position_z = float(z)
+                row.position_z = float(persistence_snapshot["z"])
             if orientation is not None:
-                row.orientation = float(orientation)
-                rotation0, rotation1, rotation2, rotation3 = DatabaseConnection._gameobject_rotation_from_orientation(
-                    float(orientation)
-                )
-                row.rotation0 = float(rotation0)
-                row.rotation1 = float(rotation1)
-                row.rotation2 = float(rotation2)
-                row.rotation3 = float(rotation3)
+                row.orientation = float(persistence_snapshot["orientation"])
+                row.rotation0 = float(persistence_snapshot["rotation0"])
+                row.rotation1 = float(persistence_snapshot["rotation1"])
+                row.rotation2 = float(persistence_snapshot["rotation2"])
+                row.rotation3 = float(persistence_snapshot["rotation3"])
             session.commit()
         except Exception as exc:
             session.rollback()
@@ -2819,24 +2945,8 @@ class DatabaseConnection:
         finally:
             session.close()
 
-        updated = dict(existing)
-        if x is not None:
-            updated["x"] = float(x)
-        if y is not None:
-            updated["y"] = float(y)
-        if z is not None:
-            updated["z"] = float(z)
-        if orientation is not None:
-            rotation0, rotation1, rotation2, rotation3 = DatabaseConnection._gameobject_rotation_from_orientation(
-                float(orientation)
-            )
-            updated["orientation"] = float(orientation)
-            updated["rotation0"] = float(rotation0)
-            updated["rotation1"] = float(rotation1)
-            updated["rotation2"] = float(rotation2)
-            updated["rotation3"] = float(rotation3)
-        if updated is not None:
-            DatabaseConnection._cache_restore_gameobject_spawn(dict(updated))
+        updated = dict(persistence_snapshot)
+        DatabaseConnection._cache_restore_gameobject_spawn(dict(updated))
         return updated
 
     @staticmethod
@@ -2847,6 +2957,13 @@ class DatabaseConnection:
         existing = DatabaseConnection.get_gameobject_spawn(int(spawn_guid))
         if existing is None:
             return None
+        requested = dict(existing)
+        requested["size"] = float(size)
+        persistence_snapshot = DatabaseConnection._gameobject_save_snapshot(
+            existing,
+            requested,
+            ("size",),
+        )
 
         try:
             session = DatabaseConnection.world()
@@ -2860,7 +2977,7 @@ class DatabaseConnection:
             if row is None:
                 session.rollback()
                 return None
-            row.scale = float(size)
+            row.scale = float(persistence_snapshot["size"])
             session.commit()
         except Exception as exc:
             session.rollback()
@@ -2869,8 +2986,7 @@ class DatabaseConnection:
         finally:
             session.close()
 
-        updated = dict(existing)
-        updated["size"] = float(size)
+        updated = dict(persistence_snapshot)
         DatabaseConnection._cache_restore_gameobject_spawn(dict(updated))
         return updated
 

@@ -24,8 +24,8 @@ class GameObject(SpawnedWorldObject):
     Persistent-spawn identity comes from ``SpawnedWorldObject``. Generic
     runtime identity and geometry come from ``RuntimeObject`` through
     ``WorldObject``. After construction, that inherited transform is the live
-    runtime transform; its source mapping remains authoritative for persistent
-    data. GameObject-specific packet construction, visibility, collision,
+    runtime transform. Its source mapping is a persistence snapshot rather
+    than live mutable state. GameObject-specific packet construction, visibility, collision,
     persistence, and gameplay behavior remain in their existing modules. This
     class owns the runtime fields used by CREATE. Explicit setters mutate only
     this object; they do not update persistence or trigger packets, visibility,

@@ -147,6 +147,43 @@ def test_gameobject_preload_mirror_populates_stable_runtime_instances():
     assert cache == {1: [authoritative_entry]}
 
 
+def test_creature_preload_mirror_populates_stable_runtime_instances():
+    DatabaseConnection = _import_database_connection()
+    from server.modules.game.guid import CreatureGuid
+    from server.modules.handlers.world.runtime.creature_store import (
+        get_creature_runtime_store,
+    )
+
+    authoritative_entry = {
+        "guid": 123,
+        "entry": 456,
+        "map_id": 1,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": -1.0,
+        "modelid": 0,
+        "npcflag": 0,
+    }
+    template = {456: {"modelid1": 1437, "npcflag": 0x2000}}
+    cache = {1: [dict(authoritative_entry)]}
+
+    DatabaseConnection._populate_creature_runtime_store(cache, template)
+
+    store = get_creature_runtime_store()
+    runtime_guid = CreatureGuid.from_spawn_guid(123, 1)
+    first = store.get(runtime_guid)
+    second = store.get_by_spawn_id(123)
+
+    assert first is not None
+    assert first is second
+    assert first.entry == 456
+    assert first.world_position == (10.0, 20.0, 30.0)
+    assert first.display_id == 1437
+    assert first.npc_flags == 0x2000
+    assert cache == {1: [authoritative_entry]}
+
+
 def test_world_cache_preload_populates_gameobject_runtime_store(monkeypatch):
     DatabaseConnection = _import_database_connection()
     from server.modules.game.guid import GameObjectGuid
@@ -484,14 +521,31 @@ def test_update_gameobject_spawn_transform_updates_loaded_cache_without_db_reloa
 
     db_session = Session()
     DatabaseConnection.world = staticmethod(lambda: db_session)
-
-    updated = DatabaseConnection.update_gameobject_spawn_transform(
-        33,
-        x=100.0,
-        y=200.0,
-        z=300.0,
-        orientation=2.5,
+    from server.modules.handlers.world.runtime.gameobject import GameObject
+    from server.modules.handlers.world.runtime.gameobject_store import (
+        get_gameobject_runtime_store,
     )
+
+    runtime_object = GameObject.from_mapping(
+        DatabaseConnection.get_gameobject_spawn(33),
+        runtime_guid=3333,
+    )
+    runtime_object.set_position(100.0, 200.0, 300.0)
+    runtime_object.set_orientation(2.5)
+    runtime_object.set_rotation((0.1, 0.2, 0.3, 0.9))
+    store = get_gameobject_runtime_store()
+    store.clear()
+    store.add(runtime_object)
+    try:
+        updated = DatabaseConnection.update_gameobject_spawn_transform(
+            33,
+            x=100.0,
+            y=200.0,
+            z=300.0,
+            orientation=2.5,
+        )
+    finally:
+        store.clear()
     fresh = DatabaseConnection.get_gameobject_spawn(33)
 
     assert db_session.committed is True
@@ -500,14 +554,100 @@ def test_update_gameobject_spawn_transform_updates_loaded_cache_without_db_reloa
     assert row.position_y == 200.0
     assert row.position_z == 300.0
     assert row.orientation == 2.5
+    assert (row.rotation0, row.rotation1, row.rotation2, row.rotation3) == (
+        0.1,
+        0.2,
+        0.3,
+        0.9,
+    )
     assert updated["x"] == 100.0
     assert updated["y"] == 200.0
     assert updated["z"] == 300.0
     assert updated["orientation"] == 2.5
+    assert tuple(updated[f"rotation{index}"] for index in range(4)) == (
+        0.1,
+        0.2,
+        0.3,
+        0.9,
+    )
     assert fresh["x"] == 100.0
     assert fresh["y"] == 200.0
     assert fresh["z"] == 300.0
     assert fresh["orientation"] == 2.5
+
+
+def test_gameobject_save_boundary_serializes_long_lived_runtime_state():
+    DatabaseConnection = _import_database_connection()
+    from server.modules.handlers.world.runtime.gameobject import GameObject
+    from server.modules.handlers.world.runtime.gameobject_store import (
+        get_gameobject_runtime_store,
+    )
+
+    existing = {
+        "guid": 44,
+        "entry": 400,
+        "map_id": 1,
+        "map": 1,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 1.0,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "size": 1.0,
+        "display_id": 100,
+        "state": 1,
+        "flags": 1,
+        "faction": 0,
+        "artkit": 0,
+        "animprogress": 255,
+        "type": 5,
+        "name": "Persistent metadata",
+    }
+    runtime_object = GameObject.from_mapping(existing, runtime_guid=4444)
+    runtime_object.set_position(100.0, 200.0, 300.0)
+    runtime_object.set_orientation(2.0)
+    runtime_object.set_rotation((0.1, 0.2, 0.3, 0.9))
+    runtime_object.set_scale(1.5)
+    runtime_object.set_state(2)
+    runtime_object.set_flags(17)
+    runtime_object.set_display_id(200)
+    runtime_object.set_faction(35)
+    runtime_object.set_art_kit(7)
+    runtime_object.set_animation_progress(127)
+    store = get_gameobject_runtime_store()
+    store.clear()
+    store.add(runtime_object)
+    requested = dict(existing, x=100.0, y=200.0, z=300.0)
+    try:
+        snapshot = DatabaseConnection._gameobject_save_snapshot(
+            existing,
+            requested,
+            ("x", "y", "z"),
+        )
+    finally:
+        store.clear()
+
+    assert snapshot["x"] == 100.0
+    assert snapshot["y"] == 200.0
+    assert snapshot["z"] == 300.0
+    assert snapshot["orientation"] == 2.0
+    assert tuple(snapshot[f"rotation{index}"] for index in range(4)) == (
+        0.1,
+        0.2,
+        0.3,
+        0.9,
+    )
+    assert snapshot["size"] == 1.5
+    assert snapshot["state"] == 2
+    assert snapshot["flags"] == 17
+    assert snapshot["display_id"] == 200
+    assert snapshot["faction"] == 35
+    assert snapshot["artkit"] == 7
+    assert snapshot["animprogress"] == 127
+    assert snapshot["name"] == "Persistent metadata"
 
 
 def test_gameobject_candidate_uses_spawn_scale_before_template_size():

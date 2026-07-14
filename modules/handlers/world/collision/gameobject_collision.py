@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from server.modules.dbc import read_dbc
+from server.modules.handlers.world.runtime.gameobject import GameObject
+from server.modules.handlers.world.runtime.gameobject_store import (
+    get_gameobject_runtime_store,
+)
 from shared.Logger import Logger
 
 from .bounds import DisplayBounds, OrientedBounds, build_oriented_bounds
@@ -47,6 +51,8 @@ class GameObjectCollision:
     display_id: int
     bounds: OrientedBounds
     name: str = ""
+    runtime_guid: int = 0
+    rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
 
 def load_display_bounds(path: str | Path | None = None) -> dict[int, DisplayBounds]:
@@ -60,21 +66,46 @@ def load_display_bounds(path: str | Path | None = None) -> dict[int, DisplayBoun
     return result
 
 
-def gameobject_eligibility_reason(entry: Mapping, bounds: DisplayBounds | None) -> tuple[bool, str]:
-    go_type = int(entry.get("type", -1) or 0)
+def gameobject_eligibility_reason(
+    entry: Mapping,
+    bounds: DisplayBounds | None,
+    gameobject: GameObject | None = None,
+) -> tuple[bool, str]:
+    go_type = (
+        int(gameobject.gameobject_type)
+        if gameobject is not None
+        else int(entry.get("type", -1) or 0)
+    )
     if go_type not in SOLID_TYPES or go_type in (GAMEOBJECT_TYPE_CHAIR, GAMEOBJECT_TYPE_TRANSPORT, GAMEOBJECT_TYPE_MO_TRANSPORT):
         return False, f"ineligible_type:{go_type}"
     if bounds is None or not bounds.valid():
         return False, "missing_or_invalid_bounds"
-    if int(entry.get("flags", 0) or 0) & (GO_FLAG_DAMAGED | GO_FLAG_DESTROYED):
+    flags = (
+        int(gameobject.flags)
+        if gameobject is not None
+        else int(entry.get("flags", 0) or 0)
+    )
+    if flags & (GO_FLAG_DAMAGED | GO_FLAG_DESTROYED):
         return False, "damaged_or_destroyed"
-    if int(entry.get("state", GO_STATE_READY) or 0) not in (0, 1, 2):
-        return False, f"unsupported_state:{int(entry.get('state', GO_STATE_READY) or 0)}"
+    state = (
+        int(gameobject.state)
+        if gameobject is not None
+        else int(entry.get("state", GO_STATE_READY) or 0)
+    )
+    if state not in (0, 1, 2):
+        return False, f"unsupported_state:{state}"
     # A ready door/trapdoor is closed. Active variants are visually open and
     # must not retain their closed collision volume.
-    if go_type in (GAMEOBJECT_TYPE_DOOR, GAMEOBJECT_TYPE_TRAPDOOR) and int(entry.get("state", GO_STATE_READY)) != GO_STATE_READY:
-        return False, f"open_door_state:{int(entry.get('state', GO_STATE_READY) or 0)}"
-    scale = float(entry.get("size", 1.0) or 1.0)
+    if (
+        go_type in (GAMEOBJECT_TYPE_DOOR, GAMEOBJECT_TYPE_TRAPDOOR)
+        and state != GO_STATE_READY
+    ):
+        return False, f"open_door_state:{state}"
+    scale = (
+        float(gameobject.scale)
+        if gameobject is not None
+        else float(entry.get("size", 1.0) or 1.0)
+    )
     dimensions = tuple((bounds.maximum[i] - bounds.minimum[i]) * scale for i in range(3))
     if max(dimensions[0], dimensions[1]) < _MIN_PLANAR_EXTENT or dimensions[2] < _MIN_HEIGHT:
         return False, "below_min_dimensions"
@@ -92,8 +123,12 @@ def gameobject_eligibility_reason(entry: Mapping, bounds: DisplayBounds | None) 
     return True, "eligible"
 
 
-def gameobject_is_eligible(entry: Mapping, bounds: DisplayBounds | None) -> bool:
-    return gameobject_eligibility_reason(entry, bounds)[0]
+def gameobject_is_eligible(
+    entry: Mapping,
+    bounds: DisplayBounds | None,
+    gameobject: GameObject | None = None,
+) -> bool:
+    return gameobject_eligibility_reason(entry, bounds, gameobject)[0]
 
 
 class GameObjectCollisionIndex:
@@ -300,26 +335,41 @@ def clear_gameobject_collision_index() -> None:
     gameobject_collision_index.clear()
 
 
-def build_gameobject_collision(entry: Mapping, display_bounds: DisplayBounds | None) -> GameObjectCollision | None:
-    eligible, _reason = gameobject_eligibility_reason(entry, display_bounds)
+def build_gameobject_collision(
+    entry: Mapping,
+    display_bounds: DisplayBounds | None,
+    gameobject: GameObject | None = None,
+) -> GameObjectCollision | None:
+    if gameobject is None:
+        gameobject = GameObject.from_mapping(
+            entry,
+            runtime_guid=int(entry.get("world_guid", 0) or 0),
+        )
+    eligible, _reason = gameobject_eligibility_reason(
+        entry,
+        display_bounds,
+        gameobject,
+    )
     if not eligible or display_bounds is None:
         return None
     display_id = int(entry.get("display_id", 0) or 0)
     bounds = build_oriented_bounds(
         display_bounds,
-        position=(float(entry.get("x", 0.0)), float(entry.get("y", 0.0)), float(entry.get("z", 0.0))),
-        orientation=float(entry.get("orientation", 0.0) or 0.0),
-        scale=float(entry.get("size", 1.0) or 1.0),
+        position=gameobject.world_position,
+        orientation=float(gameobject.orientation),
+        scale=float(gameobject.scale),
     )
     if bounds is None:
         return None
     return GameObjectCollision(
-        int(entry.get("map_id", entry.get("map", 0)) or 0),
-        int(entry.get("guid", 0) or 0),
-        int(entry.get("entry", 0) or 0),
+        int(gameobject.map_id),
+        int(gameobject.spawn_id),
+        int(gameobject.entry),
         display_id,
         bounds,
         str(entry.get("name", "") or ""),
+        int(gameobject.runtime_guid),
+        gameobject.rotation,
     )
 
 
@@ -330,9 +380,21 @@ def build_gameobject_collision_index(entries_by_map: Mapping[int, Iterable[Mappi
 
     for map_id, entries in entries_by_map.items():
         for entry in entries:
+            runtime_object = get_gameobject_runtime_store().get_by_spawn_id(
+                int(entry.get("guid", 0) or 0)
+            )
+            if runtime_object is None:
+                runtime_object = GameObject.from_mapping(
+                    entry,
+                    runtime_guid=int(entry.get("world_guid", 0) or 0),
+                )
             display_id = int(entry.get("display_id", 0) or 0)
             display_bounds = bounds_by_display.get(display_id)
-            eligible, reason = gameobject_eligibility_reason(entry, display_bounds)
+            eligible, reason = gameobject_eligibility_reason(
+                entry,
+                display_bounds,
+                runtime_object,
+            )
             if not eligible:
                 if gameobject_collision_debug_enabled():
                     Logger.info(
@@ -346,7 +408,11 @@ def build_gameobject_collision_index(entries_by_map: Mapping[int, Iterable[Mappi
                         reason,
                     )
                 continue
-            collision = build_gameobject_collision(entry, display_bounds)
+            collision = build_gameobject_collision(
+                entry,
+                display_bounds,
+                runtime_object,
+            )
             if collision is None:
                 if gameobject_collision_debug_enabled():
                     Logger.info(

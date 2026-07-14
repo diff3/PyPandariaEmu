@@ -566,10 +566,11 @@ def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
 
     captured = {}
 
-    def _fake_build(*, map_id, entry, realm_id):
+    def _fake_build(*, map_id, entry, realm_id, creature=None):
         captured["map_id"] = map_id
         captured["entry"] = dict(entry)
         captured["realm_id"] = realm_id
+        captured["creature"] = creature
         return b"npc"
 
     monkeypatch.setattr(creatures, "_build_creature_update_payload", _fake_build)
@@ -587,6 +588,186 @@ def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
     assert captured["entry"]["x"] == 1000.0
     assert captured["entry"]["y"] == 2000.0
     assert captured["entry"]["z"] == 99.0
+    assert captured["creature"] is not None
+
+
+def test_creature_visibility_reuses_runtime_store_snapshot(monkeypatch):
+    creatures = _import_creatures()
+    from server.modules.handlers.world.runtime.creature import Creature
+    from server.modules.handlers.world.runtime.creature_store import (
+        get_creature_runtime_store,
+    )
+
+    session = SimpleNamespace(
+        npcs_visible=True,
+        map_id=1,
+        instance_id=0,
+        x=100.0,
+        y=200.0,
+        realm_id=1,
+    )
+    entry = {
+        "guid": 68,
+        "entry": 2457,
+        "modelid": 1437,
+        "npcflag": 0x2000,
+        "x": 1000.0,
+        "y": 2000.0,
+        "z": 99.0,
+        "orientation": 1.0,
+    }
+    template = {"name": "Historian", "modelid1": 1437, "npcflag": 0x4}
+    runtime_guid = creatures.CreatureGuid.from_spawn_guid(68, 1)
+    stored = Creature.from_mapping(
+        {
+            **entry,
+            "template": template,
+            "map_id": 1,
+            "instance_id": 0,
+        },
+        runtime_guid=runtime_guid,
+    )
+    store = get_creature_runtime_store()
+    store.clear()
+    store.add(stored)
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creatures_near",
+        staticmethod(lambda *args, **kwargs: [dict(entry)]),
+    )
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_creature_template",
+        staticmethod(lambda _entry: dict(template)),
+    )
+    captured = []
+
+    def capture_payload(*, map_id, entry, realm_id, creature=None):
+        captured.append(creature)
+        return b"npc"
+
+    monkeypatch.setattr(
+        creatures,
+        "_build_creature_update_payload",
+        capture_payload,
+    )
+    def reject_temporary(cls, mapping, *, runtime_guid=0):
+        raise AssertionError("matching persistent Creature must be reused")
+
+    monkeypatch.setattr(Creature, "from_mapping", classmethod(reject_temporary))
+    try:
+        responses = creatures.build_database_creature_responses(session)
+    finally:
+        store.clear()
+
+    assert responses == [("SMSG_UPDATE_OBJECT", b"npc")]
+    assert captured == [stored]
+
+
+def test_creature_packet_runtime_path_matches_mapping_fallback():
+    creatures = _import_creatures()
+    from server.modules.handlers.world.runtime.creature import Creature
+    from server.modules.handlers.world.runtime.creature_store import (
+        get_creature_runtime_store,
+    )
+
+    entry = {
+        "guid": 68,
+        "entry": 2457,
+        "map_id": 1,
+        "x": -8903.01,
+        "y": 641.83,
+        "z": 99.62,
+        "orientation": -1.0,
+        "modelid": 1437,
+        "npcflag": 0x2000,
+        "template": {"modelid1": 1437, "npcflag": 0x4},
+    }
+    runtime_guid = creatures.CreatureGuid.from_spawn_guid(68, 1)
+    runtime_creature = Creature.from_mapping(
+        entry,
+        runtime_guid=runtime_guid,
+    )
+    store = get_creature_runtime_store()
+    store.clear()
+    fallback_payload = creatures._build_creature_update_payload(
+        map_id=1,
+        entry=entry,
+        realm_id=1,
+    )
+    runtime_payload = creatures._build_creature_update_payload(
+        map_id=1,
+        entry=entry,
+        realm_id=1,
+        creature=runtime_creature,
+    )
+
+    assert runtime_payload == fallback_payload
+
+
+def test_creature_packet_does_not_read_migrated_state_from_mapping():
+    creatures = _import_creatures()
+    from server.modules.handlers.world.runtime.creature import Creature
+
+    entry = {
+        "guid": 68,
+        "entry": 2457,
+        "map_id": 1,
+        "instance_id": 0,
+        "x": -8903.01,
+        "y": 641.83,
+        "z": 99.62,
+        "spawn_orientation": -1.0,
+        "orientation": -1.0,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "size": 1.0,
+        "modelid": 1437,
+        "npcflag": 0x2000,
+        "template": {"modelid1": 1437, "npcflag": 0x4},
+    }
+    runtime_guid = creatures.CreatureGuid.from_spawn_guid(68, 1)
+    runtime_creature = Creature.from_mapping(
+        entry,
+        runtime_guid=runtime_guid,
+    )
+    expected = creatures._build_creature_update_payload(
+        map_id=1,
+        entry=entry,
+        realm_id=1,
+        creature=runtime_creature,
+    )
+    migrated_fields = {
+        "x",
+        "y",
+        "z",
+        "orientation",
+        "rotation0",
+        "rotation1",
+        "rotation2",
+        "rotation3",
+        "size",
+        "modelid",
+        "npcflag",
+    }
+
+    class RuntimeFieldRejectingMapping(dict):
+        def get(self, key, default=None):
+            if key in migrated_fields:
+                raise AssertionError(f"packet mapping read runtime field {key}")
+            return super().get(key, default)
+
+    actual = creatures._build_creature_update_payload(
+        map_id=1,
+        entry=RuntimeFieldRejectingMapping(entry),
+        realm_id=1,
+        creature=runtime_creature,
+    )
+
+    assert actual == expected
 
 
 def test_build_database_creature_responses_tracks_loaded_world_guid(monkeypatch):

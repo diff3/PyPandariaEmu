@@ -202,7 +202,11 @@ def _create_collision(
         from server.modules.handlers.world.collision import gameobject_collision_index
 
         bounds = load_display_bounds().get(_entry_int(restored, "display_id"))
-        collision = build_gameobject_collision(restored, bounds)
+        collision = build_gameobject_collision(
+            restored,
+            bounds,
+            runtime_object,
+        )
         if collision is None:
             return False
         gameobject_collision_index.register(collision)
@@ -300,6 +304,7 @@ def spawn_persistent_gameobject(session, spawn_id: int) -> GameObjectSpawnRuntim
         return GameObjectSpawnRuntimeResult("spawn", int(spawn_id), None, 0)
     runtime_guid = int(runtime_object.runtime_guid)
     entry["world_guid"] = runtime_guid
+    get_gameobject_runtime_store().add(runtime_object)
     sessions = _same_map_sessions(session, runtime_object)
     collision_created = _create_collision(runtime_object, entry)
     _invalidate_geometry_caches()
@@ -431,6 +436,7 @@ def replace_persistent_gameobject(
         _remove_session_visibility(target, old_runtime_object)
     collision_removed = _remove_collision(old_runtime_object)
     _invalidate_geometry_caches()
+    get_gameobject_runtime_store().add(new_runtime_object)
     collision_created = _create_collision(new_runtime_object, new_entry)
     _invalidate_geometry_caches()
 

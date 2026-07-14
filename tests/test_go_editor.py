@@ -4,6 +4,8 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
+
 database_module = types.ModuleType("server.modules.database.DatabaseConnection")
 database_module.DatabaseConnection = type(
     "DatabaseConnection",
@@ -38,6 +40,17 @@ from server.modules.handlers.world.features.world_editor import creature_editor
 from server.modules.handlers.world.features.world_editor import gameobject_editor
 from server.modules.handlers.world.features.world_editor import history as gameobject_history
 from server.modules.handlers.world.features.world_editor import selection
+from server.modules.handlers.world.runtime.gameobject_store import (
+    get_gameobject_runtime_store,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_gameobject_runtime_store():
+    store = get_gameobject_runtime_store()
+    store.clear()
+    yield
+    store.clear()
 
 
 def _session() -> SimpleNamespace:
@@ -401,6 +414,76 @@ def test_go_move_updates_position_and_pushes_history(monkeypatch):
     assert calls[0] == {"guid": 12345, "x": 10.0, "y": 20.0, "z": 30.0}
     assert [opcode for opcode, _payload in responses[:2]] == ["SMSG_UPDATE_OBJECT", "SMSG_UPDATE_OBJECT"]
     assert gameobject_history.list_history(session)[-1]["operation"] == "MOVE"
+
+
+def test_repeated_editor_moves_mutate_same_long_lived_runtime_object(monkeypatch):
+    session = _session()
+    entry = _entry()
+    persisted = dict(entry)
+    runtime_objects = []
+    _patch_packets(monkeypatch)
+    _mark_gameobject_loaded(session, entry)
+
+    def update_transform(_guid, **values):
+        persisted.update(values)
+        return dict(persisted)
+
+    monkeypatch.setattr(
+        gameobject_editor.DatabaseConnection,
+        "update_gameobject_spawn_transform",
+        update_transform,
+    )
+    monkeypatch.setattr(
+        gameobject_editor.DatabaseConnection,
+        "get_gameobject_spawn",
+        lambda _guid: dict(persisted),
+    )
+    world_guid = int(entry["world_guid"])
+
+    def refresh_visibility(target):
+        target.loaded_gameobjects.add(world_guid)
+        target.loaded_gameobject_entries[world_guid] = dict(persisted)
+        return [("SMSG_UPDATE_OBJECT", b"create")]
+
+    monkeypatch.setattr(
+        gameobject_editor.gameobject_runtime,
+        "_visibility_refresh_for_session",
+        refresh_visibility,
+    )
+    original_replace = gameobject_editor.gameobject_runtime.replace_persistent_gameobject
+
+    def record_replace(*args, **kwargs):
+        result = original_replace(*args, **kwargs)
+        runtime_objects.append(
+            get_gameobject_runtime_store().get_by_spawn_id(entry["guid"])
+        )
+        return result
+
+    monkeypatch.setattr(
+        gameobject_editor.gameobject_runtime,
+        "replace_persistent_gameobject",
+        record_replace,
+    )
+
+    first_responses, first_updated = gameobject_editor.move(session, entry)
+    session.x, session.y, session.z = 40.0, 50.0, 60.0
+    second_responses, second_updated = gameobject_editor.move(
+        session,
+        dict(first_updated),
+    )
+
+    assert first_updated is not None
+    assert second_updated is not None
+    assert runtime_objects[0] is runtime_objects[1]
+    assert runtime_objects[1].world_position == (40.0, 50.0, 60.0)
+    assert [payload for _opcode, payload in first_responses[:2]] == [
+        b"destroy",
+        b"create",
+    ]
+    assert [payload for _opcode, payload in second_responses[:2]] == [
+        b"destroy",
+        b"create",
+    ]
 
 
 def test_go_move_broadcasts_live_recreate_to_loaded_peer(monkeypatch):

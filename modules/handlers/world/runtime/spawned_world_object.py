@@ -6,13 +6,38 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol, TypeVar
 
 from server.modules.handlers.world.runtime.runtime_object import (
     _mapping_float,
     _mapping_int,
 )
+from server.modules.handlers.world.runtime.runtime_store import RuntimeStore
 from server.modules.handlers.world.runtime.world_object import WorldObject
+
+
+SpawnedObjectT = TypeVar("SpawnedObjectT", bound="SpawnedWorldObject")
+
+
+class _SnapshotCompatibility(Protocol[SpawnedObjectT]):
+    def __call__(
+        self,
+        runtime_object: SpawnedObjectT,
+        mapping: Mapping[str, Any],
+        *,
+        runtime_guid: int,
+    ) -> bool:
+        ...
+
+
+class _SpawnedObjectFactory(Protocol[SpawnedObjectT]):
+    def __call__(
+        self,
+        mapping: Mapping[str, Any],
+        *,
+        runtime_guid: int,
+    ) -> SpawnedObjectT:
+        ...
 
 
 @dataclass(slots=True)
@@ -54,3 +79,27 @@ class SpawnedWorldObject(WorldObject):
             entry=_mapping_int(data, "entry"),
             spawn_id=_mapping_int(data, "guid"),
         )
+
+
+def resolve_spawned_world_object(
+    mapping: Mapping[str, Any],
+    *,
+    runtime_guid: int,
+    store: RuntimeStore[SpawnedObjectT],
+    snapshot_compatible: _SnapshotCompatibility[SpawnedObjectT],
+    fallback_factory: _SpawnedObjectFactory[SpawnedObjectT],
+) -> SpawnedObjectT:
+    """Resolve a compatible stored snapshot or construct its fallback.
+
+    Object-specific snapshot rules and construction remain supplied by the
+    concrete runtime type. This helper knows nothing about packets, visibility,
+    persistence, editor behavior, collision, lifecycle, or gameplay.
+    """
+    stored = store.get_by_spawn_id(_mapping_int(mapping, "guid"))
+    if stored is not None and snapshot_compatible(
+        stored,
+        mapping,
+        runtime_guid=runtime_guid,
+    ):
+        return stored
+    return fallback_factory(mapping, runtime_guid=runtime_guid)

@@ -3,6 +3,9 @@
 
 from server.modules.handlers.world.runtime.creature import Creature
 from server.modules.handlers.world.runtime.gameobject import GameObject
+from server.modules.handlers.world.runtime.gameobject_persistence import (
+    gameobject_persistence_snapshot,
+)
 from server.modules.handlers.world.runtime.runtime_object import RuntimeObject
 from server.modules.handlers.world.runtime.spawned_world_object import (
     SpawnedWorldObject,
@@ -173,6 +176,67 @@ def test_gameobject_setters_mutate_only_runtime_state():
     assert mapping == persistent_snapshot
 
 
+def test_gameobject_persistence_snapshot_serializes_runtime_authority():
+    mapping = {
+        "guid": 123,
+        "entry": 456,
+        "map_id": 1,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 1.5,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "size": 1.0,
+        "display_id": 3015,
+        "state": 1,
+        "flags": 40,
+        "faction": 35,
+        "artkit": 7,
+        "animprogress": 255,
+        "type": 5,
+        "name": "Persistent metadata",
+    }
+    original_mapping = dict(mapping)
+    gameobject = GameObject.from_mapping(mapping, runtime_guid=789)
+    gameobject.set_position(11.0, 22.0, 33.0)
+    gameobject.set_orientation(2.5)
+    gameobject.set_rotation((0.1, 0.2, 0.3, 0.9))
+    gameobject.set_scale(1.75)
+    gameobject.set_state(2)
+    gameobject.set_flags(17)
+    gameobject.set_display_id(4321)
+    gameobject.set_faction(14)
+    gameobject.set_art_kit(9)
+    gameobject.set_animation_progress(127)
+    gameobject.set_gameobject_type(3)
+
+    snapshot = gameobject_persistence_snapshot(gameobject, mapping)
+
+    assert snapshot["x"] == 11.0
+    assert snapshot["y"] == 22.0
+    assert snapshot["z"] == 33.0
+    assert snapshot["orientation"] == 2.5
+    assert tuple(snapshot[f"rotation{index}"] for index in range(4)) == (
+        0.1,
+        0.2,
+        0.3,
+        0.9,
+    )
+    assert snapshot["size"] == 1.75
+    assert snapshot["display_id"] == 4321
+    assert snapshot["state"] == 2
+    assert snapshot["flags"] == 17
+    assert snapshot["faction"] == 14
+    assert snapshot["artkit"] == 9
+    assert snapshot["animprogress"] == 127
+    assert snapshot["type"] == 3
+    assert snapshot["name"] == "Persistent metadata"
+    assert mapping == original_mapping
+
+
 def test_spawned_world_object_constructs_persistent_identity():
     spawned = SpawnedWorldObject.from_mapping(
         {
@@ -209,6 +273,8 @@ def test_creature_inherits_shared_runtime_identity_and_transform():
             "rotation2": 0.2,
             "rotation3": 0.8,
             "size": 1.5,
+            "modelid": 1437,
+            "npcflag": 0x2000,
         },
         runtime_guid=0xF130000000000141,
     )
@@ -226,6 +292,32 @@ def test_creature_inherits_shared_runtime_identity_and_transform():
     assert creature.orientation == 2.5
     assert creature.rotation == (0.4, 0.3, 0.2, 0.8)
     assert creature.scale == 1.5
+    assert creature.display_id == 1437
+    assert creature.npc_flags == 0x2000
+
+
+def test_creature_runtime_snapshot_retains_no_mapping_reference():
+    template = {"modelid1": 1437, "npcflag": 0x2000}
+    mapping = {
+        "guid": 321,
+        "entry": 654,
+        "map_id": 1,
+        "x": 11.0,
+        "y": 22.0,
+        "z": 33.0,
+        "orientation": 2.5,
+        "modelid": 0,
+        "npcflag": 0,
+        "template": template,
+    }
+    creature = Creature.from_mapping(mapping, runtime_guid=789)
+
+    mapping.update(x=99.0, modelid=4321, npcflag=4)
+    template.update(modelid1=5555, npcflag=8)
+
+    assert creature.x == 11.0
+    assert creature.display_id == 1437
+    assert creature.npc_flags == 0x2000
 
 
 def test_creature_uses_runtime_object_transform_and_distance_helpers():

@@ -9,9 +9,14 @@ from server.modules.handlers.world.collision.bounds import DisplayBounds, build_
 from server.modules.handlers.world.collision.gameobject_collision import (
     GameObjectCollision,
     GameObjectCollisionIndex,
+    build_gameobject_collision,
     build_gameobject_collision_index,
     gameobject_collision_index,
     gameobject_is_eligible,
+)
+from server.modules.handlers.world.runtime.gameobject import GameObject
+from server.modules.handlers.world.runtime.gameobject_store import (
+    get_gameobject_runtime_store,
 )
 
 # The focused movement test does not require a live SQLAlchemy/world DB stack.
@@ -118,6 +123,79 @@ def test_normal_gameobject_with_bounds_registers(monkeypatch):
         lambda: False,
     )
     assert build_gameobject_collision_index({1: [_entry()]}) == 1
+
+
+def test_collision_consumes_runtime_identity_and_transform():
+    mapping = _entry(
+        x=4.0,
+        y=5.0,
+        z=6.0,
+        orientation=0.0,
+        size=1.0,
+        name="Persistent model metadata",
+    )
+    runtime_object = GameObject.from_mapping(
+        {
+            **mapping,
+            "x": 40.0,
+            "y": 50.0,
+            "z": 60.0,
+            "orientation": math.pi / 2.0,
+            "rotation0": 0.1,
+            "rotation1": 0.2,
+            "rotation2": 0.3,
+            "rotation3": 0.9,
+            "size": 2.0,
+        },
+        runtime_guid=0xF11000000000000C,
+    )
+
+    collision = build_gameobject_collision(
+        mapping,
+        _display_bounds(),
+        runtime_object,
+    )
+
+    assert collision is not None
+    assert collision.guid == runtime_object.spawn_id
+    assert collision.runtime_guid == runtime_object.runtime_guid
+    assert collision.rotation == runtime_object.rotation
+    assert collision.name == mapping["name"]
+    assert collision.bounds.center == (40.0, 50.0, 62.0)
+    assert collision.bounds.half_extents == (2.0, 1.0, 2.0)
+
+
+def test_collision_index_reuses_long_lived_runtime_transform(monkeypatch):
+    mapping = _entry(x=4.0, y=5.0, z=6.0, orientation=0.0, size=1.0)
+    runtime_object = GameObject.from_mapping(
+        mapping,
+        runtime_guid=0xF11000000000000C,
+    )
+    runtime_object.set_position(40.0, 50.0, 60.0)
+    runtime_object.set_orientation(math.pi / 2.0)
+    runtime_object.set_scale(2.0)
+    store = get_gameobject_runtime_store()
+    store.clear()
+    store.add(runtime_object)
+    monkeypatch.setattr(
+        "server.modules.handlers.world.collision.gameobject_collision.load_display_bounds",
+        lambda: {56: _display_bounds()},
+    )
+    monkeypatch.setattr(
+        "server.modules.handlers.world.feature_config.gameobject_collision_debug_enabled",
+        lambda: False,
+    )
+    try:
+        assert build_gameobject_collision_index({1: [mapping]}) == 1
+        collision = gameobject_collision_index.get(1, mapping["guid"])
+    finally:
+        store.clear()
+        gameobject_collision_index.clear()
+
+    assert collision is not None
+    assert collision.runtime_guid == runtime_object.runtime_guid
+    assert collision.bounds.center == (40.0, 50.0, 62.0)
+    assert collision.bounds.half_extents == (2.0, 1.0, 2.0)
 
 
 def test_transport_and_chair_types_are_excluded():

@@ -306,6 +306,10 @@ def test_spawn_lifecycle_uses_temporary_fallback_as_runtime_parameter(monkeypatc
     assert result.runtime_guid == int(entry["world_guid"])
     assert len(constructed) == 1
     assert collision_objects == [constructed[0]]
+    assert (
+        get_gameobject_runtime_store().get_by_spawn_id(entry["guid"])
+        is constructed[0]
+    )
 
 
 def test_replace_persistent_gameobject_destroys_old_then_refreshes_visibility(monkeypatch):

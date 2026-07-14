@@ -18,6 +18,10 @@ from server.modules.handlers.world.protocol.update_object.serializers import (
     u32_from_float,
 )
 from server.modules.handlers.world.runtime.creature import Creature
+from server.modules.handlers.world.runtime.creature_store import (
+    creature_identity_matches_mapping,
+    resolve_creature_runtime,
+)
 
 for _definition_name in creature_defs.__all__:
     globals()[f"_{_definition_name}"] = getattr(creature_defs, _definition_name)
@@ -96,7 +100,12 @@ def _build_creature_create_flags() -> bytes:
     return bytes(_CREATURE_CREATE_FLAGS)
 
 
-def _resolve_creature_display_id(entry: dict) -> int:
+def _resolve_creature_display_id(
+    entry: dict,
+    creature: Creature | None = None,
+) -> int:
+    if creature is not None:
+        return int(creature.display_id)
     display_id = int(entry.get("modelid", 0) or 0)
     if display_id > 0:
         return display_id
@@ -110,16 +119,32 @@ def _resolve_creature_display_id(entry: dict) -> int:
     return 15476
 
 
-def _build_creature_field_values(entry: dict, *, world_guid: int) -> dict[int, int]:
-    display_id = _resolve_creature_display_id(entry)
-    template = entry.get("template")
-    template_flags = int(template.get("npcflag", 0) or 0) if isinstance(template, dict) else 0
-    npc_flags = int(entry.get("npcflag", 0) or template_flags or 0)
+def _build_creature_field_values(
+    entry: dict,
+    *,
+    world_guid: int,
+    creature: Creature | None = None,
+) -> dict[int, int]:
+    display_id = _resolve_creature_display_id(entry, creature)
+    if creature is not None:
+        npc_flags = int(creature.npc_flags)
+    else:
+        template = entry.get("template")
+        template_flags = (
+            int(template.get("npcflag", 0) or 0)
+            if isinstance(template, dict)
+            else 0
+        )
+        npc_flags = int(entry.get("npcflag", 0) or template_flags or 0)
     return {
         _OBJECT_FIELD_GUID_LOW: int(world_guid) & 0xFFFFFFFF,
         _OBJECT_FIELD_GUID_HIGH: (int(world_guid) >> 32) & 0xFFFFFFFF,
         _OBJECT_FIELD_TYPE: _CREATURE_OBJECT_TYPE_FIELD_VALUE,
-        _OBJECT_FIELD_ENTRY: int(entry.get("entry", 0) or 0),
+        _OBJECT_FIELD_ENTRY: (
+            int(creature.entry)
+            if creature is not None
+            else int(entry.get("entry", 0) or 0)
+        ),
         _OBJECT_FIELD_DYNAMIC_FLAGS: _CREATURE_DYNAMIC_FLAGS_DEFAULT,
         _OBJECT_FIELD_SCALE_X: _u32_from_float(_CREATURE_SCALE_DEFAULT),
         _UNIT_FIELD_BYTES_0: _CREATURE_BYTES_0_DEFAULT,
@@ -147,22 +172,70 @@ def _build_creature_field_values(entry: dict, *, world_guid: int) -> dict[int, i
     }
 
 
-def _build_creature_update_payload(*, map_id: int, entry: dict, realm_id: int) -> bytes:
+def _resolve_packet_creature(
+    entry: dict,
+    *,
+    map_id: int,
+    realm_id: int,
+    creature: Creature | None,
+) -> Creature:
     world_guid = int(
         entry.get("world_guid")
         or CreatureGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), int(realm_id) or 1)
     )
+    if creature is not None:
+        identity_mapping = {
+            "guid": entry.get("guid", 0),
+            "entry": entry.get("entry", 0),
+            "map_id": entry.get("map_id", map_id),
+            "instance_id": entry.get("instance_id", creature.instance_id),
+        }
+        if creature_identity_matches_mapping(
+            creature,
+            identity_mapping,
+            runtime_guid=world_guid,
+        ):
+            return creature
+    runtime_mapping = dict(entry)
+    runtime_mapping["map_id"] = int(entry.get("map_id", map_id) or map_id)
+    return resolve_creature_runtime(
+        runtime_mapping,
+        runtime_guid=world_guid,
+    )
+
+
+def _build_creature_update_payload(
+    *,
+    map_id: int,
+    entry: dict,
+    realm_id: int,
+    creature: Creature | None = None,
+) -> bytes:
+    creature = _resolve_packet_creature(
+        entry,
+        map_id=map_id,
+        realm_id=realm_id,
+        creature=creature,
+    )
+    world_guid = int(creature.runtime_guid)
     raw_guid = GuidHelper.to_le_bytes(world_guid)
     mask_bytes, field_bytes = _build_fixed_u32_field_block(
-        _build_creature_field_values(entry, world_guid=world_guid),
+        _build_creature_field_values(
+            entry,
+            world_guid=world_guid,
+            creature=creature,
+        ),
         mask_blocks=_CREATURE_MASK_BLOCKS,
     )
 
-    x = float(entry.get("x", 0.0) or 0.0)
-    y = float(entry.get("y", 0.0) or 0.0)
-    z = float(entry.get("z", 0.0) or 0.0)
-    spawn_orientation = float(entry.get("spawn_orientation", entry.get("orientation", 0.0)) or 0.0)
-    orientation = _normalize_orientation(spawn_orientation)
+    x = float(creature.x)
+    y = float(creature.y)
+    z = float(creature.z)
+    if "spawn_orientation" in entry:
+        spawn_orientation = float(entry.get("spawn_orientation", 0.0) or 0.0)
+    else:
+        spawn_orientation = float(entry.get("orientation", 0.0) or 0.0)
+    orientation = float(creature.orientation)
 
     body = bytearray()
     body += struct.pack("<B", raw_guid[4])
@@ -269,12 +342,13 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
             "spawn_orientation": spawn_orientation,
             "orientation": runtime_orientation,
         }
-        runtime_creature = Creature.from_mapping(
-            {
-                **spawn,
-                "map_id": map_id,
-                "instance_id": int(getattr(session, "instance_id", 0) or 0),
-            },
+        runtime_mapping = {
+            **spawn,
+            "map_id": map_id,
+            "instance_id": int(getattr(session, "instance_id", 0) or 0),
+        }
+        runtime_creature = resolve_creature_runtime(
+            runtime_mapping,
             runtime_guid=world_guid,
         )
         npc_flags_by_guid = getattr(session, "npc_flags_by_guid", None)
@@ -323,6 +397,7 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
             map_id=map_id,
             entry=spawn,
             realm_id=realm_id,
+            creature=runtime_creature,
         )
         responses.append(make_update_object_response(payload))
 

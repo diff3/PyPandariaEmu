@@ -13,6 +13,11 @@ from server.modules.handlers.world.transport_runtime import (
     GAMEOBJECT_TYPE_MO_TRANSPORT,
     GAMEOBJECT_TYPE_TRANSPORT,
 )
+from server.modules.handlers.world.runtime.gameobject import GameObject
+from server.modules.handlers.world.runtime.gameobject_store import (
+    gameobject_identity_matches_mapping,
+    get_gameobject_runtime_store,
+)
 
 
 _RUNTIME_ONLY_KEYS = ("synthetic_transport", "_transport_create_source_path")
@@ -301,6 +306,7 @@ def _remove_runtime_references(session, world_guid: int, spawn_id: int, map_id: 
         geometry_shadow._world_cache_signature = None
     except Exception:
         pass
+    get_gameobject_runtime_store().remove(int(world_guid))
 
 
 def _add_runtime_references(session, entry: dict[str, Any], world_guid: int) -> None:
@@ -316,6 +322,19 @@ def _add_runtime_references(session, entry: dict[str, Any], world_guid: int) -> 
     restored = dict(entry)
     restored["world_guid"] = int(world_guid)
     entries[int(world_guid)] = restored
+    store = get_gameobject_runtime_store()
+    runtime_object = store.get_by_spawn_id(_entry_int(restored, "guid"))
+    if runtime_object is None or not gameobject_identity_matches_mapping(
+        runtime_object,
+        restored,
+        runtime_guid=int(world_guid),
+    ):
+        runtime_object = store.add(
+            GameObject.from_mapping(
+                restored,
+                runtime_guid=int(world_guid),
+            )
+        )
     try:
         from server.modules.handlers.world.collision.gameobject_collision import (
             build_gameobject_collision,
@@ -324,7 +343,11 @@ def _add_runtime_references(session, entry: dict[str, Any], world_guid: int) -> 
         from server.modules.handlers.world.collision import gameobject_collision_index
 
         bounds = load_display_bounds().get(_entry_int(restored, "display_id"))
-        collision = build_gameobject_collision(restored, bounds)
+        collision = build_gameobject_collision(
+            restored,
+            bounds,
+            runtime_object,
+        )
         if collision is not None:
             gameobject_collision_index.register(collision)
     except Exception as exc:
