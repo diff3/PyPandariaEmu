@@ -28,6 +28,12 @@ from server.modules.handlers.world.state.runtime import broadcast_player_state_u
 from server.modules.handlers.world.runtime.player_store import (
     sync_player_runtime_from_session,
 )
+from server.modules.handlers.world.runtime.flight_path_store import (
+    register_flight_path_runtime,
+    resolve_flight_path_runtime,
+    sync_flight_path_runtime_from_session,
+    unregister_flight_path_runtime,
+)
 
 
 TAXI_TICK_SECONDS = 0.05
@@ -272,6 +278,7 @@ def start_taxi_flight(
     session.taxi_state = state
     session.taxi_controls_locked = True
     session.player_travel_state = TAXI_STATE_FLIGHT
+    register_flight_path_runtime(session)
 
     responses = _apply_taxi_mount(session, state, mount_display_id)
     first = path.points[0]
@@ -539,6 +546,7 @@ def cancel_taxi_flight(session, reason: str = "cancelled") -> None:
         str(reason),
     )
     session.taxi_state = None
+    unregister_flight_path_runtime(session)
 
 
 def _taxi_arrival_point(state: TaxiFlightSession) -> TaxiPathPoint:
@@ -627,12 +635,8 @@ def _next_taxi_spline_id(session, generation: int) -> int:
 
 
 def _build_taxi_spline_response(session, state: TaxiFlightSession) -> tuple[str, bytes] | None:
-    guid = int(
-        getattr(session, "char_guid", 0)
-        or getattr(session, "world_guid", 0)
-        or getattr(session, "player_guid", 0)
-        or 0
-    )
+    flight_path = resolve_flight_path_runtime(session)
+    guid = int(flight_path.runtime_guid)
     if guid <= 0:
         Logger.warning("[TAXI] spline build failed reason=no_player_guid")
         return None
@@ -710,6 +714,7 @@ def _finish_taxi_state(session, state: TaxiFlightSession, *, send_updates: bool)
     )
     session.player_travel_state = TAXI_STATE_NORMAL
     session.taxi_state = None
+    unregister_flight_path_runtime(session)
 
 
 def _interpolate_path(
@@ -928,6 +933,7 @@ def _apply_taxi_position(session, point: TaxiPathPoint, orientation: float) -> N
     session.z = float(point.z)
     session.orientation = float(orientation)
     sync_player_runtime_from_session(session)
+    sync_flight_path_runtime_from_session(session)
     session.position_dirty = True
 
     movement_state = getattr(session, "movement_state", None)

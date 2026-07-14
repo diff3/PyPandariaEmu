@@ -17,6 +17,12 @@ from server.modules.handlers.world.runtime.elevator_store import (
     get_elevator_runtime_store,
     resolve_elevator_runtime,
 )
+from server.modules.handlers.world.runtime.flight_path import FlightPath
+from server.modules.handlers.world.runtime.flight_path_store import (
+    FlightPathRuntimeStore,
+    get_flight_path_runtime_store,
+    resolve_flight_path_runtime,
+)
 from server.modules.handlers.world.runtime.gameobject import GameObject
 from server.modules.handlers.world.runtime.gameobject_persistence import (
     gameobject_persistence_snapshot,
@@ -45,6 +51,8 @@ __all__ = [
     "CreatureRuntimeStore",
     "Elevator",
     "ElevatorRuntimeStore",
+    "FlightPath",
+    "FlightPathRuntimeStore",
     "GameObject",
     "GameObjectRuntimeStore",
     "Player",
@@ -56,10 +64,12 @@ __all__ = [
     "WorldObject",
     "get_creature_runtime_store",
     "get_elevator_runtime_store",
+    "get_flight_path_runtime_store",
     "get_gameobject_runtime_store",
     "get_player_runtime_store",
     "resolve_player_runtime",
     "resolve_elevator_runtime",
+    "resolve_flight_path_runtime",
     "creature_persistence_snapshot",
     "gameobject_persistence_snapshot",
     "resolve_spawned_world_object",

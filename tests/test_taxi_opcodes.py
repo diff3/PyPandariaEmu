@@ -13,6 +13,10 @@ from server.modules.handlers.world import dispatcher
 from server.modules.handlers.world import feature_config
 from server.modules.handlers.world import taxi_runtime
 from server.modules.handlers.world.opcodes import taxi
+from server.modules.handlers.world.runtime import (
+    FlightPath,
+    get_flight_path_runtime_store,
+)
 
 
 def _quiet_logger():
@@ -1612,6 +1616,8 @@ def test_move_spline_done_continues_multi_leg_taxi(monkeypatch):
 
 
 def test_move_spline_done_cross_map_leg_starts_worldport(monkeypatch):
+    flight_store = get_flight_path_runtime_store()
+    flight_store.clear()
     monkeypatch.setattr(
         taxi,
         "_TAXI_NODES",
@@ -1675,8 +1681,12 @@ def test_move_spline_done_cross_map_leg_starts_worldport(monkeypatch):
             phase="TAXI_FLIGHT",
         ),
     )
+    flight_path = flight_store.add(FlightPath.from_session(session))
 
-    _status, responses = taxi.handle_move_spline_done(session, b"")
+    try:
+        _status, responses = taxi.handle_move_spline_done(session, b"")
+    finally:
+        flight_store.clear()
 
     assert [opcode for opcode, _payload in responses] == [
         "SMSG_TRANSFER_PENDING",
@@ -1700,6 +1710,9 @@ def test_move_spline_done_cross_map_leg_starts_worldport(monkeypatch):
     assert session.loaded_gameobjects == set()
     assert session.loaded_npcs == set()
     assert session.loaded_transport_entries == {}
+    assert flight_path.map_id == session.map_id
+    assert flight_path.world_position == (session.x, session.y, session.z)
+    assert flight_path.orientation == session.orientation
 
 
 def test_continue_pending_cross_map_taxi_launches_next_leg(monkeypatch):

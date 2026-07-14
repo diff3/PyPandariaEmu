@@ -33,6 +33,9 @@ from server.modules.handlers.world.state.runtime import attach_session_to_world_
 from server.modules.handlers.world.runtime.player_store import (
     sync_player_runtime_from_session,
 )
+from server.modules.handlers.world.runtime.flight_path_store import (
+    sync_flight_path_runtime_from_session,
+)
 from server.modules.handlers.world.transport_runtime import (
     clear_player_transport_state,
 )
@@ -1042,6 +1045,7 @@ def _begin_cross_map_taxi_transfer(
     session.z = float(transfer_point.z)
     session.orientation = float(getattr(session, "orientation", 0.0) or 0.0)
     sync_player_runtime_from_session(session)
+    sync_flight_path_runtime_from_session(session)
     movement_state = getattr(session, "movement_state", None)
     if movement_state is not None:
         movement_state.x = float(transfer_point.x)

@@ -6,7 +6,16 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from server.modules.handlers.world import taxi_runtime
-from server.modules.handlers.world.runtime import Player, get_player_runtime_store
+from server.modules.handlers.world.runtime import (
+    FlightPath,
+    FlightPathRuntimeStore,
+    Player,
+    RuntimeObject,
+    WorldObject,
+    get_flight_path_runtime_store,
+    get_player_runtime_store,
+    resolve_flight_path_runtime,
+)
 from server.session.world_session import MovementState
 
 
@@ -30,6 +39,171 @@ def _taxi_session():
         fly_speed=7.0,
         fly_back_speed=4.5,
     )
+
+
+def _disable_taxi_side_effects(monkeypatch, *, broadcasts=None):
+    monkeypatch.setattr(
+        taxi_runtime,
+        "_build_mount_visual_responses",
+        lambda session, display_id: [],
+    )
+    monkeypatch.setattr(
+        taxi_runtime,
+        "_broadcast_mount_visual",
+        lambda session, display_id: None,
+    )
+    monkeypatch.setattr(taxi_runtime, "_send_self_movement", lambda session: None)
+    monkeypatch.setattr(
+        taxi_runtime,
+        "broadcast_player_state_update",
+        broadcasts if broadcasts is not None else lambda session, force=False: None,
+    )
+
+
+def _start_test_flight(session):
+    return taxi_runtime.start_taxi_flight(
+        session,
+        [
+            taxi_runtime.TaxiPathPoint(0.0, 0.0, 0.0),
+            taxi_runtime.TaxiPathPoint(10.0, 0.0, 5.0),
+        ],
+        destination_map=1,
+        destination_node=2,
+        speed=5.0,
+        mount_display_id=6851,
+    )
+
+
+def test_flight_path_runtime_store_uses_runtime_guid_as_its_only_index():
+    session = _taxi_session()
+    session.instance_id = 4
+    flight_path = FlightPath.from_session(session)
+    store = FlightPathRuntimeStore()
+
+    assert isinstance(flight_path, WorldObject)
+    assert isinstance(flight_path, RuntimeObject)
+    assert flight_path.runtime_guid == 7
+    assert flight_path.map_id == 1
+    assert flight_path.instance_id == 4
+    assert flight_path.world_position == (0.0, 0.0, 0.0)
+    assert flight_path.rotation == (0.0, 0.0, 0.0, 1.0)
+    assert flight_path.scale == 1.0
+
+    assert store.add(flight_path) is flight_path
+    assert store.get(7) is flight_path
+    assert store.contains(7) is True
+    assert list(store) == [flight_path]
+    assert store.remove(7) is flight_path
+    assert store.contains(7) is False
+    store.add(flight_path)
+    store.clear()
+    assert list(store) == []
+
+
+def test_flight_start_registers_stable_runtime_and_tick_publishes_transform(
+    monkeypatch,
+):
+    store = get_flight_path_runtime_store()
+    store.clear()
+    _disable_taxi_side_effects(monkeypatch)
+    session = _taxi_session()
+
+    try:
+        _start_test_flight(session)
+        flight_path = store.get(7)
+
+        assert isinstance(flight_path, FlightPath)
+        assert resolve_flight_path_runtime(session) is flight_path
+        assert flight_path.world_position == (session.x, session.y, session.z)
+
+        session._taxi_last_tick_at = 100.0
+        assert taxi_runtime.taxi_tick(session, now=101.0) is True
+
+        assert store.get(7) is flight_path
+        assert flight_path.map_id == session.map_id
+        assert flight_path.world_position == (session.x, session.y, session.z)
+        assert flight_path.orientation == session.orientation
+    finally:
+        store.clear()
+
+
+def test_flight_path_packet_path_matches_unregistered_fallback(monkeypatch):
+    store = get_flight_path_runtime_store()
+    store.clear()
+    _disable_taxi_side_effects(monkeypatch)
+    session = _taxi_session()
+
+    try:
+        _start_test_flight(session)
+        state = session.taxi_state
+        retained = resolve_flight_path_runtime(session)
+        retained_response = taxi_runtime._build_taxi_spline_response(session, state)
+
+        assert store.remove(retained.runtime_guid) is retained
+        fallback = resolve_flight_path_runtime(session)
+        fallback_response = taxi_runtime._build_taxi_spline_response(session, state)
+
+        assert fallback is not retained
+        assert store.contains(retained.runtime_guid) is False
+        assert fallback_response == retained_response
+    finally:
+        store.clear()
+
+
+def test_flight_visibility_broadcast_observes_published_runtime(monkeypatch):
+    store = get_flight_path_runtime_store()
+    store.clear()
+    observed = []
+
+    def capture_broadcast(session, force=False):
+        flight_path = resolve_flight_path_runtime(session)
+        observed.append(
+            (
+                flight_path,
+                flight_path.map_id,
+                flight_path.world_position,
+                flight_path.orientation,
+                bool(force),
+            )
+        )
+
+    _disable_taxi_side_effects(monkeypatch, broadcasts=capture_broadcast)
+    session = _taxi_session()
+
+    try:
+        _start_test_flight(session)
+        flight_path = store.get(7)
+        session._taxi_last_tick_at = 100.0
+        assert taxi_runtime.taxi_tick(session, now=101.0) is True
+
+        assert observed
+        assert all(item[0] is flight_path for item in observed)
+        assert observed[-1][1] == session.map_id
+        assert observed[-1][2] == (session.x, session.y, session.z)
+        assert observed[-1][3] == session.orientation
+        assert observed[-1][4] is True
+    finally:
+        store.clear()
+
+
+def test_flight_completion_and_cancellation_unregister_runtime(monkeypatch):
+    store = get_flight_path_runtime_store()
+    store.clear()
+    _disable_taxi_side_effects(monkeypatch)
+    session = _taxi_session()
+
+    _start_test_flight(session)
+    first = store.get(7)
+    assert first is not None
+    taxi_runtime.complete_taxi_spline(session)
+    assert store.contains(7) is False
+
+    _start_test_flight(session)
+    second = store.get(7)
+    assert second is not None
+    assert second is not first
+    taxi_runtime.cancel_taxi_flight(session, "test_interrupt")
+    assert store.contains(7) is False
 
 
 def test_taxi_position_boundary_updates_runtime_player():
@@ -290,6 +464,8 @@ def test_taxi_arrival_uses_destination_landing_height(monkeypatch):
 
 
 def test_taxi_disconnect_completion_persists_destination_without_packets(monkeypatch):
+    flight_store = get_flight_path_runtime_store()
+    flight_store.clear()
     sent_positions = []
     broadcasts = []
     monkeypatch.setattr(taxi_runtime, "_start_taxi_thread", lambda session, generation: None)
@@ -317,6 +493,7 @@ def test_taxi_disconnect_completion_persists_destination_without_packets(monkeyp
         mount_display_id=6851,
         destination_landing_point=landing_point,
     )
+    assert flight_store.contains(7) is True
     sent_positions.clear()
     broadcasts.clear()
 
@@ -335,6 +512,7 @@ def test_taxi_disconnect_completion_persists_destination_without_packets(monkeyp
     assert session.is_flying is False
     assert session.is_mounted is False
     assert session.movement_state.flags & taxi_runtime._MOVEMENTFLAG_FORWARD == 0
+    assert flight_store.contains(7) is False
 
 
 def test_taxi_z_curve_is_monotone_between_altitude_nodes():
