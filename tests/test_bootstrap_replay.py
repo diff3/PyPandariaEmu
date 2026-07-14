@@ -528,6 +528,85 @@ def test_database_transport_bootstrap_uses_authoritative_runtime_entry(monkeypat
     assert canonical_guid in session.loaded_transport_entries
 
 
+def test_database_transport_bootstrap_rejects_old_map_runtime_snapshot(
+    monkeypatch,
+):
+    gameobjects = _import_gameobjects()
+    session = SimpleNamespace(
+        map_id=530,
+        x=10.0,
+        y=20.0,
+        realm_id=1,
+    )
+    world_guid = int(gameobjects.MoTransportGuid.from_spawn_guid(7))
+    entry = {
+        "guid": 7,
+        "world_guid": world_guid,
+        "entry": 20808,
+        "map": 530,
+        "type": 15,
+        "display_id": 3015,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 0.0,
+        "use_transport_guid": True,
+    }
+    db_module = sys.modules["server.modules.database.DatabaseConnection"]
+    monkeypatch.setattr(
+        db_module.DatabaseConnection,
+        "get_gameobjects_near",
+        staticmethod(lambda *args, **kwargs: [dict(entry)]),
+    )
+    transport_runtime_module = sys.modules[
+        "server.modules.handlers.world.transport_runtime"
+    ]
+
+    def register_loaded(target, mapping, *, world_guid, map_id):
+        target.loaded_transport_entries = {
+            int(world_guid): dict(mapping),
+        }
+        return True
+
+    snapshot_calls = []
+
+    def stale_runtime_snapshot(_session, mapping):
+        snapshot_calls.append(dict(mapping))
+        stale = dict(mapping)
+        if len(snapshot_calls) == 1:
+            return stale
+        stale["map"] = 0
+        stale["map_id"] = 0
+        stale["x"] = -1000.0
+        stale["y"] = -2000.0
+        return stale
+
+    monkeypatch.setattr(
+        transport_runtime_module,
+        "register_loaded_transport_entry",
+        register_loaded,
+    )
+    monkeypatch.setattr(
+        transport_runtime_module,
+        "cached_transport_runtime_entry",
+        stale_runtime_snapshot,
+    )
+    monkeypatch.setattr(
+        gameobjects,
+        "_build_gameobject_update_payload",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("old-map transport CREATE was serialized")
+        ),
+    )
+
+    responses = gameobjects.build_database_gameobject_responses(session)
+
+    assert responses == []
+    assert session.loaded_gameobjects == set()
+    assert session.loaded_gameobject_entries == {}
+    assert session.loaded_transport_entries == {}
+    assert len(snapshot_calls) == 2
+
+
 def test_build_database_creature_responses_spawns_npc_near_player(monkeypatch):
     creatures = _import_creatures()
     session = SimpleNamespace(

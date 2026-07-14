@@ -182,6 +182,21 @@ class WorldLoginContext:
                 getattr(session, "account_data_times", {}).get(index, 0) or 0
             )
         movement_state = getattr(session, "movement_state", None)
+        transition_owner = str(
+            getattr(session, "world_transition_owner", "") or ""
+        )
+        ordinary_teleport_active = bool(
+            transition_owner == "ordinary_teleport"
+            and getattr(session, "teleport_pending", False)
+        )
+        transport_guid = int(
+            getattr(movement_state, "transport_guid", 0) or 0
+        )
+        include_transport = bool(
+            not ordinary_teleport_active
+            and getattr(movement_state, "has_transport_data", False)
+            and transport_guid > 0
+        )
         return cls(
             account_id=session.account_id,
             account_name=session.account_name,
@@ -208,21 +223,55 @@ class WorldLoginContext:
             y=session.y,
             z=session.z,
             orientation=session.orientation,
-            has_transport_data=bool(
-                getattr(movement_state, "has_transport_data", False)
-                and int(getattr(movement_state, "transport_guid", 0) or 0) > 0
+            has_transport_data=include_transport,
+            transport_guid=transport_guid if include_transport else 0,
+            transport_x=(
+                float(getattr(movement_state, "transport_x", 0.0) or 0.0)
+                if include_transport
+                else 0.0
             ),
-            transport_guid=int(getattr(movement_state, "transport_guid", 0) or 0),
-            transport_x=float(getattr(movement_state, "transport_x", 0.0) or 0.0),
-            transport_y=float(getattr(movement_state, "transport_y", 0.0) or 0.0),
-            transport_z=float(getattr(movement_state, "transport_z", 0.0) or 0.0),
-            transport_orientation=float(
-                getattr(movement_state, "transport_orientation", 0.0) or 0.0
+            transport_y=(
+                float(getattr(movement_state, "transport_y", 0.0) or 0.0)
+                if include_transport
+                else 0.0
             ),
-            transport_time=int(getattr(movement_state, "transport_time", 0) or 0),
-            transport_time2=int(getattr(movement_state, "transport_time2", 0) or 0),
-            transport_time3=int(getattr(movement_state, "transport_time3", 0) or 0),
-            transport_seat=int(getattr(movement_state, "transport_seat", -1)),
+            transport_z=(
+                float(getattr(movement_state, "transport_z", 0.0) or 0.0)
+                if include_transport
+                else 0.0
+            ),
+            transport_orientation=(
+                float(
+                    getattr(
+                        movement_state,
+                        "transport_orientation",
+                        0.0,
+                    )
+                    or 0.0
+                )
+                if include_transport
+                else 0.0
+            ),
+            transport_time=(
+                int(getattr(movement_state, "transport_time", 0) or 0)
+                if include_transport
+                else 0
+            ),
+            transport_time2=(
+                int(getattr(movement_state, "transport_time2", 0) or 0)
+                if include_transport
+                else 0
+            ),
+            transport_time3=(
+                int(getattr(movement_state, "transport_time3", 0) or 0)
+                if include_transport
+                else 0
+            ),
+            transport_seat=(
+                int(getattr(movement_state, "transport_seat", -1))
+                if include_transport
+                else -1
+            ),
 
             server_time=session.server_time,
             game_time=getattr(session, "game_time", int(time.time())),

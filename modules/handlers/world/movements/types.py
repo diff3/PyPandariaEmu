@@ -77,6 +77,7 @@ class MovementTemplate:
     transfer_nodes: tuple[int, ...] = ()
     station_nodes: tuple[int, ...] = ()
     phase_distances: tuple[float, ...] = ()
+    map_local_splines: bool = False
 
 
 @dataclass(frozen=True)

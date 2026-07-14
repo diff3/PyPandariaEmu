@@ -3451,6 +3451,63 @@ def _consume_pending_teleport_on_movement(session, opcode_name: str) -> None:
     Logger.debug("[Teleport] movement resumed on %s while teleport ack is pending", str(opcode_name))
 
 
+def _complete_owned_near_teleport_from_movement(
+    session,
+    opcode_name: str,
+) -> tuple[bool, list[tuple[str, bytes]]]:
+    """Complete a current near teleport before the normal gameplay gate.
+
+    The triggering movement is deliberately consumed.  It exists only as the
+    client signal that the same-map teleport completed; later movement packets
+    resume through the ordinary movement path.
+    """
+    from server.modules.handlers.world.teleport.transition import (
+        complete_world_transition,
+        current_near_teleport_is_owned,
+    )
+
+    if not bool(getattr(session, "near_teleport_pending", False)):
+        return False, []
+    if (
+        int(getattr(session, "near_teleport_generation", 0) or 0) <= 0
+        and str(getattr(session, "world_transition_owner", "") or "")
+        != "ordinary_teleport"
+    ):
+        return False, []
+    if not current_near_teleport_is_owned(session):
+        Logger.info(
+            "[Teleport] near movement fallback rejected opcode=%s player=%s "
+            "near_generation=%s current_generation=%s owner=%s",
+            str(opcode_name),
+            int(getattr(session, "char_guid", 0) or 0),
+            int(getattr(session, "near_teleport_generation", 0) or 0),
+            int(getattr(session, "world_transition_generation", 0) or 0),
+            str(getattr(session, "world_transition_owner", "") or "none"),
+        )
+        return True, []
+
+    destination = str(getattr(session, "teleport_destination", "") or "?")
+    session.near_teleport_pending = False
+    session.worldport_ack_pending = False
+    complete_world_transition(session)
+    responses = list(
+        stream_world_objects_after_teleport(
+            session,
+            context="near-teleport-movement-fallback",
+        )
+    )
+    session.teleport_destination = None
+    Logger.info(
+        "[Teleport] near movement fallback completed opcode=%s player=%s "
+        "destination=%s packets=%s",
+        str(opcode_name),
+        int(getattr(session, "char_guid", 0) or 0),
+        destination,
+        len(responses),
+    )
+    return True, responses
+
+
 def _player_movement_debug_enabled() -> bool:
     try:
         from server.modules.handlers.world.feature_config import player_movement_debug_enabled
@@ -5676,6 +5733,22 @@ def _save_session_position(session, *, reason: str, online: int | None = None, f
         )
         return False
 
+    if str(getattr(session, "transport_attach_state", "") or "") == "ATTACHED":
+        Logger.info(
+            "[POS_SAVE] attached position preserved player=%s reason=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            str(reason),
+        )
+        if online is None:
+            return False
+        now = time.time()
+        return DatabaseConnection.save_character_online_state(
+            int(session.char_guid),
+            int(session.realm_id),
+            online=int(online),
+            logout_time=int(now) if int(online) == 0 else None,
+        )
+
     now = time.time()
     position_dirty = bool(getattr(session, "position_dirty", False))
     if not force and not position_dirty:
@@ -5850,6 +5923,11 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     starting_z = float(getattr(session, "z", 0.0) or 0.0)
     starting_o = float(getattr(session, "orientation", 0.0) or 0.0)
     _consume_pending_teleport_on_movement(session, opcode_name)
+    near_fallback_handled, near_fallback_responses = (
+        _complete_owned_near_teleport_from_movement(session, opcode_name)
+    )
+    if near_fallback_handled:
+        return 0, near_fallback_responses or None
     if not is_player_world_active(session):
         Logger.debug(
             "[Movement] suspended opcode=%s player=%s transition_owner=%s generation=%s",
@@ -6419,6 +6497,24 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         Logger.debug("[Teleport] ignoring unexpected CMSG_MOVE_TELEPORT_ACK")
         return 0, [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload("[Teleport] unexpected near-teleport ack ignored"))]
 
+    from server.modules.handlers.world.teleport.transition import (
+        current_near_teleport_is_owned,
+    )
+
+    if (
+        str(getattr(session, "world_transition_owner", "") or "")
+        == "ordinary_teleport"
+        and not current_near_teleport_is_owned(session)
+    ):
+        Logger.info(
+            "[Teleport] stale near-teleport ACK ignored player=%s "
+            "near_generation=%s current_generation=%s",
+            int(getattr(session, "char_guid", 0) or 0),
+            int(getattr(session, "near_teleport_generation", 0) or 0),
+            int(getattr(session, "world_transition_generation", 0) or 0),
+        )
+        return 0, None
+
     destination = str(getattr(session, "teleport_destination", "") or "?")
     session.near_teleport_pending = False
     session.worldport_ack_pending = False
@@ -6481,6 +6577,7 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
     session.teleport_destination = None
     return 0, responses
 
+@register("MSG_MOVE_WORLDPORT_ACK")
 @register("CMSG_MOVE_WORLDPORT_ACK")
 def handle_move_worldport_ack(session, _ctx: PacketContext):
     if not bool(getattr(session, "worldport_ack_pending", False)):
@@ -6516,9 +6613,38 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
             int(getattr(session, "map_id", 0) or 0),
         )
 
+    if bool(getattr(session, "teleport_pending", False)):
+        pending = getattr(session, "pending_transport_transfer", None)
+        expected_generation = int(
+            (
+                pending.get("world_transition_generation", 0)
+                if isinstance(pending, dict)
+                else getattr(
+                    session,
+                    "world_transition_loading_generation",
+                    0,
+                )
+            )
+            or 0
+        )
+        expected_owner = str(
+            getattr(session, "world_transition_owner", "") or ""
+        )
+        from server.modules.handlers.world.opcodes.login import (
+            ensure_worldport_bootstrap_started,
+        )
+
+        responses = ensure_worldport_bootstrap_started(
+            session,
+            "worldport_ack",
+            expected_generation=expected_generation,
+            expected_owner=expected_owner,
+        )
+        return 0, responses or None
+
     destination = str(getattr(session, "teleport_destination", "") or "?")
-    # WORLDPORT_ACK only confirms the transfer packet. The loading screen
-    # completion still owns the final world bootstrap and pending reset.
+    # Compatibility path for ACKs that are not attached to a pending
+    # generation-owned worldport. Active worldports returned above.
     session.near_teleport_pending = False
     session.worldport_ack_pending = False
     pending_transport_diagnostics = getattr(session, "pending_transport_transfer", None)

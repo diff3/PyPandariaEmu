@@ -299,6 +299,77 @@ def test_first_valid_movement_packet_clears_stale_near_teleport_pending(monkeypa
     assert session.near_teleport_pending is False
 
 
+def test_current_near_teleport_movement_fallback_completes_before_world_gate(
+    monkeypatch,
+):
+    from server.modules.handlers.world.state.runtime import is_player_world_active
+
+    session = _transition_session(owner="ordinary_teleport")
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+    session.near_teleport_pending = True
+    session.near_teleport_generation = 1
+    session.teleport_destination = "near-destination"
+    streamed = []
+    monkeypatch.setattr(
+        movement,
+        "stream_world_objects_after_teleport",
+        lambda target, *, context: streamed.append((target, context))
+        or [("SMSG_UPDATE_OBJECT", b"destination")],
+    )
+
+    status, responses = movement.handle_movement_packet(
+        session,
+        SimpleNamespace(
+            name="MSG_MOVE_HEARTBEAT",
+            opcode=0,
+            payload=b"stale-wire-payload-is-consumed",
+            decoded={},
+        ),
+    )
+
+    assert status == 0
+    assert responses == [("SMSG_UPDATE_OBJECT", b"destination")]
+    assert session.near_teleport_pending is False
+    assert session.world_transition_owner is None
+    assert session.world_transition_bootstrap_generation == 0
+    assert session.world_transition_bootstrap_status == "IDLE"
+    assert is_player_world_active(session) is True
+    assert streamed == [(session, "near-teleport-movement-fallback")]
+
+
+def test_stale_movement_cannot_complete_newer_near_teleport(monkeypatch):
+    session = _transition_session(owner="ordinary_teleport")
+    session.world_transition_generation = 2
+    session.world_transition_loading_generation = 2
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+    session.near_teleport_pending = True
+    session.near_teleport_generation = 1
+    streamed = []
+    monkeypatch.setattr(
+        movement,
+        "stream_world_objects_after_teleport",
+        lambda *_args, **_kwargs: streamed.append(True) or [],
+    )
+
+    status, responses = movement.handle_movement_packet(
+        session,
+        SimpleNamespace(
+            name="MSG_MOVE_HEARTBEAT",
+            opcode=0,
+            payload=b"",
+            decoded={},
+        ),
+    )
+
+    assert (status, responses) == (0, None)
+    assert session.near_teleport_pending is True
+    assert session.world_transition_generation == 2
+    assert session.world_transition_owner == "ordinary_teleport"
+    assert streamed == []
+
+
 def test_movement_clears_stale_near_teleport_without_starting_transport_transfer(
     monkeypatch,
 ):
@@ -387,6 +458,10 @@ def test_movement_packets_advance_same_map_teleport_counter():
 
 def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
     session = _FakeSession()
+    session.world_transition_generation = 3
+    session.world_transition_loading_generation = 3
+    session.world_transition_owner = "ordinary_teleport"
+    session.near_teleport_generation = 3
     calls: list[tuple[str, object]] = []
 
     monkeypatch.setattr(
@@ -431,6 +506,8 @@ def test_same_map_teleport_ack_builds_self_resync(monkeypatch):
     assert session.near_teleport_pending is False
     assert session.worldport_ack_pending is False
     assert session.teleport_destination is None
+    assert session.world_transition_owner is None
+    assert session.world_transition_loading_generation == 0
     assert responses == [
         ("SMSG_MESSAGECHAT", b"[Teleport] same-map ack -> Orgrimmar"),
         ("SMSG_UPDATE_OBJECT", b"0006"),
@@ -590,49 +667,42 @@ def test_same_map_teleport_ack_with_fixspeed_refreshes_speed_and_player_move(mon
     ]
 
 
-def test_worldport_ack_keeps_teleport_pending_for_loading_screen_completion(monkeypatch):
-    session = _FakeSession()
-    session.teleport_pending = True
-    session.near_teleport_pending = False
-    session.worldport_ack_pending = True
-    session.teleport_destination = "Silvermoon"
+def test_worldport_ack_requests_shared_bootstrap(monkeypatch):
+    from server.modules.handlers.world.opcodes import login as login_handlers
 
+    session = _transition_session()
     calls = []
-    stream_calls: list[str] = []
-    monkeypatch.setattr(movement, "_capture_persist_position_from_session", lambda target: None)
-    monkeypatch.setattr(movement, "_mark_position_dirty", lambda target: None)
-    monkeypatch.setattr(movement, "_save_session_position", lambda target, **kwargs: None)
-    monkeypatch.setattr(movement, "broadcast_player_state_update", lambda target, *, force=False: None)
+
+    def ensure(target, signal, *, expected_generation, expected_owner):
+        calls.append(
+            (
+                target,
+                signal,
+                expected_generation,
+                expected_owner,
+            )
+        )
+        return [("SMSG_UPDATE_OBJECT", b"destination-bootstrap")]
+
     monkeypatch.setattr(
-        movement,
-        "force_bilateral_visibility_resync",
-        lambda target, *, reason: calls.append((target, reason)),
-    )
-    monkeypatch.setattr(
-        movement,
-        "encode_skyfire_messagechat_system_payload",
-        lambda message: message.encode("utf-8"),
-    )
-    monkeypatch.setattr(
-        movement,
-        "stream_world_objects_after_teleport",
-        lambda target, *, context: stream_calls.append(context)
-        or [("SMSG_UPDATE_OBJECT", b"worldport-visible")],
+        login_handlers,
+        "ensure_worldport_bootstrap_started",
+        ensure,
     )
 
     status, responses = movement.handle_move_worldport_ack(session, None)
 
     assert status == 0
-    assert session.teleport_pending is True
-    assert session.worldport_ack_pending is False
-    assert session.near_teleport_pending is False
-    assert session.teleport_destination == "Silvermoon"
-    assert responses == [
-        ("SMSG_MESSAGECHAT", b"[Teleport] worldport ack -> Silvermoon"),
-        ("SMSG_UPDATE_OBJECT", b"worldport-visible"),
+    assert responses == [("SMSG_UPDATE_OBJECT", b"destination-bootstrap")]
+    assert calls == [
+        (session, "worldport_ack", 1, "transport_worldport"),
     ]
-    assert calls == [(session, "worldport-ack")]
-    assert stream_calls == ["worldport-ack"]
+
+
+def test_live_worldport_ack_opcode_uses_worldport_handler():
+    from server.modules.handlers.world.dispatcher import HANDLERS
+
+    assert HANDLERS["MSG_MOVE_WORLDPORT_ACK"].__name__ == "handle_move_worldport_ack"
 
 
 def test_superseded_transport_worldport_ack_cannot_consume_manual_transition(monkeypatch):

@@ -94,6 +94,7 @@ def build_arc_lengths(
     *,
     samples_per_segment: int = 32,
     interpolation_mode: str = INTERPOLATION_SPLINE,
+    map_local_splines: bool = False,
 ) -> tuple[ArcLengthSample, ...]:
     if len(nodes) < 2:
         return ()
@@ -134,8 +135,15 @@ def build_arc_lengths(
             previous = sample
             continue
 
-        p0 = nodes[max(0, index - 1)]
-        p3 = nodes[min(len(nodes) - 1, index + 2)]
+        lower_control_index = max(0, index - 1)
+        upper_control_index = min(len(nodes) - 1, index + 2)
+        if map_local_splines:
+            if int(nodes[lower_control_index].map_id) != int(current.map_id):
+                lower_control_index = index
+            if int(nodes[upper_control_index].map_id) != int(current.map_id):
+                upper_control_index = index + 1
+        p0 = nodes[lower_control_index]
+        p3 = nodes[upper_control_index]
 
         for step in range(1, segment_samples + 1):
             t = float(step) / float(segment_samples)

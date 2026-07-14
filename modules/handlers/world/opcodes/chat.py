@@ -76,6 +76,9 @@ from server.modules.handlers.world.teleport.teleport_service import (
     remove_teleport as remove_named_teleport,
     search_teleports,
 )
+from server.modules.handlers.world.transport_debug import (
+    log_transport_packet_snapshot,
+)
 
 
 # TODO: Move messagechat packet encoders and raw replay helpers out of legacy once
@@ -1186,9 +1189,13 @@ def _apply_fixplayer_destination(session, destination_name: str) -> str | None:
 
 def _build_fixspeed_responses(session) -> list[tuple[str, bytes]]:
     from server.modules.handlers.world.opcodes.movement import build_same_map_teleport_payload
+    from server.modules.handlers.world.teleport.transition import (
+        mark_near_teleport_pending,
+    )
 
     session.teleport_pending = False
-    session.near_teleport_pending = True
+    if not mark_near_teleport_pending(session):
+        session.near_teleport_pending = True
     session.fixspeed_pending = True
     Logger.info(
         "[FIXSPEED] guid=%s queued same-map teleport pos=(%.2f,%.2f,%.2f,%.2f) run=%.2f",
@@ -1314,6 +1321,15 @@ def _clear_loaded_world_objects_for_teleport(session, movement_handlers, *, map_
                         "SMSG_UPDATE_OBJECT",
                         builder(map_id=int(map_id), guid=int(guid)),
                     )
+                )
+                log_transport_packet_snapshot(
+                    session,
+                    opcode="SMSG_UPDATE_OBJECT",
+                    source_subsystem="manual_teleport_cleanup",
+                    batch_id="manual-teleport-start",
+                    map_id=int(map_id),
+                    object_guid=int(guid),
+                    object_map_context=int(map_id),
                 )
         if is_gameobject_set and isinstance(loaded_transport_entries, dict):
             for guid in sorted(int(value) for value in loaded_guids):
@@ -1511,9 +1527,14 @@ def apply_player_state_change(
         movement_handlers._capture_persist_position_from_session(session)
         movement_handlers._mark_position_dirty(session)
         if same_map:
+            from server.modules.handlers.world.teleport.transition import (
+                mark_near_teleport_pending,
+            )
+
             session.teleport_pending = False
             session.worldport_ack_pending = False
-            session.near_teleport_pending = True
+            if not mark_near_teleport_pending(session):
+                session.near_teleport_pending = True
             teleport_responses = apply_state_and_resync(
                 session,
                 [
@@ -1533,7 +1554,7 @@ def apply_player_state_change(
         session.teleport_pending = True
         session.worldport_ack_pending = True
         session.near_teleport_pending = False
-        return bind_packet_batch_to_current_transition(
+        responses = bind_packet_batch_to_current_transition(
             session,
             pre_position_responses
             + [
@@ -1563,6 +1584,26 @@ def apply_player_state_change(
                 ),
             ],
         )
+        batch_id = (
+            f"{int(responses.transition_generation or 0)}:"
+            "manual-worldport-start"
+        )
+        for opcode_name in ("SMSG_TRANSFER_PENDING", "SMSG_NEW_WORLD"):
+            log_transport_packet_snapshot(
+                session,
+                opcode=opcode_name,
+                source_subsystem="manual_teleport",
+                batch_id=batch_id,
+                map_id=target_map_id,
+                position=(
+                    float(x),
+                    float(y),
+                    float(z),
+                    float(orientation),
+                ),
+                transport_offsets=(0.0, 0.0, 0.0, 0.0),
+            )
+        return responses
 
     responses = _build_field_update_responses(session, field_updates)
 

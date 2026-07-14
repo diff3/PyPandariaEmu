@@ -15,6 +15,7 @@ from typing import Any
 from shared.Logger import Logger
 from server.modules.handlers.world.feature_config import (
     transport_lifecycle_debug_enabled,
+    transport_packet_debug_enabled,
 )
 
 
@@ -89,4 +90,56 @@ def log_transport_event(
         if value is not None and value != "":
             fields.append(f"{key}={value}")
     Logger.info("[TransportLifecycle] %s", " ".join(fields))
+    return True
+
+
+def log_transport_packet_snapshot(
+    session: Any,
+    *,
+    opcode: str,
+    source_subsystem: str,
+    batch_id: str,
+    map_id: int,
+    position: tuple[float, float, float, float] | None = None,
+    transport_guid: int = 0,
+    transport_offsets: tuple[float, float, float, float] | None = None,
+    movement_flags: int = 0,
+    object_guid: int = 0,
+    object_map_context: int | None = None,
+) -> bool:
+    """Log one transition packet's semantic snapshot when explicitly enabled."""
+    if not transport_packet_debug_enabled():
+        return False
+
+    generation = int(
+        getattr(session, "world_transition_generation", 0) or 0
+    )
+    owner = str(getattr(session, "world_transition_owner", "") or "none")
+    fields = [
+        f"opcode={str(opcode)}",
+        f"batch_id={str(batch_id)}",
+        f"generation={generation}",
+        f"owner={owner}",
+        f"source={str(source_subsystem)}",
+        f"map_id={int(map_id)}",
+        f"transport_guid=0x{int(transport_guid) & 0xFFFFFFFFFFFFFFFF:016X}",
+        f"movement_flags=0x{int(movement_flags) & 0xFFFFFFFF:08X}",
+        f"object_guid=0x{int(object_guid) & 0xFFFFFFFFFFFFFFFF:016X}",
+        "object_map_context=%s"
+        % (
+            "none"
+            if object_map_context is None
+            else str(int(object_map_context))
+        ),
+    ]
+    if position is not None:
+        fields.append(
+            "position=(%.3f,%.3f,%.3f,%.6f)" % tuple(position)
+        )
+    if transport_offsets is not None:
+        fields.append(
+            "transport_offsets=(%.3f,%.3f,%.3f,%.6f)"
+            % tuple(transport_offsets)
+        )
+    Logger.info("[TransportPacket] %s", " ".join(fields))
     return True

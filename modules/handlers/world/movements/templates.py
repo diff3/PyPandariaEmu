@@ -22,6 +22,7 @@ def build_template(
     *,
     interpolation_mode: InterpolationMode,
     period_ms: int | None = None,
+    map_local_splines: bool = False,
 ) -> tuple[MovementTemplate | None, str]:
     """Build immutable cached movement template."""
 
@@ -40,6 +41,7 @@ def build_template(
     arc_lengths = build_arc_lengths(
         expanded_nodes,
         interpolation_mode=interpolation_mode,
+        map_local_splines=bool(map_local_splines),
     )
 
     total_length = 0.0
@@ -71,6 +73,7 @@ def build_template(
         transfer_nodes=transfer_nodes,
         station_nodes=station_nodes,
         phase_distances=phase_distances,
+        map_local_splines=bool(map_local_splines),
     )
 
     valid, reason = validate_template(template)
@@ -198,6 +201,19 @@ def _transfer_nodes(
         #
         if bool(node.transfer):
             result.append(index)
+
+    #
+    # A final explicit cross-map node represents the cyclic boundary from the
+    # end of the route back to its first node.  It is not part of the adjacent
+    # pairs above, but it is still an executable transfer node.
+    #
+    last_index = len(nodes) - 1
+    if (
+        last_index >= 0
+        and bool(nodes[last_index].transfer)
+        and int(nodes[last_index].map_id) != int(nodes[0].map_id)
+    ):
+        result.append(last_index)
 
     return tuple(result)
 

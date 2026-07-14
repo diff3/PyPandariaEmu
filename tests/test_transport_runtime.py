@@ -103,6 +103,10 @@ from server.modules.handlers.world.runtime.elevator_store import (
 )
 from server.modules.handlers.world.runtime.transport import Transport
 from server.modules.handlers.world.runtime.world_object import WorldObject
+from server.modules.handlers.world.runtime.world_attachment import (
+    persist_session_world_attachment,
+    prepare_login_world_attachment,
+)
 from server.session.world_session import MovementState
 
 
@@ -349,6 +353,233 @@ def test_elevator_runtime_object_has_stable_shared_identity(monkeypatch):
     assert duplicate is state
     assert manager.elevator_for_guid(int(entry["world_guid"])) is elevator
     assert state.elevator is elevator
+
+
+def _attachment_restore_session(spawn_id: int, **overrides):
+    values = {
+        "char_guid": 42,
+        "realm_id": 1,
+        "map_id": 1,
+        "instance_id": 0,
+        "x": -10.0,
+        "y": -20.0,
+        "z": -30.0,
+        "orientation": 0.25,
+        "movement_state": MovementState(),
+        "transport_attach_state": transport_runtime.ATTACH_STATE_DETACHED,
+        "transport_attached_guid": 0,
+        "pending_world_attachment_restore": {
+            "spawn_id": int(spawn_id),
+            "local_x": 2.0,
+            "local_y": 3.0,
+            "local_z": 4.0,
+            "local_o": 0.5,
+            "safe_map": 1,
+            "safe_instance_id": 0,
+            "safe_x": -10.0,
+            "safe_y": -20.0,
+            "safe_z": -30.0,
+            "safe_o": 0.25,
+            "status": "LOADED",
+        },
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_login_attachment_restores_elevator_world_object(monkeypatch):
+    _reset_transport_states()
+    entry, state, elevator = _registered_runtime_elevator(monkeypatch)
+    session = _attachment_restore_session(int(state.spawn_guid))
+
+    assert prepare_login_world_attachment(session) is True
+
+    assert session.transport_attached_guid == elevator.runtime_guid
+    assert session.movement_state.transport_guid == elevator.runtime_guid
+    assert session.pending_world_attachment_restore["status"] == "PREPARED"
+    assert transport_runtime.transport_passenger_attachment(
+        elevator.runtime_guid,
+        42,
+    ) is not None
+    assert session._player_bootstrap_runtime_transport["transport_guid"] == int(
+        entry["world_guid"]
+    )
+
+
+def test_login_attachment_uses_current_boat_transform_after_movement():
+    _reset_transport_states()
+    _entry, state, transport = _registered_runtime_transport()
+    old_runtime_identity = id(transport)
+    state.x = 500.0
+    state.y = 600.0
+    state.z = 20.0
+    state.orientation = math.pi / 2.0
+    state.path_progress_ms = 3210
+    transport_runtime.get_world_transport_manager().update_entry_transform_from_state(
+        state
+    )
+    session = _attachment_restore_session(int(state.spawn_guid))
+
+    assert prepare_login_world_attachment(session) is True
+
+    assert id(
+        transport_runtime.get_world_transport_manager().transport_for_guid(
+            transport.runtime_guid
+        )
+    ) == old_runtime_identity
+    assert session.x == pytest.approx(497.0)
+    assert session.y == pytest.approx(602.0)
+    assert session.z == pytest.approx(24.0)
+    assert session.x != -10.0
+    assert session.movement_state.transport_time == 3210
+
+
+def test_login_attachment_missing_runtime_falls_back_to_safe_position():
+    _reset_transport_states()
+    session = _attachment_restore_session(
+        999999,
+        map_id=0,
+        x=100.0,
+        y=200.0,
+        z=300.0,
+    )
+
+    assert prepare_login_world_attachment(session) is False
+
+    assert session.pending_world_attachment_restore is None
+    assert session.transport_attach_state == transport_runtime.ATTACH_STATE_DETACHED
+    assert session.movement_state.has_transport_data is False
+    assert (session.map_id, session.x, session.y, session.z) == (
+        1,
+        -10.0,
+        -20.0,
+        -30.0,
+    )
+
+
+def test_login_attachment_resolves_replaced_runtime_identity_after_restart():
+    _reset_transport_states()
+    entry, state, old_transport = _registered_runtime_transport()
+    spawn_id = int(state.spawn_guid)
+    old_runtime_guid = int(old_transport.runtime_guid)
+
+    _reset_transport_states()
+    replacement_entry = dict(entry)
+    replacement_entry["world_guid"] = old_runtime_guid + 1000
+    replacement_state = (
+        transport_runtime.get_world_transport_manager().register_transport(
+            replacement_entry,
+            source="restart-test",
+        )
+    )
+    assert replacement_state is not None
+    session = _attachment_restore_session(spawn_id)
+
+    assert prepare_login_world_attachment(session) is True
+    assert session.transport_attached_guid == old_runtime_guid + 1000
+    assert session.transport_attached_guid != old_runtime_guid
+
+
+def test_login_attachment_rejects_transferring_world_object():
+    _reset_transport_states()
+    _entry, state, _transport = _registered_runtime_transport()
+    state.transfer_active = True
+    state.transfer_destination_map = 0
+    session = _attachment_restore_session(
+        int(state.spawn_guid),
+        map_id=0,
+        x=100.0,
+        y=200.0,
+        z=300.0,
+    )
+
+    assert prepare_login_world_attachment(session) is False
+    assert session.pending_world_attachment_restore is None
+    assert session.transport_attach_state == transport_runtime.ATTACH_STATE_DETACHED
+    assert (session.map_id, session.x, session.y, session.z) == (
+        1,
+        -10.0,
+        -20.0,
+        -30.0,
+    )
+
+
+def test_logout_attachment_persists_spawn_identity_and_local_offset():
+    _reset_transport_states()
+    _entry, state, transport = _registered_runtime_transport()
+    session = _attachment_restore_session(int(state.spawn_guid))
+    session.transport_attach_state = transport_runtime.ATTACH_STATE_ATTACHED
+    session.transport_attached_guid = transport.runtime_guid
+    session.movement_state.has_transport_data = True
+    session.movement_state.transport_guid = transport.runtime_guid
+    session.movement_state.transport_x = 7.0
+    session.movement_state.transport_y = 8.0
+    session.movement_state.transport_z = 9.0
+    session.movement_state.transport_orientation = 0.75
+    saved = []
+
+    class DbApi:
+        @staticmethod
+        def save_character_world_attachment(char_guid, realm_id, **values):
+            saved.append((char_guid, realm_id, values))
+            return True
+
+    assert persist_session_world_attachment(session, db_api=DbApi) is True
+    assert saved == [
+        (
+            42,
+            1,
+            {
+                "spawn_id": int(state.spawn_guid),
+                "local_x": 7.0,
+                "local_y": 8.0,
+                "local_z": 9.0,
+                "local_o": 0.75,
+            },
+        )
+    ]
+
+
+def test_attached_logout_preserves_absolute_safe_position(monkeypatch):
+    session = _attachment_restore_session(7)
+    session.transport_attach_state = transport_runtime.ATTACH_STATE_ATTACHED
+    position_saves = []
+    online_saves = []
+    monkeypatch.setattr(
+        movement.DatabaseConnection,
+        "save_character_position",
+        lambda *args, **kwargs: position_saves.append((args, kwargs)) or True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        movement.DatabaseConnection,
+        "save_character_online_state",
+        lambda *args, **kwargs: online_saves.append((args, kwargs)) or True,
+        raising=False,
+    )
+
+    assert movement._save_session_position(
+        session,
+        reason="disconnect",
+        online=0,
+        force=True,
+    ) is True
+    assert position_saves == []
+    assert len(online_saves) == 1
+    assert online_saves[0][0] == (42, 1)
+    assert online_saves[0][1]["online"] == 0
+    assert int(online_saves[0][1]["logout_time"]) > 0
+
+
+def test_login_attachment_rejects_invalid_saved_offset():
+    _reset_transport_states()
+    _entry, state, _transport = _registered_runtime_transport()
+    session = _attachment_restore_session(int(state.spawn_guid))
+    session.pending_world_attachment_restore["local_x"] = float("inf")
+
+    assert prepare_login_world_attachment(session) is False
+    assert session.pending_world_attachment_restore is None
+    assert session.transport_attach_state == transport_runtime.ATTACH_STATE_DETACHED
 
 
 def test_elevator_movement_publishes_transform_without_owning_simulation(monkeypatch):
@@ -1991,15 +2222,13 @@ def test_world_db_transport_spawns_from_same_map_taxi_nodes(monkeypatch):
     )
     monkeypatch.setattr(
         transport_runtime,
-        "_transport_taxi_path_nodes_by_path",
-        lambda: {
-            241: (
-                transport_runtime.TransportTaxiPathNode(241, 0, 1, -1370.0, -4266.0, 0.0),
-                transport_runtime.TransportTaxiPathNode(241, 1, 1, -1265.0, -4140.0, 0.0),
-                transport_runtime.TransportTaxiPathNode(241, 20, 0, -14123.0, 852.0, 0.0),
-                transport_runtime.TransportTaxiPathNode(241, 21, 0, -14268.0, 964.0, 0.0),
-            )
-        },
+        "_build_skyfire_taxi_transport_route",
+        lambda *_args, **_kwargs: [
+            transport_runtime.TransportRouteNode(1, -1370.0, -4266.0, 0.0, time_ms=0),
+            transport_runtime.TransportRouteNode(1, -1265.0, -4140.0, 0.0, time_ms=1000),
+            transport_runtime.TransportRouteNode(0, -14123.0, 852.0, 0.0, time_ms=1001),
+            transport_runtime.TransportRouteNode(0, -14268.0, 964.0, 0.0, time_ms=2000),
+        ],
     )
     transport_runtime.get_world_transport_manager().start()
 
@@ -2073,13 +2302,11 @@ def test_world_db_transport_canonical_runtime_progresses(monkeypatch):
     )
     monkeypatch.setattr(
         transport_runtime,
-        "_transport_taxi_path_nodes_by_path",
-        lambda: {
-            241: (
-                transport_runtime.TransportTaxiPathNode(241, 0, 1, 0.0, 0.0, 0.0),
-                transport_runtime.TransportTaxiPathNode(241, 1, 1, 100.0, 0.0, 0.0),
-            )
-        },
+        "_build_skyfire_taxi_transport_route",
+        lambda *_args, **_kwargs: [
+            transport_runtime.TransportRouteNode(1, 0.0, 0.0, 0.0, time_ms=0),
+            transport_runtime.TransportRouteNode(1, 100.0, 0.0, 0.0, time_ms=1000),
+        ],
     )
 
     transport_runtime.get_world_transport_manager().start()
@@ -2103,7 +2330,7 @@ def test_world_db_transport_canonical_runtime_progresses(monkeypatch):
     assert int(state.path_progress_ms) == 500
 
 
-def test_canonical_world_db_transport_changes_map_at_transfer(monkeypatch):
+def test_canonical_world_db_transport_publishes_coherent_cross_map_transform(monkeypatch):
     _reset_transport_states()
     server_time = {"ms": 11500}
     monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: 400.0)
@@ -2154,9 +2381,17 @@ def test_canonical_world_db_transport_changes_map_at_transfer(monkeypatch):
 
     assert state.guid == canonical_guid
     assert state.spawn_guid == 7
-    assert state.map_id == 0
-    assert (state.x, state.y, state.z) == (100.0, 200.0, 10.0)
+    assert state.map_id == 1
+    assert (state.x, state.y, state.z) == (20.0, 20.0, 5.0)
+    assert state.transfer_destination_map == 0
+    assert state.lifecycle_state == transport_runtime.TRANSPORT_STATE_TRANSFER_PENDING
     assert int(state.path_progress_ms) == 750
+    transport = transport_runtime.get_world_transport_manager().transport_for_guid(
+        canonical_guid
+    )
+    assert transport is not None
+    assert transport.map_id == 1
+    assert transport.world_position == (20.0, 20.0, 5.0)
     assert set(transport_runtime._runtime_transport_states()) == {canonical_guid}
     assert set(transport_runtime.get_movement_manager().instances) == {canonical_guid}
     assert clone_guid not in transport_runtime._runtime_transport_states()
@@ -2171,6 +2406,9 @@ def test_canonical_world_db_transport_changes_map_at_transfer(monkeypatch):
 
     assert state.guid == canonical_guid
     assert state.map_id == 0
+    assert (state.x, state.y, state.z) == (125.0, 200.0, 10.0)
+    assert transport.map_id == 0
+    assert transport.world_position == (125.0, 200.0, 10.0)
     assert int(state.path_progress_ms) == 1500
     assert set(transport_runtime._runtime_transport_states()) == {canonical_guid}
     assert set(transport_runtime.get_movement_manager().instances) == {canonical_guid}
@@ -2185,6 +2423,8 @@ def test_canonical_world_db_transport_changes_map_at_transfer(monkeypatch):
     assert state.guid == canonical_guid
     assert state.map_id == 1
     assert (state.x, state.y, state.z) == (10.0, 20.0, 5.0)
+    assert transport.map_id == 1
+    assert transport.world_position == (10.0, 20.0, 5.0)
     assert int(state.path_progress_ms) == 0
     assert set(transport_runtime._runtime_transport_states()) == {canonical_guid}
     assert set(transport_runtime.get_movement_manager().instances) == {canonical_guid}
@@ -2254,10 +2494,24 @@ def test_canonical_world_db_transport_visible_only_on_current_map(monkeypatch):
         realm_id=1,
     )
 
-    assert transport_runtime.synthetic_transport_entries_near(
+    entries = transport_runtime.synthetic_transport_entries_near(
         old_map_session,
         loaded_guids=set(),
+    )
+    assert len(entries) == 1
+    assert entries[0]["world_guid"] == canonical_guid
+    assert entries[0]["map"] == 1
+    assert transport_runtime.synthetic_transport_entries_near(
+        new_map_session,
+        loaded_guids=set(),
     ) == []
+
+    server_time["ms"] = 13000
+    transport_runtime.get_movement_manager().tick_instance(
+        canonical_guid,
+        server_time_ms=transport_runtime._transport_server_time_ms(state),
+    )
+    transport_runtime._commit_transport_state_from_movement_cache(state)
     entries = transport_runtime.synthetic_transport_entries_near(
         new_map_session,
         loaded_guids=set(),
@@ -2291,6 +2545,668 @@ def test_cross_map_transport_route_keeps_departure_hold(monkeypatch):
     cross_map_segment_ms = route[2].time_ms - route[1].time_ms
     assert cross_map_segment_ms <= same_map_segment_ms
     assert cross_map_segment_ms <= 2
+
+
+def test_ratchet_booty_route_uses_skyfire_keyframes_and_timing(monkeypatch):
+    if hasattr(transport_runtime._transport_taxi_path_nodes_by_path, "_paths"):
+        monkeypatch.delattr(
+            transport_runtime._transport_taxi_path_nodes_by_path,
+            "_paths",
+        )
+
+    raw_nodes = transport_runtime._transport_taxi_path_nodes_by_path()[241]
+    keyframes = transport_runtime._skyfire_transport_keyframes(
+        raw_nodes,
+        can_be_stopped=False,
+    )
+    observed_section_maps = []
+    original_lengths = transport_runtime._catmull_rom_section_lengths
+
+    def _record_section(section):
+        observed_section_maps.append({int(node.map_id) for node in section})
+        return original_lengths(section)
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "_catmull_rom_section_lengths",
+        _record_section,
+    )
+    route = transport_runtime._build_skyfire_taxi_transport_route(
+        241,
+        move_speed=30.0,
+        acceleration=1.0,
+        can_be_stopped=False,
+    )
+
+    assert len(route) == 18
+    assert [node.source_node_index for node in route] == [
+        *range(1, 11),
+        *range(13, 21),
+    ]
+    assert [
+        (node.source_node_index, node.transfer_destination_node_index)
+        for node in route
+        if node.transfer
+    ] == [(10, 13), (20, 1)]
+    assert observed_section_maps == [{1}, {0}]
+    assert [
+        (
+            node.source_node_index,
+            node.wait_time,
+            node.arrival_event_id,
+            node.departure_event_id,
+        )
+        for node in route
+        if node.wait_time > 0.0
+    ] == [
+        (6, 60.0, 16398, 0),
+        (16, 60.0, 16397, 0),
+    ]
+    assert route[-1].time_ms == 231111
+    assert route[-1].time_ms > 21
+    assert route[10].time_ms - route[9].time_ms == 1
+
+
+def test_ratchet_booty_route_has_symmetric_cross_map_lifecycle_boundaries():
+    nodes = transport_runtime._transport_taxi_path_nodes_by_path()[241]
+    keyframes = transport_runtime._skyfire_transport_keyframes(
+        nodes,
+        can_be_stopped=False,
+    )
+    boundaries = transport_runtime._transport_boundary_destinations(keyframes)
+
+    forward_source = keyframes[9]
+    forward_destination = keyframes[boundaries[9]]
+    reverse_source = keyframes[17]
+    reverse_destination = keyframes[boundaries[17]]
+
+    assert (
+        forward_source.node_index,
+        forward_source.map_id,
+        forward_destination.node_index,
+        forward_destination.map_id,
+    ) == (10, 1, 13, 0)
+    assert (
+        reverse_source.node_index,
+        reverse_source.map_id,
+        reverse_destination.node_index,
+        reverse_destination.map_id,
+    ) == (20, 0, 1, 1)
+
+
+def test_ratchet_booty_runtime_keeps_eighteen_executable_keyframes(monkeypatch):
+    _reset_transport_states()
+    monkeypatch.setattr(
+        transport_runtime,
+        "_shared_route_phase_ms",
+        lambda *_args: 0,
+    )
+    route = transport_runtime._build_skyfire_taxi_transport_route(
+        241,
+        move_speed=30.0,
+        acceleration=1.0,
+        can_be_stopped=False,
+    )
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(7))
+    entry = transport_runtime._entry_from_world_db_transport_spec(
+        {
+            "guid": 7,
+            "entry": 20808,
+            "name": "The Maiden's Fancy",
+            "display_id": 3015,
+            "faction": 0,
+            "flags": 40,
+            "size": 1.0,
+            "path_id": 241,
+            "data1": 30,
+            "data2": 1,
+            "data3": 0,
+            "data8": 0,
+        },
+        world_guid=world_guid,
+        route=route,
+        start_index=0,
+    )
+
+    state = transport_runtime.get_world_transport_manager().register_transport(
+        entry,
+        source="test",
+    )
+    assert state is not None
+    assert len(state.route) == 18
+    assert state.route_period_ms == 231112
+    assert [
+        (node.source_node_index, node.arrival_event_id)
+        for node in state.route
+        if node.arrival_event_id
+    ] == [(6, 16398), (16, 16397)]
+    template = transport_runtime._movement_template_for_state(state)
+    assert template is not None
+    assert len(template.nodes) == 20
+    assert template.period_ms == 231112
+    assert template.transfer_nodes == (10, 19)
+    assert template.station_nodes == (5, 14)
+
+    transport_runtime.get_movement_manager().unregister_instance(world_guid)
+    transport_runtime._ensure_movement_instance_for_state(state)
+    restored_template = transport_runtime._movement_template_for_state(state)
+    assert restored_template is not None
+    assert restored_template.map_local_splines is True
+    assert len(restored_template.nodes) == 20
+
+
+def test_path_241_station_lifecycle_is_symmetric_across_two_cycles(monkeypatch):
+    monkeypatch.setattr(
+        transport_runtime,
+        "_shared_route_phase_ms",
+        lambda *_args: 0,
+    )
+    route = transport_runtime._build_skyfire_taxi_transport_route(
+        241,
+        move_speed=30.0,
+        acceleration=1.0,
+        can_be_stopped=False,
+    )
+    entry = {
+        "entry": 20808,
+        "world_guid": 241,
+        "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
+        "skyfire_transport_route": True,
+    }
+    template = transport_runtime._movement_template_from_route(entry, route)
+
+    assert template is not None
+    assert template.station_nodes == (5, 14)
+    assert template.transfer_nodes == (10, 19)
+    assert route[5].source_node_index == 6
+    assert route[5].arrival_event_id == 16398
+    assert route[13].source_node_index == 16
+    assert route[13].arrival_event_id == 16397
+
+    manager = movement_manager_module.MovementManager()
+    instance = MovementInstance(
+        instance_id=241,
+        template_id=template.template_id,
+        started_at_ms=0,
+    )
+    state = MovementRuntimeState(
+        instance=instance,
+        spawned=True,
+    )
+    manager.templates[template.template_id] = template
+    manager.instances[241] = state
+
+    emitted = []
+
+    def tick_phase(absolute_phase_ms):
+        before = tuple(state.lifecycle_events)
+        transform = manager.tick_instance(
+            241,
+            server_time_ms=int(absolute_phase_ms) + 11500,
+        )
+        after = tuple(state.lifecycle_events)
+        overlap = 0
+        for size in range(min(len(before), len(after)), -1, -1):
+            if before[len(before) - size:] == after[:size]:
+                overlap = size
+                break
+        emitted.extend(after[overlap:])
+        return transform
+
+    tick_phase(0)
+    node_times = sorted(
+        {
+            int(node.time_ms)
+            for node in template.nodes
+            if int(node.time_ms) > 0
+        }
+    )
+    station_samples = {5: [], 14: []}
+    for cycle in range(2):
+        cycle_start = cycle * int(template.period_ms)
+        for phase_ms in node_times:
+            transform = tick_phase(cycle_start + phase_ms)
+            if int(transform.node_index) in station_samples:
+                station_samples[int(transform.node_index)].append(transform)
+        tick_phase((cycle + 1) * int(template.period_ms))
+
+    for station_index in (5, 14):
+        arrivals = [
+            event
+            for event in emitted
+            if event.event_type == MovementLifecycleEventType.ARRIVED
+            and int(event.node_index) == station_index
+        ]
+        departures = [
+            event
+            for event in emitted
+            if event.event_type == MovementLifecycleEventType.DEPARTED
+            and int(event.node_index) == station_index
+        ]
+        assert len(arrivals) == 2
+        assert len(departures) == 2
+        assert len(station_samples[station_index]) == 2
+        assert all(
+            str(transform.state) == evaluator.STATE_DOCKED
+            for transform in station_samples[station_index]
+        )
+
+    cyclic_begins = [
+        event
+        for event in emitted
+        if event.event_type == MovementLifecycleEventType.TRANSFER_BEGIN
+        and int(event.node_index) == 19
+        and int(event.target_map_id) == 1
+    ]
+    assert len(cyclic_begins) == 2
+
+    cyclic_source = evaluator.evaluate_template(
+        template,
+        int(template.period_ms) - 1 + 11500,
+    )
+    cyclic_destination = evaluator.evaluate_template(
+        template,
+        int(template.period_ms) + 11500,
+    )
+    assert (
+        cyclic_source.phase_ms,
+        cyclic_source.node_index,
+        cyclic_source.next_node_index,
+        cyclic_source.map_id,
+        cyclic_source.state,
+    ) == (
+        231111,
+        19,
+        0,
+        0,
+        evaluator.STATE_TRANSFER_PENDING,
+    )
+    assert (
+        cyclic_destination.phase_ms,
+        cyclic_destination.node_index,
+        cyclic_destination.map_id,
+        cyclic_destination.state,
+    ) == (0, 0, 1, evaluator.STATE_ACTIVE)
+
+    ratchet_wait_end = int(template.nodes[6].time_ms)
+    booty_wait_end = int(template.nodes[15].time_ms)
+    for cycle in range(2):
+        cycle_start = cycle * int(template.period_ms)
+        for wait_end, wait_node in ((ratchet_wait_end, 6), (booty_wait_end, 15)):
+            waiting = evaluator.evaluate_template(
+                template,
+                cycle_start + wait_end + 11499,
+            )
+            departed = evaluator.evaluate_template(
+                template,
+                cycle_start + wait_end + 11500,
+            )
+            moving = evaluator.evaluate_template(
+                template,
+                cycle_start + wait_end + 11501,
+            )
+            assert waiting.node_index == wait_node - 1
+            assert waiting.state == evaluator.STATE_DOCKED
+            assert departed.node_index == wait_node
+            assert departed.state == evaluator.STATE_ACTIVE
+            assert (departed.x, departed.y, departed.z) == (
+                waiting.x,
+                waiting.y,
+                waiting.z,
+            )
+            assert moving.node_index == wait_node
+            assert (moving.x, moving.y, moving.z) != (
+                departed.x,
+                departed.y,
+                departed.z,
+            )
+
+
+def test_next_station_distance_completes_no_station_synthetic_cycle():
+    distance = transport_runtime._distance_to_next_station(
+        0,
+        (0,),
+        (10.0, 20.0, 30.0),
+    )
+
+    assert distance == 60.0
+
+
+def test_next_station_distance_completes_one_real_station_cycle():
+    distance = transport_runtime._distance_to_next_station(
+        1,
+        (1,),
+        (10.0, 20.0, 30.0),
+    )
+
+    assert distance == 60.0
+
+
+def test_next_station_distance_stops_at_next_of_multiple_stations():
+    distance = transport_runtime._distance_to_next_station(
+        0,
+        (0, 2),
+        (10.0, 20.0, 30.0),
+    )
+
+    assert distance == 30.0
+
+
+def test_next_station_distance_from_between_stations():
+    distance = transport_runtime._distance_to_next_station(
+        1,
+        (0, 2),
+        (10.0, 20.0, 30.0),
+    )
+
+    assert distance == 20.0
+
+
+def test_next_station_distance_rejects_unreachable_station():
+    with pytest.raises(ValueError, match="no reachable station"):
+        transport_runtime._distance_to_next_station(
+            0,
+            (9,),
+            (10.0, 20.0, 30.0),
+        )
+
+
+def test_skyfire_transport_timeline_accumulates_every_station_delay(monkeypatch):
+    def _nodes(delays):
+        return tuple(
+            transport_runtime.TransportTaxiPathNode(
+                1002,
+                index,
+                1,
+                float(index * 100),
+                0.0,
+                0.0,
+                flags=2 if index in (0, 2, 4) else 0,
+                delay=int(delays.get(index, 0)),
+            )
+            for index in range(5)
+        )
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "_transport_taxi_path_nodes_by_path",
+        lambda: {1002: _nodes({})},
+    )
+    route_without_delays = transport_runtime._build_skyfire_taxi_transport_route(
+        1002,
+        move_speed=10.0,
+        acceleration=1.0,
+        can_be_stopped=True,
+    )
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "_transport_taxi_path_nodes_by_path",
+        lambda: {1002: _nodes({0: 2, 2: 3, 4: 4})},
+    )
+    route = transport_runtime._build_skyfire_taxi_transport_route(
+        1002,
+        move_speed=10.0,
+        acceleration=1.0,
+        can_be_stopped=True,
+    )
+
+    assert [
+        node.time_ms - baseline.time_ms
+        for node, baseline in zip(route, route_without_delays)
+    ] == [0, 2000, 2000, 5000, 5000]
+
+    entry = {
+        "entry": 1002,
+        "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
+        "skyfire_transport_route": True,
+    }
+    template = transport_runtime._movement_template_from_route(entry, route)
+
+    assert template is not None
+    times = [int(node.time_ms) for node in template.nodes]
+    assert all(later > earlier for earlier, later in zip(times, times[1:]))
+    for route_node in route:
+        delay_ms = int(round(float(route_node.wait_time) * 1000.0))
+        if delay_ms <= 0:
+            continue
+        assert int(route_node.time_ms) + delay_ms in times
+    assert template.period_ms == route[-1].time_ms + 4000
+    assert transport_runtime._route_period_with_waits_ms(route) == template.period_ms
+
+
+def test_entry_186371_builds_a_monotonic_skyfire_transport_template(monkeypatch):
+    _reset_transport_states()
+    monkeypatch.setattr(
+        transport_runtime,
+        "_shared_route_phase_ms",
+        lambda *_args: 0,
+    )
+    route = transport_runtime._build_skyfire_taxi_transport_route(
+        727,
+        move_speed=10.0,
+        acceleration=1.0,
+        can_be_stopped=False,
+    )
+
+    assert route[0].source_node_index == 1
+    assert route[0].time_ms == 0
+    assert route[0].wait_time == 60.0
+    assert route[1].source_node_index == 2
+    assert route[1].time_ms == 69_240
+
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(13))
+    entry = transport_runtime._entry_from_world_db_transport_spec(
+        {
+            "guid": 13,
+            "entry": 186371,
+            "name": 'Westguard Keep bombardment ("Zeppelin")',
+            "display_id": 3031,
+            "faction": 0,
+            "flags": 0,
+            "size": 1.0,
+            "path_id": 727,
+            "data1": 10,
+            "data2": 1,
+            "data3": 0,
+            "data8": 0,
+        },
+        world_guid=world_guid,
+        route=route,
+        start_index=0,
+    )
+    try:
+        state = transport_runtime.get_world_transport_manager().register_transport(
+            entry,
+            source="test",
+        )
+
+        assert state is not None
+        template = transport_runtime._movement_template_for_state(state)
+        assert template is not None
+        times = [int(node.time_ms) for node in template.nodes]
+        assert all(later > earlier for earlier, later in zip(times, times[1:]))
+        assert template.period_ms == times[-1]
+        assert state.route_period_ms == template.period_ms
+    finally:
+        _reset_transport_states()
+
+
+def test_path_2600_registers_without_station_nodes(monkeypatch):
+    _reset_transport_states()
+    monkeypatch.setattr(
+        transport_runtime,
+        "_shared_route_phase_ms",
+        lambda *_args: 0,
+    )
+    route = transport_runtime._build_skyfire_taxi_transport_route(
+        2600,
+        move_speed=15.0,
+        acceleration=8.0,
+        can_be_stopped=False,
+    )
+    assert len(route) == 10
+    assert all(node.wait_time == 0.0 for node in route)
+
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(26))
+    entry = transport_runtime._entry_from_world_db_transport_spec(
+        {
+            "guid": 26,
+            "entry": 207227,
+            "name": "Krazzworks Attack Zeppelin",
+            "display_id": 3031,
+            "faction": 0,
+            "flags": 40,
+            "size": 1.0,
+            "path_id": 2600,
+            "data1": 15,
+            "data2": 8,
+            "data3": 0,
+            "data8": 0,
+        },
+        world_guid=world_guid,
+        route=route,
+        start_index=0,
+    )
+
+    try:
+        state = transport_runtime.get_world_transport_manager().register_transport(
+            entry,
+            source="test",
+        )
+        assert state is not None
+        template = transport_runtime._movement_template_for_state(state)
+        assert template is not None
+        times = [int(node.time_ms) for node in template.nodes]
+        assert all(later > earlier for earlier, later in zip(times, times[1:]))
+    finally:
+        _reset_transport_states()
+
+
+@pytest.mark.parametrize(
+    ("entry", "path_id", "speed", "acceleration"),
+    (
+        (20808, 241, 30, 1),
+        (164871, 302, 30, 1),
+        (175080, 285, 30, 1),
+        (176231, 292, 30, 1),
+        (176310, 967, 30, 1),
+        (176495, 301, 30, 1),
+        (177233, 777, 30, 1),
+        (181646, 503, 30, 1),
+        (181688, 964, 15, 1),
+        (181689, 737, 30, 1),
+        (186238, 712, 30, 1),
+        (186371, 727, 10, 1),
+        (187038, 778, 20, 1),
+        (187568, 799, 30, 1),
+        (188511, 1079, 30, 1),
+        (190536, 965, 21, 1),
+        (190549, 1221, 30, 1),
+        (192241, 1095, 2, 1),
+        (192242, 1094, 2, 1),
+        (197195, 1368, 30, 8),
+        (203428, 2338, 15, 10),
+        (203466, 2204, 30, 8),
+        (203626, 2265, 30, 5),
+        (204018, 2222, 7, 10),
+        (206328, 2477, 20, 8),
+        (206329, 2480, 20, 8),
+        (207227, 2600, 15, 8),
+    ),
+)
+def test_all_world_db_type15_route_builders_terminate(
+    entry,
+    path_id,
+    speed,
+    acceleration,
+):
+    route = transport_runtime._build_skyfire_taxi_transport_route(
+        path_id,
+        move_speed=float(speed),
+        acceleration=float(acceleration),
+        can_be_stopped=False,
+    )
+
+    assert len(route) >= 2, f"entry={entry} path={path_id}"
+    times = [int(node.time_ms) for node in route]
+    assert all(later > earlier for earlier, later in zip(times, times[1:]))
+
+
+def test_ratchet_booty_owner_tick_starts_worldport_in_both_directions(monkeypatch):
+    _reset_transport_states()
+    phase = {"value": 115557}
+    monkeypatch.setattr(
+        transport_runtime,
+        "_shared_route_phase_ms",
+        lambda *_args: 11500 + int(phase["value"]),
+    )
+    route = transport_runtime._build_skyfire_taxi_transport_route(
+        241,
+        move_speed=30.0,
+        acceleration=1.0,
+        can_be_stopped=False,
+    )
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(7))
+    entry = transport_runtime._entry_from_world_db_transport_spec(
+        {
+            "guid": 7,
+            "entry": 20808,
+            "name": "The Maiden's Fancy",
+            "display_id": 3015,
+            "faction": 0,
+            "flags": 40,
+            "size": 1.0,
+            "path_id": 241,
+            "data1": 30,
+            "data2": 1,
+            "data3": 0,
+            "data8": 0,
+        },
+        world_guid=world_guid,
+        route=route,
+        start_index=0,
+    )
+    state = transport_runtime.get_world_transport_manager().register_transport(
+        entry,
+        source="test",
+    )
+    assert state is not None
+    worldports = []
+    monkeypatch.setattr(
+        transport_runtime,
+        "transport_crossed_map_boundary",
+        lambda guid, *, previous_map_id, boundary_event: worldports.append(
+            (
+                int(guid),
+                int(previous_map_id),
+                int(boundary_event.target_map_id),
+            )
+        ) or True,
+    )
+
+    phase["value"] = 115559
+    assert transport_runtime.get_world_transport_manager()._tick_transport_state(
+        world_guid,
+        state,
+    ) is True
+    assert state.map_id == 0
+
+    phase["value"] = 231110
+    transport_runtime.get_world_transport_manager()._tick_transport_state(
+        world_guid,
+        state,
+    )
+    phase["value"] = 0
+    assert transport_runtime.get_world_transport_manager()._tick_transport_state(
+        world_guid,
+        state,
+    ) is True
+    assert state.map_id == 1
+    assert worldports == [
+        (world_guid, 1, 0),
+        (world_guid, 0, 1),
+    ]
 
 
 def test_transport_manager_ticks_each_shared_clock_independently(monkeypatch):
@@ -2904,7 +3820,7 @@ def test_cross_map_transfer_waits_at_departure_position(monkeypatch):
     assert transport_runtime.transport_transfer_destination_map_for_guid(world_guid) == 0
 
 
-def test_cached_transport_entry_uses_runtime_position_during_transfer_frame(monkeypatch):
+def test_cached_transport_entry_keeps_source_map_during_transfer_frame(monkeypatch):
     _reset_transport_states()
     monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: 0.0)
     world_guid = 0xF120000000000A03
@@ -2941,7 +3857,7 @@ def test_cached_transport_entry_uses_runtime_position_during_transfer_frame(monk
     )
 
     assert (moved["x"], moved["y"], moved["z"]) == (10.0, 20.0, 5.0)
-    assert moved["map"] == 0
+    assert moved["map"] == 1
     assert moved["transport_path_progress"] == transfer.phase_ms
 
 
@@ -4049,6 +4965,19 @@ def test_transport_boundary_event_worldports_attached_passenger_once(monkeypatch
     assert session.pending_transport_transfer["world_transition_generation"] == (
         session.world_transition_generation
     )
+    pending = session.pending_transport_transfer
+    assert pending["destination_map"] == 0
+    assert (pending["base_x"], pending["base_y"], pending["base_z"]) == (
+        state.x,
+        state.y,
+        state.z,
+    )
+    assert pending["destination_entry"]["map"] == state.map_id
+    assert (
+        pending["destination_entry"]["x"],
+        pending["destination_entry"]["y"],
+        pending["destination_entry"]["z"],
+    ) == (state.x, state.y, state.z)
     boundary_key = tuple(
         session.pending_transport_transfer["boundary_event_key"]
     )
@@ -4482,6 +5411,9 @@ def test_transport_owner_tick_alone_starts_boundary_worldport(monkeypatch):
 
     def commit_boundary(committed_state):
         committed_state.map_id = 0
+        committed_state.x = 100.0
+        committed_state.y = 200.0
+        committed_state.z = 10.0
 
     monkeypatch.setattr(
         transport_runtime,
@@ -4503,6 +5435,13 @@ def test_transport_owner_tick_alone_starts_boundary_worldport(monkeypatch):
         world_guid,
         state,
     ) is True
+    pending = session.pending_transport_transfer
+    assert pending["destination_map"] == 0
+    assert (pending["base_x"], pending["base_y"], pending["base_z"]) == (
+        100.0,
+        200.0,
+        10.0,
+    )
     assert [name for name, _payload in sent][-2:] == [
         "SMSG_TRANSFER_PENDING",
         "SMSG_NEW_WORLD",

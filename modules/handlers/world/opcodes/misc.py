@@ -187,6 +187,14 @@ def handle_logout_request(session, ctx):
         flush_account_data_types_to_db(session, tuple(DB_ACCOUNT_DATA_137_TYPES), seed_defaults=True)
 
     persist_session_inventory(session)
+    try:
+        from server.modules.handlers.world.runtime.world_attachment import (
+            persist_session_world_attachment,
+        )
+
+        persist_session_world_attachment(session)
+    except Exception as exc:
+        Logger.warning("[LOGOUT] world attachment save failed: %s", str(exc))
     save_current_position_like_command(session, reason="logout", online=0, force=True)
     get_player_runtime_store().remove(
         int(getattr(session, "char_guid", 0) or 0)

@@ -24,6 +24,27 @@ from server.modules.handlers.world.bootstrap.playerobjects import (
     locate_field_region,
     extract_field_indices,
 )
+from server.session.world_session import MovementState, WorldSession
+
+
+def _load_world_login_context_class():
+    context_path = (
+        Path(__file__).resolve().parents[1]
+        / "modules"
+        / "handlers"
+        / "world"
+        / "login"
+        / "context.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_packet_snapshot_login_context",
+        context_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.WorldLoginContext
 
 
 EXPECTED_PLAYER_CREATE_MOVEMENT_BLOCK = bytes.fromhex(
@@ -893,6 +914,77 @@ def test_player_create_transport_bootstrap_keeps_stable_no_transport_layout() ->
     assert update["has_transport_data"] == 0
     assert "transport_guid_0_mask" not in update
     assert "transport_x" not in update
+
+def test_manual_teleport_create_snapshot_ignores_stale_transport_state() -> None:
+    world_login_context = _load_world_login_context_class()
+    session = WorldSession()
+    session.account_id = 1
+    session.account_name = "packet-snapshot"
+    session.realm_id = 1
+    session.player_guid = 16
+    session.char_guid = 16
+    session.world_guid = 16
+    session.map_id = 530
+    session.instance_id = 0
+    session.x = 100.0
+    session.y = 200.0
+    session.z = 10.0
+    session.orientation = 0.5
+    session.world_transition_owner = "ordinary_teleport"
+    session.world_transition_status = "ACTIVE"
+    session.teleport_pending = True
+    session.movement_state = MovementState()
+    session.movement_state.has_transport_data = True
+    session.movement_state.transport_guid = 0x1FC0000000000007
+    session.movement_state.transport_x = 2.0
+    session.movement_state.transport_y = 3.0
+    session.movement_state.transport_z = 4.0
+    session.movement_state.transport_orientation = 0.25
+    session.movement_state.transport_time = 1234
+
+    stale_ctx = world_login_context.from_session(session)
+    stale_payload = build_full_player_create(stale_ctx)
+
+    session.movement_state = MovementState()
+    clean_ctx = world_login_context.from_session(session)
+    clean_payload = build_full_player_create(clean_ctx)
+
+    assert stale_ctx.has_transport_data is False
+    assert stale_ctx.transport_guid == 0
+    assert stale_ctx.transport_x == 0.0
+    assert stale_ctx.transport_y == 0.0
+    assert stale_ctx.transport_z == 0.0
+    assert stale_ctx.transport_orientation == 0.0
+    assert stale_payload == clean_payload
+    update = dsl_decode(
+        "SMSG_UPDATE_OBJECT",
+        stale_payload,
+        silent=True,
+    )["updates"][0]
+    assert update["has_transport_data"] == 0
+    assert "transport_guid_0_mask" not in update
+    assert "transport_x" not in update
+
+    session.world_transition_owner = "transport_worldport"
+    session.movement_state.has_transport_data = True
+    session.movement_state.transport_guid = 0x1FC0000000000007
+    session.movement_state.transport_x = 2.0
+    session.movement_state.transport_y = 3.0
+    session.movement_state.transport_z = 4.0
+    session.movement_state.transport_orientation = 0.25
+    session.movement_state.transport_time = 1234
+    transport_ctx = world_login_context.from_session(session)
+    transport_payload = build_full_player_create(transport_ctx)
+    transport_update = dsl_decode(
+        "SMSG_UPDATE_OBJECT",
+        transport_payload,
+        silent=True,
+    )["updates"][0]
+
+    assert transport_ctx.has_transport_data is True
+    assert transport_ctx.transport_guid == 0x1FC0000000000007
+    assert transport_update["has_transport_data"] == 1
+    assert transport_update["transport_x"] == pytest.approx(2.0)
 
 
 def test_server_built_create_mask_roundtrip_matches_field_values() -> None:

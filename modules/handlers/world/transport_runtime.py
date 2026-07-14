@@ -12,7 +12,8 @@ import time
 from typing import Any
 
 from shared.Logger import Logger
-from shared.PathUtils import get_data_root
+from shared.PathUtils import get_data_root, get_dbc_root
+from server.modules.dbc import read_dbc
 from server.modules.handlers.world.feature_config import (
     autonomous_transport_visibility_enabled,
     elevators_enabled,
@@ -48,6 +49,7 @@ from server.modules.handlers.world.runtime.world_object import WorldObject
 from server.modules.handlers.world.transport_debug import (
     TransportDebugEvent,
     log_transport_event,
+    log_transport_packet_snapshot,
     transport_location,
 )
 from server.modules.protocol.packet_batch import PacketBatch
@@ -138,6 +140,10 @@ class TransportRouteNode:
     wait_time: float = 0.0
     time_ms: int = 0
     transfer: bool = False
+    source_node_index: int = -1
+    transfer_destination_node_index: int | None = None
+    arrival_event_id: int = 0
+    departure_event_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -165,6 +171,8 @@ class TransportTaxiPathNode:
     z: float
     flags: int = 0
     delay: int = 0
+    arrival_event_id: int = 0
+    departure_event_id: int = 0
 
 
 @dataclass
@@ -203,6 +211,7 @@ class RuntimeTransportState:
     pending_transfers: dict[int, PassengerTransferState] | None = None
     transport_db_guid: int = 0
     world_db_transport: bool = False
+    skyfire_transport_route: bool = False
     clock_model: str = ""
     clock_started_at_ms: int = 0
     handled_boundary_events: set[tuple[int, int, int | None]] = field(default_factory=set)
@@ -370,6 +379,23 @@ class WorldTransportManager:
         if elevator is not None:
             return elevator
         return self.transport_for_guid(int(world_guid))
+
+    def resolve_world_object_by_spawn_id(
+        self,
+        spawn_id: int,
+    ) -> tuple[WorldObject, RuntimeTransportState] | None:
+        """Resolve stable persisted identity to the current runtime instance."""
+        expected_spawn_id = int(spawn_id)
+        if expected_spawn_id <= 0:
+            return None
+        with self._lock:
+            for state in _runtime_transport_states().values():
+                if int(getattr(state, "spawn_guid", 0) or 0) != expected_spawn_id:
+                    continue
+                runtime_object = self._sync_runtime_object_locked(state)
+                if runtime_object is not None:
+                    return runtime_object, state
+        return None
 
     def resolve_world_object(
         self,
@@ -889,9 +915,11 @@ class WorldTransportManager:
 
     def _register_world_db_transports_locked(self) -> None:
         for spec in _load_world_db_transports():
-            route = _build_timed_taxi_transport_route(
+            route = _build_skyfire_taxi_transport_route(
                 int(spec.get("path_id", 0) or 0),
-                period_ms=int(spec.get("period", 0) or _DEFAULT_MO_TRANSPORT_PERIOD_MS),
+                move_speed=float(spec.get("data1", 0) or 0),
+                acceleration=float(spec.get("data2", 0) or 0),
+                can_be_stopped=bool(int(spec.get("data8", 0) or 0)),
             )
             if len(route) < 2:
                 continue
@@ -2003,9 +2031,13 @@ def _entry_from_world_db_transport_spec(
         "data1": int(spec.get("data1", 0) or 30),
         "data2": int(spec.get("data2", 0) or 1),
         "data3": int(spec.get("data3", 0) or 0),
-        "transport_period": int(spec.get("period", 0) or _DEFAULT_MO_TRANSPORT_PERIOD_MS),
+        "data8": int(spec.get("data8", 0) or 0),
+        "transport_period": int(_route_period_with_waits_ms(route)),
         "route_start_index": int(start_index) % len(route),
+        "shared_route_clock_key": "world-db-transport:%s"
+        % int(spec.get("guid", 0) or 0),
         "world_db_transport": True,
+        "skyfire_transport_route": True,
         "use_transport_guid": True,
         "runtime_route": [
             (
@@ -2015,6 +2047,11 @@ def _entry_from_world_db_transport_spec(
                 float(node.z),
                 float(node.wait_time),
                 int(node.time_ms),
+                int(node.source_node_index),
+                bool(node.transfer),
+                node.transfer_destination_node_index,
+                int(node.arrival_event_id),
+                int(node.departure_event_id),
             )
             for node in route
         ],
@@ -2718,6 +2755,40 @@ def build_bootstrap_transport_value_updates(
     loaded_after = set(getattr(session, "loaded_gameobjects", set()) or set())
     for world_guid, entry in sorted(entries.items()):
         state = _runtime_transport_states().get(int(world_guid))
+        if responses and int(world_guid) in loaded_after:
+            log_transport_packet_snapshot(
+                session,
+                opcode="SMSG_UPDATE_OBJECT",
+                source_subsystem="transport_bootstrap_values",
+                batch_id=(
+                    f"{int(getattr(session, 'world_transition_generation', 0) or 0)}:"
+                    "world-bootstrap"
+                ),
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                position=(
+                    float(
+                        getattr(state, "x", entry.get("x", 0.0)) or 0.0
+                    ),
+                    float(
+                        getattr(state, "y", entry.get("y", 0.0)) or 0.0
+                    ),
+                    float(
+                        getattr(state, "z", entry.get("z", 0.0)) or 0.0
+                    ),
+                    float(
+                        getattr(
+                            state,
+                            "orientation",
+                            entry.get("orientation", 0.0),
+                        )
+                        or 0.0
+                    ),
+                ),
+                object_guid=int(world_guid),
+                object_map_context=int(
+                    getattr(state, "map_id", entry.get("map", 0)) or 0
+                ),
+            )
         Logger.info(
             "[WORLDPORT_TRANSPORT] context=%s player_guid=0x%X map=%s x=%.3f y=%.3f z=%.3f "
             "transport_guid=0x%016X entry=%s phase=%s position=(%.3f %.3f %.3f) "
@@ -3655,7 +3726,13 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
 
     first = route[0]
     second = route[1]
-    route_period_ms = max(int(_route_period_ms(route) or 0), int(_transport_period_ms(entry) or 0))
+    if bool(entry.get("skyfire_transport_route")):
+        route_period_ms = int(_route_period_with_waits_ms(route) or 0)
+    else:
+        route_period_ms = max(
+            int(_route_period_ms(route) or 0),
+            int(_transport_period_ms(entry) or 0),
+        )
     shared_clock_key = str(entry.get("shared_route_clock_key", "") or "")
     reference_clock = bool(entry.get("world_db_transport")) and not shared_clock_key
     clock_started_at_ms = _transport_monotonic_ms() if reference_clock else 0
@@ -3699,6 +3776,7 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
         affinity_map_id=_transport_affinity_map_id(entry, int(first.map_id)),
         transport_db_guid=int(entry.get("transport_db_guid", 0) or 0),
         world_db_transport=bool(entry.get("world_db_transport")),
+        skyfire_transport_route=bool(entry.get("skyfire_transport_route")),
         clock_model=(
             _REFERENCE_TRANSPORT_CLOCK_MODEL
             if reference_clock
@@ -3731,30 +3809,76 @@ def _transport_state_for_entry(entry: dict[str, Any]) -> RuntimeTransportState |
 
 def _movement_template_from_route(entry: dict[str, Any], route: list[TransportRouteNode]):
     yaw = float(entry.get("orientation", 0.0) or 0.0)
-    nodes = tuple(
-        MovementNode(
-            map_id=int(node.map_id),
-            x=float(node.x),
-            y=float(node.y),
-            z=float(node.z),
-            time_ms=int(node.time_ms),
-            yaw=yaw,
-            station=bool(float(node.wait_time) > 0.0),
-            transfer=bool(node.transfer),
-            delay=max(0, int(round(float(node.wait_time) * 1000.0))),
-        )
-        for node in route
+    skyfire_world_transport = bool(
+        bool(entry.get("skyfire_transport_route"))
+        and int(entry.get("type", 0) or 0) == GAMEOBJECT_TYPE_MO_TRANSPORT
+        and any(int(node.source_node_index) >= 0 for node in route)
     )
+    if skyfire_world_transport:
+        movement_nodes: list[MovementNode] = []
+        for node in route:
+            wait_ms = max(0, int(round(float(node.wait_time) * 1000.0)))
+            movement_nodes.append(
+                MovementNode(
+                    map_id=int(node.map_id),
+                    x=float(node.x),
+                    y=float(node.y),
+                    z=float(node.z),
+                    time_ms=int(node.time_ms),
+                    yaw=yaw,
+                    station=wait_ms > 0,
+                    transfer=bool(node.transfer),
+                    delay=0,
+                )
+            )
+            if wait_ms > 0:
+                movement_nodes.append(
+                    MovementNode(
+                        map_id=int(node.map_id),
+                        x=float(node.x),
+                        y=float(node.y),
+                        z=float(node.z),
+                        time_ms=int(node.time_ms) + wait_ms,
+                        yaw=yaw,
+                        station=False,
+                        transfer=False,
+                        delay=0,
+                    )
+                )
+        nodes = tuple(movement_nodes)
+        interpolation_mode = InterpolationMode.SPLINE
+    else:
+        nodes = tuple(
+            MovementNode(
+                map_id=int(node.map_id),
+                x=float(node.x),
+                y=float(node.y),
+                z=float(node.z),
+                time_ms=int(node.time_ms),
+                yaw=yaw,
+                station=bool(float(node.wait_time) > 0.0),
+                transfer=bool(node.transfer),
+                delay=max(0, int(round(float(node.wait_time) * 1000.0))),
+            )
+            for node in route
+        )
+        interpolation_mode = InterpolationMode.LINEAR
     template_id = "transport:%s:%s" % (
         int(entry.get("entry", 0) or 0),
         int(entry.get("world_guid", 0) or 0),
+    )
+    route_period_ms = (
+        _route_period_with_waits_ms(route)
+        if skyfire_world_transport
+        else _route_period_ms(route)
     )
     template, reason = build_template(
         template_id,
         _movement_kind_for_entry(entry),
         nodes,
-        interpolation_mode=InterpolationMode.LINEAR,
-        period_ms=int(_route_period_ms(route) or _transport_period_ms(entry) or 0),
+        interpolation_mode=interpolation_mode,
+        period_ms=int(route_period_ms or _transport_period_ms(entry) or 0),
+        map_local_splines=skyfire_world_transport,
     )
     if template is None:
         Logger.warning(
@@ -3943,7 +4067,8 @@ def _load_world_db_transports() -> tuple[dict[str, Any], ...]:
                     gt.data0,
                     gt.data1,
                     gt.data2,
-                    gt.data3
+                    gt.data3,
+                    gt.data8
                 FROM transports t
                 JOIN gameobject_template gt ON gt.entry = t.entry
                 WHERE gt.type = :transport_type
@@ -3976,6 +4101,7 @@ def _load_world_db_transports() -> tuple[dict[str, Any], ...]:
                 "data1": int(row.get("data1", 0) or 0),
                 "data2": int(row.get("data2", 0) or 0),
                 "data3": int(row.get("data3", 0) or 0),
+                "data8": int(row.get("data8", 0) or 0),
             }
         )
 
@@ -4094,29 +4220,43 @@ def _transport_taxi_path_nodes_by_path() -> dict[int, tuple[TransportTaxiPathNod
         return cached
 
     paths: dict[int, tuple[TransportTaxiPathNode, ...]] = {}
-    try:
-        cache = get_movement_cache()
-        cache.load()
-    except Exception as exc:
+    dbc_root = get_dbc_root()
+    dbc_path = None if dbc_root is None else dbc_root / "TaxiPathNode.dbc"
+    if dbc_path is None or not dbc_path.exists():
         setattr(_transport_taxi_path_nodes_by_path, "_paths", paths)
-        Logger.warning("[WorldTransport] movement cache taxi load failed err=%s", exc)
+        Logger.warning("[WorldTransport] missing TaxiPathNode.dbc")
         return paths
 
-    for path_id, template in cache.taxi_paths.items():
-        nodes: list[TransportTaxiPathNode] = []
-        for index, node in enumerate(template.nodes):
-            nodes.append(
+    try:
+        rows = read_dbc(dbc_path, "diiifffiiii")
+    except Exception as exc:
+        setattr(_transport_taxi_path_nodes_by_path, "_paths", paths)
+        Logger.warning("[WorldTransport] TaxiPathNode load failed err=%s", exc)
+        return paths
+
+    grouped: dict[int, list[TransportTaxiPathNode]] = {}
+    for row in rows:
+        try:
+            path_id = int(row[1])
+            grouped.setdefault(path_id, []).append(
                 TransportTaxiPathNode(
                     path_id=int(path_id),
-                    node_index=int(index),
-                    map_id=int(node.map_id),
-                    x=float(node.x),
-                    y=float(node.y),
-                    z=float(node.z),
-                    flags=int(getattr(node, "flags", 0) or 0),
-                    delay=int(getattr(node, "delay", 0) or 0),
+                    node_index=int(row[2]),
+                    map_id=int(row[3]),
+                    x=float(row[4]),
+                    y=float(row[5]),
+                    z=float(row[6]),
+                    flags=int(row[7]),
+                    delay=max(0, int(row[8])),
+                    arrival_event_id=max(0, int(row[9])),
+                    departure_event_id=max(0, int(row[10])),
                 )
             )
+        except (IndexError, TypeError, ValueError):
+            continue
+
+    for path_id, nodes in grouped.items():
+        nodes.sort(key=lambda node: int(node.node_index))
         if len(nodes) >= 2:
             paths[int(path_id)] = tuple(nodes)
 
@@ -4126,6 +4266,312 @@ def _transport_taxi_path_nodes_by_path() -> dict[int, tuple[TransportTaxiPathNod
         len(paths),
     )
     return paths
+
+
+def _build_skyfire_taxi_transport_route(
+    path_id: int,
+    *,
+    move_speed: float,
+    acceleration: float,
+    can_be_stopped: bool,
+) -> list[TransportRouteNode]:
+    """Build one type-15 route from SkyFire-compatible executable keyframes."""
+    raw_nodes = _transport_taxi_path_nodes_by_path().get(int(path_id), ())
+    keyframes = _skyfire_transport_keyframes(
+        raw_nodes,
+        can_be_stopped=bool(can_be_stopped),
+    )
+    if len(keyframes) < 2:
+        return []
+
+    speed = float(move_speed)
+    accel = float(acceleration)
+    if speed <= 0.0 or accel <= 0.0:
+        Logger.warning(
+            "[WorldTransport] invalid motion path=%s speed=%s acceleration=%s",
+            int(path_id),
+            float(speed),
+            float(accel),
+        )
+        return []
+
+    segment_distances = _map_local_transport_segment_distances(keyframes)
+    arrival_times = _skyfire_transport_arrival_times(
+        keyframes,
+        segment_distances,
+        move_speed=speed,
+        acceleration=accel,
+    )
+    if len(arrival_times) != len(keyframes):
+        return []
+
+    boundary_destinations = _transport_boundary_destinations(keyframes)
+    route: list[TransportRouteNode] = []
+    for index, node in enumerate(keyframes):
+        destination_index = boundary_destinations.get(index)
+        route.append(
+            TransportRouteNode(
+                map_id=int(node.map_id),
+                x=float(node.x),
+                y=float(node.y),
+                z=float(node.z),
+                wait_time=(float(node.delay) if int(node.flags) == 2 else 0.0),
+                time_ms=int(arrival_times[index]),
+                transfer=destination_index is not None,
+                source_node_index=int(node.node_index),
+                transfer_destination_node_index=(
+                    None
+                    if destination_index is None
+                    else int(keyframes[destination_index].node_index)
+                ),
+                arrival_event_id=int(node.arrival_event_id),
+                departure_event_id=int(node.departure_event_id),
+            )
+        )
+    return route
+
+
+def _skyfire_transport_keyframes(
+    raw_nodes: tuple[TransportTaxiPathNode, ...],
+    *,
+    can_be_stopped: bool,
+) -> tuple[TransportTaxiPathNode, ...]:
+    """Remove DBC spline controls that surround cross-map teleport boundaries."""
+    if len(raw_nodes) < 2:
+        return ()
+
+    retained: list[TransportTaxiPathNode] = []
+    skip_next = False
+    for index, node in enumerate(raw_nodes):
+        if skip_next:
+            skip_next = False
+            continue
+        if index + 1 < len(raw_nodes):
+            following = raw_nodes[index + 1]
+            if int(node.flags) == 1 or int(node.map_id) != int(following.map_id):
+                skip_next = True
+                continue
+        retained.append(node)
+
+    if not can_be_stopped and len(retained) >= 2:
+        retained = retained[1:-1]
+    return tuple(retained)
+
+
+def _transport_boundary_destinations(
+    keyframes: tuple[TransportTaxiPathNode, ...],
+) -> dict[int, int]:
+    """Map every cross-map source keyframe to its cyclic destination keyframe."""
+    result: dict[int, int] = {}
+    if len(keyframes) < 2:
+        return result
+    for index, node in enumerate(keyframes):
+        destination_index = (index + 1) % len(keyframes)
+        destination = keyframes[destination_index]
+        if int(node.map_id) != int(destination.map_id):
+            result[index] = destination_index
+    return result
+
+
+def _map_local_transport_segment_distances(
+    keyframes: tuple[TransportTaxiPathNode, ...],
+) -> tuple[float, ...]:
+    """Measure cyclic route edges without cross-map spline control points."""
+    result = [0.0 for _node in keyframes]
+    section_start = 0
+    while section_start < len(keyframes):
+        section_end = section_start + 1
+        while (
+            section_end < len(keyframes)
+            and int(keyframes[section_end].map_id) == int(keyframes[section_start].map_id)
+        ):
+            section_end += 1
+        section = keyframes[section_start:section_end]
+        section_lengths = _catmull_rom_section_lengths(section)
+        for offset, distance in enumerate(section_lengths):
+            result[section_start + offset] = float(distance)
+        section_start = section_end
+    return tuple(result)
+
+
+def _catmull_rom_section_lengths(
+    section: tuple[TransportTaxiPathNode, ...],
+) -> tuple[float, ...]:
+    """Approximate SkyFire's three-sample Catmull-Rom segment lengths."""
+    if len(section) < 2:
+        return ()
+    points = [(float(node.x), float(node.y), float(node.z)) for node in section]
+    first_virtual = tuple(
+        (2.0 * points[0][axis]) - points[1][axis]
+        for axis in range(3)
+    )
+    controls = [first_virtual, *points, points[-1]]
+    lengths: list[float] = []
+    for index in range(len(points) - 1):
+        previous = points[index]
+        distance = 0.0
+        control = controls[index:index + 4]
+        for step in range(1, 4):
+            current = _catmull_rom_transport_point(control, float(step) / 3.0)
+            distance += math.dist(previous, current)
+            previous = current
+        lengths.append(float(distance))
+    return tuple(lengths)
+
+
+def _catmull_rom_transport_point(
+    control: list[tuple[float, float, float]],
+    ratio: float,
+) -> tuple[float, float, float]:
+    value = float(ratio)
+    value_squared = value * value
+    value_cubed = value_squared * value
+    result: list[float] = []
+    for axis in range(3):
+        p0, p1, p2, p3 = (point[axis] for point in control)
+        result.append(
+            0.5 * (
+                (2.0 * p1)
+                + ((-p0 + p2) * value)
+                + ((2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * value_squared)
+                + ((-p0 + 3.0 * p1 - 3.0 * p2 + p3) * value_cubed)
+            )
+        )
+    return (result[0], result[1], result[2])
+
+
+def _skyfire_transport_arrival_times(
+    keyframes: tuple[TransportTaxiPathNode, ...],
+    segment_distances: tuple[float, ...],
+    *,
+    move_speed: float,
+    acceleration: float,
+) -> tuple[int, ...]:
+    """Derive keyframe arrival times from stops and the transport speed profile."""
+    station_indices = tuple(
+        index
+        for index, node in enumerate(keyframes)
+        if int(node.flags) == 2
+    )
+    if len(segment_distances) != len(keyframes):
+        return ()
+    timing_station_indices = station_indices or (0,)
+
+    time_to_stop: list[float] = []
+    for index in range(len(keyframes)):
+        distance_since = _distance_from_previous_station(
+            index,
+            timing_station_indices,
+            segment_distances,
+        )
+        distance_until = _distance_to_next_station(
+            index,
+            timing_station_indices,
+            segment_distances,
+        )
+        time_to_stop.append(
+            _transport_time_to_stop(
+                distance_since,
+                distance_until,
+                move_speed=float(move_speed),
+                acceleration=float(acceleration),
+            )
+        )
+
+    first_node = keyframes[0]
+    current_seconds = (
+        float(max(0, int(first_node.delay)))
+        if int(first_node.flags) == 2
+        else 0.0
+    )
+    arrival_times = [0]
+    for index in range(1, len(keyframes)):
+        current_seconds += float(time_to_stop[index - 1])
+        node = keyframes[index]
+        if int(node.flags) == 2:
+            arrival_seconds = current_seconds
+            current_seconds += float(max(0, int(node.delay)))
+        else:
+            current_seconds -= float(time_to_stop[index])
+            arrival_seconds = current_seconds
+        arrival_times.append(max(0, int(arrival_seconds * 1000.0)))
+
+    # Cross-map teleports are explicit lifecycle markers, not interpolation.
+    for source_index, destination_index in _transport_boundary_destinations(keyframes).items():
+        if destination_index == 0:
+            continue
+        minimum_destination_time = arrival_times[source_index] + 1
+        if arrival_times[destination_index] < minimum_destination_time:
+            adjustment = minimum_destination_time - arrival_times[destination_index]
+            for index in range(destination_index, len(arrival_times)):
+                arrival_times[index] += int(adjustment)
+    return tuple(arrival_times)
+
+
+def _distance_from_previous_station(
+    node_index: int,
+    station_indices: tuple[int, ...],
+    segment_distances: tuple[float, ...],
+) -> float:
+    if node_index in station_indices:
+        return 0.0
+    distance = 0.0
+    cursor = int(node_index)
+    while cursor not in station_indices:
+        previous = (cursor - 1) % len(segment_distances)
+        distance += float(segment_distances[previous])
+        cursor = previous
+    return float(distance)
+
+
+def _distance_to_next_station(
+    node_index: int,
+    station_indices: tuple[int, ...],
+    segment_distances: tuple[float, ...],
+) -> float:
+    segment_count = len(segment_distances)
+    if segment_count <= 0:
+        raise ValueError("transport route has no segments")
+
+    start_index = int(node_index)
+    if start_index < 0 or start_index >= segment_count:
+        raise ValueError(f"transport node index out of range: {start_index}")
+
+    stations = frozenset(int(index) for index in station_indices)
+    distance = 0.0
+    cursor = start_index
+    for _step in range(segment_count):
+        distance += float(segment_distances[cursor])
+        cursor = (cursor + 1) % segment_count
+        if cursor in stations:
+            return float(distance)
+
+    raise ValueError(
+        "transport route has no reachable station "
+        f"from node {start_index} after {segment_count} segments"
+    )
+
+
+def _transport_time_to_stop(
+    distance_since: float,
+    distance_until: float,
+    *,
+    move_speed: float,
+    acceleration: float,
+) -> float:
+    total_distance = float(distance_since) + float(distance_until)
+    acceleration_distance = 0.5 * move_speed * move_speed / acceleration
+    if total_distance < 2.0 * acceleration_distance:
+        if distance_since < distance_until:
+            segment_time = 2.0 * math.sqrt(total_distance / acceleration)
+            return segment_time - math.sqrt(2.0 * distance_since / acceleration)
+        return math.sqrt(2.0 * distance_until / acceleration)
+    if distance_since < acceleration_distance:
+        segment_time = (total_distance / move_speed) + (move_speed / acceleration)
+        return segment_time - math.sqrt(2.0 * distance_since / acceleration)
+    if distance_until < acceleration_distance:
+        return math.sqrt(2.0 * distance_until / acceleration)
+    return (distance_until / move_speed) + (0.5 * move_speed / acceleration)
 
 
 def _build_timed_taxi_transport_route(path_id: int, *, period_ms: int) -> list[TransportRouteNode]:
@@ -4251,9 +4697,20 @@ def _build_default_route(entry: dict[str, Any]) -> list[TransportRouteNode]:
                     float(node[3]),
                     float(node[4]) if len(node) > 4 else 0.0,
                     int(node[5]) if len(node) > 5 else 0,
+                    transfer=bool(node[7]) if len(node) > 7 else False,
+                    source_node_index=int(node[6]) if len(node) > 6 else -1,
+                    transfer_destination_node_index=(
+                        None
+                        if len(node) <= 8 or node[8] is None
+                        else int(node[8])
+                    ),
+                    arrival_event_id=int(node[9]) if len(node) > 9 else 0,
+                    departure_event_id=int(node[10]) if len(node) > 10 else 0,
                 )
             )
         if len(route) >= 2:
+            if bool(entry.get("skyfire_transport_route")):
+                return route
             return _expand_route_wait_nodes(route)
 
     dbc_route = _build_dbc_animation_route(entry)
@@ -4384,6 +4841,41 @@ def _route_period_ms(route: list[TransportRouteNode]) -> int:
     return max(1, max(int(node.time_ms) for node in route))
 
 
+def _route_period_with_waits_ms(route: list[TransportRouteNode]) -> int:
+    """Return the final departure time for an arrival-timed route."""
+    if not _is_timed_route(route):
+        return 0
+    period_ms = max(
+        1,
+        max(
+            int(node.time_ms)
+            + max(0, int(round(float(node.wait_time) * 1000.0)))
+            for node in route
+        ),
+    )
+    first = route[0]
+    last = route[-1]
+    if (
+        bool(last.transfer)
+        and int(last.map_id) != int(first.map_id)
+        and (
+            last.transfer_destination_node_index is None
+            or int(last.transfer_destination_node_index)
+            == int(first.source_node_index)
+        )
+    ):
+        # The modulo clock never reaches a phase equal to period_ms.  Reserve
+        # one lifecycle millisecond so the cyclic transfer source is selected
+        # before the clock returns to the destination at phase zero.
+        period_ms = max(
+            int(period_ms),
+            int(last.time_ms)
+            + max(0, int(round(float(last.wait_time) * 1000.0)))
+            + 1,
+        )
+    return int(period_ms)
+
+
 def _transport_period_ms(entry: dict[str, Any]) -> int:
     period = int(entry.get("transport_period", 0) or 0)
     if period > 0:
@@ -4404,13 +4896,11 @@ def _commit_transport_dynamic_state(state: RuntimeTransportState) -> None:
     transform = get_movement_manager().get_transform(int(state.guid))
     if transform is None:
         return
-    visible_transfer_node = _visible_transfer_destination_node(state, transform)
-    if visible_transfer_node is not None:
-        state.node_index = int(transform.next_node_index)
-        state.map_id = int(visible_transfer_node.map_id)
-    else:
-        state.node_index = int(transform.node_index)
-        state.map_id = int(transform.map_id)
+    # Publish one coherent map-local transform.  During a cross-map transfer the
+    # evaluator keeps the source transform live and exposes destination intent
+    # separately through transfer_destination_map and the lifecycle event.
+    state.node_index = int(transform.node_index)
+    state.map_id = int(transform.map_id)
     state.x = float(transform.x)
     state.y = float(transform.y)
     state.z = float(transform.z)
@@ -4478,6 +4968,8 @@ def _ensure_movement_instance_for_state(state: RuntimeTransportState) -> None:
         "world_guid": int(state.guid),
         "type": GAMEOBJECT_TYPE_MO_TRANSPORT,
         "transport_period": int(state.route_period_ms),
+        "world_db_transport": bool(state.world_db_transport),
+        "skyfire_transport_route": bool(state.skyfire_transport_route),
     }
     template = _movement_template_from_route(entry, list(state.route))
     if template is None:

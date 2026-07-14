@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
-from .interpolation import heading_from_delta, sample_by_distance
+from .interpolation import (
+    heading_from_delta,
+    interpolate_position,
+    sample_by_distance,
+)
 from .types import (
     InterpolationMode,
     MovementTemplate,
@@ -177,6 +181,17 @@ def _evaluate_spline(
 ) -> MovementTransform:
     """Evaluate spline-based movement."""
 
+    if bool(getattr(template, "map_local_splines", False)):
+        return _evaluate_map_local_spline(
+            template,
+            phase,
+            node_index,
+            next_index,
+            state,
+            event,
+            node,
+        )
+
     target_distance = _distance_for_phase(
         template,
         phase,
@@ -234,6 +249,67 @@ def _evaluate_spline(
         x=x,
         y=y,
         z=z,
+        orientation=orientation,
+        phase_ms=int(phase),
+        node_index=int(node_index),
+        next_node_index=int(next_index),
+        state=state,
+        event=event,
+    )
+
+
+def _evaluate_map_local_spline(
+    template: MovementTemplate,
+    phase: int,
+    node_index: int,
+    next_index: int,
+    state: str,
+    event: str,
+    node,
+) -> MovementTransform:
+    """Evaluate one spline segment without crossing its map-local controls."""
+    next_node = template.nodes[next_index]
+    start_time = int(node.time_ms)
+    end_time = int(next_node.time_ms)
+    duration = max(1, end_time - start_time)
+    ratio = max(0.0, min(1.0, (int(phase) - start_time) / duration))
+
+    previous_index = max(0, node_index - 1)
+    following_index = min(len(template.nodes) - 1, next_index + 1)
+    previous = template.nodes[previous_index]
+    following = template.nodes[following_index]
+    if int(previous.map_id) != int(node.map_id):
+        previous = node
+    if int(following.map_id) != int(node.map_id):
+        following = next_node
+
+    x, y, z = interpolate_position(
+        InterpolationMode.SPLINE,
+        previous,
+        node,
+        next_node,
+        following,
+        ratio,
+    )
+    ahead_ratio = min(1.0, ratio + 0.01)
+    ahead_x, ahead_y, _ahead_z = interpolate_position(
+        InterpolationMode.SPLINE,
+        previous,
+        node,
+        next_node,
+        following,
+        ahead_ratio,
+    )
+    orientation = heading_from_delta(
+        float(ahead_x) - float(x),
+        float(ahead_y) - float(y),
+        float(node.yaw or 0.0),
+    )
+    return MovementTransform(
+        map_id=int(node.map_id),
+        x=_stable_axis_value(template, "x", float(x)),
+        y=_stable_axis_value(template, "y", float(y)),
+        z=_stable_axis_value(template, "z", float(z)),
         orientation=orientation,
         phase_ms=int(phase),
         node_index=int(node_index),
@@ -319,6 +395,22 @@ def _segment_for_phase(
                 index + 1,
                 max(0.0, min(1.0, ratio)),
             )
+
+    last_index = len(nodes) - 1
+    cyclic_start = int(nodes[last_index].time_ms)
+    cyclic_end = int(template.period_ms)
+    if (
+        cyclic_start <= int(phase_ms) < cyclic_end
+        and bool(nodes[last_index].transfer)
+        and int(nodes[last_index].map_id) != int(nodes[0].map_id)
+    ):
+        duration = max(1, cyclic_end - cyclic_start)
+        ratio = (int(phase_ms) - cyclic_start) / duration
+        return (
+            last_index,
+            0,
+            max(0.0, min(1.0, ratio)),
+        )
 
     return (
         len(nodes) - 2,

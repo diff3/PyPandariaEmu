@@ -300,6 +300,40 @@ def test_update_object_0003_template_builder_is_not_dispatched():
     assert not hasattr(login_packets, "build_SMSG_UPDATE_OBJECT_1773613176_0003")
 
 
+def test_new_world_serializes_captured_map_one_destination_in_548_order():
+    payload = login_packets.build_login_packet(
+        "SMSG_NEW_WORLD",
+        SimpleNamespace(
+            map_id=1,
+            x=-1270.0899658203125,
+            y=-4134.93896484375,
+            z=6.098471641540527,
+            orientation=5.892721652984619,
+        ),
+    )
+
+    assert payload == bytes.fromhex(
+        "E1C29EC4 01000000 833781C5 AE26C340 2D91BC40"
+    )
+
+
+def test_new_world_serializes_captured_map_zero_destination_in_548_order():
+    payload = login_packets.build_login_packet(
+        "SMSG_NEW_WORLD",
+        SimpleNamespace(
+            map_id=0,
+            x=-14360.1162109375,
+            y=868.4589233398438,
+            z=6.098471641540527,
+            orientation=3.2771177291870117,
+        ),
+    )
+
+    assert payload == bytes.fromhex(
+        "776060C6 00000000 5F1D5944 AE26C340 4CBC5140"
+    )
+
+
 def test_update_object_1775665925_0004_matches_sniff_exactly():
     payload = login_packets.build_SMSG_UPDATE_OBJECT_1775665925_0004(SimpleNamespace(map_id=1))
     assert payload == _capture_payload("SMSG_UPDATE_OBJECT_1775665925_0004.json")

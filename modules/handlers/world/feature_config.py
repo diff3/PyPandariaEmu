@@ -13,6 +13,7 @@ CONFIG_ENABLE_ELEVATORS = "Transport.EnableElevators"
 CONFIG_ENABLE_MOVING_TRANSPORTS = "Transport.EnableMovingTransports"
 CONFIG_DEBUG_TRANSPORT_LIFECYCLE = "Transport.DebugLifecycle"
 CONFIG_DEBUG_TRANSPORT_MOVEMENT = "Transport.DebugMovement"
+CONFIG_DEBUG_TRANSPORT_PACKETS = "Transport.DebugPackets"
 CONFIG_DEBUG_TRANSPORT_MESSAGES = "Transport.DebugMessages"
 CONFIG_AUTONOMOUS_TRANSPORT_VISIBILITY = "Transport.AutonomousVisibility"
 CONFIG_EXPERIMENTAL_PLAYER_CREATE_LIVING_MOVEMENT = "Transport.ExperimentalPlayerCreateLivingMovement"
@@ -48,6 +49,7 @@ _DEFAULTS: dict[str, bool] = {
     CONFIG_ENABLE_MOVING_TRANSPORTS: True,
     CONFIG_DEBUG_TRANSPORT_LIFECYCLE: False,
     CONFIG_DEBUG_TRANSPORT_MOVEMENT: False,
+    CONFIG_DEBUG_TRANSPORT_PACKETS: False,
     CONFIG_DEBUG_TRANSPORT_MESSAGES: False,
     CONFIG_AUTONOMOUS_TRANSPORT_VISIBILITY: False,
     CONFIG_EXPERIMENTAL_PLAYER_CREATE_LIVING_MOVEMENT: False,
@@ -115,6 +117,10 @@ def transport_lifecycle_debug_enabled() -> bool:
 
 def transport_movement_debug_enabled() -> bool:
     return feature_enabled(CONFIG_DEBUG_TRANSPORT_MOVEMENT)
+
+
+def transport_packet_debug_enabled() -> bool:
+    return feature_enabled(CONFIG_DEBUG_TRANSPORT_PACKETS)
 
 
 def transport_debug_messages_enabled() -> bool:
@@ -215,6 +221,10 @@ def log_effective_world_feature_config() -> None:
     Logger.info(
         "[Config] Transport movement debug: %s",
         "enabled" if transport_movement_debug_enabled() else "disabled",
+    )
+    Logger.info(
+        "[Config] Transport packet debug: %s",
+        "enabled" if transport_packet_debug_enabled() else "disabled",
     )
     Logger.info(
         "[Config] Transport debug messages: %s",

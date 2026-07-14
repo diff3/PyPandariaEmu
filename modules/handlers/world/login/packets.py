@@ -1561,8 +1561,8 @@ def build_SMSG_NEW_WORLD(_ctx=None) -> bytes:
         {"map_id": 0, "x": 0.0, "y": 0.0, "z": 0.0, "orientation": 0.0},
     )()
     return _encode("SMSG_NEW_WORLD", {
-        "map_id": int(getattr(ctx, "map_id", 0) or 0),
         "x": float(getattr(ctx, "x", 0.0) or 0.0),
+        "map_id": int(getattr(ctx, "map_id", 0) or 0),
         "y": float(getattr(ctx, "y", 0.0) or 0.0),
         "z": float(getattr(ctx, "z", 0.0) or 0.0),
         "orientation": float(getattr(ctx, "orientation", 0.0) or 0.0),

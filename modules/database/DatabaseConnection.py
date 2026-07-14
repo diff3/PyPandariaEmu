@@ -1093,6 +1093,54 @@ class DatabaseConnection:
             return False
 
     @staticmethod
+    def save_character_world_attachment(
+        char_guid: int,
+        realm_id: int,
+        *,
+        spawn_id: int,
+        local_x: float,
+        local_y: float,
+        local_z: float,
+        local_o: float,
+    ) -> bool:
+        """Persist stable moving-object identity and passenger-local offsets."""
+        session = DatabaseConnection.chars()
+        try:
+            updated = (
+                session.query(Characters)
+                .filter(
+                    Characters.guid == int(char_guid),
+                    Characters.realm == int(realm_id),
+                )
+                .update(
+                    {
+                        Characters.transguid: int(spawn_id or 0),
+                        Characters.trans_x: float(local_x or 0.0),
+                        Characters.trans_y: float(local_y or 0.0),
+                        Characters.trans_z: float(local_z or 0.0),
+                        Characters.trans_o: float(local_o or 0.0),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if not updated:
+                session.rollback()
+                return False
+            session.commit()
+            session.expire_all()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(
+                "[DB] save_character_world_attachment failed "
+                "guid=%s realm=%s: %s",
+                int(char_guid),
+                int(realm_id),
+                str(exc),
+            )
+            return False
+
+    @staticmethod
     def ensure_character_homebind_table() -> bool:
         """Ensure the minimal homebind table used by innkeeper binding exists."""
         session = DatabaseConnection.chars()

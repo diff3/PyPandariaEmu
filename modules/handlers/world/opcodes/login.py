@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Optional, Tuple
 
@@ -75,6 +76,7 @@ from server.modules.handlers.world.runtime.player_store import (
 from server.modules.handlers.world.transport_debug import (
     TransportDebugEvent,
     log_transport_event,
+    log_transport_packet_snapshot,
 )
 
 _CINEMATIC_SEQUENCE_BY_RACE = {
@@ -384,8 +386,14 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     session.worldport_ack_pending = False
     session.teleport_destination = None
     session.near_teleport_pending = False
+    session.near_teleport_generation = 0
     session.world_transition_generation = 0
     session.world_transition_loading_generation = 0
+    from server.modules.handlers.world.teleport.transition import (
+        reset_world_transition_bootstrap,
+    )
+
+    reset_world_transition_bootstrap(session)
     session.world_transition_owner = None
     session.world_transition_ignore_worldport_ack = False
     session.world_transition_status = "IDLE"
@@ -404,6 +412,7 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     except Exception as exc:
         Logger.warning("[TransportDetach] login reset detach failed error=%s", str(exc))
     session.post_bootstrap_transport_reattach_request = None
+    session.pending_world_attachment_restore = None
     session.inventory_activated = False
 
 
@@ -549,6 +558,38 @@ def build_player_bootstrap_packets(session) -> list[tuple[str, bytes]]:
     if player_create is not None:
         responses.append(("SMSG_UPDATE_OBJECT", player_create))
         session.player_object_sent = True
+        log_transport_packet_snapshot(
+            session,
+            opcode="SMSG_UPDATE_OBJECT",
+            source_subsystem="player_bootstrap_create",
+            batch_id=(
+                f"{int(getattr(session, 'world_transition_generation', 0) or 0)}:"
+                "world-bootstrap"
+            ),
+            map_id=int(getattr(ctx, "map_id", 0) or 0),
+            position=(
+                float(getattr(ctx, "x", 0.0) or 0.0),
+                float(getattr(ctx, "y", 0.0) or 0.0),
+                float(getattr(ctx, "z", 0.0) or 0.0),
+                float(getattr(ctx, "orientation", 0.0) or 0.0),
+            ),
+            transport_guid=int(
+                getattr(ctx, "transport_guid", 0) or 0
+            ),
+            transport_offsets=(
+                float(getattr(ctx, "transport_x", 0.0) or 0.0),
+                float(getattr(ctx, "transport_y", 0.0) or 0.0),
+                float(getattr(ctx, "transport_z", 0.0) or 0.0),
+                float(
+                    getattr(ctx, "transport_orientation", 0.0) or 0.0
+                ),
+            ),
+            movement_flags=int(
+                getattr(ctx, "movement_flags", 0) or 0
+            ),
+            object_guid=int(getattr(ctx, "world_guid", 0) or 0),
+            object_map_context=int(getattr(ctx, "map_id", 0) or 0),
+        )
 
     if not transport_bootstrap:
         responses.extend(build_database_gameobject_responses(session))
@@ -630,6 +671,15 @@ def _sync_pending_transport_before_player_bootstrap(session) -> bool:
         transport_y = float(getattr(runtime_state, "y", 0.0) or 0.0)
         transport_z = float(getattr(runtime_state, "z", 0.0) or 0.0)
         transport_o = float(getattr(runtime_state, "orientation", 0.0) or 0.0)
+        cos_o = math.cos(transport_o)
+        sin_o = math.sin(transport_o)
+        rotated_x = (cos_o * local_x) - (sin_o * local_y)
+        rotated_y = (sin_o * local_x) + (cos_o * local_y)
+        rotated_z = local_z
+        player_x = transport_x + rotated_x
+        player_y = transport_y + rotated_y
+        player_z = transport_z + rotated_z
+        player_o = transport_o + local_o
         state = getattr(session, "movement_state", None)
         if state is None:
             from server.session.world_session import MovementState
@@ -646,6 +696,28 @@ def _sync_pending_transport_before_player_bootstrap(session) -> bool:
         state.transport_time2 = 0
         state.transport_time3 = 0
         state.transport_seat = -1
+        state.x = player_x
+        state.y = player_y
+        state.z = player_z
+        state.orientation = player_o
+
+        session.map_id = destination_map
+        session.x = player_x
+        session.y = player_y
+        session.z = player_z
+        session.orientation = player_o
+        from server.modules.handlers.world.runtime.player_store import (
+            sync_player_runtime_from_session,
+        )
+
+        sync_player_runtime_from_session(session)
+        region = getattr(session, "region", None)
+        if (
+            region is not None
+            and int(getattr(region, "map_id", destination_map) or 0)
+            != destination_map
+        ):
+            attach_session_to_world_state(session, map_id=destination_map)
 
         route_phase = int(getattr(runtime_state, "path_progress_ms", 0) or 0) & 0xFFFFFFFF
         session._player_bootstrap_runtime_transport = {
@@ -660,9 +732,9 @@ def _sync_pending_transport_before_player_bootstrap(session) -> bool:
             "local_y": local_y,
             "local_z": local_z,
             "local_o": local_o,
-            "rotated_x": 0.0,
-            "rotated_y": 0.0,
-            "rotated_z": 0.0,
+            "rotated_x": rotated_x,
+            "rotated_y": rotated_y,
+            "rotated_z": rotated_z,
         }
         Logger.info(
             "[TransportBootstrap] preserved_attachment "
@@ -685,7 +757,41 @@ def _sync_pending_transport_before_player_bootstrap(session) -> bool:
         return False
 
 
-def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[tuple[str, bytes]]:
+def _sync_bootstrap_context_from_session(
+    session,
+    ctx: WorldLoginContext,
+) -> None:
+    """Publish committed passenger geometry into the existing bootstrap context."""
+    state = getattr(session, "movement_state", None)
+    ctx.map_id = int(getattr(session, "map_id", 0) or 0)
+    ctx.instance_id = int(getattr(session, "instance_id", 0) or 0)
+    ctx.x = float(getattr(session, "x", 0.0) or 0.0)
+    ctx.y = float(getattr(session, "y", 0.0) or 0.0)
+    ctx.z = float(getattr(session, "z", 0.0) or 0.0)
+    ctx.orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+    ctx.player_runtime = resolve_player_runtime(session)
+    ctx.has_transport_data = bool(
+        state is not None
+        and getattr(state, "has_transport_data", False)
+        and int(getattr(state, "transport_guid", 0) or 0) > 0
+    )
+    ctx.transport_guid = int(getattr(state, "transport_guid", 0) or 0)
+    ctx.transport_x = float(getattr(state, "transport_x", 0.0) or 0.0)
+    ctx.transport_y = float(getattr(state, "transport_y", 0.0) or 0.0)
+    ctx.transport_z = float(getattr(state, "transport_z", 0.0) or 0.0)
+    ctx.transport_orientation = float(
+        getattr(state, "transport_orientation", 0.0) or 0.0
+    )
+    ctx.transport_time = int(getattr(state, "transport_time", 0) or 0)
+    ctx.transport_time2 = int(getattr(state, "transport_time2", 0) or 0)
+    ctx.transport_time3 = int(getattr(state, "transport_time3", 0) or 0)
+    ctx.transport_seat = int(getattr(state, "transport_seat", -1))
+
+
+def _queue_world_bootstrap_transition_unchecked(
+    session,
+    ctx: WorldLoginContext,
+) -> list[tuple[str, bytes]]:
     # TODO: Keep current packet ordering intact until world bootstrap is isolated from legacy replay helpers.
     if getattr(session, "post_loading_sent", False):
         Logger.info("[LOGIN] WORLD_BOOTSTRAP already queued; skipping duplicate")
@@ -761,6 +867,35 @@ def _queue_world_bootstrap_transition(session, ctx: WorldLoginContext) -> list[t
     return responses
 
 
+def _queue_world_bootstrap_transition(
+    session,
+    ctx: WorldLoginContext,
+) -> list[tuple[str, bytes]]:
+    """Build login bootstrap with atomic moving-object attachment restore."""
+    from server.modules.handlers.world.runtime.world_attachment import (
+        abort_login_world_attachment,
+        prepare_login_world_attachment,
+    )
+
+    has_restore = isinstance(
+        getattr(session, "pending_world_attachment_restore", None),
+        dict,
+    )
+    if has_restore:
+        prepare_login_world_attachment(session)
+        ctx = _build_world_login_context(session)
+    try:
+        responses = _queue_world_bootstrap_transition_unchecked(session, ctx)
+    except Exception:
+        if has_restore:
+            abort_login_world_attachment(
+                session,
+                reason="bootstrap_failed",
+            )
+        raise
+    return responses
+
+
 def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tuple[str, bytes]]:
     trace_id = str(getattr(session, "loading_screen_trace_id", "unknown") or "unknown")
     bootstrap_started = time.monotonic()
@@ -779,6 +914,8 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         str(getattr(getattr(session, "taxi_state", None), "phase", "")),
         getattr(session, "pending_taxi_transfer", None),
     )
+    if _sync_pending_transport_before_player_bootstrap(session):
+        _sync_bootstrap_context_from_session(session, ctx)
     _reset_loaded_world_object_state(session)
     _set_login_state(session, LoginState.WORLD_BOOTSTRAP)
     refresh_region_weather(session)
@@ -803,7 +940,6 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         trace_id,
     )
     try:
-        _sync_pending_transport_before_player_bootstrap(session)
         player_bootstrap_packets = build_player_bootstrap_packets(session)
     except Exception as exc:
         Logger.info(
@@ -1095,6 +1231,139 @@ def _fail_transport_worldport_bootstrap(
         expected_generation,
         int(getattr(session, "world_transition_generation", 0) or 0),
         safe_map,
+    )
+    return responses
+
+
+def ensure_worldport_bootstrap_started(
+    session,
+    signal: str,
+    *,
+    expected_generation: int | None = None,
+    expected_owner: str | None = None,
+) -> list[tuple[str, bytes]]:
+    """Start the current worldport bootstrap once for either client signal.
+
+    Loading-screen completion and WORLDPORT_ACK are both untrusted requests to
+    start bootstrap.  Successful bootstrap remains the only completion path.
+    """
+    generation = int(
+        getattr(session, "world_transition_generation", 0) or 0
+    )
+    owner = str(getattr(session, "world_transition_owner", "") or "")
+    signal_name = str(signal or "unknown")
+
+    if expected_generation is None:
+        expected_generation = int(
+            getattr(session, "world_transition_loading_generation", 0) or 0
+        )
+    if expected_owner is None:
+        expected_owner = owner
+
+    if (
+        generation <= 0
+        or not owner
+        or int(expected_generation or 0) != generation
+        or str(expected_owner or "") != owner
+    ):
+        Logger.info(
+            "[WorldportBootstrap] signal rejected signal=%s "
+            "expected_generation=%s current_generation=%s "
+            "expected_owner=%s current_owner=%s reason=stale_ownership",
+            signal_name,
+            int(expected_generation or 0),
+            generation,
+            str(expected_owner or "none"),
+            owner or "none",
+        )
+        return []
+
+    if not bool(getattr(session, "teleport_pending", False)):
+        Logger.info(
+            "[WorldportBootstrap] signal ignored signal=%s generation=%s "
+            "owner=%s reason=no_pending_worldport",
+            signal_name,
+            generation,
+            owner,
+        )
+        return []
+
+    bootstrap_generation = int(
+        getattr(session, "world_transition_bootstrap_generation", 0) or 0
+    )
+    bootstrap_status = str(
+        getattr(session, "world_transition_bootstrap_status", "IDLE") or "IDLE"
+    )
+    if bootstrap_generation == generation and bootstrap_status in {
+        "STARTING",
+        "COMPLETED",
+        "FAILED",
+    }:
+        Logger.info(
+            "[WorldportBootstrap] signal ignored signal=%s generation=%s "
+            "owner=%s reason=already_%s",
+            signal_name,
+            generation,
+            owner,
+            bootstrap_status.lower(),
+        )
+        return []
+
+    session.world_transition_bootstrap_generation = generation
+    session.world_transition_bootstrap_status = "STARTING"
+    pending = getattr(session, "pending_transport_transfer", None)
+    Logger.info(
+        "[WorldportBootstrap] starting signal=%s generation=%s owner=%s",
+        signal_name,
+        generation,
+        owner,
+    )
+
+    try:
+        login_ctx = _build_world_login_context(session)
+        responses = _queue_teleport_world_transition(session, login_ctx)
+    except Exception as exc:
+        session.world_transition_bootstrap_status = "FAILED"
+        log_transport_event(
+            TransportDebugEvent.BOOTSTRAP_REJECTED,
+            transport_guid=int(
+                (pending.get("destination_guid", 0) or 0)
+                if isinstance(pending, dict)
+                else 0
+            ),
+            player_guid=int(getattr(session, "char_guid", 0) or 0),
+            transfer_id=str(
+                pending.get("transfer_id", "")
+                if isinstance(pending, dict)
+                else ""
+            ),
+            reason=str(exc),
+        )
+        if _current_transport_worldport_matches(session, pending):
+            return _fail_transport_worldport_bootstrap(
+                session,
+                pending,
+                reason=str(exc),
+            )
+        raise
+
+    responses.insert(
+        0,
+        (
+            "SMSG_MESSAGECHAT",
+            encode_skyfire_messagechat_system_payload(
+                "[Teleport] loading done -> "
+                f"{str(getattr(session, 'teleport_destination', '') or '?')}"
+            ),
+        ),
+    )
+    Logger.info(
+        "[WorldportBootstrap] completed signal=%s generation=%s "
+        "owner=%s packets=%s",
+        signal_name,
+        generation,
+        owner,
+        len(responses),
     )
     return responses
 
@@ -1421,6 +1690,28 @@ def handle_player_login(session, ctx: PacketContext):
         preserve_loading_screen_done=bool(getattr(session, "loading_screen_done", False)),
     )
 
+    from server.modules.handlers.world.runtime.world_attachment import (
+        load_saved_world_attachment,
+        prepare_login_world_attachment,
+    )
+
+    load_saved_world_attachment(session, row)
+    if prepare_login_world_attachment(session):
+        session.zone = int(
+            resolve_zone_from_position(
+                int(session.map_id),
+                float(session.x),
+                float(session.y),
+            ) or int(session.zone or 0)
+        )
+        session.current_area = int(
+            resolve_area_from_position(
+                int(session.map_id),
+                float(session.x),
+                float(session.y),
+            ) or int(session.zone or 0)
+        )
+
     _resolve_session_ids(session)
     _set_login_state(session, LoginState.PLAYER_LOGIN)
 
@@ -1486,8 +1777,17 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
     _resolve_session_ids(session)
 
     from server.modules.handlers.world.teleport.transition import (
+        current_near_teleport_is_owned,
         mark_world_transition_loading_started,
     )
+
+    if current_near_teleport_is_owned(session):
+        Logger.info(
+            "[WorldHandlers] LOADING_SCREEN_NOTIFY ignored during current "
+            "near teleport generation=%s",
+            int(getattr(session, "world_transition_generation", 0) or 0),
+        )
+        return 0, None
 
     session.loading_screen_visible = bool(showing)
     if showing:
@@ -1557,52 +1857,23 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
             str(getattr(getattr(session, "taxi_state", None), "phase", "")),
             getattr(session, "pending_taxi_transfer", None),
         )
-        context_started = time.monotonic()
-        Logger.info(
-            "[LoadingScreenTrace] trace_id=%s stage=login_context event=entering",
-            trace_id,
-        )
         try:
-            login_ctx = _build_world_login_context(session)
-        except Exception as exc:
-            Logger.info(
-                "[LoadingScreenTrace] trace_id=%s stage=login_context event=exception "
-                "elapsed_ms=%.3f error=%s",
-                trace_id,
-                (time.monotonic() - context_started) * 1000.0,
-                str(exc),
-            )
-            pending = getattr(session, "pending_transport_transfer", None)
-            if _current_transport_worldport_matches(session, pending):
-                fallback_responses = _fail_transport_worldport_bootstrap(
-                    session,
-                    pending,
-                    reason=str(exc),
-                )
-                return 0, fallback_responses or None
-            raise
-        Logger.info(
-            "[LoadingScreenTrace] trace_id=%s stage=login_context event=leaving elapsed_ms=%.3f",
-            trace_id,
-            (time.monotonic() - context_started) * 1000.0,
-        )
-        try:
-            responses = _queue_teleport_world_transition(session, login_ctx)
-        except Exception as exc:
-            pending = getattr(session, "pending_transport_transfer", None)
-            log_transport_event(
-                TransportDebugEvent.BOOTSTRAP_REJECTED,
-                transport_guid=int(
-                    (pending.get("destination_guid", 0) or 0)
-                    if isinstance(pending, dict)
-                    else 0
+            responses = ensure_worldport_bootstrap_started(
+                session,
+                "loading_screen_notify",
+                expected_generation=int(
+                    getattr(
+                        session,
+                        "world_transition_loading_generation",
+                        0,
+                    )
+                    or 0
                 ),
-                player_guid=int(getattr(session, "char_guid", 0) or 0),
-                transfer_id=str(
-                    pending.get("transfer_id", "") if isinstance(pending, dict) else ""
+                expected_owner=str(
+                    getattr(session, "world_transition_owner", "") or ""
                 ),
-                reason=str(exc),
             )
+        except Exception as exc:
             Logger.info(
                 "[LoadingScreenTrace] trace_id=%s stage=bootstrap event=exception "
                 "elapsed_ms=%.3f error=%s",
@@ -1610,23 +1881,7 @@ def handle_loading_screen_notify(session, ctx: PacketContext):
                 (time.monotonic() - handler_started) * 1000.0,
                 str(exc),
             )
-            if _current_transport_worldport_matches(session, pending):
-                fallback_responses = _fail_transport_worldport_bootstrap(
-                    session,
-                    pending,
-                    reason=str(exc),
-                )
-                return 0, fallback_responses or None
             raise
-        responses.insert(
-            0,
-            (
-                "SMSG_MESSAGECHAT",
-                encode_skyfire_messagechat_system_payload(
-                    f"[Teleport] loading done -> {str(getattr(session, 'teleport_destination', '') or '?')}"
-                ),
-            ),
-        )
         Logger.info(
             "[LoadingScreenTrace] trace_id=%s stage=handler event=leaving "
             "elapsed_ms=%.3f reason=teleport_complete packets=%s empty=%s",
@@ -1711,6 +1966,11 @@ def handle_set_active_mover(session, ctx: PacketContext):
         return 0, None
 
     _assert_player_object_sent(session)
+    from server.modules.handlers.world.runtime.world_attachment import (
+        complete_login_world_attachment,
+    )
+
+    complete_login_world_attachment(session)
     _set_login_state(session, LoginState.IN_WORLD)
     player = get_player_runtime_store().add(Player.from_session(session))
     sync_player_visibility(session)

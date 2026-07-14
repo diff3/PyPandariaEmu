@@ -158,6 +158,15 @@ def handle_disconnect_session(target_session) -> None:
 
     # --- Persist position ---
     try:
+        from server.modules.handlers.world.runtime.world_attachment import (
+            persist_session_world_attachment,
+        )
+
+        persist_session_world_attachment(target_session)
+    except Exception as exc:
+        Logger.warning(f"[DISCONNECT] world attachment save failed: {exc}")
+
+    try:
         save_current_position_like_command(
             target_session,
             reason="disconnect",

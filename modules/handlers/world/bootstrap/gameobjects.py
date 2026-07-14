@@ -27,6 +27,9 @@ from server.modules.handlers.world.runtime.world_object import WorldObject
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
 from server.modules.handlers.world.feature_config import transport_movement_debug_enabled
+from server.modules.handlers.world.transport_debug import (
+    log_transport_packet_snapshot,
+)
 
 for _definition_name in gameobject_defs.__all__:
     globals()[f"_{_definition_name}"] = getattr(gameobject_defs, _definition_name)
@@ -57,6 +60,48 @@ def _transport_debug_log(message: str, *args) -> None:
     if not transport_movement_debug_enabled():
         return
     Logger.info(message, *args)
+
+
+def _transport_packet_context_matches_map(
+    entry: Mapping[str, Any],
+    map_id: int,
+) -> bool:
+    """Return whether a moving transport belongs to the packet map snapshot."""
+    is_moving_transport = bool(
+        _entry_int(entry, "type") == 15
+        or entry.get("use_transport_guid")
+        or entry.get("synthetic_transport")
+        or entry.get("world_db_transport")
+    )
+    if not is_moving_transport:
+        return True
+    return _entry_map_id(entry, int(map_id)) == int(map_id)
+
+
+def _discard_transport_packet_snapshot(
+    session,
+    *,
+    world_guids: tuple[int, ...],
+) -> None:
+    """Remove a rejected transport snapshot from session-known containers."""
+    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
+    loaded_gameobject_entries = getattr(
+        session,
+        "loaded_gameobject_entries",
+        None,
+    )
+    loaded_transport_entries = getattr(
+        session,
+        "loaded_transport_entries",
+        None,
+    )
+    for world_guid in world_guids:
+        if isinstance(loaded_gameobjects, set):
+            loaded_gameobjects.discard(int(world_guid))
+        if isinstance(loaded_gameobject_entries, dict):
+            loaded_gameobject_entries.pop(int(world_guid), None)
+        if isinstance(loaded_transport_entries, dict):
+            loaded_transport_entries.pop(int(world_guid), None)
 
 
 def _manager_transport_for_guid(
@@ -1077,6 +1122,38 @@ def build_database_gameobject_responses(
         original_world_guid = int(world_guid)
         entry = cached_transport_runtime_entry(session, entry)
         world_guid = int(entry.get("world_guid", original_world_guid) or original_world_guid)
+        if not _transport_packet_context_matches_map(entry, map_id):
+            _discard_transport_packet_snapshot(
+                session,
+                world_guids=(original_world_guid, world_guid),
+            )
+            log_transport_packet_snapshot(
+                session,
+                opcode="SMSG_UPDATE_OBJECT_SKIPPED",
+                source_subsystem="gameobject_bootstrap_discovery",
+                batch_id=(
+                    f"{int(getattr(session, 'world_transition_generation', 0) or 0)}:"
+                    "world-bootstrap"
+                ),
+                map_id=map_id,
+                position=(
+                    _entry_float(entry, "x"),
+                    _entry_float(entry, "y"),
+                    _entry_float(entry, "z"),
+                    _entry_float(entry, "orientation"),
+                ),
+                object_guid=world_guid,
+                object_map_context=_entry_map_id(entry, map_id),
+            )
+            _transport_debug_log(
+                "[TransportPacket] bootstrap create skipped source=database "
+                "object_guid=0x%016X packet_map=%s object_map=%s "
+                "reason=map_context_mismatch",
+                world_guid & 0xFFFFFFFFFFFFFFFF,
+                map_id,
+                _entry_map_id(entry, map_id),
+            )
+            continue
         if world_guid != original_world_guid:
             loaded_transports = getattr(session, "loaded_transport_entries", None)
             if isinstance(loaded_transports, dict):
@@ -1155,6 +1232,41 @@ def build_database_gameobject_responses(
             entry.get("world_guid", runtime_object.runtime_guid)
             or runtime_object.runtime_guid
         )
+        if not _transport_packet_context_matches_map(entry, map_id):
+            _discard_transport_packet_snapshot(
+                session,
+                world_guids=(
+                    int(runtime_object.runtime_guid),
+                    packet_runtime_guid,
+                ),
+            )
+            log_transport_packet_snapshot(
+                session,
+                opcode="SMSG_UPDATE_OBJECT_SKIPPED",
+                source_subsystem="gameobject_bootstrap_serialize",
+                batch_id=(
+                    f"{int(getattr(session, 'world_transition_generation', 0) or 0)}:"
+                    "world-bootstrap"
+                ),
+                map_id=map_id,
+                position=(
+                    _entry_float(entry, "x"),
+                    _entry_float(entry, "y"),
+                    _entry_float(entry, "z"),
+                    _entry_float(entry, "orientation"),
+                ),
+                object_guid=packet_runtime_guid,
+                object_map_context=_entry_map_id(entry, map_id),
+            )
+            _transport_debug_log(
+                "[TransportPacket] bootstrap create skipped source=serialize "
+                "object_guid=0x%016X packet_map=%s object_map=%s "
+                "reason=map_context_changed",
+                packet_runtime_guid & 0xFFFFFFFFFFFFFFFF,
+                map_id,
+                _entry_map_id(entry, map_id),
+            )
+            continue
         if not gameobject_matches_mapping(
             runtime_object,
             entry,
@@ -1171,6 +1283,27 @@ def build_database_gameobject_responses(
             gameobject=runtime_object,
             transport=transport,
         )
+        if _entry_int(entry, "type") == 15 or entry.get(
+            "use_transport_guid"
+        ):
+            log_transport_packet_snapshot(
+                session,
+                opcode="SMSG_UPDATE_OBJECT",
+                source_subsystem="gameobject_bootstrap_create",
+                batch_id=(
+                    f"{int(getattr(session, 'world_transition_generation', 0) or 0)}:"
+                    "world-bootstrap"
+                ),
+                map_id=map_id,
+                position=(
+                    _entry_float(entry, "x"),
+                    _entry_float(entry, "y"),
+                    _entry_float(entry, "z"),
+                    _entry_float(entry, "orientation"),
+                ),
+                object_guid=packet_runtime_guid,
+                object_map_context=_entry_map_id(entry, map_id),
+            )
         if bool(entry.get("synthetic_transport")):
             _transport_debug_log(
                 "[WorldTransport] synthetic create guid=%s entry=%s type=%s "

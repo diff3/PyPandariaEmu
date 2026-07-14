@@ -41,8 +41,402 @@ from server.session.world_session import LoginState
 from server.session.world_session import MovementState
 
 
+def _pending_worldport_session(
+    *,
+    generation: int = 7,
+    owner: str = "transport_worldport",
+    source_map: int = 0,
+    destination_map: int = 1,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        char_guid=42,
+        world_guid=42,
+        login_state=LoginState.IN_WORLD,
+        map_id=destination_map,
+        instance_id=0,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.5,
+        teleport_pending=True,
+        worldport_ack_pending=True,
+        near_teleport_pending=False,
+        teleport_destination=f"transport:{source_map}->{destination_map}",
+        loading_screen_visible=True,
+        loading_screen_done=False,
+        post_loading_sent=False,
+        world_transition_generation=generation,
+        world_transition_loading_generation=generation,
+        world_transition_bootstrap_generation=0,
+        world_transition_bootstrap_status="IDLE",
+        world_transition_owner=owner,
+        world_transition_ignore_worldport_ack=False,
+        pending_transport_transfer={
+            "world_transition_generation": generation,
+            "source_map": source_map,
+            "destination_map": destination_map,
+            "destination_guid": 7,
+        },
+        transport_transfer_pending=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "signals,source_map,destination_map",
+    (
+        (("loading_screen_notify", "worldport_ack"), 0, 1),
+        (("worldport_ack", "loading_screen_notify"), 1, 0),
+    ),
+)
+def test_ratchet_booty_worldport_bootstrap_signal_order_is_idempotent(
+    monkeypatch,
+    signals,
+    source_map,
+    destination_map,
+) -> None:
+    from server.modules.handlers.world.teleport.transition import (
+        complete_world_transition,
+    )
+
+    session = _pending_worldport_session(
+        source_map=source_map,
+        destination_map=destination_map,
+    )
+    calls = []
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda target: SimpleNamespace(map_id=target.map_id),
+    )
+
+    def queue(target, ctx):
+        calls.append((target.map_id, ctx.map_id))
+        target.teleport_pending = False
+        target.worldport_ack_pending = False
+        target.post_loading_sent = True
+        complete_world_transition(target)
+        return [("SMSG_UPDATE_OBJECT", b"destination-bootstrap")]
+
+    monkeypatch.setattr(login_handlers, "_queue_teleport_world_transition", queue)
+    monkeypatch.setattr(
+        login_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode(),
+    )
+
+    first = login_handlers.ensure_worldport_bootstrap_started(
+        session,
+        signals[0],
+        expected_generation=7,
+        expected_owner="transport_worldport",
+    )
+    second = login_handlers.ensure_worldport_bootstrap_started(
+        session,
+        signals[1],
+        expected_generation=7,
+        expected_owner="transport_worldport",
+    )
+
+    assert first[-1] == ("SMSG_UPDATE_OBJECT", b"destination-bootstrap")
+    assert second == []
+    assert calls == [(destination_map, destination_map)]
+    assert session.world_transition_bootstrap_generation == 7
+    assert session.world_transition_bootstrap_status == "COMPLETED"
+
+
+def test_stale_post_loading_sent_cannot_block_new_transport_bootstrap(
+    monkeypatch,
+) -> None:
+    from server.modules.handlers.world.teleport.transition import (
+        complete_world_transition,
+    )
+
+    session = _pending_worldport_session()
+    session.post_loading_sent = True
+    calls = []
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda _target: SimpleNamespace(),
+    )
+
+    def queue(target, _ctx):
+        calls.append(target.world_transition_generation)
+        target.teleport_pending = False
+        target.worldport_ack_pending = False
+        complete_world_transition(target)
+        return [("SMSG_UPDATE_OBJECT", b"bootstrap")]
+
+    monkeypatch.setattr(login_handlers, "_queue_teleport_world_transition", queue)
+    monkeypatch.setattr(
+        login_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode(),
+    )
+
+    responses = login_handlers.ensure_worldport_bootstrap_started(
+        session,
+        "worldport_ack",
+        expected_generation=7,
+        expected_owner="transport_worldport",
+    )
+
+    assert responses[-1] == ("SMSG_UPDATE_OBJECT", b"bootstrap")
+    assert calls == [7]
+    assert session.world_transition_bootstrap_generation == 7
+    assert session.world_transition_bootstrap_status == "COMPLETED"
+
+
+def test_stale_loading_notification_cannot_start_bootstrap_during_near_teleport(
+    monkeypatch,
+) -> None:
+    session = _pending_worldport_session(owner="ordinary_teleport")
+    session.teleport_pending = False
+    session.worldport_ack_pending = False
+    session.near_teleport_pending = True
+    session.near_teleport_generation = 7
+    session.loading_screen_visible = False
+    ctx = SimpleNamespace(
+        name="CMSG_LOADING_SCREEN_NOTIFY",
+        payload=b"",
+        decoded={},
+    )
+    monkeypatch.setattr(login_handlers, "log_cmsg", lambda _ctx: {})
+    monkeypatch.setattr(
+        login_handlers,
+        "_decode_loading_screen_showing",
+        lambda _decoded, _payload: 0,
+    )
+    monkeypatch.setattr(login_handlers, "_resolve_session_ids", lambda _target: None)
+    monkeypatch.setattr(
+        login_handlers,
+        "_queue_world_bootstrap_transition",
+        lambda *_args: pytest.fail("stale loading started login bootstrap"),
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "ensure_worldport_bootstrap_started",
+        lambda *_args, **_kwargs: pytest.fail(
+            "stale loading started worldport bootstrap"
+        ),
+    )
+
+    assert login_handlers.handle_loading_screen_notify(session, ctx) == (0, None)
+    assert session.near_teleport_pending is True
+    assert session.world_transition_owner == "ordinary_teleport"
+    assert session.world_transition_generation == 7
+    assert session.loading_screen_visible is False
+
+
+def test_bootstrap_state_tombstones_completion_and_resets_other_terminal_paths() -> None:
+    from server.modules.handlers.world.teleport.transition import (
+        begin_ordinary_teleport_transition,
+        complete_world_transition,
+        fail_world_transition,
+    )
+
+    completed = _pending_worldport_session()
+    completed.world_transition_bootstrap_generation = 7
+    completed.world_transition_bootstrap_status = "STARTING"
+    complete_world_transition(completed)
+    assert completed.world_transition_bootstrap_generation == 7
+    assert completed.world_transition_bootstrap_status == "COMPLETED"
+
+    failed = _pending_worldport_session()
+    failed.world_transition_bootstrap_generation = 7
+    failed.world_transition_bootstrap_status = "STARTING"
+    assert fail_world_transition(
+        failed,
+        expected_generation=7,
+        expected_owner="transport_worldport",
+        reason="test failure",
+    ) is True
+    assert failed.world_transition_bootstrap_generation == 0
+    assert failed.world_transition_bootstrap_status == "IDLE"
+
+    superseded = _pending_worldport_session()
+    superseded.world_transition_bootstrap_generation = 7
+    superseded.world_transition_bootstrap_status = "STARTING"
+    assert begin_ordinary_teleport_transition(superseded) == 8
+    assert superseded.world_transition_bootstrap_generation == 0
+    assert superseded.world_transition_bootstrap_status == "IDLE"
+
+
+@pytest.mark.parametrize("signal", ("worldport_ack", "loading_screen_notify"))
+def test_duplicate_worldport_bootstrap_signal_is_ignored(monkeypatch, signal) -> None:
+    session = _pending_worldport_session()
+    session.world_transition_bootstrap_generation = 7
+    session.world_transition_bootstrap_status = "STARTING"
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda _target: pytest.fail("duplicate rebuilt login context"),
+    )
+
+    assert login_handlers.ensure_worldport_bootstrap_started(
+        session,
+        signal,
+        expected_generation=7,
+        expected_owner="transport_worldport",
+    ) == []
+
+
+@pytest.mark.parametrize("signal", ("worldport_ack", "loading_screen_notify"))
+def test_completed_generation_tombstone_rejects_late_bootstrap_signal(
+    monkeypatch,
+    signal,
+) -> None:
+    session = _pending_worldport_session()
+    session.world_transition_bootstrap_generation = 7
+    session.world_transition_bootstrap_status = "COMPLETED"
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda _target: pytest.fail("completed generation restarted bootstrap"),
+    )
+
+    assert login_handlers.ensure_worldport_bootstrap_started(
+        session,
+        signal,
+        expected_generation=7,
+        expected_owner="transport_worldport",
+    ) == []
+    assert session.world_transition_bootstrap_generation == 7
+    assert session.world_transition_bootstrap_status == "COMPLETED"
+
+
+def test_two_bidirectional_cycles_build_one_bootstrap_batch_per_generation(
+    monkeypatch,
+) -> None:
+    from server.modules.handlers.world.teleport.transition import (
+        begin_transport_worldport_transition,
+        complete_world_transition,
+    )
+
+    session = _pending_worldport_session(source_map=0, destination_map=1)
+    built_destinations = []
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda target: SimpleNamespace(map_id=target.map_id),
+    )
+
+    def queue(target, _ctx):
+        built_destinations.append(target.map_id)
+        target.teleport_pending = False
+        target.worldport_ack_pending = False
+        complete_world_transition(target)
+        return [("SMSG_UPDATE_OBJECT", b"bootstrap")]
+
+    monkeypatch.setattr(login_handlers, "_queue_teleport_world_transition", queue)
+    monkeypatch.setattr(
+        login_handlers,
+        "encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode(),
+    )
+
+    for cycle_index, destination_map in enumerate((1, 0, 1, 0)):
+        if cycle_index:
+            begin_transport_worldport_transition(session)
+        generation = int(session.world_transition_generation)
+        session.map_id = destination_map
+        session.teleport_pending = True
+        session.worldport_ack_pending = True
+        session.pending_transport_transfer = {
+            "world_transition_generation": generation,
+            "source_map": 1 - destination_map,
+            "destination_map": destination_map,
+        }
+        first_signal = (
+            "loading_screen_notify" if cycle_index % 2 == 0 else "worldport_ack"
+        )
+        late_signal = (
+            "worldport_ack" if first_signal == "loading_screen_notify"
+            else "loading_screen_notify"
+        )
+
+        assert login_handlers.ensure_worldport_bootstrap_started(
+            session,
+            first_signal,
+            expected_generation=generation,
+            expected_owner="transport_worldport",
+        )
+        assert login_handlers.ensure_worldport_bootstrap_started(
+            session,
+            late_signal,
+            expected_generation=generation,
+            expected_owner="transport_worldport",
+        ) == []
+        assert session.world_transition_bootstrap_generation == generation
+        assert session.world_transition_bootstrap_status == "COMPLETED"
+
+    assert built_destinations == [1, 0, 1, 0]
+
+
+def test_stale_worldport_ack_generation_cannot_start_bootstrap(monkeypatch) -> None:
+    session = _pending_worldport_session(generation=8)
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda _target: pytest.fail("stale ACK built login context"),
+    )
+
+    assert login_handlers.ensure_worldport_bootstrap_started(
+        session,
+        "worldport_ack",
+        expected_generation=7,
+        expected_owner="transport_worldport",
+    ) == []
+    assert session.teleport_pending is True
+    assert session.world_transition_bootstrap_status == "IDLE"
+
+
+def test_ack_triggered_bootstrap_failure_uses_terminal_failure_path(
+    monkeypatch,
+) -> None:
+    session = _pending_worldport_session()
+    pending = session.pending_transport_transfer
+    failures = []
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda _target: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "_queue_teleport_world_transition",
+        lambda _target, _ctx: (_ for _ in ()).throw(
+            RuntimeError("ACK bootstrap failed")
+        ),
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "_fail_transport_worldport_bootstrap",
+        lambda target, target_pending, *, reason: failures.append(
+            (target, target_pending, reason)
+        )
+        or [("SMSG_NEW_WORLD", b"safe-fallback")],
+    )
+
+    responses = login_handlers.ensure_worldport_bootstrap_started(
+        session,
+        "worldport_ack",
+        expected_generation=7,
+        expected_owner="transport_worldport",
+    )
+
+    assert responses == [("SMSG_NEW_WORLD", b"safe-fallback")]
+    assert failures == [(session, pending, "ACK bootstrap failed")]
+    assert session.world_transition_bootstrap_generation == 7
+    assert session.world_transition_bootstrap_status == "FAILED"
+
+
 def test_pending_boat_sync_preserves_attachment_before_bootstrap(monkeypatch) -> None:
     from server.modules.handlers.world import transport_runtime
+    from server.modules.handlers.world.runtime.player import Player
+    from server.modules.handlers.world.runtime.player_store import (
+        get_player_runtime_store,
+    )
 
     transport_guid = 0x1FC0000000000007
     runtime = SimpleNamespace(
@@ -62,6 +456,9 @@ def test_pending_boat_sync_preserves_attachment_before_bootstrap(monkeypatch) ->
         lambda guid: runtime if guid == transport_guid else None,
     )
     session = SimpleNamespace(
+        char_guid=91,
+        world_guid=91,
+        instance_id=0,
         map_id=0,
         x=-500.0,
         y=-600.0,
@@ -82,11 +479,28 @@ def test_pending_boat_sync_preserves_attachment_before_bootstrap(monkeypatch) ->
         },
     )
 
-    assert login_handlers._sync_pending_transport_before_player_bootstrap(session) is True
-    assert session.x == pytest.approx(-500.0)
-    assert session.y == pytest.approx(-600.0)
-    assert session.z == pytest.approx(-10.0)
-    assert session.orientation == pytest.approx(0.0)
+    player_store = get_player_runtime_store()
+    player_store.clear()
+    player = player_store.add(Player.from_session(session))
+    try:
+        synced = login_handlers._sync_pending_transport_before_player_bootstrap(
+            session
+        )
+    finally:
+        player_store.clear()
+
+    assert synced is True
+    assert session.x == pytest.approx(97.0)
+    assert session.y == pytest.approx(202.0)
+    assert session.z == pytest.approx(14.0)
+    assert session.orientation == pytest.approx((math.pi / 2.0) + 0.25)
+    assert (player.map_id, player.x, player.y, player.z, player.orientation) == (
+        pytest.approx(0),
+        pytest.approx(97.0),
+        pytest.approx(202.0),
+        pytest.approx(14.0),
+        pytest.approx((math.pi / 2.0) + 0.25),
+    )
     assert session.movement_state.has_transport_data is True
     assert session.movement_state.transport_guid == transport_guid
     assert session.movement_state.transport_x == pytest.approx(2.0)
@@ -106,9 +520,9 @@ def test_pending_boat_sync_preserves_attachment_before_bootstrap(monkeypatch) ->
         "local_y": 3.0,
         "local_z": 4.0,
         "local_o": 0.25,
-        "rotated_x": 0.0,
-        "rotated_y": 0.0,
-        "rotated_z": 0.0,
+        "rotated_x": pytest.approx(-3.0),
+        "rotated_y": pytest.approx(2.0),
+        "rotated_z": pytest.approx(4.0),
     }
 
 
@@ -458,9 +872,10 @@ def test_pending_transport_transfer_syncs_before_player_bootstrap(monkeypatch) -
     )
 
     assert login_handlers._sync_pending_transport_before_player_bootstrap(session) is True
-    assert session.x == pytest.approx(-1.0)
-    assert session.y == pytest.approx(-2.0)
-    assert session.z == pytest.approx(-3.0)
+    assert session.x == pytest.approx(97.0)
+    assert session.y == pytest.approx(202.0)
+    assert session.z == pytest.approx(14.0)
+    assert session.orientation == pytest.approx((math.pi / 2.0) + 0.25)
     assert session.movement_state.has_transport_data is True
     assert session.movement_state.transport_guid == transport_guid
     assert session.movement_state.transport_time == 4321
@@ -696,6 +1111,10 @@ def test_active_mover_sends_mount_restore_after_known_spells(monkeypatch) -> Non
         motd="",
         chat_motd_sent=False,
         account_settings_sent=False,
+        pending_world_attachment_restore={
+            "status": "PREPARED",
+            "runtime_guid": 7,
+        },
     )
     calls: list[str] = []
 
@@ -723,6 +1142,7 @@ def test_active_mover_sends_mount_restore_after_known_spells(monkeypatch) -> Non
         player = store.get(7)
         assert player is not None
         assert player.runtime_guid == 7
+        assert session.pending_world_attachment_restore is None
         assert player.world_position == (10.0, 20.0, 30.0)
         assert list(store) == [player]
 
@@ -878,6 +1298,10 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
         worldport_ack_pending=True,
         teleport_destination="test",
         char_guid=1,
+        world_guid=1,
+        player_guid=1,
+        instance_id=0,
+        map_id=0,
         x=10.0,
         y=20.0,
         z=30.0,
@@ -895,6 +1319,11 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
             "transfer_id": "1-post-bootstrap",
             "destination_guid": 0x1FC0000000000007,
             "world_transition_generation": 1,
+            "destination_map": 0,
+            "local_x": 2.0,
+            "local_y": 3.0,
+            "local_z": 4.0,
+            "local_o": 0.25,
             "destination_entry": {
                 "entry": 20808,
                 "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
@@ -902,14 +1331,39 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
                 "name": "The Maiden's Fancy",
             },
         },
+        movement_state=MovementState(),
     )
     ctx = SimpleNamespace()
     calls: list[str] = []
+    runtime_state = SimpleNamespace(
+        map_id=0,
+        x=100.0,
+        y=200.0,
+        z=10.0,
+        orientation=math.pi / 2.0,
+        path_progress_ms=4321,
+    )
 
     monkeypatch.setattr(login_handlers, "_set_login_state", lambda _session, state: None)
     monkeypatch.setattr(login_handlers, "refresh_region_weather", lambda _session: None)
     monkeypatch.setattr(login_handlers, "build_login_packet", lambda opcode_name, _ctx: None)
     monkeypatch.setattr(login_handlers, "build_player_bootstrap_packets", lambda _session: [])
+    monkeypatch.setattr(
+        login_handlers,
+        "resolve_player_runtime",
+        lambda target: SimpleNamespace(
+            map_id=target.map_id,
+            x=target.x,
+            y=target.y,
+            z=target.z,
+            orientation=target.orientation,
+        ),
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "current_runtime_transport_state_for_guid",
+        lambda _guid: runtime_state,
+    )
     monkeypatch.setattr(login_handlers.spells_handlers, "build_active_mover_spell_sync_responses", lambda _session: [])
     monkeypatch.setattr(login_handlers, "build_login_inventory_sync_responses", lambda _session: [])
     monkeypatch.setattr(login_handlers, "trigger_inventory_activation", lambda _session: [])
@@ -917,6 +1371,9 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
     monkeypatch.setattr(transport_runtime, "build_bootstrap_transport_value_updates", lambda _session: [])
     def stream_during_bootstrap(target, *, context):
         assert is_player_world_active(target) is False
+        assert (target.x, target.y, target.z) == pytest.approx(
+            (97.0, 202.0, 14.0)
+        )
         calls.append(context)
         return [("SMSG_UPDATE_OBJECT", b"visible-now")]
 
@@ -929,7 +1386,12 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
 
     assert calls == ["worldport-loading-complete"]
     assert responses[0] == ("SMSG_UPDATE_OBJECT", b"visible-now")
-    assert (session.x, session.y, session.z, session.orientation) == (10.0, 20.0, 30.0, 0.5)
+    assert (session.x, session.y, session.z, session.orientation) == pytest.approx(
+        (97.0, 202.0, 14.0, (math.pi / 2.0) + 0.25)
+    )
+    assert (ctx.map_id, ctx.x, ctx.y, ctx.z, ctx.orientation) == pytest.approx(
+        (0, 97.0, 202.0, 14.0, (math.pi / 2.0) + 0.25)
+    )
     assert session.pending_transport_transfer is None
     assert session.transport_transfer_pending is False
     assert session.transport_attach_state == transport_runtime.ATTACH_STATE_ATTACHED
@@ -1172,3 +1634,53 @@ def test_loading_handler_terminalizes_transport_bootstrap_exception(
     assert status == 0
     assert responses == [("SMSG_NEW_WORLD", b"fallback")]
     assert failures == [(session, pending, "bootstrap failed")]
+
+
+def test_login_attachment_bootstrap_failure_aborts_restore(monkeypatch) -> None:
+    from server.modules.handlers.world.runtime import world_attachment
+    from server.modules.handlers.world.state.runtime import is_player_world_active
+
+    pending = {
+        "status": "PREPARED",
+        "spawn_id": 7,
+    }
+    session = SimpleNamespace(
+        char_guid=42,
+        login_state=LoginState.WORLD_BOOTSTRAP,
+        world_transition_owner=None,
+        world_transition_loading_generation=0,
+        pending_world_attachment_restore=pending,
+    )
+    aborts = []
+
+    monkeypatch.setattr(
+        world_attachment,
+        "prepare_login_world_attachment",
+        lambda _session: True,
+    )
+    monkeypatch.setattr(
+        world_attachment,
+        "abort_login_world_attachment",
+        lambda target, *, reason: aborts.append((target, reason)) or True,
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "_build_world_login_context",
+        lambda _session: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "_queue_world_bootstrap_transition_unchecked",
+        lambda _session, _ctx: (_ for _ in ()).throw(
+            RuntimeError("bootstrap failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="bootstrap failed"):
+        login_handlers._queue_world_bootstrap_transition(
+            session,
+            SimpleNamespace(),
+        )
+
+    assert aborts == [(session, "bootstrap_failed")]
+    assert is_player_world_active(session) is False
