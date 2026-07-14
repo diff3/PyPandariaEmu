@@ -150,10 +150,23 @@ def test_logout_request_finalizes_taxi_before_remove_and_position_save(monkeypat
     session.y = 0.0
     session.z = 0.0
     session.orientation = 0.0
+    session.char_guid = 42
+    session.world_guid = 0x100000000000002A
+    session.map_id = 1
+    session.instance_id = 0
     session.taxi_state = object()
     session.taxi_controls_locked = True
     session.player_travel_state = "TAXI_FLIGHT"
     session.global_state.sessions.add(session)
+
+    from server.modules.handlers.world.runtime.player import Player
+    from server.modules.handlers.world.runtime.player_store import (
+        get_player_runtime_store,
+    )
+
+    player_store = get_player_runtime_store()
+    player_store.clear()
+    player_store.add(Player.from_session(session))
 
     status, responses = misc.handle_logout_request(session, SimpleNamespace(payload=b""))
 
@@ -170,3 +183,4 @@ def test_logout_request_finalizes_taxi_before_remove_and_position_save(monkeypat
     assert session.taxi_state is None
     assert session.taxi_controls_locked is False
     assert session.player_travel_state == "NORMAL"
+    assert player_store.get(42) is None

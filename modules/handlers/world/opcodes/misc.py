@@ -38,6 +38,9 @@ from server.modules.handlers.world.opcodes.movement import (
     _save_current_position_like_command as save_current_position_like_command,
 )
 from server.modules.handlers.world.packet_logging import log_cmsg
+from server.modules.handlers.world.runtime.player_store import (
+    get_player_runtime_store,
+)
 from server.modules.handlers.world.taxi_runtime import complete_taxi_for_disconnect
 from server.modules.interpretation.utils import dsl_decode
 from server.modules.handlers.world.state.runtime import (
@@ -185,6 +188,9 @@ def handle_logout_request(session, ctx):
 
     persist_session_inventory(session)
     save_current_position_like_command(session, reason="logout", online=0, force=True)
+    get_player_runtime_store().remove(
+        int(getattr(session, "char_guid", 0) or 0)
+    )
 
     logout_response = EncoderHandler.encode_packet(
         "SMSG_LOGOUT_RESPONSE",

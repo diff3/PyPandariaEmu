@@ -7,6 +7,7 @@ from server.modules.handlers.world.state.region_manager import region_manager
 from server.modules.handlers.world.state import runtime
 from server.modules.handlers.world.state import weather_zone_registry
 from server.modules.handlers.world.state.weather_zone_registry import AreaTableEntry, WeatherZoneEntry
+from server.modules.handlers.world.runtime import Player, get_player_runtime_store
 from server.session.world_session import WorldSession
 
 
@@ -549,3 +550,177 @@ def test_resync_player_appearance_appends_remote_visible_item_updates(monkeypatc
         ("SMSG_UPDATE_OBJECT", b"create"),
         ("SMSG_UPDATE_OBJECT", b"visible-items"),
     ]]
+
+
+def test_visibility_decision_is_identical_with_matching_runtime_players():
+    store = get_player_runtime_store()
+    store.clear()
+    left = _make_session(name="Left", guid=101, map_id=1, state=GlobalState())
+    right = _make_session(name="Right", guid=102, map_id=1, state=GlobalState())
+    left.instance_id = right.instance_id = 7
+    left.phase_mask = right.phase_mask = 1
+    left.x, left.y, left.z = (10.0, 20.0, 30.0)
+    right.x, right.y, right.z = (15.0, 25.0, 35.0)
+
+    fallback_decision = runtime._sessions_in_visibility_range(left, right)
+    store.add(Player.from_session(left))
+    store.add(Player.from_session(right))
+    try:
+        runtime_decision = runtime._sessions_in_visibility_range(left, right)
+    finally:
+        store.clear()
+
+    assert fallback_decision is True
+    assert runtime_decision is fallback_decision
+
+
+def test_visibility_reads_map_instance_and_position_from_runtime_player():
+    store = get_player_runtime_store()
+    store.clear()
+    left = _make_session(name="Left", guid=201, map_id=1, state=GlobalState())
+    right = _make_session(name="Right", guid=202, map_id=1, state=GlobalState())
+    left.instance_id = right.instance_id = 7
+    left.phase_mask = right.phase_mask = 1
+    left.x, left.y, left.z = (0.0, 0.0, 0.0)
+    right.x, right.y, right.z = (1.0, 1.0, 1.0)
+    left_player = Player.from_session(left)
+    right_player = Player.from_session(right)
+    store.add(left_player)
+    store.add(right_player)
+
+    left.map_id = 530
+    left.instance_id = 99
+    left.x, left.y, left.z = (1000.0, 1000.0, 1000.0)
+
+    try:
+        assert runtime._sessions_in_visibility_range(left, right) is True
+
+        left_player.map_id = 530
+        assert runtime._sessions_in_visibility_range(left, right) is False
+
+        left_player.map_id = right_player.map_id
+        left_player.instance_id = 99
+        assert runtime._sessions_in_visibility_range(left, right) is False
+
+        left_player.instance_id = right_player.instance_id
+        left_player.x = 1000.0
+        assert runtime._sessions_in_visibility_range(left, right) is False
+    finally:
+        store.clear()
+
+
+def test_visibility_candidate_discovery_reads_map_from_runtime_player():
+    store = get_player_runtime_store()
+    store.clear()
+    state = GlobalState()
+    session = _make_session(name="Candidate", guid=251, map_id=1, state=state)
+    session.login_state = "IN_WORLD"
+    state.sessions.add(session)
+    player = Player.from_session(session)
+    store.add(player)
+    session.map_id = 530
+
+    try:
+        assert runtime.iter_in_world_sessions(state=state, map_id=1) == [session]
+        assert runtime.iter_in_world_sessions(state=state, map_id=530) == []
+    finally:
+        store.clear()
+
+
+def test_visibility_create_and_destroy_order_is_unchanged(monkeypatch):
+    source = _make_session(name="Source", guid=301, map_id=1, state=GlobalState())
+    other = _make_session(name="Other", guid=302, map_id=1, state=GlobalState())
+    source.login_state = "IN_WORLD"
+    other.login_state = "IN_WORLD"
+    calls = []
+
+    monkeypatch.setattr(
+        runtime,
+        "_send_player_create",
+        lambda observer, visible: calls.append(
+            ("create", observer.char_guid, visible.char_guid)
+        ) or True,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_send_player_remove",
+        lambda observer, visible: calls.append(
+            ("destroy", observer.char_guid, visible.char_guid)
+        ) or True,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_sessions_in_visibility_range",
+        lambda left, right: True,
+    )
+
+    runtime._reconcile_session_visibility_pair(source, other)
+
+    assert calls == [
+        ("create", source.char_guid, other.char_guid),
+        ("create", other.char_guid, source.char_guid),
+    ]
+
+    calls.clear()
+    monkeypatch.setattr(
+        runtime,
+        "_sessions_in_visibility_range",
+        lambda left, right: False,
+    )
+
+    runtime._reconcile_session_visibility_pair(source, other)
+
+    assert calls == [
+        ("destroy", source.char_guid, other.char_guid),
+        ("destroy", other.char_guid, source.char_guid),
+    ]
+
+
+def test_visibility_create_context_uses_stored_player_runtime(monkeypatch):
+    store = get_player_runtime_store()
+    store.clear()
+    source = _make_session(name="Source", guid=401, map_id=1, state=GlobalState())
+    source.world_guid = 0x1000000000000191
+    player = Player.from_session(source)
+    store.add(player)
+    captured = {}
+
+    context_module = types.ModuleType(
+        "server.modules.handlers.world.login.context",
+    )
+
+    class _WorldLoginContext:
+        @staticmethod
+        def from_session(_session):
+            return SimpleNamespace()
+
+    context_module.WorldLoginContext = _WorldLoginContext
+    monkeypatch.setitem(
+        sys.modules,
+        "server.modules.handlers.world.login.context",
+        context_module,
+    )
+
+    packets_module = types.ModuleType(
+        "server.modules.handlers.world.login.packets",
+    )
+
+    def capture_packet(_opcode, ctx):
+        captured["player"] = ctx.player_runtime
+        return b"create"
+
+    packets_module.build_login_packet = capture_packet
+    monkeypatch.setitem(
+        sys.modules,
+        "server.modules.handlers.world.login.packets",
+        packets_module,
+    )
+
+    try:
+        response = runtime._build_player_create_update_response(source)
+    finally:
+        store.clear()
+
+    assert response == ("SMSG_UPDATE_OBJECT", b"create")
+    assert captured["player"] is player
+    assert captured["player"].runtime_guid == source.world_guid

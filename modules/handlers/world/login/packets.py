@@ -43,6 +43,7 @@ from server.modules.handlers.world.pet.pet_service import (
     granted_battle_pet_spells,
 )
 from server.modules.handlers.world.bootstrap.playerobjects import build_server_built_player_create
+from server.modules.handlers.world.runtime.player import Player
 from server.modules.handlers.world.protocol.update_object.serializers import (
     build_fixed_u32_field_block,
 )
@@ -135,7 +136,11 @@ def _encode(name: str, data: Dict[str, Any]) -> bytes:
 # Opcode → builder dispatch
 # ------------------------------------------------------------
 
-def build_login_packet(opcode: str, ctx):
+def build_login_packet(
+    opcode: str,
+    ctx,
+    player: Player | None = None,
+):
     """
     Dispatch helper used by worldLogin.flow.
 
@@ -148,6 +153,14 @@ def build_login_packet(opcode: str, ctx):
     if fn is None:
         return None
 
+    if player is not None and opcode in {
+        "SMSG_LOGIN_VERIFY_WORLD",
+        "SMSG_MOVE_SET_ACTIVE_MOVER",
+        "SMSG_UPDATE_OBJECT_1773613176_0002",
+        "SMSG_UPDATE_OBJECT_1773613176_0004",
+        "SMSG_UPDATE_OBJECT_1773613185_0006",
+    }:
+        return fn(ctx, player=player)
     return fn(ctx)
 
 # ---------------------------------------------------------------------
@@ -646,18 +659,43 @@ def build_SMSG_SETUP_CURRENCY(ctx) -> bytes:
 # Post-loading packets (world entered)
 # ---------------------------------------------------------------------
 
-def build_SMSG_LOGIN_VERIFY_WORLD(_ctx=None) -> bytes:
+def build_SMSG_LOGIN_VERIFY_WORLD(
+    _ctx=None,
+    player: Player | None = None,
+) -> bytes:
     ctx = _ctx or type(
         "Ctx",
         (),
         {"x": 0.0, "y": 0.0, "z": 0.0, "orientation": 0.0, "map_id": 0},
     )()
+    if player is None:
+        player = getattr(ctx, "player_runtime", None)
     return _encode("SMSG_LOGIN_VERIFY_WORLD", {
-        "x": float(getattr(ctx, "x", 0.0)),
-        "facing": float(getattr(ctx, "orientation", 0.0)),
-        "y": float(getattr(ctx, "y", 0.0)),
-        "map": int(getattr(ctx, "map_id", 0)),
-        "z": float(getattr(ctx, "z", 0.0)),
+        "x": (
+            float(player.x)
+            if player is not None
+            else float(getattr(ctx, "x", 0.0))
+        ),
+        "facing": (
+            float(player.orientation)
+            if player is not None
+            else float(getattr(ctx, "orientation", 0.0))
+        ),
+        "y": (
+            float(player.y)
+            if player is not None
+            else float(getattr(ctx, "y", 0.0))
+        ),
+        "map": (
+            int(player.map_id)
+            if player is not None
+            else int(getattr(ctx, "map_id", 0))
+        ),
+        "z": (
+            float(player.z)
+            if player is not None
+            else float(getattr(ctx, "z", 0.0))
+        ),
     })
 
 
@@ -1072,10 +1110,27 @@ def build_SMSG_UPDATE_OBJECT_1775665925_0006(_ctx=None) -> bytes:
     return built
 
 
-def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
+def build_SMSG_UPDATE_OBJECT_1773613176_0004(
+    _ctx=None,
+    player: Player | None = None,
+) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
-    map_id = _ctx_int_preserve_zero(ctx, "exact_0004_map_id", int(getattr(ctx, "map_id", 1)))
-    guid = _resolve_player_value_update_guid(ctx, "exact_0004_guid")
+    if player is None:
+        player = getattr(ctx, "player_runtime", None)
+    map_id = (
+        int(player.map_id)
+        if player is not None
+        else _ctx_int_preserve_zero(
+            ctx,
+            "exact_0004_map_id",
+            int(getattr(ctx, "map_id", 1)),
+        )
+    )
+    guid = _resolve_player_value_update_guid(
+        ctx,
+        "exact_0004_guid",
+        player,
+    )
     base_fields = _player_visual_value_update_fields(ctx)
     mask_bytes, field_bytes, set_bits = _build_exact_fixed_u32_field_block(
         base_fields,
@@ -1112,10 +1167,19 @@ def build_SMSG_UPDATE_OBJECT_1773613176_0004(_ctx=None) -> bytes:
     return built
 
 
-def build_SMSG_UPDATE_OBJECT_1773613176_0002(_ctx=None) -> bytes:
+def build_SMSG_UPDATE_OBJECT_1773613176_0002(
+    _ctx=None,
+    player: Player | None = None,
+) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
+    if player is None:
+        player = getattr(ctx, "player_runtime", None)
     is_remote_player = bool(getattr(ctx, "exact_0002_remote_player", False))
-    built = build_server_built_player_create(ctx)
+    built = (
+        build_server_built_player_create(ctx, player)
+        if player is not None
+        else build_server_built_player_create(ctx)
+    )
     if built is None:
         raise RuntimeError("[PLAYER CREATE] server-built create returned no payload")
 
@@ -1205,10 +1269,27 @@ def _resolve_player_display_id(race: int, gender: int, fallback: int = 15475) ->
     return int(gender_map.get(int(gender) or 0, fallback))
 
 
-def build_SMSG_UPDATE_OBJECT_1773613185_0006(_ctx=None) -> bytes:
+def build_SMSG_UPDATE_OBJECT_1773613185_0006(
+    _ctx=None,
+    player: Player | None = None,
+) -> bytes:
     ctx = _ctx or type("Ctx", (), {})()
-    map_id = _ctx_int_preserve_zero(ctx, "exact_0006_map_id", int(getattr(ctx, "map_id", 1)))
-    guid = _resolve_player_value_update_guid(ctx, "exact_0006_guid")
+    if player is None:
+        player = getattr(ctx, "player_runtime", None)
+    map_id = (
+        int(player.map_id)
+        if player is not None
+        else _ctx_int_preserve_zero(
+            ctx,
+            "exact_0006_map_id",
+            int(getattr(ctx, "map_id", 1)),
+        )
+    )
+    guid = _resolve_player_value_update_guid(
+        ctx,
+        "exact_0006_guid",
+        player,
+    )
     display_id = int(
         getattr(
             ctx,
@@ -1402,8 +1483,14 @@ def _resolve_update_world_guid(ctx: Any) -> int:
     return int(world_guid)
 
 
-def _resolve_player_value_update_guid(ctx: Any, explicit_key: str) -> int:
-    guid_value = getattr(ctx, explicit_key, None)
+def _resolve_player_value_update_guid(
+    ctx: Any,
+    explicit_key: str,
+    player: Player | None = None,
+) -> int:
+    guid_value = int(player.runtime_guid) if player is not None else None
+    if guid_value is None:
+        guid_value = getattr(ctx, explicit_key, None)
     if guid_value is None:
         guid_value = getattr(ctx, "char_guid", None)
     if guid_value is None:
@@ -1672,10 +1759,27 @@ CHAR_META_MASK_FIELDS = (
     "guildguid_7_mask",
 )
 
-def build_SMSG_MOVE_SET_ACTIVE_MOVER(_ctx=None) -> bytes:
-    ctx = _ctx or type("Ctx", (), {"world_guid": None, "realm_id": 0, "char_guid": 0})()
-    mover_world_guid = _resolve_update_world_guid(ctx)
-    mover_guid = int(getattr(ctx, "char_guid", 0) or 0)
+def build_SMSG_MOVE_SET_ACTIVE_MOVER(
+    _ctx=None,
+    player: Player | None = None,
+) -> bytes:
+    ctx = _ctx or type(
+        "Ctx",
+        (),
+        {"world_guid": None, "realm_id": 0, "char_guid": 0},
+    )()
+    if player is None:
+        player = getattr(ctx, "player_runtime", None)
+    mover_world_guid = (
+        int(player.runtime_guid)
+        if player is not None
+        else _resolve_update_world_guid(ctx)
+    )
+    mover_guid = (
+        int(player.character_guid)
+        if player is not None
+        else int(getattr(ctx, "char_guid", 0) or 0)
+    )
     if mover_guid <= 0:
         mover_guid = int(mover_world_guid) & 0xFFFFFFFF
     mover_guid_mask = GuidHelper.pack(mover_guid)[0]

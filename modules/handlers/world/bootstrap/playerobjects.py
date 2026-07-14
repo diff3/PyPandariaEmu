@@ -170,6 +170,7 @@ from server.modules.handlers.world.protocol.update_object.serializers import (
     build_fixed_u32_field_block,
     u32_from_float,
 )
+from server.modules.handlers.world.runtime.player import Player
 from server.session.runtime import session as runtime_session
 
 for _definition_name in player_update_defs.__all__:
@@ -182,7 +183,9 @@ def _u32_from_float(value: float) -> int:
     return u32_from_float(value)
 
 
-def _resolve_player_guid(ctx) -> int:
+def _resolve_player_guid(ctx, player: Player | None = None) -> int:
+    if player is not None:
+        return int(player.runtime_guid)
     return int(
         getattr(ctx, "world_guid", 0)
         or getattr(ctx, "player_guid", 0)
@@ -191,7 +194,9 @@ def _resolve_player_guid(ctx) -> int:
     )
 
 
-def _resolve_player_low_guid(ctx) -> int:
+def _resolve_player_low_guid(ctx, player: Player | None = None) -> int:
+    if player is not None:
+        return int(player.character_guid) & 0xFF
     return int(
         getattr(ctx, "exact_0002_low_guid", 0)
         or getattr(ctx, "char_guid", 0)
@@ -624,8 +629,11 @@ def _experimental_player_create_living_movement_enabled() -> bool:
         return False
 
 
-def _resolve_player_create_movement_guid(ctx) -> int:
-    return _resolve_player_guid(ctx)
+def _resolve_player_create_movement_guid(
+    ctx,
+    player: Player | None = None,
+) -> int:
+    return _resolve_player_guid(ctx, player)
 
 
 def _player_create_transport_data(ctx) -> dict[str, int | float] | None:
@@ -645,12 +653,19 @@ def _player_create_transport_data(ctx) -> dict[str, int | float] | None:
     }
 
 
-def _player_create_movement_state(ctx) -> dict[str, int | float | bool | None]:
+def _player_create_movement_state(
+    ctx,
+    player: Player | None = None,
+) -> dict[str, int | float | bool | None]:
     movement_flags = _movement_u32(ctx, "movement_flags", "move_flags")
     movement_flags2 = _movement_u32(ctx, "movement_flags2", "move_flags2")
     movement_counter = _movement_u32(ctx, "movement_counter")
     timestamp = _movement_u32(ctx, "movement_timestamp", "timestamp", "time")
-    orientation = _movement_float(ctx, "orientation")
+    orientation = (
+        float(player.orientation)
+        if player is not None
+        else _movement_float(ctx, "orientation")
+    )
     pitch = _movement_float(ctx, "pitch")
     fall_time = _movement_u32(ctx, "fall_time")
     fall_zspeed = _movement_float(ctx, "fall_zspeed", "jump_zspeed")
@@ -694,11 +709,22 @@ def _player_create_movement_state(ctx) -> dict[str, int | float | bool | None]:
     }
 
 
-def _build_player_create_movement_bits(ctx=None) -> bytes:
+def _build_player_create_movement_bits(
+    ctx=None,
+    player: Player | None = None,
+) -> bytes:
     """Build the SkyFire 5.4.8 CREATE_OBJECT living movement bit region."""
     transport = _player_create_transport_data(ctx) if ctx is not None else None
-    state = _player_create_movement_state(ctx) if ctx is not None else _player_create_movement_state(object())
-    player_guid = _resolve_player_create_movement_guid(ctx) if ctx is not None else 0
+    state = (
+        _player_create_movement_state(ctx, player)
+        if ctx is not None
+        else _player_create_movement_state(object(), player)
+    )
+    player_guid = (
+        _resolve_player_create_movement_guid(ctx, player)
+        if ctx is not None
+        else 0
+    )
     player_guid_bytes = int(player_guid).to_bytes(8, "little", signed=False)
     transport_guid_bytes = (
         int(transport["guid"]).to_bytes(8, "little", signed=False)
@@ -842,7 +868,10 @@ def _build_legacy_player_create_movement_header() -> bytes:
     return bytes(output)
 
 
-def _build_skyfire_player_create_movement_header(ctx=None) -> bytes:
+def _build_skyfire_player_create_movement_header(
+    ctx=None,
+    player: Player | None = None,
+) -> bytes:
     """Build the SkyFire 5.4.8 CREATE_OBJECT living movement pre-position region."""
     transport = _player_create_transport_data(ctx) if ctx is not None else None
     transport_guid_bytes = (
@@ -852,7 +881,7 @@ def _build_skyfire_player_create_movement_header(ctx=None) -> bytes:
     )
     has_time2 = bool(transport and int(transport["time2"]) != 0)
     has_time3 = bool(transport and int(transport["time3"]) != 0)
-    output = bytearray(_build_player_create_movement_bits(ctx))
+    output = bytearray(_build_player_create_movement_bits(ctx, player))
     if transport is not None:
         def append_guid_byte(index: int) -> None:
             output.extend(_guid_byte_seq(transport_guid_bytes, index))
@@ -878,23 +907,29 @@ def _build_skyfire_player_create_movement_header(ctx=None) -> bytes:
     return bytes(output)
 
 
-def build_player_create_movement_header(ctx=None) -> bytes:
+def build_player_create_movement_header(
+    ctx=None,
+    player: Player | None = None,
+) -> bytes:
     """Build the active player CREATE_OBJECT movement header.
 
     The SkyFire living-movement port is experimental because the normal
     no-transport login path must retain the known-good 826-byte payload.
     """
     if _experimental_player_create_living_movement_enabled():
-        return _build_skyfire_player_create_movement_header(ctx)
+        return _build_skyfire_player_create_movement_header(ctx, player)
     return _build_legacy_player_create_movement_header()
 
 
-def build_skyfire_player_create_living_movement_block(ctx) -> bytes:
+def build_skyfire_player_create_living_movement_block(
+    ctx,
+    player: Player | None = None,
+) -> bytes:
     """Build the player CREATE_OBJECT living movement block in SkyFire 5.4.8 order."""
-    state = _player_create_movement_state(ctx)
-    player_guid = _resolve_player_create_movement_guid(ctx)
+    state = _player_create_movement_state(ctx, player)
+    player_guid = _resolve_player_create_movement_guid(ctx, player)
     player_guid_bytes = int(player_guid).to_bytes(8, "little", signed=False)
-    output = bytearray(_build_skyfire_player_create_movement_header(ctx))
+    output = bytearray(_build_skyfire_player_create_movement_header(ctx, player))
 
     output.extend(_guid_byte_seq(player_guid_bytes, 4))
     # Player CREATE has no spline payload for the local player in the current path.
@@ -922,14 +957,20 @@ def build_skyfire_player_create_living_movement_block(ctx) -> bytes:
 
     output.extend(_guid_byte_seq(player_guid_bytes, 7))
     output.extend(struct.pack("<f", _movement_float(ctx, "pitch_speed", default=_PLAYER_CREATE_PITCH_SPEED)))
-    output.extend(struct.pack("<f", float(getattr(ctx, "x", 0.0) or 0.0)))
+    output.extend(struct.pack(
+        "<f",
+        float(player.x) if player is not None else float(getattr(ctx, "x", 0.0) or 0.0),
+    ))
     if bool(state["has_pitch"]):
         output.extend(struct.pack("<f", float(state["pitch"])))
     if bool(state["has_orientation"]):
         output.extend(struct.pack("<f", float(state["orientation"])))
 
     output.extend(struct.pack("<f", _movement_float(ctx, "walk_speed", default=_PLAYER_CREATE_WALK_SPEED)))
-    output.extend(struct.pack("<f", float(getattr(ctx, "y", 0.0) or 0.0)))
+    output.extend(struct.pack(
+        "<f",
+        float(player.y) if player is not None else float(getattr(ctx, "y", 0.0) or 0.0),
+    ))
     output.extend(struct.pack("<f", _movement_float(ctx, "fly_back_speed", default=_PLAYER_CREATE_FLY_BACK_SPEED)))
     output.extend(_guid_byte_seq(player_guid_bytes, 3))
     output.extend(_guid_byte_seq(player_guid_bytes, 5))
@@ -938,42 +979,62 @@ def build_skyfire_player_create_living_movement_block(ctx) -> bytes:
     output.extend(struct.pack("<f", _movement_float(ctx, "swim_back_speed", default=_PLAYER_CREATE_SWIM_BACK_SPEED)))
     output.extend(struct.pack("<f", _movement_float(ctx, "run_speed", default=_PLAYER_CREATE_RUN_SPEED)))
     output.extend(struct.pack("<f", _movement_float(ctx, "swim_speed", default=_PLAYER_CREATE_SWIM_SPEED)))
-    output.extend(struct.pack("<f", float(getattr(ctx, "z", 0.0) or 0.0)))
+    output.extend(struct.pack(
+        "<f",
+        float(player.z) if player is not None else float(getattr(ctx, "z", 0.0) or 0.0),
+    ))
     if _player_create_transport_data(ctx) is None and len(output) != _PLAYER_CREATE_MOVEMENT_BLOCK_SIZE:
         raise ValueError("player create movement block size mismatch")
     return bytes(output)
 
 
-def build_movement_block(ctx) -> bytes:
+def build_movement_block(ctx, player: Player | None = None) -> bytes:
     """Build the player CREATE_OBJECT movement block.
 
     Default: stable pre-experiment no-transport layout used by ordinary login.
     Experiment: SkyFire 5.4.8 living movement serializer.
     """
     if _player_create_transport_data(ctx) is not None:
-        return build_skyfire_player_create_living_movement_block(ctx)
+        return build_skyfire_player_create_living_movement_block(ctx, player)
     if _experimental_player_create_living_movement_enabled():
-        return build_skyfire_player_create_living_movement_block(ctx)
+        return build_skyfire_player_create_living_movement_block(ctx, player)
 
     output = bytearray(_build_legacy_player_create_movement_header())
-    output.extend(struct.pack("<f", float(getattr(ctx, "x", 0.0) or 0.0)))
-    output.extend(struct.pack("<f", float(getattr(ctx, "orientation", 0.0) or 0.0)))
+    output.extend(struct.pack(
+        "<f",
+        float(player.x) if player is not None else float(getattr(ctx, "x", 0.0) or 0.0),
+    ))
+    output.extend(struct.pack(
+        "<f",
+        float(player.orientation)
+        if player is not None
+        else float(getattr(ctx, "orientation", 0.0) or 0.0),
+    ))
     output.extend(struct.pack("<f", _PLAYER_CREATE_WALK_SPEED))
-    output.extend(struct.pack("<f", float(getattr(ctx, "y", 0.0) or 0.0)))
+    output.extend(struct.pack(
+        "<f",
+        float(player.y) if player is not None else float(getattr(ctx, "y", 0.0) or 0.0),
+    ))
     output.extend(struct.pack("<f", _PLAYER_CREATE_FLY_BACK_SPEED))
     output.append(_PLAYER_CREATE_MOVEMENT_GUID_BYTE)
     output.extend(struct.pack("<f", _PLAYER_CREATE_RUN_BACK_SPEED))
     output.extend(struct.pack("<f", _PLAYER_CREATE_RUN_SPEED))
     output.extend(struct.pack("<f", _PLAYER_CREATE_SWIM_BACK_SPEED))
-    output.extend(struct.pack("<f", float(getattr(ctx, "z", 0.0) or 0.0)))
+    output.extend(struct.pack(
+        "<f",
+        float(player.z) if player is not None else float(getattr(ctx, "z", 0.0) or 0.0),
+    ))
     if len(output) != _PLAYER_CREATE_MOVEMENT_BLOCK_SIZE:
         raise ValueError("player create movement block size mismatch")
     return bytes(output)
 
 
-def build_player_field_values(ctx) -> dict[int, int]:
+def build_player_field_values(
+    ctx,
+    player: Player | None = None,
+) -> dict[int, int]:
     """Build the current server-side player field mapping for value updates."""
-    guid = _resolve_player_guid(ctx)
+    guid = _resolve_player_guid(ctx, player)
     race = int(getattr(ctx, "race", 0) or 0)
     class_id = int(getattr(ctx, "player_class", 0) or getattr(ctx, "class_id", 0) or 0)
     gender = int(getattr(ctx, "gender", 0) or 0)
@@ -1024,7 +1085,9 @@ def build_player_field_values(ctx) -> dict[int, int]:
         {
             _OBJECT_FIELD_GUID_LOW: int(guid) & 0xFFFFFFFF,
             _OBJECT_FIELD_TYPE: _PLAYER_OBJECT_TYPE,
-            _OBJECT_FIELD_SCALE_X: _u32_from_float(_PLAYER_SCALE_X),
+            _OBJECT_FIELD_SCALE_X: _u32_from_float(
+                float(player.scale) if player is not None else _PLAYER_SCALE_X
+            ),
             30: _pack_u8x4(race, class_id, 0, gender),
             _UNIT_FIELD_HEALTH: health,
             _UNIT_FIELD_POWER_PRIMARY: power_primary,
@@ -1072,21 +1135,31 @@ def build_player_field_values(ctx) -> dict[int, int]:
     return field_values
 
 
-def build_create_object_payload(ctx) -> bytes:
+def build_create_object_payload(
+    ctx,
+    player: Player | None = None,
+) -> bytes:
     """Build the top-level CREATE_OBJECT payload header without a template."""
     payload = bytearray()
-    payload += struct.pack("<H", int(getattr(ctx, "map_id", 0) or 0) & 0xFFFF)
+    payload += struct.pack(
+        "<H",
+        int(player.map_id if player is not None else getattr(ctx, "map_id", 0) or 0)
+        & 0xFFFF,
+    )
     payload += struct.pack("<I", _PLAYER_CREATE_UPDATE_COUNT)
     payload += struct.pack("<B", _PLAYER_CREATE_UPDATE_TYPE)
-    payload += GuidHelper.pack(_resolve_player_low_guid(ctx))
+    payload += GuidHelper.pack(_resolve_player_low_guid(ctx, player))
     payload += struct.pack("<B", _PLAYER_CREATE_OBJECT_TYPE)
     return bytes(payload)
 
 
-def build_full_player_create(ctx) -> bytes | None:
+def build_full_player_create(
+    ctx,
+    player: Player | None = None,
+) -> bytes | None:
     """Build a full player CREATE_OBJECT using a built header plus known body blocks."""
     try:
-        movement_block = build_movement_block(ctx)
+        movement_block = build_movement_block(ctx, player)
         if (
             _player_create_transport_data(ctx) is None
             and len(movement_block)
@@ -1094,7 +1167,7 @@ def build_full_player_create(ctx) -> bytes | None:
         ):
             return None
 
-        srv_values = build_player_field_values(ctx)
+        srv_values = build_player_field_values(ctx, player)
         if 30 not in srv_values:
             raise ValueError("player create fields missing field 30")
         if _UNIT_FIELD_LEVEL not in srv_values:
@@ -1107,7 +1180,7 @@ def build_full_player_create(ctx) -> bytes | None:
         field_bytes = _serialize_field_values(srv_values)
         Logger.info(f"[MASK BUILD] words={mask_words} fields={len(srv_values)}")
 
-        payload = bytearray(build_create_object_payload(ctx))
+        payload = bytearray(build_create_object_payload(ctx, player))
         payload += movement_block
         payload += struct.pack("<B", int(mask_words) & 0xFF)
         payload += mask_bytes
@@ -1147,23 +1220,31 @@ def build_full_player_create(ctx) -> bytes | None:
         return None
 
 
-def build_server_built_player_create(ctx) -> bytes | None:
+def build_server_built_player_create(
+    ctx,
+    player: Player | None = None,
+) -> bytes | None:
     """Build player CREATE_OBJECT from the single server-built runtime path."""
     Logger.info("[CREATE_OBJECT] server-built only path active")
-    return build_full_player_create(ctx)
+    return build_full_player_create(ctx, player)
 
 
-def build_server_built_minimal_player_value_update(ctx) -> bytes | None:
+def build_server_built_minimal_player_value_update(
+    ctx,
+    player: Player | None = None,
+) -> bytes | None:
     """Build a minimal server-built player UPDATE_OBJECT value-update packet."""
-    guid = _resolve_player_guid(ctx)
+    guid = _resolve_player_guid(ctx, player)
     if guid <= 0:
         Logger.warning("[PLAYER UPDATE_OBJECT] server-built experimental path skipped: missing guid")
         return None
 
-    map_id = int(getattr(ctx, "map_id", 0) or 0)
+    map_id = int(
+        player.map_id if player is not None else getattr(ctx, "map_id", 0) or 0
+    )
 
     # server-built experimental path
-    field_values = build_player_field_values(ctx)
+    field_values = build_player_field_values(ctx, player)
 
     Logger.info(
         "[PLAYER UPDATE_OBJECT] server-built experimental path active map_id=%s guid=0x%X",

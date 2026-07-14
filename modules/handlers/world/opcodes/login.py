@@ -64,6 +64,11 @@ from server.modules.handlers.world.position.position_service import (
     normalize_position,
     position_from_row,
 )
+from server.modules.handlers.world.runtime.player import Player
+from server.modules.handlers.world.runtime.player_store import (
+    get_player_runtime_store,
+    resolve_player_runtime,
+)
 
 _CINEMATIC_SEQUENCE_BY_RACE = {
     # ChrRaces.dbc cinematic sequence ids.
@@ -411,7 +416,14 @@ def _reset_loaded_world_object_state(session) -> None:
 
 
 def _build_world_login_context(session) -> WorldLoginContext:
-    return WorldLoginContext.from_session(session)
+    ctx = WorldLoginContext.from_session(session)
+    ctx.player_runtime = _resolve_player_packet_runtime(session)
+    return ctx
+
+
+def _resolve_player_packet_runtime(session) -> Player:
+    """Reuse the logged-in Player or build an unregistered packet fallback."""
+    return resolve_player_runtime(session)
 
 
 def _resolve_opening_cinematic_id(race: int) -> int:
@@ -456,6 +468,8 @@ def _is_pre_player_login_state(state: Optional[LoginState]) -> bool:
 def build_player_bootstrap_packets(session) -> list[tuple[str, bytes]]:
     """Build the player's initial world object packets from live session state."""
     ctx = _build_world_login_context(session)
+    player = _resolve_player_packet_runtime(session)
+    ctx.player_runtime = player
     responses: list[tuple[str, bytes]] = []
 
     active_mover = build_login_packet("SMSG_MOVE_SET_ACTIVE_MOVER", ctx)
@@ -1500,8 +1514,9 @@ def handle_set_active_mover(session, ctx: PacketContext):
 
     _assert_player_object_sent(session)
     _set_login_state(session, LoginState.IN_WORLD)
+    player = get_player_runtime_store().add(Player.from_session(session))
     sync_player_visibility(session)
-    sync_all_players_on_map(int(getattr(session, "map_id", 0) or 0))
+    sync_all_players_on_map(int(player.map_id))
     responses: list[tuple[str, bytes]] = []
     responses.extend(_build_pending_cinematic_response(session))
     motd = str(getattr(_build_world_login_context(session), "motd", "") or "").strip()

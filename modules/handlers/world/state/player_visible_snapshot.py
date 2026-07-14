@@ -6,6 +6,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from server.modules.handlers.world.runtime.player import Player
+from server.modules.handlers.world.runtime.player_store import (
+    resolve_player_runtime,
+)
+
 
 @dataclass(frozen=True)
 class PlayerVisibleEquipmentSlot:
@@ -84,21 +89,21 @@ def _visible_equipment_slots(session: Any) -> tuple[PlayerVisibleEquipmentSlot, 
     return tuple(slots)
 
 
-def build_player_visible_snapshot(session: Any) -> PlayerVisibleSnapshot:
+def build_player_visible_snapshot(
+    session: Any,
+    player: Player | None = None,
+) -> PlayerVisibleSnapshot:
+    player = player or resolve_player_runtime(session)
     movement_state = getattr(session, "movement_state", None)
     return PlayerVisibleSnapshot(
-        guid=_to_int(
-            getattr(session, "char_guid", 0)
-            or getattr(session, "player_guid", 0)
-            or getattr(session, "world_guid", 0)
-        ),
+        guid=_to_int(player.character_guid),
         name=str(getattr(session, "player_name", "") or ""),
-        map_id=_to_int(getattr(session, "map_id", 0)),
+        map_id=_to_int(player.map_id),
         zone=_to_int(getattr(session, "zone", 0)),
-        x=_to_float(getattr(session, "x", 0.0)),
-        y=_to_float(getattr(session, "y", 0.0)),
-        z=_to_float(getattr(session, "z", 0.0)),
-        orientation=_to_float(getattr(session, "orientation", 0.0)),
+        x=_to_float(player.x),
+        y=_to_float(player.y),
+        z=_to_float(player.z),
+        orientation=_to_float(player.orientation),
         movement_flags=_to_int(getattr(movement_state, "flags", 0)),
         movement_flags2=_to_int(getattr(movement_state, "flags2", 0)),
         is_mounted=bool(getattr(session, "is_mounted", False)),

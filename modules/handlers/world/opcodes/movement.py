@@ -15,6 +15,7 @@ from server.modules.handlers.world.bootstrap.playerobjects import build_single_u
 from server.modules.handlers.world.runtime.gameobject_store import (
     resolve_gameobject_runtime,
 )
+from server.modules.handlers.world.runtime.player import Player
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
@@ -1076,7 +1077,12 @@ _SMSG_PLAYER_MOVE_JUMP_CONTROL_NO_DIRECTION = bytes.fromhex("8A0C0800000000")
 _SMSG_PLAYER_MOVE_JUMP_CONTROL_WITH_DIRECTION = bytes.fromhex("8A4C0800000000")
 
 
-def _movement_sync_guid(session) -> int:
+def _movement_sync_guid(
+    session,
+    player: Player | None = None,
+) -> int:
+    if player is not None:
+        return int(player.character_guid)
     return int(getattr(session, "char_guid", 0) or _player_guid(session) or 0)
 
 
@@ -3028,9 +3034,12 @@ def _has_valid_fall_direction(state) -> bool:
     return abs(horizontal_speed) > 1e-5 and abs(sin_angle) <= 1.001 and abs(cos_angle) <= 1.001
 
 
-def build_smsg_player_move_payload_old(session) -> bytes | None:
+def build_smsg_player_move_payload_old(
+    session,
+    player: Player | None = None,
+) -> bytes | None:
     state = _movement_state(session)
-    guid_value = _movement_sync_guid(session)
+    guid_value = _movement_sync_guid(session, player)
     if guid_value <= 0:
         return None
 
@@ -3038,10 +3047,14 @@ def build_smsg_player_move_payload_old(session) -> bytes | None:
     move_flags = _movement_flags_for_outbound_sync(session, state)
     move_flags2 = int(state.flags2)
     timestamp = _outbound_movement_timestamp_ms(session)
-    x = float(state.x)
-    y = float(state.y)
-    z = float(state.z)
-    orientation = float(state.orientation)
+    x = float(player.x) if player is not None else float(state.x)
+    y = float(player.y) if player is not None else float(state.y)
+    z = float(player.z) if player is not None else float(state.z)
+    orientation = (
+        float(player.orientation)
+        if player is not None
+        else float(state.orientation)
+    )
     # Keep outbound SMSG_PLAYER_MOVE on the simpler low-guid layout that gave
     # the best visual sync so far in the sandbox. The stricter SkyFire-like
     # rewrite made the client ignore live movement again.
@@ -3089,18 +3102,25 @@ def build_smsg_player_move_payload_old(session) -> bytes | None:
     return bytes(payload)
 
 
-def build_smsg_player_move_payload_stable_old(session) -> bytes | None:
+def build_smsg_player_move_payload_stable_old(
+    session,
+    player: Player | None = None,
+) -> bytes | None:
     state = _movement_state(session)
-    guid_value = _movement_sync_guid(session)
+    guid_value = _movement_sync_guid(session, player)
     if guid_value <= 0:
         return None
 
     raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
     timestamp = _outbound_movement_timestamp_ms(session)
-    x = float(state.x)
-    y = float(state.y)
-    z = float(state.z)
-    orientation = float(state.orientation)
+    x = float(player.x) if player is not None else float(state.x)
+    y = float(player.y) if player is not None else float(state.y)
+    z = float(player.z) if player is not None else float(state.z)
+    orientation = (
+        float(player.orientation)
+        if player is not None
+        else float(state.orientation)
+    )
     has_fall_data = bool(getattr(state, "has_fall_data", False))
     fall_time = int(getattr(state, "fall_time", 0) or 0) & 0xFFFFFFFF
     fall_vertical_speed = float(getattr(state, "fall_vertical_speed", 0.0) or 0.0)
@@ -3199,8 +3219,11 @@ def build_smsg_player_move_payload_stable_old(session) -> bytes | None:
     return bytes(payload)
 
 
-def build_smsg_player_move_payload(session) -> bytes | None:
-    return build_smsg_player_move_payload_stable_old(session)
+def build_smsg_player_move_payload(
+    session,
+    player: Player | None = None,
+) -> bytes | None:
+    return build_smsg_player_move_payload_stable_old(session, player)
 
 
 def _build_run_speed_refresh_response(session) -> tuple[str, bytes] | None:

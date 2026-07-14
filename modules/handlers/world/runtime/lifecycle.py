@@ -17,6 +17,9 @@ from server.modules.handlers.world.opcodes.movement import (
 )
 from server.modules.handlers.world.state.global_state import global_state
 from server.modules.handlers.world.state.runtime import broadcast_player_remove
+from server.modules.handlers.world.runtime.player_store import (
+    get_player_runtime_store,
+)
 
 
 
@@ -198,6 +201,8 @@ def handle_disconnect_session(target_session) -> None:
 
         except Exception as exc:
             Logger.warning(f"[DISCONNECT] global_state cleanup failed: {exc}")
+
+    get_player_runtime_store().remove(guid)
 
     # --- Clear references ---
     target_session.region = None

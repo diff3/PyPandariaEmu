@@ -19,6 +19,12 @@ from server.modules.handlers.world.runtime.gameobject_store import (
     GameObjectRuntimeStore,
     get_gameobject_runtime_store,
 )
+from server.modules.handlers.world.runtime.player import Player
+from server.modules.handlers.world.runtime.player_store import (
+    PlayerRuntimeStore,
+    get_player_runtime_store,
+    resolve_player_runtime,
+)
 from server.modules.handlers.world.runtime.runtime_object import RuntimeObject
 from server.modules.handlers.world.runtime.runtime_store import RuntimeStore
 from server.modules.handlers.world.runtime.spawned_world_object import (
@@ -33,6 +39,8 @@ __all__ = [
     "CreatureRuntimeStore",
     "GameObject",
     "GameObjectRuntimeStore",
+    "Player",
+    "PlayerRuntimeStore",
     "RuntimeObject",
     "RuntimeStore",
     "SpawnedWorldObject",
@@ -40,6 +48,8 @@ __all__ = [
     "WorldObject",
     "get_creature_runtime_store",
     "get_gameobject_runtime_store",
+    "get_player_runtime_store",
+    "resolve_player_runtime",
     "creature_persistence_snapshot",
     "gameobject_persistence_snapshot",
     "resolve_spawned_world_object",

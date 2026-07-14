@@ -78,6 +78,15 @@ def test_handle_disconnect_session_persists_inventory(monkeypatch):
     state.sessions.add(session)
     region.players.add(session)
 
+    from server.modules.handlers.world.runtime.player import Player
+    from server.modules.handlers.world.runtime.player_store import (
+        get_player_runtime_store,
+    )
+
+    player_store = get_player_runtime_store()
+    player_store.clear()
+    player_store.add(Player.from_session(session))
+
     lifecycle.handle_disconnect_session(session)
 
     assert ("inventory", session) in calls
@@ -91,6 +100,7 @@ def test_handle_disconnect_session_persists_inventory(monkeypatch):
     assert session not in state.sessions
     assert session not in state.chat_channels["world"]
     assert session not in region.players
+    assert player_store.get(42) is None
 
 
 def test_handle_disconnect_session_finalizes_taxi_before_position_save(monkeypatch):

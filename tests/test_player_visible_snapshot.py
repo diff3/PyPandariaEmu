@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from server.modules.handlers.world.runtime import Player, get_player_runtime_store
 from server.modules.handlers.world.state.player_visible_snapshot import (
     build_player_visible_snapshot,
 )
@@ -93,3 +94,35 @@ def test_player_visible_snapshot_is_read_only_copy():
     assert snapshot.equipment_cache_raw == (11, 22)
     with pytest.raises(FrozenInstanceError):
         snapshot.guid = 10
+
+
+def test_player_visible_snapshot_uses_runtime_geometry_and_session_gameplay():
+    store = get_player_runtime_store()
+    store.clear()
+    session = WorldSession()
+    session.char_guid = 21
+    session.world_guid = 0x1000000000000015
+    session.player_name = "Runtime Snapshot"
+    session.map_id = 1
+    session.x, session.y, session.z = (1.0, 2.0, 3.0)
+    session.orientation = 0.5
+    player = Player.from_session(session)
+    store.add(player)
+
+    session.map_id = 530
+    session.x, session.y, session.z = (100.0, 200.0, 300.0)
+    session.orientation = 2.5
+    session.player_name = "Session Gameplay"
+    session.mount_display_id = 2404
+
+    try:
+        snapshot = build_player_visible_snapshot(session)
+    finally:
+        store.clear()
+
+    assert snapshot.guid == player.character_guid
+    assert snapshot.map_id == player.map_id
+    assert (snapshot.x, snapshot.y, snapshot.z) == player.world_position
+    assert snapshot.orientation == player.orientation
+    assert snapshot.name == "Session Gameplay"
+    assert snapshot.mount_display_id == 2404

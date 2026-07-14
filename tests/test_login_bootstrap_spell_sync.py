@@ -31,6 +31,9 @@ characters_module.handle_CMSG_REORDER_CHARACTERS = lambda *args, **kwargs: (0, N
 sys.modules.setdefault("server.modules.handlers.world.characters.characters", characters_module)
 
 from server.modules.handlers.world.opcodes import login as login_handlers
+from server.modules.handlers.world.runtime.player_store import (
+    get_player_runtime_store,
+)
 from server.session.world_session import LoginState
 from server.session.world_session import MovementState
 
@@ -550,6 +553,11 @@ def test_active_mover_sends_mount_restore_after_known_spells(monkeypatch) -> Non
         char_guid=7,
         world_guid=7,
         map_id=1,
+        instance_id=0,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.5,
         motd="",
         chat_motd_sent=False,
         account_settings_sent=False,
@@ -570,7 +578,29 @@ def test_active_mover_sends_mount_restore_after_known_spells(monkeypatch) -> Non
         lambda _session: calls.append("mount") or [("SMSG_MOVE_SET_CAN_FLY", b"fly")],
     )
 
-    status, responses = login_handlers.handle_set_active_mover(session, SimpleNamespace())
+    store = get_player_runtime_store()
+    store.clear()
+    try:
+        status, responses = login_handlers.handle_set_active_mover(
+            session,
+            SimpleNamespace(),
+        )
+        player = store.get(7)
+        assert player is not None
+        assert player.runtime_guid == 7
+        assert player.world_position == (10.0, 20.0, 30.0)
+        assert list(store) == [player]
+
+        duplicate_status, duplicate_responses = (
+            login_handlers.handle_set_active_mover(session, SimpleNamespace())
+        )
+
+        assert duplicate_status == 0
+        assert duplicate_responses is None
+        assert store.get(7) is player
+        assert list(store) == [player]
+    finally:
+        store.clear()
 
     assert status == 0
     assert session.login_state == LoginState.IN_WORLD
