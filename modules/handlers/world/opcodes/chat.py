@@ -62,6 +62,9 @@ from server.modules.handlers.world.state.runtime import (
     resolve_weather_type,
 )
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
+from server.modules.handlers.world.runtime.player_store import (
+    sync_player_runtime_from_session,
+)
 from server.modules.handlers.world.teleport.teleport_service import (
     add_teleport as add_named_teleport,
     find_teleport,
@@ -1161,16 +1164,15 @@ def _apply_fixplayer_destination(session, destination_name: str) -> str | None:
     y = float(destination["y"])
     z = float(destination["z"])
     orientation = float(destination["o"])
-    try:
-        from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
+    from server.modules.handlers.world.transport_runtime import (
+        clear_player_transport_state,
+    )
 
-        detach_session_transport_passenger(
-            session,
-            reason="teleport",
-            opcode_name="fixplayer",
-        )
-    except Exception as exc:
-        Logger.warning("[TransportDetach] fixplayer detach failed error=%s", str(exc))
+    clear_player_transport_state(
+        session,
+        reason="teleport",
+        opcode_name="fixplayer",
+    )
     session.map_id = map_id
     session.x = x
     session.y = y
@@ -1178,6 +1180,7 @@ def _apply_fixplayer_destination(session, destination_name: str) -> str | None:
     session.orientation = orientation
     session.zone = int(resolve_zone_from_position(map_id, x, y) or int(getattr(session, "zone", 0) or 0))
     session.instance_id = 0
+    sync_player_runtime_from_session(session)
     session.teleport_destination = str(destination["name"])
     return str(destination["name"])
 
@@ -1425,16 +1428,15 @@ def apply_player_state_change(
         except Exception as exc:
             Logger.debug("[CHAIR] release on teleport failed: %s", exc)
         if not suppress_worldport_cleanup:
-            try:
-                from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
+            from server.modules.handlers.world.transport_runtime import (
+                clear_player_transport_state,
+            )
 
-                detach_session_transport_passenger(
-                    session,
-                    reason="teleport",
-                    opcode_name="chat_teleport",
-                )
-            except Exception as exc:
-                Logger.warning("[TransportDetach] chat teleport detach failed error=%s", str(exc))
+            clear_player_transport_state(
+                session,
+                reason="teleport",
+                opcode_name="chat_teleport",
+            )
 
         old_map_id = int(getattr(session, "map_id", 0) or 0)
         target_map_id = old_map_id if map_id is None else int(map_id)
@@ -1471,6 +1473,7 @@ def apply_player_state_change(
             or int(getattr(session, "zone", 0) or 0)
         )
         session.instance_id = 0
+        sync_player_runtime_from_session(session)
         movement_state = movement_handlers._movement_state(session)
         movement_state.x = float(x)
         movement_state.y = float(y)

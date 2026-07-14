@@ -17,6 +17,12 @@ from server.modules.handlers.world.dispatcher import register
 from server.modules.game.guid import GameObjectGuid, GuidHelper
 from server.modules.handlers.world.bootstrap.playerobjects import build_single_u32_update_object_payload
 from server.modules.handlers.world.opcodes.movement import build_same_map_teleport_payload
+from server.modules.handlers.world.runtime.player_store import (
+    sync_player_runtime_from_session,
+)
+from server.modules.handlers.world.transport_runtime import (
+    clear_player_transport_state,
+)
 from server.modules.handlers.world.teleport.gameobject_teleport import (
     activate_gameobject_teleport,
     resolve_gameobject_teleport_destination,
@@ -435,10 +441,16 @@ def _sit_on_chair(session, entry: dict) -> list[tuple[str, bytes]]:
     player_guid = _player_guid(session)
     _get_chair_occupancy(session).setdefault(chair_guid, {})[int(seat)] = player_guid
 
+    clear_player_transport_state(
+        session,
+        reason="teleport",
+        opcode_name="chair",
+    )
     session.x = float(x)
     session.y = float(y)
     session.z = float(z)
     session.orientation = float(orientation)
+    sync_player_runtime_from_session(session)
     movement_state = getattr(session, "movement_state", None)
     if movement_state is not None:
         movement_state.x = float(x)

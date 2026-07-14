@@ -1677,6 +1677,93 @@ def detach_session_transport_passenger(
     return bool(existed)
 
 
+def clear_player_transport_state(
+    session: Any,
+    *,
+    reason: str = "teleport",
+    opcode_name: str = "",
+) -> None:
+    """Remove every transport attachment owned by one player session.
+
+    Ordinary teleports use this as their single transport-state boundary.  It
+    clears canonical and legacy passenger membership, pending transfers, the
+    session attachment, and movement-info transport data without changing
+    unrelated movement values.
+    """
+    char_guid = int(getattr(session, "char_guid", 0) or 0)
+    candidate_guids = {_current_session_transport_guid(session)}
+
+    for value in (
+        getattr(session, "pending_transport_transfer", None),
+        getattr(session, "post_bootstrap_transport_reattach_request", None),
+    ):
+        if not isinstance(value, dict):
+            continue
+        for key in ("source_guid", "destination_guid", "transport_guid"):
+            candidate_guids.add(int(value.get(key, 0) or 0))
+
+    for state in list(_runtime_transport_states().values()):
+        passengers = getattr(state, "passengers", None)
+        pending_transfers = getattr(state, "pending_transfers", None)
+        if char_guid > 0 and (
+            (isinstance(passengers, dict) and char_guid in passengers)
+            or (isinstance(pending_transfers, dict) and char_guid in pending_transfers)
+        ):
+            candidate_guids.add(int(state.guid))
+
+    movement_manager = get_movement_manager()
+    for world_guid, state in list(movement_manager.instances.items()):
+        passengers = getattr(state, "passengers", None)
+        pending_transfers = getattr(state, "pending_transfers", None)
+        if char_guid > 0 and (
+            (isinstance(passengers, dict) and char_guid in passengers)
+            or (isinstance(pending_transfers, dict) and char_guid in pending_transfers)
+        ):
+            candidate_guids.add(int(world_guid))
+
+    for world_guid in sorted(guid for guid in candidate_guids if int(guid) > 0):
+        runtime_state = runtime_transport_state_for_guid(int(world_guid))
+        if runtime_state is not None:
+            passengers = _canonical_runtime_passengers(
+                runtime_state,
+                reason="teleport_reset",
+            )
+            if char_guid > 0 and char_guid in passengers:
+                detach_transport_passenger(
+                    int(world_guid),
+                    char_guid,
+                    reason=str(reason),
+                )
+            pending_transfers = getattr(runtime_state, "pending_transfers", None)
+            if isinstance(pending_transfers, dict):
+                pending_transfers.pop(char_guid, None)
+
+        movement_state = movement_manager.get_state(int(world_guid))
+        passengers = getattr(movement_state, "passengers", None)
+        if isinstance(passengers, dict):
+            passengers.pop(char_guid, None)
+        pending_transfers = getattr(movement_state, "pending_transfers", None)
+        if isinstance(pending_transfers, dict):
+            pending_transfers.pop(char_guid, None)
+
+    session.transport_transfer_pending = False
+    session.pending_transport_transfer = None
+    session.post_bootstrap_transport_reattach_request = None
+    session.transport_debug_transfer_id = ""
+    session.transport_debug_message_stages = set()
+    session._worldporttest_transport_guid = 0
+    session._transport_bootstrap_first_movement_logged = False
+    session._player_bootstrap_runtime_transport = None
+    _clear_session_transport_state(session)
+    Logger.info(
+        "[TransportReset] opcode=%s reason=%s player=%s candidates=%s",
+        str(opcode_name),
+        str(reason),
+        char_guid,
+        len([guid for guid in candidate_guids if int(guid) > 0]),
+    )
+
+
 def transport_passenger_attachment(
     world_guid: int,
     passenger_id: int,

@@ -9,6 +9,9 @@ from server.modules.handlers.world.runtime import (
     get_player_runtime_store,
     resolve_player_runtime,
 )
+from server.modules.handlers.world.runtime.player_store import (
+    sync_player_runtime_from_session,
+)
 from server.session.world_session import WorldSession
 
 
@@ -99,5 +102,38 @@ def test_resolve_player_runtime_reuses_store_and_does_not_register_fallback():
     store.add(stored)
     try:
         assert resolve_player_runtime(session) is stored
+    finally:
+        store.clear()
+
+
+def test_sync_player_runtime_from_session_updates_only_existing_player():
+    store = get_player_runtime_store()
+    store.clear()
+    session = WorldSession(
+        world_guid=0x100000000000002A,
+        char_guid=42,
+        map_id=1,
+        instance_id=7,
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=0.5,
+    )
+
+    assert sync_player_runtime_from_session(session) is None
+    assert store.get(42) is None
+
+    player = store.add(Player.from_session(session))
+    session.map_id = 530
+    session.instance_id = 11
+    session.x, session.y, session.z = (10.0, 20.0, 30.0)
+    session.orientation = 1.5
+
+    try:
+        assert sync_player_runtime_from_session(session) is player
+        assert player.map_id == 530
+        assert player.instance_id == 11
+        assert player.world_position == (10.0, 20.0, 30.0)
+        assert player.orientation == 1.5
     finally:
         store.clear()

@@ -25,6 +25,9 @@ from server.modules.handlers.world.protocol.movement.spline import (
     build_basic_spline_move,
 )
 from server.modules.handlers.world.state.runtime import broadcast_player_state_update
+from server.modules.handlers.world.runtime.player_store import (
+    sync_player_runtime_from_session,
+)
 
 
 TAXI_TICK_SECONDS = 0.05
@@ -924,6 +927,7 @@ def _apply_taxi_position(session, point: TaxiPathPoint, orientation: float) -> N
     session.y = float(point.y)
     session.z = float(point.z)
     session.orientation = float(orientation)
+    sync_player_runtime_from_session(session)
     session.position_dirty = True
 
     movement_state = getattr(session, "movement_state", None)

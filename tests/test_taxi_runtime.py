@@ -6,6 +6,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from server.modules.handlers.world import taxi_runtime
+from server.modules.handlers.world.runtime import Player, get_player_runtime_store
 from server.session.world_session import MovementState
 
 
@@ -29,6 +30,30 @@ def _taxi_session():
         fly_speed=7.0,
         fly_back_speed=4.5,
     )
+
+
+def test_taxi_position_boundary_updates_runtime_player():
+    session = _taxi_session()
+    session.instance_id = 9
+    store = get_player_runtime_store()
+    store.clear()
+    player = store.add(Player.from_session(session))
+    point = taxi_runtime.TaxiPathPoint(
+        10.0,
+        20.0,
+        30.0,
+        map_id=530,
+    )
+
+    try:
+        taxi_runtime._apply_taxi_position(session, point, 1.25)
+
+        assert player.map_id == session.map_id == 530
+        assert player.instance_id == session.instance_id == 9
+        assert player.world_position == (session.x, session.y, session.z)
+        assert player.orientation == session.orientation == 1.25
+    finally:
+        store.clear()
 
 
 def test_start_taxi_flight_emits_native_spline_without_snapshot_thread(monkeypatch):

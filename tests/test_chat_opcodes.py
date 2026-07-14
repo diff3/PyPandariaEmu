@@ -13,6 +13,7 @@ from DSL.modules.EncoderHandler import EncoderHandler
 from DSL.modules.bitsHandler import BitInterPreter, BitWriter
 from server.modules.interpretation.utils import dsl_decode
 from server.modules.handlers.world.state.global_state import GlobalState
+from server.modules.handlers.world.runtime import Player, get_player_runtime_store
 from server.session.world_session import WorldSession
 
 
@@ -3109,7 +3110,54 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
     alice.map_id = 1
+    alice.instance_id = 77
     alice.zone = 12
+    player_store = get_player_runtime_store()
+    player_store.clear()
+    player = player_store.add(Player.from_session(alice))
+    from server.modules.handlers.world import transport_runtime
+
+    alice.movement_state.has_transport_data = True
+    alice.movement_state.transport_guid = 9
+    alice.movement_state.transport_x = 90.0
+    alice.movement_state.transport_y = 91.0
+    alice.movement_state.transport_z = 92.0
+    original_clear_transport = transport_runtime.clear_player_transport_state
+    transport_reset_calls = []
+
+    def capture_transport_reset(session, *, reason, opcode_name):
+        transport_reset_calls.append(
+            (
+                session.x,
+                session.y,
+                session.z,
+                session.movement_state.transport_guid,
+            )
+        )
+        original_clear_transport(
+            session,
+            reason=reason,
+            opcode_name=opcode_name,
+        )
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "clear_player_transport_state",
+        capture_transport_reset,
+    )
+    visibility_positions = []
+    movement_module.stream_world_objects_after_teleport = (
+        lambda session, *, context: visibility_positions.append(
+            (
+                context,
+                player.map_id,
+                player.instance_id,
+                player.world_position,
+                player.orientation,
+            )
+        )
+        or []
+    )
 
     responses = chat_handlers.apply_player_state_change(
         alice,
@@ -3121,6 +3169,19 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     assert alice.y == 20.0
     assert alice.z == 30.0
     assert alice.orientation == 1.5
+    assert player.map_id == alice.map_id
+    assert player.instance_id == alice.instance_id == 0
+    assert player.world_position == (alice.x, alice.y, alice.z)
+    assert player.orientation == alice.orientation
+    assert transport_reset_calls == [(0.0, 0.0, 0.0, 9)]
+    assert alice.movement_state.has_transport_data is False
+    assert alice.movement_state.transport_guid == 0
+    assert alice.movement_state.transport_x == 0.0
+    assert alice.movement_state.transport_y == 0.0
+    assert alice.movement_state.transport_z == 0.0
+    assert visibility_positions == [
+        ("near-teleport-start", 1, 0, (10.0, 20.0, 30.0), 1.5),
+    ]
     assert alice.near_teleport_pending is True
     assert alice.teleport_pending is False
     assert saved["kwargs"] == {
@@ -3131,6 +3192,7 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     assert len(responses) == 2
     assert responses[0][0] == "SMSG_MOVE_TELEPORT"
     assert responses[1] == ("SMSG_PLAYER_MOVE", b"move")
+    player_store.clear()
 
 
 def test_same_map_teleport_streams_world_objects_without_ack(monkeypatch):
@@ -3393,7 +3455,11 @@ def test_apply_player_state_change_cross_map_position_returns_transfer_packets(m
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
     alice.map_id = 1
+    alice.instance_id = 55
     alice.zone = 12
+    player_store = get_player_runtime_store()
+    player_store.clear()
+    player = player_store.add(Player.from_session(alice))
 
     responses = chat_handlers.apply_player_state_change(
         alice,
@@ -3402,12 +3468,67 @@ def test_apply_player_state_change_cross_map_position_returns_transfer_packets(m
     )
 
     assert alice.map_id == 0
+    assert player.map_id == alice.map_id
+    assert player.instance_id == alice.instance_id == 0
+    assert player.world_position == (alice.x, alice.y, alice.z)
+    assert player.orientation == alice.orientation
     assert alice.teleport_pending is True
     assert alice.near_teleport_pending is False
     assert responses == [
         ("SMSG_TRANSFER_PENDING", b"SMSG_TRANSFER_PENDING|0"),
         ("SMSG_NEW_WORLD", b"SMSG_NEW_WORLD|0"),
     ]
+    player_store.clear()
+
+
+def test_gm_coordinate_teleport_updates_runtime_player(monkeypatch):
+    movement_module = _install_movement_stub(monkeypatch)
+    monkeypatch.setattr(
+        movement_module,
+        "_movement_state",
+        lambda session: SimpleNamespace(
+            x=0.0,
+            y=0.0,
+            z=0.0,
+            orientation=0.0,
+            flags=1,
+            flags2=2,
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_login_packet",
+        lambda opcode_name, ctx: opcode_name.encode(),
+    )
+    monkeypatch.setitem(
+        chat_handlers.chat_commands.HELPERS,
+        "apply_player_state_change",
+        chat_handlers.apply_player_state_change,
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.instance_id = 33
+    player_store = get_player_runtime_store()
+    player_store.clear()
+    player = player_store.add(Player.from_session(alice))
+
+    responses = chat_handlers.chat_commands._telxyz(
+        alice,
+        ["530", "10", "20", "30", "1.5"],
+    )
+
+    assert player.map_id == alice.map_id == 530
+    assert player.instance_id == alice.instance_id == 0
+    assert player.world_position == (alice.x, alice.y, alice.z)
+    assert player.orientation == alice.orientation == 1.5
+    assert [opcode for opcode, _payload in responses[:2]] == [
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
+    player_store.clear()
 
 
 def test_morph_unknown_name_returns_feedback(monkeypatch):

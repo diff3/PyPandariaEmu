@@ -16,6 +16,9 @@ from server.modules.handlers.world.runtime.gameobject_store import (
     resolve_gameobject_runtime,
 )
 from server.modules.handlers.world.runtime.player import Player
+from server.modules.handlers.world.runtime.player_store import (
+    sync_player_runtime_from_session,
+)
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.database.DatabaseConnection import DatabaseConnection
@@ -239,6 +242,7 @@ def _verify_pending_boat_transfer_attachment(session, pending: dict[str, Any] | 
     session.y = world_y
     session.z = world_z
     session.orientation = world_o
+    sync_player_runtime_from_session(session)
     Logger.info(
         "[TransportTransferDiag] verify transfer_id=%s kind=%s return_reason=completed "
         "early_return=false runtime_attachment=%s runtime_transport=%s rebase=true "

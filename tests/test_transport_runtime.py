@@ -34,8 +34,25 @@ sys.modules.setdefault("server.modules.database.DatabaseConnection", database_mo
 chat_opcode_module = types.ModuleType("server.modules.handlers.world.opcodes.chat")
 
 
-def _test_apply_player_state_change(session, *, position=None, map_id=None, **_kwargs):
+def _test_apply_player_state_change(
+    session,
+    *,
+    position=None,
+    map_id=None,
+    suppress_worldport_cleanup=False,
+    **_kwargs,
+):
     if position is not None:
+        if not suppress_worldport_cleanup:
+            from server.modules.handlers.world.transport_runtime import (
+                clear_player_transport_state,
+            )
+
+            clear_player_transport_state(
+                session,
+                reason="teleport",
+                opcode_name="test_chat_teleport",
+            )
         loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
         if isinstance(loaded_gameobjects, set):
             loaded_gameobjects.clear()
@@ -68,8 +85,10 @@ from server.modules.handlers.world.bootstrap import gameobjects
 from server.modules.handlers.world.movements import manager as movement_manager_module
 from server.modules.handlers.world.movements import evaluator
 from server.modules.handlers.world.movements.types import (
+    MovementInstance,
     MovementLifecycleEvent,
     MovementLifecycleEventType,
+    MovementRuntimeState,
 )
 from server.modules.handlers.world.opcodes import movement
 from server.modules.handlers.world.runtime.runtime_object import RuntimeObject
@@ -478,6 +497,25 @@ def test_map_transfer_clears_transport_by_default(monkeypatch):
     session.movement_state.transport_y = 2.0
     session.movement_state.transport_z = 3.0
     session.movement_state.transport_orientation = 0.25
+    session.movement_state.transport_time = 123
+    session.movement_state.transport_time2 = 456
+    session.movement_state.transport_time3 = 789
+    session.movement_state.transport_seat = 2
+    session.movement_state.transport_vehicle_id = 77
+    session.transport_transfer_pending = True
+    session.pending_transport_transfer = {
+        "source_guid": 9,
+        "destination_guid": 10,
+    }
+    session.post_bootstrap_transport_reattach_request = {
+        "destination_guid": 10,
+    }
+    session._player_bootstrap_runtime_transport = {
+        "transport_guid": 9,
+        "x": 91.0,
+        "y": 92.0,
+        "z": 93.0,
+    }
 
     map_transfer.apply_map_transfer(
         session,
@@ -491,6 +529,28 @@ def test_map_transfer_clears_transport_by_default(monkeypatch):
     assert session.movement_state.transport_y == 0.0
     assert session.movement_state.transport_z == 0.0
     assert session.movement_state.transport_orientation == 0.0
+    assert session.movement_state.transport_time == 0
+    assert session.movement_state.transport_time2 == 0
+    assert session.movement_state.transport_time3 == 0
+    assert session.movement_state.transport_seat == -1
+    assert session.movement_state.transport_vehicle_id == 0
+    assert session.transport_transfer_pending is False
+    assert session.pending_transport_transfer is None
+    assert session.post_bootstrap_transport_reattach_request is None
+    assert session._player_bootstrap_runtime_transport is None
+    assert (session.map_id, session.x, session.y, session.z, session.orientation) == (
+        1,
+        10.0,
+        20.0,
+        30.0,
+        0.5,
+    )
+    assert (
+        session.movement_state.x,
+        session.movement_state.y,
+        session.movement_state.z,
+        session.movement_state.orientation,
+    ) == (10.0, 20.0, 30.0, 0.5)
 
 
 def test_map_transfer_keep_transport_preserves_transport_state(monkeypatch):
@@ -594,6 +654,102 @@ def test_canonical_transport_detach_clears_runtime_and_movement_state():
     assert session.movement_state.transport_time == 0
     assert session.movement_state.transport_time2 == 0
     assert session.movement_state.transport_time3 == 0
+
+
+def test_map_transfer_finds_stale_runtime_passenger_membership():
+    from server.modules.handlers.world.teleport import map_transfer
+
+    _reset_transport_states()
+    world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(17))
+    state = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=20808,
+        spawn_guid=17,
+        display_id=3015,
+        route=[],
+        node_index=0,
+        x=100.0,
+        y=200.0,
+        z=10.0,
+        orientation=0.5,
+        map_id=1,
+    )
+    transport_runtime._runtime_transport_states()[world_guid] = state
+    assert transport_runtime.attach_transport_passenger(
+        world_guid,
+        42,
+        local_x=4.0,
+        local_y=5.0,
+        local_z=6.0,
+        local_o=0.25,
+        source_map=1,
+    ) is True
+    state.pending_transfers = {
+        42: SimpleNamespace(destination_instance_id=world_guid),
+    }
+    legacy_state = MovementRuntimeState(
+        instance=MovementInstance(world_guid, "legacy-test"),
+        pending_transfers={
+            42: SimpleNamespace(destination_instance_id=world_guid),
+        },
+    )
+    transport_runtime.get_movement_manager().instances[world_guid] = legacy_state
+    session = SimpleNamespace(
+        char_guid=42,
+        map_id=1,
+        x=104.0,
+        y=205.0,
+        z=16.0,
+        orientation=0.75,
+        movement_state=MovementState(),
+        transport_attached_guid=0,
+        transport_transfer_pending=True,
+        pending_transport_transfer=None,
+        post_bootstrap_transport_reattach_request={
+            "destination_guid": world_guid,
+        },
+    )
+
+    map_transfer.apply_map_transfer(
+        session,
+        map_transfer.TeleportDestination(0, 10.0, 20.0, 30.0, 1.25),
+        reason="teleport",
+    )
+
+    assert transport_runtime.transport_passenger_attachment(world_guid, 42) is None
+    assert 42 not in (state.pending_transfers or {})
+    assert 42 not in (legacy_state.pending_transfers or {})
+    assert session.transport_attach_state == transport_runtime.ATTACH_STATE_DETACHED
+    assert session.transport_attached_guid == 0
+    assert session.transport_transfer_pending is False
+    assert session.pending_transport_transfer is None
+    assert session.post_bootstrap_transport_reattach_request is None
+    assert (session.map_id, session.x, session.y, session.z, session.orientation) == (
+        0,
+        10.0,
+        20.0,
+        30.0,
+        1.25,
+    )
+
+
+def test_teleport_transport_reset_is_idempotent():
+    session = SimpleNamespace(
+        char_guid=42,
+        map_id=1,
+        movement_state=MovementState(),
+        transport_transfer_pending=False,
+        pending_transport_transfer=None,
+        post_bootstrap_transport_reattach_request=None,
+    )
+
+    transport_runtime.clear_player_transport_state(session, reason="teleport")
+    transport_runtime.clear_player_transport_state(session, reason="teleport")
+
+    assert session.transport_attach_state == transport_runtime.ATTACH_STATE_DETACHED
+    assert session.transport_attached_guid == 0
+    assert session.movement_state.has_transport_data is False
+    assert session.movement_state.transport_guid == 0
 
 
 def test_record_attach_detaches_previous_transport_before_new_transport():

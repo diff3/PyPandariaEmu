@@ -66,3 +66,24 @@ def resolve_player_runtime(session) -> Player:
     if player is not None:
         return player
     return Player.from_session(session)
+
+
+def sync_player_runtime_from_session(session) -> Player | None:
+    """Copy session world geometry into an existing runtime Player.
+
+    This explicit boundary never constructs or registers a Player. It is used
+    when an existing teleport path has already committed its destination to
+    ``WorldSession`` and must keep the long-lived runtime snapshot consistent.
+    """
+    character_guid = int(getattr(session, "char_guid", 0) or 0)
+    player = _PLAYER_RUNTIME_STORE.get(character_guid)
+    if player is None:
+        return None
+
+    player.map_id = int(getattr(session, "map_id", 0) or 0)
+    player.instance_id = int(getattr(session, "instance_id", 0) or 0)
+    player.x = float(getattr(session, "x", 0.0) or 0.0)
+    player.y = float(getattr(session, "y", 0.0) or 0.0)
+    player.z = float(getattr(session, "z", 0.0) or 0.0)
+    player.orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+    return player

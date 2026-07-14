@@ -30,6 +30,12 @@ from server.modules.handlers.world.taxi_runtime import (
     sync_taxi_to_current_destination,
 )
 from server.modules.handlers.world.state.runtime import attach_session_to_world_state
+from server.modules.handlers.world.runtime.player_store import (
+    sync_player_runtime_from_session,
+)
+from server.modules.handlers.world.transport_runtime import (
+    clear_player_transport_state,
+)
 from server.modules.protocol.PacketContext import PacketContext
 
 
@@ -1025,11 +1031,17 @@ def _begin_cross_map_taxi_transfer(
     session.near_teleport_pending = False
     session.teleport_destination = f"taxi:{int(source_node)}->{int(destination_node)}"
 
+    clear_player_transport_state(
+        session,
+        reason="teleport",
+        opcode_name="taxi_map_transfer",
+    )
     session.map_id = int(destination_map)
     session.x = float(transfer_point.x)
     session.y = float(transfer_point.y)
     session.z = float(transfer_point.z)
     session.orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+    sync_player_runtime_from_session(session)
     movement_state = getattr(session, "movement_state", None)
     if movement_state is not None:
         movement_state.x = float(transfer_point.x)
