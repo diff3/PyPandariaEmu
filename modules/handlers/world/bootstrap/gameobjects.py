@@ -23,7 +23,7 @@ from server.modules.handlers.world.runtime.gameobject_store import (
     resolve_gameobject_runtime,
 )
 from server.modules.handlers.world.runtime.runtime_object import RuntimeObject
-from server.modules.handlers.world.runtime.transport import Transport
+from server.modules.handlers.world.runtime.world_object import WorldObject
 from shared.ConfigLoader import ConfigLoader
 from shared.Logger import Logger
 from server.modules.handlers.world.feature_config import transport_movement_debug_enabled
@@ -59,14 +59,22 @@ def _transport_debug_log(message: str, *args) -> None:
     Logger.info(message, *args)
 
 
-def _manager_transport_for_guid(world_guid: int) -> Transport | None:
-    """Return an existing manager-owned Transport when runtime is available."""
+def _manager_transport_for_guid(
+    world_guid: int,
+    entry: Mapping[str, Any] | None = None,
+) -> WorldObject | None:
+    """Resolve the existing moving WorldObject or elevator fallback."""
     try:
         from server.modules.handlers.world.transport_runtime import (
             get_world_transport_manager,
         )
 
-        return get_world_transport_manager().transport_for_guid(int(world_guid))
+        if isinstance(entry, Mapping):
+            return get_world_transport_manager().resolve_world_object(
+                int(world_guid),
+                dict(entry),
+            )
+        return get_world_transport_manager().world_object_for_guid(int(world_guid))
     except Exception:
         return None
 
@@ -454,7 +462,7 @@ def _resolve_world_guid(entry: Mapping[str, Any], realm_id: int) -> int:
 def _transport_runtime_packet_entry(
     entry: Mapping[str, Any],
     gameobject: GameObject | None = None,
-    transport: Transport | None = None,
+    transport: WorldObject | None = None,
 ) -> Mapping[str, Any]:
     """Overlay transport packet fields from RuntimeTransportState when available."""
     if bool(entry.get("_bootstrap_runtime_transform_pinned")):
@@ -479,7 +487,7 @@ def _transport_runtime_packet_entry(
     if world_guid <= 0:
         return entry
 
-    state = transport.runtime_state if transport is not None else None
+    state = getattr(transport, "runtime_state", None)
     if state is None:
         try:
             from server.modules.handlers.world.transport_runtime import runtime_transport_state_for_guid
@@ -578,7 +586,7 @@ def _build_gameobject_field_values(
     *,
     world_guid: int,
     gameobject: GameObject | None = None,
-    transport: Transport | None = None,
+    transport: WorldObject | None = None,
 ) -> dict[int, int]:
     """Build update-field values for a single GameObject create packet."""
     gameobject_type = (
@@ -649,7 +657,7 @@ def _build_gameobject_field_values(
 def _packet_transform_object(
     entry: Mapping[str, Any],
     gameobject: GameObject,
-    transport: Transport | None,
+    transport: WorldObject | None,
 ) -> RuntimeObject:
     """Select the existing packet-visible transform without changing rules."""
     if transport is None:
@@ -664,9 +672,9 @@ def _packet_transform_object(
 def _resolve_packet_transport(
     entry: Mapping[str, Any],
     gameobject: GameObject | None,
-    transport: Transport | None,
-) -> Transport | None:
-    """Resolve the manager-owned Transport without creating new state."""
+    transport: WorldObject | None,
+) -> WorldObject | None:
+    """Resolve the moving WorldObject without creating simulation state."""
     if transport is not None:
         return transport
     gameobject_type = (
@@ -685,7 +693,7 @@ def _resolve_packet_transport(
         else _resolve_world_guid(entry, _entry_int(entry, "realm_id", 1))
     )
     try:
-        return _manager_transport_for_guid(world_guid)
+        return _manager_transport_for_guid(world_guid, entry)
     except Exception:
         return None
 
@@ -696,7 +704,7 @@ def _build_gameobject_update_payload(
     entry: Mapping[str, Any],
     realm_id: int,
     gameobject: GameObject | None = None,
-    transport: Transport | None = None,
+    transport: WorldObject | None = None,
 ) -> bytes:
     """Encode a GameObject CREATE_OBJECT payload through the DSL definition."""
     transport = _resolve_packet_transport(entry, gameobject, transport)
@@ -796,7 +804,7 @@ def _build_gameobject_values_update_payload(
     entry: Mapping[str, Any],
     realm_id: int,
     gameobject: GameObject | None = None,
-    transport: Transport | None = None,
+    transport: WorldObject | None = None,
 ) -> bytes:
     """Encode a minimal GameObject VALUES update for an already-created object."""
     transport = _resolve_packet_transport(entry, gameobject, transport)
@@ -1033,7 +1041,7 @@ def build_database_gameobject_responses(
     if not isinstance(loaded_gameobject_entries, dict):
         loaded_gameobject_entries = {}
         session.loaded_gameobject_entries = loaded_gameobject_entries
-    filtered_entries: list[tuple[GameObject, dict, Transport | None]] = []
+    filtered_entries: list[tuple[GameObject, dict, WorldObject | None]] = []
     for entry in entries:
         entry = prepare_runtime_transport_entry(entry)
         if int(entry.get("type", 0) or 0) == 15:
@@ -1087,7 +1095,7 @@ def build_database_gameobject_responses(
             (
                 runtime_object,
                 entry,
-                _manager_transport_for_guid(world_guid),
+                _manager_transport_for_guid(world_guid, entry),
             )
         )
         loaded_gameobject_entries[world_guid] = dict(entry)
@@ -1121,7 +1129,7 @@ def build_database_gameobject_responses(
             (
                 runtime_object,
                 entry,
-                _manager_transport_for_guid(world_guid),
+                _manager_transport_for_guid(world_guid, entry),
             )
         )
         if seen is not None:

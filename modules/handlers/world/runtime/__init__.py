@@ -11,6 +11,12 @@ from server.modules.handlers.world.runtime.creature_store import (
     CreatureRuntimeStore,
     get_creature_runtime_store,
 )
+from server.modules.handlers.world.runtime.elevator import Elevator
+from server.modules.handlers.world.runtime.elevator_store import (
+    ElevatorRuntimeStore,
+    get_elevator_runtime_store,
+    resolve_elevator_runtime,
+)
 from server.modules.handlers.world.runtime.gameobject import GameObject
 from server.modules.handlers.world.runtime.gameobject_persistence import (
     gameobject_persistence_snapshot,
@@ -37,6 +43,8 @@ from server.modules.handlers.world.runtime.world_object import WorldObject
 __all__ = [
     "Creature",
     "CreatureRuntimeStore",
+    "Elevator",
+    "ElevatorRuntimeStore",
     "GameObject",
     "GameObjectRuntimeStore",
     "Player",
@@ -47,9 +55,11 @@ __all__ = [
     "Transport",
     "WorldObject",
     "get_creature_runtime_store",
+    "get_elevator_runtime_store",
     "get_gameobject_runtime_store",
     "get_player_runtime_store",
     "resolve_player_runtime",
+    "resolve_elevator_runtime",
     "creature_persistence_snapshot",
     "gameobject_persistence_snapshot",
     "resolve_spawned_world_object",

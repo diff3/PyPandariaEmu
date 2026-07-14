@@ -31,7 +31,10 @@ from server.modules.handlers.world.mount.mount_service import load_mount_spells
 from server.modules.handlers.world.pet.pet_service import load_battle_pets
 from server.modules.handlers.world.teleport.teleport_service import load_teleports
 from server.modules.handlers.world.state.global_state import global_state
-from server.modules.handlers.world.transport_runtime import start_world_transport_manager
+from server.modules.handlers.world.transport_runtime import (
+    start_world_transport_manager,
+    stop_world_transport_manager,
+)
 from server.modules.handlers.world.movements.manager import get_movement_manager
 from server.modules.handlers.world.runtime.lifecycle import handle_disconnect_session
 from server.modules.handlers.world.addons import load_from_db as load_addon_cache
@@ -983,6 +986,10 @@ def run_world() -> None:
     except Exception as exc:
         Logger.warning(f"[ChatAPI] bridge shutdown failed: {exc}")
     _shutdown_active_clients()
+    try:
+        stop_world_transport_manager()
+    except Exception as exc:
+        Logger.warning(f"[TransportManager] shutdown failed: {exc}")
     srv.close()
 
     if restart_requested:

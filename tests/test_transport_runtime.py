@@ -92,6 +92,12 @@ from server.modules.handlers.world.movements.types import (
 )
 from server.modules.handlers.world.opcodes import movement
 from server.modules.handlers.world.runtime.runtime_object import RuntimeObject
+from server.modules.handlers.world.runtime.elevator import Elevator
+from server.modules.handlers.world.runtime.elevator_store import (
+    ElevatorRuntimeStore,
+    get_elevator_runtime_store,
+    resolve_elevator_runtime,
+)
 from server.modules.handlers.world.runtime.transport import Transport
 from server.modules.handlers.world.runtime.world_object import WorldObject
 from server.session.world_session import MovementState
@@ -214,6 +220,55 @@ def _registered_runtime_transport() -> tuple[
     return entry, state, transport
 
 
+def _runtime_elevator_animation(entry_id: int = 999010):
+    return transport_runtime.TransportAnimationPath(
+        entry=int(entry_id),
+        nodes=(
+            transport_runtime.TransportAnimationNode(0, 0.0, 0.0, 0.0),
+            transport_runtime.TransportAnimationNode(5000, 0.0, 0.0, 10.0),
+            transport_runtime.TransportAnimationNode(10000, 0.0, 0.0, 0.0),
+        ),
+        period_ms=10000,
+    )
+
+
+def _registered_runtime_elevator(monkeypatch):
+    entry_id = 999010
+    animation = _runtime_elevator_animation(entry_id)
+    monkeypatch.setattr(
+        transport_runtime,
+        "_transport_animation_for_entry",
+        lambda candidate: animation if int(candidate) == entry_id else None,
+    )
+    entry = transport_runtime.prepare_runtime_transport_entry(
+        {
+            "guid": 9010,
+            "world_guid": int(transport_runtime.MoTransportGuid.from_spawn_guid(9010)),
+            "entry": entry_id,
+            "map": 1,
+            "map_id": 1,
+            "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+            "original_type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+            "display_id": 360,
+            "x": 10.0,
+            "y": 20.0,
+            "z": 30.0,
+            "orientation": 0.75,
+            "rotation0": 0.0,
+            "rotation1": 0.0,
+            "rotation2": 0.25,
+            "rotation3": 0.9682458,
+            "size": 1.25,
+        }
+    )
+    manager = transport_runtime.get_world_transport_manager()
+    state = manager.register_transport(entry, source="elevator-runtime-test")
+    assert state is not None
+    elevator = manager.elevator_for_guid(int(entry["world_guid"]))
+    assert elevator is not None
+    return entry, state, elevator
+
+
 def test_transport_runtime_object_has_stable_shared_identity():
     _reset_transport_states()
     entry, state, transport = _registered_runtime_transport()
@@ -234,6 +289,228 @@ def test_transport_runtime_object_has_stable_shared_identity():
     assert duplicate is state
     assert manager.transport_for_guid(int(entry["world_guid"])) is transport
     assert state.transport is transport
+
+
+def test_elevator_runtime_store_uses_runtime_guid_as_its_only_index():
+    mapping = {
+        "entry": 999010,
+        "map": 1,
+        "instance_id": 3,
+        "x": 10.0,
+        "y": 20.0,
+        "z": 30.0,
+        "orientation": 0.75,
+        "rotation2": 0.25,
+        "rotation3": 0.9682458,
+        "size": 1.25,
+    }
+    elevator = Elevator.from_mapping(mapping, runtime_guid=12345)
+    store = ElevatorRuntimeStore()
+
+    assert isinstance(elevator, WorldObject)
+    assert isinstance(elevator, RuntimeObject)
+    assert elevator.runtime_guid == 12345
+    assert elevator.entry == 999010
+    assert elevator.map_id == 1
+    assert elevator.instance_id == 3
+    assert elevator.world_position == (10.0, 20.0, 30.0)
+    assert elevator.orientation == 0.75
+    assert elevator.rotation == (0.0, 0.0, 0.25, 0.9682458)
+    assert elevator.scale == 1.25
+
+    assert store.add(elevator) is elevator
+    assert store.get(12345) is elevator
+    assert store.contains(12345) is True
+    assert list(store) == [elevator]
+    assert store.remove(12345) is elevator
+    assert store.contains(12345) is False
+    store.add(elevator)
+    store.clear()
+    assert list(store) == []
+
+
+def test_elevator_runtime_object_has_stable_shared_identity(monkeypatch):
+    _reset_transport_states()
+    entry, state, elevator = _registered_runtime_elevator(monkeypatch)
+    manager = transport_runtime.get_world_transport_manager()
+    store = get_elevator_runtime_store()
+
+    assert state.elevator is elevator
+    assert state.transport is None
+    assert manager.world_object_for_guid(int(entry["world_guid"])) is elevator
+    assert manager.transport_for_guid(int(entry["world_guid"])) is None
+    assert store.get(int(entry["world_guid"])) is elevator
+
+    duplicate = manager.register_transport(entry, source="duplicate-elevator-test")
+
+    assert duplicate is state
+    assert manager.elevator_for_guid(int(entry["world_guid"])) is elevator
+    assert state.elevator is elevator
+
+
+def test_elevator_movement_publishes_transform_without_owning_simulation(monkeypatch):
+    _reset_transport_states()
+    _entry, state, elevator = _registered_runtime_elevator(monkeypatch)
+    manager = transport_runtime.get_world_transport_manager()
+    route = state.route
+    state.path_progress_ms = 2500
+    state.map_id = 530
+    state.x = 101.25
+    state.y = -202.5
+    state.z = 44.75
+    state.orientation = 1.25
+
+    synchronized = manager.sync_transport_object(state)
+
+    assert synchronized is elevator
+    assert elevator.map_id == 530
+    assert elevator.world_position == (101.25, -202.5, 44.75)
+    assert elevator.orientation == 1.25
+    assert state.route is route
+    assert not hasattr(elevator, "runtime_state")
+    assert not hasattr(elevator, "path_progress_ms")
+    assert not hasattr(elevator, "route")
+
+
+def test_elevator_resolution_fallback_is_unregistered(monkeypatch):
+    _reset_transport_states()
+    entry, state, elevator = _registered_runtime_elevator(monkeypatch)
+    store = get_elevator_runtime_store()
+    world_guid = int(entry["world_guid"])
+
+    assert resolve_elevator_runtime(
+        entry,
+        runtime_guid=world_guid,
+        state=state,
+    ) is elevator
+
+    assert store.remove(world_guid) is elevator
+    fallback = resolve_elevator_runtime(
+        entry,
+        runtime_guid=world_guid,
+        state=state,
+    )
+
+    assert isinstance(fallback, Elevator)
+    assert fallback is not elevator
+    assert fallback.world_position == (state.x, state.y, state.z)
+    assert store.contains(world_guid) is False
+
+
+def test_elevator_packet_and_visibility_paths_reuse_runtime_object(monkeypatch):
+    _reset_transport_states()
+    entry, state, elevator = _registered_runtime_elevator(monkeypatch)
+    manager = transport_runtime.get_world_transport_manager()
+    world_guid = int(entry["world_guid"])
+    state.x = 13.5
+    state.y = 24.5
+    state.z = 35.5
+    state.orientation = 0.875
+    manager.sync_transport_object(state)
+    moved_entry = {
+        **entry,
+        "map": state.map_id,
+        "map_id": state.map_id,
+        "x": state.x,
+        "y": state.y,
+        "z": state.z,
+        "orientation": state.orientation,
+    }
+    observer = SimpleNamespace(
+        char_guid=1,
+        map_id=state.map_id,
+        x=state.x,
+        y=state.y,
+        z=state.z,
+    )
+    retained_visibility = manager.entries_near(
+        observer,
+        radius=1.0,
+    )
+
+    retained_payload = gameobjects._build_gameobject_update_payload(
+        map_id=state.map_id,
+        entry=moved_entry,
+        realm_id=1,
+        transport=elevator,
+    )
+    get_elevator_runtime_store().remove(world_guid)
+    fallback = manager.resolve_world_object(world_guid, moved_entry)
+    fallback_payload = gameobjects._build_gameobject_update_payload(
+        map_id=state.map_id,
+        entry=moved_entry,
+        realm_id=1,
+        transport=fallback,
+    )
+
+    assert isinstance(fallback, Elevator)
+    assert fallback is not elevator
+    assert get_elevator_runtime_store().contains(world_guid) is False
+    assert fallback_payload == retained_payload
+
+    fallback_visibility = manager.entries_near(
+        observer,
+        radius=1.0,
+    )
+    assert fallback_visibility == retained_visibility
+    assert [candidate["world_guid"] for candidate in fallback_visibility] == [world_guid]
+
+
+def test_elevator_visibility_reuses_manager_runtime_object(monkeypatch):
+    _reset_transport_states()
+    entry, _state, elevator = _registered_runtime_elevator(monkeypatch)
+    world_guid = int(entry["world_guid"])
+    captured: list[WorldObject | None] = []
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "_sync_transport_state_from_movement_cache",
+        lambda _state: None,
+    )
+
+    def capture_create(*, transport=None, **_kwargs):
+        captured.append(transport)
+        return b"elevator-create"
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "_build_gameobject_update_payload",
+        capture_create,
+    )
+    session = SimpleNamespace(
+        char_guid=31,
+        gameobjects_visible=True,
+        map_id=1,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        realm_id=1,
+        loaded_gameobjects=set(),
+    )
+
+    responses = transport_runtime._build_visible_transport_updates(
+        session,
+        {world_guid: dict(entry)},
+        force=True,
+    )
+
+    assert len(responses) == 1
+    assert captured == [elevator]
+    assert world_guid in session.loaded_gameobjects
+
+
+def test_elevator_despawn_unregisters_runtime_object(monkeypatch):
+    _reset_transport_states()
+    entry, state, elevator = _registered_runtime_elevator(monkeypatch)
+    manager = transport_runtime.get_world_transport_manager()
+    world_guid = int(entry["world_guid"])
+
+    assert manager.elevator_for_guid(world_guid) is elevator
+    state.lifecycle_state = transport_runtime.TRANSPORT_STATE_DESPAWNED
+
+    assert manager.sync_transport_object(state) is None
+    assert manager.elevator_for_guid(world_guid) is None
+    assert state.elevator is None
 
 
 def test_transport_runtime_object_publishes_transform_without_owning_clocks():
@@ -1421,7 +1698,8 @@ def test_world_db_elevator_preload_registers_type11_animation_runtime(monkeypatc
             },
         ),
     )
-    transport_runtime.get_world_transport_manager().start()
+    manager = transport_runtime.get_world_transport_manager()
+    manager.start()
 
     world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(9002))
     state = transport_runtime._runtime_transport_states()[world_guid]
@@ -1435,6 +1713,15 @@ def test_world_db_elevator_preload_registers_type11_animation_runtime(monkeypatc
         str(movement_state.instance.template_id)
     ]
     assert template.kind == transport_runtime.MovementKind.ELEVATOR
+    elevator = manager.elevator_for_guid(world_guid)
+    assert isinstance(elevator, Elevator)
+    assert state.elevator is elevator
+    assert get_elevator_runtime_store().get(world_guid) is elevator
+
+    manager.stop()
+
+    assert manager.elevator_for_guid(world_guid) is None
+    assert state.elevator is None
 
 
 def test_world_db_elevator_loader_includes_thunder_bluff_entries(monkeypatch):

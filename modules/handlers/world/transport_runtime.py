@@ -39,6 +39,12 @@ from server.modules.handlers.world.movements.types import (
     PassengerTransferState,
 )
 from server.modules.handlers.world.runtime.transport import Transport
+from server.modules.handlers.world.runtime.elevator import Elevator
+from server.modules.handlers.world.runtime.elevator_store import (
+    get_elevator_runtime_store,
+    resolve_elevator_runtime,
+)
+from server.modules.handlers.world.runtime.world_object import WorldObject
 
 GAMEOBJECT_TYPE_TRANSPORT = 11
 GAMEOBJECT_TYPE_MO_TRANSPORT = 15
@@ -166,6 +172,7 @@ class RuntimeTransportState:
     clock_started_at_ms: int = 0
     handled_boundary_events: set[tuple[int, int, int | None]] = field(default_factory=set)
     transport: Transport | None = field(default=None, repr=False, compare=False)
+    elevator: Elevator | None = field(default=None, repr=False, compare=False)
 
 
 class WorldTransportManager:
@@ -195,11 +202,20 @@ class WorldTransportManager:
     def stop(self) -> None:
         with self._lock:
             self._running = False
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(1.0, _TRANSPORT_TICK_SECONDS * 2.0))
+        with self._lock:
+            get_elevator_runtime_store().clear()
+            for state in _runtime_transport_states().values():
+                state.elevator = None
+            self._thread = None
 
     def reset_for_tests(self) -> None:
         with self._lock:
             self.entries.clear()
             self.transports.clear()
+            get_elevator_runtime_store().clear()
             _runtime_transport_states().clear()
             get_movement_manager().reset_for_tests()
             self._running = False
@@ -227,7 +243,7 @@ class WorldTransportManager:
                 )
                 state = _runtime_transport_states().get(world_guid)
                 if state is not None:
-                    self._sync_transport_object_locked(
+                    self._sync_runtime_object_locked(
                         state,
                         self.entries.get(world_guid),
                     )
@@ -243,7 +259,7 @@ class WorldTransportManager:
                 )
                 state = _runtime_transport_states().get(duplicate_guid)
                 if state is not None:
-                    self._sync_transport_object_locked(
+                    self._sync_runtime_object_locked(
                         state,
                         self.entries.get(duplicate_guid),
                     )
@@ -258,7 +274,7 @@ class WorldTransportManager:
             self.entries[world_guid] = transport_entry
             state = _transport_state_for_entry(transport_entry)
             if state is not None:
-                self._sync_transport_object_locked(state, transport_entry)
+                self._sync_runtime_object_locked(state, transport_entry)
             if transport_movement_debug_enabled():
                 Logger.info(
                     "[TransportRegister] transport=0x%016X entry=%s map=%s source=%s",
@@ -308,6 +324,64 @@ class WorldTransportManager:
         with self._lock:
             return self.transports.get(int(world_guid))
 
+    def elevator_for_guid(self, world_guid: int) -> Elevator | None:
+        """Return the stable shared runtime object for one elevator."""
+        return get_elevator_runtime_store().get(int(world_guid))
+
+    def world_object_for_guid(self, world_guid: int) -> WorldObject | None:
+        """Return the retained moving world object for a runtime GUID."""
+        elevator = self.elevator_for_guid(int(world_guid))
+        if elevator is not None:
+            return elevator
+        return self.transport_for_guid(int(world_guid))
+
+    def resolve_world_object(
+        self,
+        world_guid: int,
+        entry: dict[str, Any],
+    ) -> WorldObject | None:
+        """Resolve the retained object or an unregistered elevator fallback."""
+        runtime_object = self.world_object_for_guid(int(world_guid))
+        if runtime_object is not None:
+            return runtime_object
+        if not _has_transport_animation(entry):
+            return None
+        return resolve_elevator_runtime(
+            entry,
+            runtime_guid=int(world_guid),
+            state=self.state_for_guid(int(world_guid)),
+        )
+
+    def _sync_elevator_object_locked(
+        self,
+        state: RuntimeTransportState,
+        entry: dict[str, Any],
+    ) -> Elevator:
+        store = get_elevator_runtime_store()
+        elevator = store.get(int(state.guid))
+        if elevator is None:
+            elevator = store.add(Elevator.from_runtime_state(state, entry))
+        else:
+            elevator.publish_transform(state)
+        self.transports.pop(int(state.guid), None)
+        state.transport = None
+        state.elevator = elevator
+        return elevator
+
+    def _sync_runtime_object_locked(
+        self,
+        state: RuntimeTransportState,
+        entry: dict[str, Any] | None = None,
+    ) -> WorldObject | None:
+        source = entry if isinstance(entry, dict) else self.entries.get(int(state.guid))
+        if not isinstance(source, dict) or not source:
+            return None
+        if _has_transport_animation(source):
+            return self._sync_elevator_object_locked(state, source)
+        state.elevator = None
+        get_elevator_runtime_store().remove(int(state.guid))
+        return self._sync_transport_object_locked(state, source)
+
     def _sync_transport_object_locked(
         self,
         state: RuntimeTransportState,
@@ -329,14 +403,26 @@ class WorldTransportManager:
     def sync_transport_object(
         self,
         state: RuntimeTransportState,
-    ) -> Transport | None:
-        """Synchronize the stable runtime object from simulation output."""
+    ) -> WorldObject | None:
+        """Synchronize the stable world object from simulation output."""
         with self._lock:
-            return self._sync_transport_object_locked(state)
+            if str(
+                getattr(state, "lifecycle_state", TRANSPORT_STATE_ACTIVE)
+            ) == TRANSPORT_STATE_DESPAWNED:
+                get_elevator_runtime_store().remove(int(state.guid))
+                state.elevator = None
+                return None
+            return self._sync_runtime_object_locked(state)
 
     def update_entry_transform_from_state(self, state: RuntimeTransportState) -> None:
         with self._lock:
-            self._sync_transport_object_locked(state)
+            if str(
+                getattr(state, "lifecycle_state", TRANSPORT_STATE_ACTIVE)
+            ) == TRANSPORT_STATE_DESPAWNED:
+                get_elevator_runtime_store().remove(int(state.guid))
+                state.elevator = None
+            else:
+                self._sync_runtime_object_locked(state)
             entry = self.entries.get(int(state.guid))
             if not isinstance(entry, dict):
                 return
@@ -610,7 +696,7 @@ class WorldTransportManager:
                 rejected_guids.append(int(world_guid))
                 continue
             moved_entry = cached_transport_runtime_entry(session, entry)
-            transport = self.transport_for_guid(int(world_guid))
+            transport = self.resolve_world_object(int(world_guid), moved_entry)
             moved_map = (
                 int(transport.map_id)
                 if transport is not None
@@ -829,6 +915,11 @@ def start_world_transport_manager() -> None:
         Logger.info("[TransportManager] start skipped; transports disabled")
         return
     _WORLD_TRANSPORT_MANAGER.start()
+
+
+def stop_world_transport_manager() -> None:
+    """Stop transport simulation and release retained elevator objects."""
+    _WORLD_TRANSPORT_MANAGER.stop()
 
 
 def reset_world_transport_manager_for_tests() -> None:
@@ -2484,8 +2575,9 @@ def _build_visible_transport_updates(
             continue
 
         moved_entry = cached_transport_runtime_entry(session, entry)
-        transport = get_world_transport_manager().transport_for_guid(
-            int(world_guid)
+        transport = get_world_transport_manager().resolve_world_object(
+            int(world_guid),
+            moved_entry,
         )
         moved_map = int(
             transport.map_id
@@ -2725,8 +2817,9 @@ def _build_new_visible_transport_creates(
             map_id=map_id,
             entry=entry,
             realm_id=realm_id,
-            transport=get_world_transport_manager().transport_for_guid(
-                world_guid
+            transport=get_world_transport_manager().resolve_world_object(
+                world_guid,
+                entry,
             ),
         )
         responses.append(make_update_object_response(payload))
