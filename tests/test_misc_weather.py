@@ -46,7 +46,7 @@ def _install_misc_test_stubs():
     sys.modules["server.modules.handlers.world.opcodes.movement"] = movement_module
 
     taxi_module = types.ModuleType("server.modules.handlers.world.taxi_runtime")
-    taxi_module.complete_taxi_for_disconnect = lambda session: False
+    taxi_module.persist_taxi_for_disconnect = lambda session: False
     sys.modules["server.modules.handlers.world.taxi_runtime"] = taxi_module
 
     logging_module = types.ModuleType("server.modules.handlers.world.packet_logging")
@@ -99,25 +99,19 @@ def test_time_sync_response_sends_weather_when_auto_weather_changes(monkeypatch)
     assert responses == [("SMSG_WEATHER", b"SMSG_WEATHER|5|0.75")]
 
 
-def test_logout_request_finalizes_taxi_before_remove_and_position_save(monkeypatch):
+def test_logout_request_pauses_taxi_before_remove_and_position_save(monkeypatch):
     _install_misc_test_stubs()
     sys.modules.pop("server.modules.handlers.world.opcodes.misc", None)
     from server.modules.handlers.world.opcodes import misc
 
     calls = []
 
-    def _complete_taxi_for_disconnect(session):
+    def _persist_taxi_for_disconnect(session):
         calls.append(("taxi", session.x, session.y, session.z))
-        session.x = 50.0
-        session.y = 60.0
-        session.z = 7.0
-        session.orientation = 1.25
         session.taxi_state = None
-        session.taxi_controls_locked = False
-        session.player_travel_state = "NORMAL"
         return True
 
-    monkeypatch.setattr(misc, "complete_taxi_for_disconnect", _complete_taxi_for_disconnect)
+    monkeypatch.setattr(misc, "persist_taxi_for_disconnect", _persist_taxi_for_disconnect)
     monkeypatch.setattr(
         misc,
         "broadcast_player_remove",
@@ -139,6 +133,7 @@ def test_logout_request_finalizes_taxi_before_remove_and_position_save(monkeypat
         misc.EncoderHandler,
         "encode_packet",
         lambda opcode_name, values: f"{opcode_name}:{values['logout_result']}:{values['instant_logout']}".encode(),
+        raising=False,
     )
 
     class _Session:
@@ -176,11 +171,11 @@ def test_logout_request_finalizes_taxi_before_remove_and_position_save(monkeypat
         ("SMSG_LOGOUT_COMPLETE", b""),
     ]
     assert calls[0] == ("taxi", 0.0, 0.0, 0.0)
-    assert calls[1] == ("remove", 50.0, 60.0, 7.0)
-    assert calls[2] == ("inventory", 50.0, 60.0, 7.0)
-    assert calls[3][0:5] == ("position", 50.0, 60.0, 7.0, 1.25)
+    assert calls[1] == ("remove", 0.0, 0.0, 0.0)
+    assert calls[2] == ("inventory", 0.0, 0.0, 0.0)
+    assert calls[3][0:5] == ("position", 0.0, 0.0, 0.0, 0.0)
     assert calls[3][5] == {"reason": "logout", "online": 0, "force": True}
     assert session.taxi_state is None
-    assert session.taxi_controls_locked is False
-    assert session.player_travel_state == "NORMAL"
+    assert session.taxi_controls_locked is True
+    assert session.player_travel_state == "TAXI_FLIGHT"
     assert player_store.get(42) is None

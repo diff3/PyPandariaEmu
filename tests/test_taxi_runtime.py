@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import json
 
 from server.modules.handlers.world import taxi_runtime
 from server.modules.handlers.world.runtime import (
@@ -22,6 +23,7 @@ from server.session.world_session import MovementState
 def _taxi_session():
     return SimpleNamespace(
         char_guid=7,
+        realm_id=1,
         world_guid=7,
         map_id=1,
         x=0.0,
@@ -541,6 +543,77 @@ def test_taxi_disconnect_completion_persists_destination_without_packets(monkeyp
     assert session.is_mounted is False
     assert session.movement_state.flags & taxi_runtime._MOVEMENTFLAG_FORWARD == 0
     assert flight_store.contains(7) is False
+
+
+def test_taxi_disconnect_snapshot_resumes_at_same_progress(monkeypatch):
+    flight_store = get_flight_path_runtime_store()
+    flight_store.clear()
+    _disable_taxi_side_effects(monkeypatch)
+    saved = []
+    monkeypatch.setattr(
+        taxi_runtime,
+        "_save_persisted_taxi_snapshot",
+        lambda guid, realm, value: saved.append((guid, realm, value)) or True,
+    )
+    session = _taxi_session()
+    _start_test_flight(session)
+    session._taxi_last_tick_at = 100.0
+    assert taxi_runtime.taxi_tick(session, now=101.0) is True
+    paused_position = (session.x, session.y, session.z)
+    paused_distance = session.taxi_state.traveled_distance
+
+    assert taxi_runtime.persist_taxi_for_disconnect(session) is True
+    assert (session.x, session.y, session.z) == paused_position
+    assert session.taxi_state is None
+    assert flight_store.contains(7) is False
+    snapshot = json.loads(saved[-1][2])
+    assert snapshot["traveled_distance"] == paused_distance
+
+    relog = _taxi_session()
+    assert taxi_runtime.restore_persisted_taxi(relog, saved[-1][2]) is True
+    assert (relog.x, relog.y, relog.z) == paused_position
+    assert relog.taxi_state.traveled_distance == paused_distance
+    assert flight_store.contains(7) is False
+
+    responses = taxi_runtime.activate_restored_taxi(relog)
+    assert [opcode for opcode, _payload in responses].count("SMSG_ON_MONSTER_MOVE") == 1
+    assert flight_store.contains(7) is True
+    relog._taxi_last_tick_at = 200.0
+    relog.taxi_state.last_tick_at = 200.0
+    assert taxi_runtime.taxi_tick(relog, now=200.5) is True
+    assert relog.taxi_state.traveled_distance > paused_distance
+    flight_store.clear()
+
+
+def test_taxi_disconnect_derives_progress_from_client_spline_clock(monkeypatch):
+    flight_store = get_flight_path_runtime_store()
+    flight_store.clear()
+    _disable_taxi_side_effects(monkeypatch)
+    saved = []
+    monkeypatch.setattr(
+        taxi_runtime,
+        "_save_persisted_taxi_snapshot",
+        lambda guid, realm, value: saved.append(value) or True,
+    )
+    session = _taxi_session()
+    _start_test_flight(session)
+    state = session.taxi_state
+    state.started_at = 100.0
+    state.last_tick_at = 100.0
+    state.traveled_distance = 0.0
+    monkeypatch.setattr(taxi_runtime.time, "monotonic", lambda: 101.0)
+
+    assert taxi_runtime.persist_taxi_for_disconnect(session) is True
+
+    snapshot = json.loads(saved[-1])
+    assert snapshot["traveled_distance"] == 5.0
+    assert session.x > 0.0
+    assert session.x < 10.0
+    relog = _taxi_session()
+    assert taxi_runtime.restore_persisted_taxi(relog, saved[-1]) is True
+    assert relog.x == session.x
+    assert relog.taxi_state.traveled_distance == 5.0
+    flight_store.clear()
 
 
 def test_taxi_z_curve_is_monotone_between_altitude_nodes():

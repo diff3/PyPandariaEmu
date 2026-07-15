@@ -9,6 +9,7 @@ to one player session and advances it with deterministic server ticks.
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 import time
@@ -416,6 +417,211 @@ def complete_taxi_for_disconnect(session) -> bool:
     return True
 
 
+def persist_taxi_for_disconnect(session) -> bool:
+    """Pause an active taxi at its current server position for the next login."""
+    state = getattr(session, "taxi_state", None)
+    if state is None or not is_taxi_active(session):
+        return False
+
+    # The 5.4.8 client advances the taxi spline locally.  A quiet passenger may
+    # therefore produce no movement packets/ticks capable of refreshing
+    # traveled_distance before logout.  Reconcile the server phase with the
+    # elapsed spline clock before serializing the resumable snapshot.
+    elapsed_distance = max(
+        0.0,
+        (time.monotonic() - float(state.started_at)) * float(state.speed),
+    )
+    captured_distance = min(
+        float(state.path.total_length),
+        max(float(state.traveled_distance), float(elapsed_distance)),
+    )
+    (
+        captured_point,
+        captured_segment,
+        captured_segment_progress,
+        captured_total_progress,
+        captured_sample,
+        captured_sample_progress,
+        captured_spacing,
+    ) = _interpolate_path(state.path, captured_distance)
+    state.traveled_distance = float(captured_distance)
+    state.last_traveled = float(captured_distance)
+    state.current_segment = int(captured_segment)
+    state.segment_progress = float(captured_segment_progress)
+    state.total_progress = float(captured_total_progress)
+    state.current_sample_index = int(captured_sample)
+    state.sample_progress = float(captured_sample_progress)
+    state.current_sample_spacing = float(captured_spacing)
+    _apply_taxi_position(
+        session,
+        captured_point,
+        float(captured_point.orientation or 0.0),
+    )
+
+    snapshot = {
+        "version": 1,
+        "path": [
+            [float(point.x), float(point.y), float(point.z), point.orientation, point.map_id]
+            for point in state.path.points
+        ],
+        "source_node": int(state.path.source_node),
+        "destination_node": int(state.destination_node),
+        "source_map": int(state.path.source_map),
+        "destination_map": int(state.destination_map),
+        "speed": float(state.speed),
+        "traveled_distance": float(captured_distance),
+        "route_nodes": [int(node) for node in state.route_nodes],
+        "current_leg_index": int(state.current_leg_index),
+        "mount_display_id": int(getattr(session, "mount_display_id", 0) or DEFAULT_TAXI_MOUNT_DISPLAY_ID),
+        "original": {
+            "can_fly": bool(state.original_can_fly),
+            "is_flying": bool(state.original_is_flying),
+            "is_mounted": bool(state.original_is_mounted),
+            "mount_spell": state.original_mount_spell,
+            "mount_display_id": int(state.original_mount_display_id),
+            "unit_flags": int(state.original_unit_flags),
+            "run_speed": float(state.original_run_speed),
+            "fly_speed": float(state.original_fly_speed),
+            "fly_back_speed": float(state.original_fly_back_speed),
+        },
+        "landing": (
+            None
+            if state.destination_landing_point is None
+            else [
+                float(state.destination_landing_point.x),
+                float(state.destination_landing_point.y),
+                float(state.destination_landing_point.z),
+                state.destination_landing_point.orientation,
+                state.destination_landing_point.map_id,
+            ]
+        ),
+    }
+    if not _save_persisted_taxi_snapshot(
+        int(getattr(session, "char_guid", 0) or 0),
+        int(getattr(session, "realm_id", 0) or 0),
+        json.dumps(snapshot, separators=(",", ":"), allow_nan=False),
+    ):
+        return False
+
+    state.active = False
+    session._taxi_generation = int(getattr(session, "_taxi_generation", 0) or 0) + 1
+    session.taxi_state = None
+    unregister_flight_path_runtime(session)
+    Logger.info(
+        "[TAXI] paused player=%s progress=%.3f pos=(%.3f, %.3f, %.3f)",
+        int(getattr(session, "char_guid", 0) or 0),
+        float(snapshot["traveled_distance"]),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+    )
+    return True
+
+
+def restore_persisted_taxi(session, raw_snapshot: str | None) -> bool:
+    """Rebuild a paused taxi without advancing it during offline time."""
+    if not str(raw_snapshot or "").strip():
+        return False
+    try:
+        data = json.loads(str(raw_snapshot))
+        if int(data.get("version", 0)) != 1:
+            raise ValueError("unsupported snapshot version")
+        points = [
+            TaxiPathPoint(
+                float(value[0]), float(value[1]), float(value[2]),
+                None if value[3] is None else float(value[3]),
+                None if value[4] is None else int(value[4]),
+            )
+            for value in data["path"]
+        ]
+        path = build_taxi_path(
+            points,
+            source_node=int(data.get("source_node", 0)),
+            destination_node=int(data["destination_node"]),
+            source_map=int(data.get("source_map", getattr(session, "map_id", 0))),
+            destination_map=int(data["destination_map"]),
+        )
+        if path is None:
+            raise ValueError("invalid persisted path")
+        traveled = max(0.0, min(float(data["traveled_distance"]), float(path.total_length)))
+        point, segment, segment_progress, total_progress, sample, sample_progress, spacing = _interpolate_path(path, traveled)
+        original = data.get("original") or {}
+        landing_value = data.get("landing")
+        landing = None if landing_value is None else TaxiPathPoint(
+            float(landing_value[0]), float(landing_value[1]), float(landing_value[2]),
+            None if landing_value[3] is None else float(landing_value[3]),
+            None if landing_value[4] is None else int(landing_value[4]),
+        )
+        generation = int(getattr(session, "_taxi_generation", 0) or 0) + 1
+        session._taxi_generation = generation
+        now = time.monotonic()
+        state = TaxiFlightSession(
+            active=True, path=path, current_segment=int(segment),
+            segment_progress=float(segment_progress), total_progress=float(total_progress),
+            speed=max(1.0, float(data["speed"])), started_at=now,
+            destination_map=int(data["destination_map"]), destination_node=int(data["destination_node"]),
+            generation=generation,
+            original_can_fly=bool(original.get("can_fly", False)),
+            original_is_flying=bool(original.get("is_flying", False)),
+            original_is_mounted=bool(original.get("is_mounted", False)),
+            original_mount_spell=original.get("mount_spell"),
+            original_mount_display_id=int(original.get("mount_display_id", 0) or 0),
+            original_unit_flags=int(original.get("unit_flags", 0) or 0),
+            original_run_speed=float(original.get("run_speed", 7.0) or 7.0),
+            original_fly_speed=float(original.get("fly_speed", 7.0) or 7.0),
+            original_fly_back_speed=float(original.get("fly_back_speed", 4.5) or 4.5),
+            traveled_distance=float(traveled), last_traveled=float(traveled),
+            last_applied_z=float(point.z), last_target_z=float(point.z), last_tick_at=now,
+            current_sample_index=int(sample), sample_progress=float(sample_progress),
+            current_sample_spacing=float(spacing), route_nodes=tuple(int(node) for node in data.get("route_nodes", ())),
+            current_leg_index=int(data.get("current_leg_index", 0)),
+            spline_id=_next_taxi_spline_id(session, generation), destination_landing_point=landing,
+        )
+        session.taxi_state = state
+        session.taxi_controls_locked = True
+        session.player_travel_state = TAXI_STATE_FLIGHT
+        session._pending_taxi_resume = True
+        session._pending_taxi_resume_mount_display_id = int(data.get("mount_display_id", DEFAULT_TAXI_MOUNT_DISPLAY_ID))
+        _set_taxi_mount_state(session, state, session._pending_taxi_resume_mount_display_id)
+        _apply_taxi_position(session, point, float(point.orientation or 0.0))
+        _save_persisted_taxi_snapshot(
+            int(getattr(session, "char_guid", 0) or 0), int(getattr(session, "realm_id", 0) or 0), ""
+        )
+        Logger.info("[TAXI] restored player=%s progress=%.3f", int(getattr(session, "char_guid", 0) or 0), traveled)
+        return True
+    except Exception as exc:
+        Logger.warning("[TAXI] persisted state rejected player=%s: %s", int(getattr(session, "char_guid", 0) or 0), exc)
+        _save_persisted_taxi_snapshot(
+            int(getattr(session, "char_guid", 0) or 0), int(getattr(session, "realm_id", 0) or 0), ""
+        )
+        return False
+
+
+def _save_persisted_taxi_snapshot(char_guid: int, realm_id: int, value: str) -> bool:
+    from server.modules.database.DatabaseConnection import DatabaseConnection
+
+    return bool(DatabaseConnection.save_character_taxi_path(char_guid, realm_id, value))
+
+
+def activate_restored_taxi(session) -> list[tuple[str, bytes]]:
+    if not bool(getattr(session, "_pending_taxi_resume", False)):
+        return []
+    state = getattr(session, "taxi_state", None)
+    session._pending_taxi_resume = False
+    if state is None or not is_taxi_active(session):
+        return []
+    now = time.monotonic()
+    state.started_at = now
+    state.last_tick_at = now
+    session._taxi_last_tick_at = now
+    register_flight_path_runtime(session)
+    responses = _build_mount_visual_responses(session, int(getattr(session, "mount_display_id", 0) or 0))
+    spline = _build_resumed_taxi_spline_response(session, state)
+    if spline is not None:
+        responses.append(spline)
+    return responses
+
+
 def sync_taxi_to_current_destination(session) -> None:
     state = getattr(session, "taxi_state", None)
     if state is None:
@@ -685,6 +891,30 @@ def _build_taxi_spline_response(session, state: TaxiFlightSession) -> tuple[str,
     return "SMSG_ON_MONSTER_MOVE", payload
 
 
+def _build_resumed_taxi_spline_response(session, state: TaxiFlightSession) -> tuple[str, bytes] | None:
+    """Describe only the untraveled suffix so reconnect never restarts at the source."""
+    flight_path = resolve_flight_path_runtime(session)
+    guid = int(flight_path.runtime_guid)
+    remaining = max(0.0, float(state.path.total_length) - float(state.traveled_distance))
+    if guid <= 0 or remaining <= 0.001:
+        return None
+    current, segment, *_unused = _interpolate_path(state.path, float(state.traveled_distance))
+    suffix = [current]
+    suffix.extend(state.path.points[max(1, int(segment) + 1):])
+    if len(suffix) < 2:
+        suffix.append(state.path.points[-1])
+    payload = build_basic_spline_move(
+        mover_guid=guid,
+        spline_id=int(state.spline_id),
+        start_position=_spline_vector(suffix[0]),
+        destination_position=_spline_vector(suffix[-1]),
+        path_points=tuple(_spline_vector(point) for point in suffix[1:-1]),
+        spline_flags=TAXI_SPLINE_FLAGS,
+        duration_ms=max(1, int(round((remaining / max(0.001, float(state.speed))) * 1000.0))),
+    )
+    return "SMSG_ON_MONSTER_MOVE", payload
+
+
 def _spline_vector(point: TaxiPathPoint) -> SplineVector:
     return SplineVector(float(point.x), float(point.y), float(point.z))
 
@@ -880,6 +1110,13 @@ def _send_self_responses(session, responses: list[tuple[str, bytes]]) -> None:
 
 
 def _apply_taxi_mount(session, state: TaxiFlightSession, mount_display_id: int) -> list[tuple[str, bytes]]:
+    _set_taxi_mount_state(session, state, mount_display_id)
+    responses = _build_mount_visual_responses(session, int(session.mount_display_id))
+    _broadcast_mount_visual(session, int(session.mount_display_id))
+    return responses
+
+
+def _set_taxi_mount_state(session, state: TaxiFlightSession, mount_display_id: int) -> None:
     display_id = int(mount_display_id or DEFAULT_TAXI_MOUNT_DISPLAY_ID)
     session.is_mounted = True
     session.mount_spell = None
@@ -888,9 +1125,6 @@ def _apply_taxi_mount(session, state: TaxiFlightSession, mount_display_id: int) 
     session.is_flying = True
     session.fly_speed = float(state.speed)
     session.fly_back_speed = float(state.speed)
-    responses = _build_mount_visual_responses(session, display_id)
-    _broadcast_mount_visual(session, display_id)
-    return responses
 
 
 def _restore_pre_taxi_state(session, state: TaxiFlightSession) -> None:

@@ -103,7 +103,7 @@ def test_handle_disconnect_session_persists_inventory(monkeypatch):
     assert player_store.get(42) is None
 
 
-def test_handle_disconnect_session_finalizes_taxi_before_position_save(monkeypatch):
+def test_handle_disconnect_session_pauses_taxi_before_position_save(monkeypatch):
     _install_lifecycle_test_stubs()
     taxi_module = types.ModuleType("server.modules.handlers.world.taxi_runtime")
     sys.modules["server.modules.handlers.world.taxi_runtime"] = taxi_module
@@ -112,17 +112,12 @@ def test_handle_disconnect_session_finalizes_taxi_before_position_save(monkeypat
 
     calls = []
 
-    def _complete_taxi_for_disconnect(session):
+    def _persist_taxi_for_disconnect(session):
         calls.append(("taxi", session.x, session.y, session.z))
-        session.x = 50.0
-        session.y = 60.0
-        session.z = 7.0
         session.taxi_state = None
-        session.taxi_controls_locked = False
-        session.player_travel_state = "NORMAL"
         return True
 
-    taxi_module.complete_taxi_for_disconnect = _complete_taxi_for_disconnect
+    taxi_module.persist_taxi_for_disconnect = _persist_taxi_for_disconnect
     monkeypatch.setattr(lifecycle, "broadcast_player_remove", lambda session: calls.append(("remove", session.x, session.y, session.z)))
     monkeypatch.setattr(
         lifecycle,
@@ -152,11 +147,10 @@ def test_handle_disconnect_session_finalizes_taxi_before_position_save(monkeypat
     lifecycle.handle_disconnect_session(session)
 
     assert calls[0] == ("taxi", 0.0, 0.0, 0.0)
-    assert calls[1] == ("remove", 50.0, 60.0, 7.0)
-    assert calls[2][0:4] == ("position", 50.0, 60.0, 7.0)
+    assert calls[1] == ("remove", 0.0, 0.0, 0.0)
+    assert calls[2][0:4] == ("position", 0.0, 0.0, 0.0)
     assert calls[2][4]["reason"] == "disconnect"
     assert calls[2][4]["online"] == 0
     assert session.taxi_state is None
-    assert session.taxi_controls_locked is False
-    assert session.player_travel_state == "NORMAL"
-
+    assert session.taxi_controls_locked is True
+    assert session.player_travel_state == "TAXI_FLIGHT"

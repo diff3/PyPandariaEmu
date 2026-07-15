@@ -1093,6 +1093,43 @@ class DatabaseConnection:
             return False
 
     @staticmethod
+    def save_character_taxi_path(char_guid: int, realm_id: int, taxi_path: str) -> bool:
+        """Persist the resumable flight-path snapshot for one character."""
+        session = DatabaseConnection.chars()
+        try:
+            updated = (
+                session.query(Characters)
+                .filter(
+                    Characters.guid == int(char_guid),
+                    Characters.realm == int(realm_id),
+                )
+                .update(
+                    {Characters.taxi_path: str(taxi_path or "")},
+                    synchronize_session=False,
+                )
+            )
+            if not updated:
+                session.rollback()
+                Logger.warning(
+                    "[DB] save_character_taxi_path missing character guid=%s realm=%s",
+                    int(char_guid),
+                    int(realm_id),
+                )
+                return False
+            session.commit()
+            session.expire_all()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.warning(
+                "[DB] save_character_taxi_path failed guid=%s realm=%s: %s",
+                int(char_guid),
+                int(realm_id),
+                exc,
+            )
+            return False
+
+    @staticmethod
     def save_character_world_attachment(
         char_guid: int,
         realm_id: int,

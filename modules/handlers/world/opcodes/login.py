@@ -1701,6 +1701,10 @@ def handle_player_login(session, ctx: PacketContext):
             ) or int(session.zone or 0)
         )
 
+    from server.modules.handlers.world.taxi_runtime import restore_persisted_taxi
+
+    restore_persisted_taxi(session, getattr(row, "taxi_path", None))
+
     _resolve_session_ids(session)
     _set_login_state(session, LoginState.PLAYER_LOGIN)
 
@@ -2011,6 +2015,9 @@ def handle_set_active_mover(session, ctx: PacketContext):
             len(mount_restore_packets),
         )
         responses.extend(mount_restore_packets)
+    from server.modules.handlers.world.taxi_runtime import activate_restored_taxi
+
+    responses.extend(activate_restored_taxi(session))
     Logger.debug("[LOGIN] active mover acknowledged")
 
     if responses:

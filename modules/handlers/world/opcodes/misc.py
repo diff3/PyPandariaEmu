@@ -41,7 +41,7 @@ from server.modules.handlers.world.packet_logging import log_cmsg
 from server.modules.handlers.world.runtime.player_store import (
     get_player_runtime_store,
 )
-from server.modules.handlers.world.taxi_runtime import complete_taxi_for_disconnect
+from server.modules.handlers.world.taxi_runtime import persist_taxi_for_disconnect
 from server.modules.interpretation.utils import dsl_decode
 from server.modules.handlers.world.state.runtime import (
     advance_global_time,
@@ -170,7 +170,7 @@ def handle_logout_request(session, ctx):
     except Exception as exc:
         Logger.warning("[PetBattle] logout cleanup failed: %s", exc)
 
-    complete_taxi_for_disconnect(session)
+    persist_taxi_for_disconnect(session)
 
     # --- REMOVE FROM WORLD ---
     state = getattr(session, "global_state", None)
