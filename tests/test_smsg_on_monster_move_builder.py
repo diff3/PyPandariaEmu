@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import pytest
+import math
 
 from server.modules.handlers.world.protocol.movement.spline import (
     SPLINE_FLAG_CATMULLROM,
@@ -55,6 +56,19 @@ def test_build_facing_angle_spline_matches_fixture():
         "0000f04100002041070000000000a041000000000000000000000000"
         "e70000138800000000000000484200002042000070420000a03f000a"
         "6000ab09030000"
+    )
+
+
+def test_facing_angle_is_normalized_before_spline_serialization():
+    kwargs = dict(
+        mover_guid=0xAA,
+        spline_id=7,
+        start_position=SplineVector(10.0, 20.0, 30.0),
+        destination_position=SplineVector(40.0, 50.0, 60.0),
+        duration_ms=777,
+    )
+    assert build_basic_spline_move(facing_angle=math.tau + 1.25, **kwargs) == (
+        build_basic_spline_move(facing_angle=1.25, **kwargs)
     )
 
 

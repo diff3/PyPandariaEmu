@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 import struct
 
 from shared.Logger import Logger
@@ -17,6 +16,7 @@ from server.modules.handlers.world.protocol.update_object.serializers import (
     serialize_create_object_entry,
     u32_from_float,
 )
+from server.modules.handlers.world.protocol.orientation import normalize_orientation
 from server.modules.handlers.world.runtime.creature import Creature
 from server.modules.handlers.world.runtime.creature_store import (
     creature_identity_matches_mapping,
@@ -28,11 +28,7 @@ for _definition_name in creature_defs.__all__:
     globals()[f"_{_definition_name}"] = getattr(creature_defs, _definition_name)
 
 
-def _normalize_orientation(value: float) -> float:
-    orientation = math.fmod(float(value or 0.0), math.tau)
-    if orientation < 0.0:
-        orientation += math.tau
-    return float(orientation)
+_normalize_orientation = normalize_orientation
 
 
 def _npc_orientation_debug_enabled() -> bool:
@@ -237,7 +233,7 @@ def _build_creature_update_payload(
         spawn_orientation = float(entry.get("spawn_orientation", 0.0) or 0.0)
     else:
         spawn_orientation = float(entry.get("orientation", 0.0) or 0.0)
-    orientation = float(creature.orientation)
+    orientation = normalize_orientation(creature.orientation)
 
     body = bytearray()
     body += struct.pack("<B", raw_guid[4])

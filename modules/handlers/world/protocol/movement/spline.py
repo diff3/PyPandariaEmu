@@ -10,6 +10,7 @@ from enum import IntEnum
 import struct
 
 from DSL.modules.bitsHandler import BitWriter
+from server.modules.handlers.world.protocol.orientation import normalize_orientation
 
 
 MONSTER_MOVE_NORMAL = 0
@@ -147,7 +148,7 @@ def build_smsg_on_monster_move(spline: MonsterMoveSpline) -> bytes:
     _append_guid_xor_bytes(payload, raw_guid, (5,))
 
     if facing_mode == SplineFacingMode.ANGLE:
-        payload.extend(struct.pack("<f", float(spline.facing_angle)))
+        payload.extend(struct.pack("<f", normalize_orientation(spline.facing_angle)))
 
     _append_guid_xor_bytes(payload, raw_guid, (3,))
 

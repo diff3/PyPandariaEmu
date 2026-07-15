@@ -16,6 +16,7 @@ from server.modules.handlers.world.protocol.update_object.serializers import (
     build_fixed_u32_field_block,
     u32_from_float,
 )
+from server.modules.handlers.world.protocol.orientation import normalize_orientation
 from server.modules.handlers.world.runtime.gameobject import GameObject
 from server.modules.handlers.world.runtime.gameobject_store import (
     gameobject_identity_matches_mapping,
@@ -129,11 +130,7 @@ def _u32_from_float(value: float) -> int:
     return u32_from_float(value)
 
 
-def _normalize_orientation(orientation: float) -> float:
-    orientation = math.fmod(float(orientation), math.tau)
-    if orientation < 0.0:
-        orientation += math.tau
-    return float(orientation)
+_normalize_orientation = normalize_orientation
 
 
 def _rotation_has_quaternion(
@@ -238,6 +235,23 @@ def _rotation_components(
     entry: Mapping[str, Any],
     gameobject: RuntimeObject | None = None,
 ) -> tuple[float, float, float, float]:
+    gameobject_type = (
+        int(getattr(gameobject, "gameobject_type", _entry_int(entry, "type")))
+        if gameobject is not None
+        else _entry_int(entry, "type")
+    ) & 0xFF
+    if gameobject_type in (
+        _GAMEOBJECT_TYPE_TRANSPORT,
+        _GAMEOBJECT_TYPE_MO_TRANSPORT,
+    ) and bool(entry.get("_runtime_transport_orientation_authoritative")):
+        orientation = _stationary_orientation(entry, gameobject)
+        return _normalize_quaternion(
+            0.0,
+            0.0,
+            math.sin(orientation * 0.5),
+            math.cos(orientation * 0.5),
+        )
+
     raw_rotation = _raw_rotation_components(entry, gameobject)
     if _rotation_has_quaternion(
         entry,
@@ -551,6 +565,7 @@ def _transport_runtime_packet_entry(
         return entry
 
     packet_entry = dict(entry)
+    packet_entry["_runtime_transport_orientation_authoritative"] = True
     packet_entry["world_guid"] = int(state.guid)
     if (
         gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT

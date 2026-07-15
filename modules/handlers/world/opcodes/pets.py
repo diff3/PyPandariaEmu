@@ -11,6 +11,7 @@ from DSL.modules.bitsHandler import BitInterPreter
 from shared.Logger import Logger
 from server.modules.game.guid import GuidHelper
 from server.modules.handlers.world.dispatcher import register
+from server.modules.handlers.world.protocol.orientation import normalize_orientation
 from server.modules.handlers.world.pet.pet_service import (
     battle_pet_by_spell,
     battle_pet_by_guid,
@@ -261,7 +262,7 @@ def _append_companion_living_block(body: bytearray, *, world_guid: int, x: float
     body += struct.pack("<B", raw_guid[7])
     body += struct.pack("<f", 3.140000104904175)
     body += struct.pack("<f", float(x))
-    body += struct.pack("<f", float(orientation))
+    body += struct.pack("<f", normalize_orientation(orientation))
     body += struct.pack("<f", 2.5)
     body += struct.pack("<f", float(y))
     body += struct.pack("<f", 4.5)

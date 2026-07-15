@@ -446,6 +446,13 @@ def _build_world_login_context(session) -> WorldLoginContext:
     return ctx
 
 
+def _worldport_bootstrap_variant(session) -> str:
+    variant = str(
+        getattr(session, "_worldport_bootstrap_variant", "A") or "A"
+    ).strip().upper()
+    return variant if variant in {"A", "B", "C", "D"} else "A"
+
+
 def _resolve_opening_cinematic_id(race: int) -> int:
     return int(_CINEMATIC_SEQUENCE_BY_RACE.get(int(race), 0) or 0)
 
@@ -498,10 +505,12 @@ def build_player_bootstrap_packets(session) -> list[tuple[str, bytes]]:
 
     bootstrap_runtime = getattr(session, "_player_bootstrap_runtime_transport", None)
     transport_bootstrap = isinstance(bootstrap_runtime, dict)
+    bootstrap_variant = _worldport_bootstrap_variant(session)
     pre_player_gameobject_responses: list[tuple[str, bytes]] = []
     if transport_bootstrap:
         pre_player_gameobject_responses = build_database_gameobject_responses(session)
-        responses.extend(pre_player_gameobject_responses)
+        if bootstrap_variant != "B":
+            responses.extend(pre_player_gameobject_responses)
         if bool(bootstrap_runtime.get("transport_create_transform_matched")):
             Logger.info(
                 "[TransportBootstrap] transport_create_sent guid=0x%016X packets=%s",
@@ -590,6 +599,11 @@ def build_player_bootstrap_packets(session) -> list[tuple[str, bytes]]:
             object_guid=int(getattr(ctx, "world_guid", 0) or 0),
             object_map_context=int(getattr(ctx, "map_id", 0) or 0),
         )
+
+    if transport_bootstrap and bootstrap_variant == "B":
+        responses.extend(pre_player_gameobject_responses)
+    if transport_bootstrap and bootstrap_variant == "C" and active_mover is not None:
+        responses.append(("SMSG_MOVE_SET_ACTIVE_MOVER", active_mover))
 
     if not transport_bootstrap:
         responses.extend(build_database_gameobject_responses(session))
@@ -923,16 +937,29 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
 
     responses: list[tuple[str, bytes]] = []
 
-    for opcode_name in (
-        "SMSG_LOGIN_VERIFY_WORLD",
-        "SMSG_LOGIN_SET_TIME_SPEED",
-        "SMSG_BIND_POINT_UPDATE",
-    ):
+    for opcode_name in ("SMSG_BIND_POINT_UPDATE",):
         payload = build_login_packet(opcode_name, ctx)
         if payload is None:
             continue
         Logger.info(f"[Teleport] sending {opcode_name}")
         responses.append((opcode_name, payload))
+
+    far_worldport_spell_packets = spells_handlers.build_active_mover_spell_sync_responses(session)
+    if far_worldport_spell_packets:
+        Logger.info(
+            "[Teleport] sending %s pre-active-mover spell sync packets",
+            len(far_worldport_spell_packets),
+        )
+        responses.extend(far_worldport_spell_packets)
+    session._far_worldport_known_spells_sent = any(
+        opcode_name == "SMSG_SEND_KNOWN_SPELLS"
+        for opcode_name, _payload in far_worldport_spell_packets
+    )
+
+    time_speed = build_login_packet("SMSG_LOGIN_SET_TIME_SPEED", ctx)
+    if time_speed is not None:
+        Logger.info("[Teleport] sending SMSG_LOGIN_SET_TIME_SPEED")
+        responses.append(("SMSG_LOGIN_SET_TIME_SPEED", time_speed))
 
     step_started = time.monotonic()
     Logger.info(
@@ -961,14 +988,6 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         len(player_bootstrap_packets),
         len(responses),
     )
-
-    post_teleport_spell_packets = spells_handlers.build_active_mover_spell_sync_responses(session)
-    if post_teleport_spell_packets:
-        Logger.info(
-            "[Teleport] sending %s post-teleport spell sync packets",
-            len(post_teleport_spell_packets),
-        )
-        responses.extend(post_teleport_spell_packets)
 
     inventory_packets = build_login_inventory_sync_responses(session)
     if inventory_packets:
@@ -1054,6 +1073,17 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         len(world_stream_packets),
         len(responses),
     )
+    if _worldport_bootstrap_variant(session) == "D":
+        _reset_loaded_world_object_state(session)
+        replay_packets = movement_handlers.stream_world_objects_after_teleport(
+            session,
+            context="worldport-variant-d-visibility-replay",
+        )
+        responses.extend(replay_packets)
+        Logger.info(
+            "[WorldportBootstrapVariant] variant=D visibility_replay packets=%s",
+            len(replay_packets),
+        )
     from server.modules.handlers.world.opcodes import taxi as taxi_handlers
 
     taxi_responses = taxi_handlers.continue_pending_cross_map_taxi(session)
@@ -1994,7 +2024,11 @@ def handle_set_active_mover(session, ctx: PacketContext):
         else:
             Logger.info("[WorldHandlers] ACTIVE_MOVER acknowledged; suppressing account settings packets")
 
-    responses.extend(spells_handlers.build_active_mover_spell_sync_responses(session))
+    if getattr(session, "_far_worldport_known_spells_sent", False):
+        session._far_worldport_known_spells_sent = False
+        Logger.info("[WorldLogin] ACTIVE_MOVER skipping far-worldport known-spells replay")
+    else:
+        responses.extend(spells_handlers.build_active_mover_spell_sync_responses(session))
     mount_restore_packets = spells_handlers.build_login_mount_restore_responses(session)
     if mount_restore_packets:
         Logger.info(

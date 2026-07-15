@@ -7,6 +7,8 @@ import inspect
 from pathlib import Path
 import pytest
 import struct
+
+from server.modules.handlers.world.protocol.orientation import normalize_orientation
 import sys
 from types import SimpleNamespace
 import types
@@ -193,7 +195,7 @@ def _skyfire_reference_player_create_living_movement(ctx: SimpleNamespace) -> by
         output += struct.pack("<f", float(getattr(ctx, "transport_x", 0.0) or 0.0))
         if time3:
             output += struct.pack("<I", time3)
-        output += struct.pack("<f", float(getattr(ctx, "transport_orientation", 0.0) or 0.0))
+        output += struct.pack("<f", normalize_orientation(getattr(ctx, "transport_orientation", 0.0) or 0.0))
         output += struct.pack("<f", float(getattr(ctx, "transport_y", 0.0) or 0.0))
         output += _write_byte_seq(trans_guid, 4)
         output += _write_byte_seq(trans_guid, 1)
@@ -233,7 +235,7 @@ def _skyfire_reference_player_create_living_movement(ctx: SimpleNamespace) -> by
     if has_pitch:
         output += struct.pack("<f", float(getattr(ctx, "pitch", 0.0) or 0.0))
     if abs(orientation) > 1e-6:
-        output += struct.pack("<f", orientation)
+        output += struct.pack("<f", normalize_orientation(orientation))
     output += struct.pack("<f", float(getattr(ctx, "walk_speed", 2.5) or 2.5))
     output += struct.pack("<f", float(getattr(ctx, "y", 0.0) or 0.0))
     output += struct.pack("<f", float(getattr(ctx, "fly_back_speed", 4.5) or 4.5))
@@ -777,7 +779,7 @@ def test_player_create_transport_movement_block_matches_skyfire_reference() -> N
         transport_x=9.042,
         transport_y=5.740,
         transport_z=11.705,
-        transport_orientation=2.377130,
+        transport_orientation=-0.25,
         transport_time=114810,
         transport_time2=22,
         transport_time3=33,
@@ -801,6 +803,10 @@ def test_player_create_transport_movement_block_matches_skyfire_reference() -> N
     assert actual == expected
     assert b"\x1E\x08\xAC\x10" in actual  # transport local X=9.042 follows guid[7].
     assert actual.index(struct.pack("<I", 114810)) > actual.index(struct.pack("<b", -1))
+    assert struct.pack("<f", normalize_orientation(ctx.orientation)) in actual
+    assert struct.pack("<f", normalize_orientation(ctx.transport_orientation)) in actual
+    assert struct.pack("<f", ctx.orientation) not in actual
+    assert struct.pack("<f", ctx.transport_orientation) not in actual
 
 
 def test_player_create_transport_data_selects_skyfire_block_without_global_experiment(

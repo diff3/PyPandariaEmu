@@ -1420,22 +1420,45 @@ def test_transfer_pending_builder_uses_map_only_payload_for_normal_teleport():
     assert payload == struct.pack("<I", 1)
 
 
-def test_transfer_pending_builder_uses_transport_payload_for_transport_worldport():
+@pytest.mark.parametrize(
+    ("source_map_id", "destination_map_id", "expected_hex"),
+    (
+        (0, 1, "40000000004851000001000000"),
+        (1, 0, "40010000004851000000000000"),
+    ),
+)
+def test_path_241_transfer_pending_transport_wire_layout_both_directions(
+    source_map_id,
+    destination_map_id,
+    expected_hex,
+):
     from server.modules.handlers.world.login.packets import build_login_packet
 
     payload = build_login_packet(
         "SMSG_TRANSFER_PENDING",
         SimpleNamespace(
-            map_id=1,
+            map_id=destination_map_id,
             has_transport=True,
-            source_map_id=0,
+            source_map_id=source_map_id,
             transport_entry=20808,
         ),
     )
 
     assert len(payload) == 13
     assert payload[0] == 0x40
-    assert payload[1:] == struct.pack("<III", 1, 0, 20808)
+    assert payload.hex() == expected_hex
+    assert payload[1:] == struct.pack(
+        "<III",
+        source_map_id,
+        20808,
+        destination_map_id,
+    )
+    transport_map_id, transport_entry, map_id = struct.unpack("<III", payload[1:])
+    assert transport_map_id == source_map_id
+    assert transport_entry == 20808
+    assert map_id == destination_map_id
+    assert map_id in {0, 1}
+    assert map_id != transport_entry
 
 
 def test_map_transfer_keep_transport_replaces_transfer_pending_with_transport_payload(monkeypatch):
@@ -1471,7 +1494,7 @@ def test_map_transfer_keep_transport_replaces_transfer_pending_with_transport_pa
         "SMSG_NEW_WORLD",
     ]
     assert len(responses[0][1]) == 13
-    assert responses[0][1][1:] == struct.pack("<III", 1, 0, 20808)
+    assert responses[0][1][1:] == struct.pack("<III", 0, 20808, 1)
 
 
 def test_transport_worldport_uses_map_transfer_keep_transport(monkeypatch):
@@ -1552,11 +1575,65 @@ def test_transport_create_uses_same_pinned_runtime_transform_as_player_bootstrap
     assert packet_entry["orientation"] == pytest.approx(1.125)
     assert packet_entry["transport_path_progress"] == 9876
     assert packet_entry["_bootstrap_runtime_transform_pinned"] is True
+    assert packet_entry["_runtime_transport_orientation_authoritative"] is True
     assert session._player_bootstrap_runtime_transport["transport_create_transform_matched"] is True
 
     # The packet builder's normal runtime overlay must not replace the transform
     # sampled for the player in this same bootstrap.
     assert gameobjects._transport_runtime_packet_entry(packet_entry) is packet_entry
+    expected_rotation = (0.0, 0.0, math.sin(1.125 / 2.0), math.cos(1.125 / 2.0))
+    assert gameobjects._rotation_components(packet_entry) == pytest.approx(expected_rotation)
+    assert gameobjects._gameobject_rotation_packed(packet_entry) == gameobjects._gameobject_rotation_packed(
+        {"orientation": 1.125}
+    )
+
+
+def test_login_reattachment_transport_create_serializes_one_t1_orientation(monkeypatch):
+    entry = {
+        **_loaded_mo_transport_entry(),
+        "orientation": 0.0,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+    }
+    world_guid = int(entry["world_guid"])
+    session = SimpleNamespace(
+        _player_bootstrap_runtime_transport={
+            "transport_guid": world_guid,
+            "map_id": 0,
+            "x": 101.25,
+            "y": 202.5,
+            "z": 12.75,
+            "orientation": 1.125,
+            "route_phase": 9876,
+        }
+    )
+    packet_entry = transport_runtime.cached_transport_runtime_entry(session, entry)
+    captured_fields = {}
+    monkeypatch.setattr(gameobjects.EncoderHandler, "encode_packet", lambda _name, fields: fields)
+
+    def capture_fields(fields, *, mask_blocks=1):
+        captured_fields.update(fields)
+        return (b"\x00" * (int(mask_blocks) * 4), b"")
+
+    monkeypatch.setattr(gameobjects, "_build_fixed_u32_field_block", capture_fields)
+    payload = gameobjects._build_gameobject_update_payload(
+        map_id=0,
+        entry=packet_entry,
+        realm_id=1,
+    )
+
+    expected_z = math.sin(1.125 / 2.0)
+    expected_w = math.cos(1.125 / 2.0)
+    rotation_start = gameobjects._GAMEOBJECT_FIELD_ROTATION_START
+    assert payload["stationary_orientation"] == pytest.approx(1.125)
+    assert payload["gameobject_rotation_packed"] == gameobjects._gameobject_rotation_packed(
+        {"orientation": 1.125}
+    )
+    assert struct.unpack("<f", struct.pack("<I", captured_fields[rotation_start + 2]))[0] == pytest.approx(expected_z)
+    assert struct.unpack("<f", struct.pack("<I", captured_fields[rotation_start + 3]))[0] == pytest.approx(expected_w)
+    assert payload["movement_block_uint32"] == 9876
 
 
 def test_runtime_transport_values_update_is_suppressed_while_worldport_pending(monkeypatch):
@@ -3973,7 +4050,13 @@ def test_gameobject_create_reads_runtime_transport_state(monkeypatch):
     assert payload["stationary_y"] == 34.0
     assert payload["stationary_z"] == 56.0
     assert payload["stationary_orientation"] == 1.25
+    assert payload["gameobject_rotation_packed"] == gameobjects._gameobject_rotation_packed(
+        {"orientation": 1.25}
+    )
     assert payload["movement_block_uint32"] == 789
+    rotation_start = gameobjects._GAMEOBJECT_FIELD_ROTATION_START
+    assert struct.unpack("<f", struct.pack("<I", captured_fields[rotation_start + 2]))[0] == pytest.approx(math.sin(1.25 / 2.0))
+    assert struct.unpack("<f", struct.pack("<I", captured_fields[rotation_start + 3]))[0] == pytest.approx(math.cos(1.25 / 2.0))
     dynamic_flags = captured_fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS]
     assert dynamic_flags == (25853 << 16)
 
@@ -4091,9 +4174,15 @@ def test_type11_gameobject_create_reads_runtime_elevator_state(monkeypatch):
     assert payload["stationary_y"] == 222.0
     assert payload["stationary_z"] == 333.0
     assert payload["stationary_orientation"] == 1.75
+    assert payload["gameobject_rotation_packed"] == gameobjects._gameobject_rotation_packed(
+        {"orientation": 1.75}
+    )
     assert payload["movement_block_uint32"] == 4321
+    rotation_start = gameobjects._GAMEOBJECT_FIELD_ROTATION_START
+    assert struct.unpack("<f", struct.pack("<I", captured_fields[rotation_start + 2]))[0] == pytest.approx(math.sin(1.75 / 2.0))
+    assert struct.unpack("<f", struct.pack("<I", captured_fields[rotation_start + 3]))[0] == pytest.approx(math.cos(1.75 / 2.0))
     dynamic_flags = captured_fields[gameobjects._OBJECT_FIELD_DYNAMIC_FLAGS]
-    assert dynamic_flags == (28317 << 16)
+    assert dynamic_flags == 0
 
 
 def test_generic_type11_runtime_elevator_counts_as_real_runtime_elevator(monkeypatch):
@@ -7008,3 +7097,123 @@ def test_autonomous_transport_visibility_excludes_elevators():
     }
 
     assert transport_runtime._supports_autonomous_transport_visibility(elevator) is False
+
+
+def _mount_test_session_on_runtime_transport(state, *, player_guid: int = 77):
+    movement_state = MovementState()
+    movement_state.has_transport_data = True
+    movement_state.transport_guid = int(state.guid)
+    movement_state.transport_x = 1.25
+    movement_state.transport_y = -2.5
+    movement_state.transport_z = 3.75
+    movement_state.transport_orientation = 0.375
+    movement_state.transport_time = 4321
+    movement_state.transport_time2 = 123
+    movement_state.transport_time3 = 456
+    movement_state.transport_seat = -1
+    movement_state.transport_vehicle_id = 0
+    session = SimpleNamespace(
+        char_guid=int(player_guid),
+        realm_id=1,
+        map_id=int(state.map_id),
+        movement_state=movement_state,
+        transport_attach_state=transport_runtime.ATTACH_STATE_ATTACHED,
+        transport_attached_guid=int(state.guid),
+        transport_attach_source_map=int(state.map_id),
+        mount_spell=None,
+        mount_display_id=0,
+        is_mounted=False,
+        is_flying=False,
+        can_fly=False,
+        unit_flags=0,
+        active_mount_aura_spell_id=None,
+        active_mount_aura_slot=0,
+        active_fly_aura_spell_id=None,
+        run_speed=7.0,
+        fly_speed=7.0,
+    )
+    assert transport_runtime.attach_transport_passenger(
+        int(state.guid),
+        int(player_guid),
+        local_x=movement_state.transport_x,
+        local_y=movement_state.transport_y,
+        local_z=movement_state.transport_z,
+        local_o=movement_state.transport_orientation,
+        source_map=int(state.map_id),
+    )
+    return session
+
+
+def _assert_mount_did_not_change_attachment(session, state, expected):
+    attachment = transport_runtime.transport_passenger_attachment(
+        int(state.guid), int(session.char_guid)
+    )
+    assert attachment is expected
+    movement_state = session.movement_state
+    assert movement_state.has_transport_data is True
+    assert movement_state.transport_guid == int(state.guid)
+    assert (
+        movement_state.transport_x,
+        movement_state.transport_y,
+        movement_state.transport_z,
+        movement_state.transport_orientation,
+        movement_state.transport_time,
+        movement_state.transport_time2,
+        movement_state.transport_time3,
+    ) == (1.25, -2.5, 3.75, 0.375, 4321, 123, 456)
+    assert session.transport_attach_state == transport_runtime.ATTACH_STATE_ATTACHED
+    assert session.transport_attached_guid == int(state.guid)
+
+
+@pytest.mark.parametrize("runtime_kind", ["boat", "elevator"])
+def test_mount_and_dismount_preserve_runtime_transport_attachment(monkeypatch, runtime_kind):
+    from server.modules.handlers.world.opcodes import spells as spells_handlers
+
+    _reset_transport_states()
+    if runtime_kind == "boat":
+        _entry, state, _transport = _registered_runtime_transport()
+    else:
+        _entry, state, _elevator = _registered_runtime_elevator(monkeypatch)
+    session = _mount_test_session_on_runtime_transport(state)
+    expected_attachment = transport_runtime.transport_passenger_attachment(
+        int(state.guid), int(session.char_guid)
+    )
+
+    monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda _spell_id: 2404)
+    monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda _spell_id: False)
+    monkeypatch.setattr(spells_handlers, "_broadcast_mount_visual_to_visible_peers", lambda *_args: None)
+    monkeypatch.setattr(spells_handlers, "build_mount_visual_responses", lambda target, display_id: setattr(target, "mount_display_id", int(display_id)) or [])
+    monkeypatch.setattr(spells_handlers, "_build_run_speed_update_response", lambda _target: ("SMSG_MOVE_SET_RUN_SPEED", b""))
+    monkeypatch.setattr(spells_handlers, "build_move_set_flight_speed_payload", lambda _target: b"")
+    monkeypatch.setattr(spells_handlers, "_build_movement_speed_update_responses", lambda _target: [])
+    monkeypatch.setattr(spells_handlers, "_notification_response", lambda _message: [])
+    monkeypatch.setattr(spells_handlers, "_persist_current_mount_state", lambda _target: None)
+    monkeypatch.setattr(spells_handlers, "clear_persisted_mount_state", lambda _target: None)
+
+    spells_handlers.handle_mount(session, 59535)
+    _assert_mount_did_not_change_attachment(session, state, expected_attachment)
+    spells_handlers.dismount(session)
+    _assert_mount_did_not_change_attachment(session, state, expected_attachment)
+
+
+def test_repeated_mount_cycles_preserve_attachment_while_transport_moves(monkeypatch):
+    from server.modules.handlers.world.opcodes import spells as spells_handlers
+
+    _reset_transport_states()
+    _entry, state, _transport = _registered_runtime_transport()
+    session = _mount_test_session_on_runtime_transport(state)
+    expected_attachment = transport_runtime.transport_passenger_attachment(
+        int(state.guid), int(session.char_guid)
+    )
+
+    monkeypatch.setattr(spells_handlers, "send_mount_update", lambda _target, _spell_id: [])
+    monkeypatch.setattr(spells_handlers, "send_dismount_update", lambda _target: [])
+    monkeypatch.setattr(spells_handlers, "_persist_current_mount_state", lambda _target: None)
+    monkeypatch.setattr(spells_handlers, "clear_persisted_mount_state", lambda _target: None)
+
+    for path_progress_ms in (100, 250, 500, 750):
+        state.path_progress_ms = path_progress_ms
+        spells_handlers.handle_mount(session, 59535)
+        _assert_mount_did_not_change_attachment(session, state, expected_attachment)
+        spells_handlers.dismount(session)
+        _assert_mount_did_not_change_attachment(session, state, expected_attachment)

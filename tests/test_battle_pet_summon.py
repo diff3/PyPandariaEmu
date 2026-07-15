@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import struct
+import math
 import sys
 import types
 from types import SimpleNamespace
 
+import pytest
+
 from server.modules.handlers.world.opcodes.pets import (
+    _append_companion_living_block,
     build_companion_follow_responses,
     _build_companion_create_response,
     summon_companion_pet,
@@ -166,3 +170,15 @@ def test_battle_pet_follow_moves_companion_toward_player(monkeypatch):
     assert abs(session.summoned_companion_x - 2031.434) < 0.0001
     assert abs(session.summoned_companion_y - -6710.1) < 0.0001
     assert abs(session.summoned_companion_z - 5.594) < 0.0001
+def test_companion_unit_wire_orientation_is_normalized():
+    body = bytearray()
+    _append_companion_living_block(
+        body,
+        world_guid=0x0807060504030201,
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=math.tau + 0.75,
+    )
+
+    assert struct.unpack_from("<f", body, 24)[0] == pytest.approx(0.75)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from server.modules.handlers.world.protocol.orientation import normalize_orientation
+
 """Player UPDATE_OBJECT notes for the native server-built implementation.
 
 Known state:
@@ -890,7 +892,7 @@ def _build_skyfire_player_create_movement_header(
         output.extend(struct.pack("<f", float(transport["x"])))
         if has_time3:
             output.extend(struct.pack("<I", int(transport["time3"])))
-        output.extend(struct.pack("<f", float(transport["orientation"])))
+        output.extend(struct.pack("<f", normalize_orientation(transport["orientation"])))
         output.extend(struct.pack("<f", float(transport["y"])))
         append_guid_byte(4)
         append_guid_byte(1)
@@ -964,7 +966,7 @@ def build_skyfire_player_create_living_movement_block(
     if bool(state["has_pitch"]):
         output.extend(struct.pack("<f", float(state["pitch"])))
     if bool(state["has_orientation"]):
-        output.extend(struct.pack("<f", float(state["orientation"])))
+        output.extend(struct.pack("<f", normalize_orientation(state["orientation"])))
 
     output.extend(struct.pack("<f", _movement_float(ctx, "walk_speed", default=_PLAYER_CREATE_WALK_SPEED)))
     output.extend(struct.pack(
@@ -1006,9 +1008,9 @@ def build_movement_block(ctx, player: Player | None = None) -> bytes:
     ))
     output.extend(struct.pack(
         "<f",
-        float(player.orientation)
+        normalize_orientation(player.orientation)
         if player is not None
-        else float(getattr(ctx, "orientation", 0.0) or 0.0),
+        else normalize_orientation(getattr(ctx, "orientation", 0.0) or 0.0),
     ))
     output.extend(struct.pack("<f", _PLAYER_CREATE_WALK_SPEED))
     output.extend(struct.pack(

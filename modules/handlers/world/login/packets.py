@@ -33,6 +33,7 @@ from server.modules.game.equipment import _parse_equipment_cache
 from server.modules.game.player import _decode_player_bytes
 from server.modules.game.guid import _guid_bytes_and_masks, GuidHelper, HighGuid
 from server.modules.handlers.world.position.area_service import resolve_zone_from_position
+from server.modules.handlers.world.protocol.orientation import normalize_orientation
 from server.modules.interpretation.utils import dsl_decode, to_safe_json
 from server.modules.handlers.world.mount.mount_service import (
     granted_mount_spells,
@@ -677,9 +678,9 @@ def build_SMSG_LOGIN_VERIFY_WORLD(
             else float(getattr(ctx, "x", 0.0))
         ),
         "facing": (
-            float(player.orientation)
+            normalize_orientation(player.orientation)
             if player is not None
-            else float(getattr(ctx, "orientation", 0.0))
+            else normalize_orientation(getattr(ctx, "orientation", 0.0))
         ),
         "y": (
             float(player.y)
@@ -1017,7 +1018,7 @@ def _build_exact_update_object_1773613181_0005_body(
     dynamic_mask_blocks: int,
 ) -> bytes:
     payload = bytearray()
-    payload += struct.pack("<ffff", float(stationary_y), float(stationary_z), float(stationary_orientation), float(stationary_x))
+    payload += struct.pack("<ffff", float(stationary_y), float(stationary_z), normalize_orientation(stationary_orientation), float(stationary_x))
     payload += struct.pack("<I", int(unk472))
     payload += struct.pack("<Q", int(gameobject_rotation) & 0xFFFFFFFFFFFFFFFF)
     payload += struct.pack("<B", len(mask_bytes) // 4)
@@ -1545,9 +1546,9 @@ def build_SMSG_TRANSFER_PENDING(_ctx=None) -> bytes:
         bits.write_bits(0, 1)  # unknown, SkyFire writes false
         bits.write_bits(1, 1)  # transport context present
         payload = bytearray(bits.getvalue())
-        payload.extend(struct.pack("<I", int(getattr(ctx, "map_id", 0) or 0)))
         payload.extend(struct.pack("<I", int(getattr(ctx, "source_map_id", 0) or 0)))
         payload.extend(struct.pack("<I", int(getattr(ctx, "transport_entry", 0) or 0)))
+        payload.extend(struct.pack("<I", int(getattr(ctx, "map_id", 0) or 0)))
         return bytes(payload)
     return _encode("SMSG_TRANSFER_PENDING", {
         "map_id": int(getattr(ctx, "map_id", 0) or 0),
@@ -1565,7 +1566,7 @@ def build_SMSG_NEW_WORLD(_ctx=None) -> bytes:
         "map_id": int(getattr(ctx, "map_id", 0) or 0),
         "y": float(getattr(ctx, "y", 0.0) or 0.0),
         "z": float(getattr(ctx, "z", 0.0) or 0.0),
-        "orientation": float(getattr(ctx, "orientation", 0.0) or 0.0),
+        "orientation": normalize_orientation(getattr(ctx, "orientation", 0.0) or 0.0),
     })
 
 def build_SMSG_INIT_WORLD_STATES(_ctx=None) -> bytes:

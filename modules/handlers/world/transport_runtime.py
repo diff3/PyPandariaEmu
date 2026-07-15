@@ -2108,6 +2108,7 @@ def cached_transport_runtime_entry(session: Any, entry: dict[str, Any]) -> dict[
         ) & 0xFFFFFFFF
         moved_entry["_transport_create_source_path"] = "bootstrap-runtime"
         moved_entry["_bootstrap_runtime_transform_pinned"] = True
+        moved_entry["_runtime_transport_orientation_authoritative"] = True
         bootstrap_runtime["transport_create_transform_matched"] = True
         Logger.info(
             "[TransportTransfer] transport_bootstrap_runtime "

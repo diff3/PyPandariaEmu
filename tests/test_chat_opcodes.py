@@ -2290,6 +2290,22 @@ def test_worldporttest_requires_transport_debug_messages(monkeypatch):
     ]
 
 
+def test_worldporttest_selects_single_bootstrap_variant(monkeypatch):
+    alice = SimpleNamespace(is_gm=True, char_guid=1, map_id=1)
+    monkeypatch.setattr(chat_handlers.chat_commands, "_require_gm", lambda _session: None)
+    monkeypatch.setattr(chat_handlers.chat_commands, "transport_debug_messages_enabled", lambda: True)
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "_notification_response",
+        lambda message: [("SMSG_MESSAGECHAT", message.encode())],
+    )
+
+    responses = chat_handlers.chat_commands.cmd_worldporttest(alice, ["variant", "B"])
+
+    assert alice._worldport_bootstrap_variant == "B"
+    assert responses == [("SMSG_MESSAGECHAT", b"[WorldportTest] bootstrap variant=B")]
+
+
 def test_worldporttest_coordinate_uses_apply_map_transfer(monkeypatch):
     from server.modules.handlers.world.teleport import map_transfer
 

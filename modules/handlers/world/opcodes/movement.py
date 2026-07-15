@@ -15,6 +15,7 @@ from shared.Logger import Logger
 from server.modules.game.guid import CreatureGuid, GameObjectGuid, GuidHelper, MoTransportGuid
 from server.modules.handlers.world.bootstrap.gameobjects import build_database_gameobject_responses
 from server.modules.handlers.world.bootstrap.playerobjects import build_single_u32_update_object_payload
+from server.modules.handlers.world.protocol.orientation import normalize_orientation as normalize_wire_orientation
 from server.modules.handlers.world.runtime.gameobject_store import (
     resolve_gameobject_runtime,
 )
@@ -3051,7 +3052,7 @@ def build_smsg_player_move_payload_old(
     _append_guid_byte_seq(payload, raw_guid, (5, 1))
     payload.extend(struct.pack("<f", z))  # MSEPositionZ
     payload.extend(struct.pack("<I", timestamp))  # MSETimestamp
-    payload.extend(struct.pack("<f", orientation))  # MSEOrientation
+    payload.extend(struct.pack("<f", normalize_wire_orientation(orientation)))  # MSEOrientation
     _append_guid_byte_seq(payload, raw_guid, (3,))
     _append_guid_byte_seq(payload, raw_guid, (0, 2, 6))
     payload.extend(struct.pack("<f", x))  # MSEPositionX
@@ -3091,7 +3092,7 @@ def build_smsg_player_move_payload_stable_old(
         payload.extend(struct.pack("<f", y))
         payload.extend(struct.pack("<f", z))
         payload.extend(struct.pack("<I", timestamp))
-        payload.extend(struct.pack("<f", orientation))
+        payload.extend(struct.pack("<f", normalize_wire_orientation(orientation)))
         if has_fall_direction:
             payload.extend(struct.pack("<f", float(state.fall_sin_angle)))
             payload.extend(struct.pack("<f", float(state.fall_horizontal_speed)))
@@ -3152,7 +3153,7 @@ def build_smsg_player_move_payload_stable_old(
     if timestamp:
         payload.extend(struct.pack("<I", timestamp))  # MSETimestamp
     if has_orientation:
-        payload.extend(struct.pack("<f", orientation))  # MSEOrientation
+        payload.extend(struct.pack("<f", normalize_wire_orientation(orientation)))  # MSEOrientation
     if has_fall_data:
         payload.extend(struct.pack("<f", fall_vertical_speed))  # MSEJumpVerticalSpeed
         payload.extend(struct.pack("<I", fall_time))  # MSEFallTime
@@ -3394,7 +3395,7 @@ def build_same_map_teleport_payload(session) -> bytes:
     payload.extend(struct.pack("<f", float(getattr(session, "x", 0.0) or 0.0)))
     payload.extend(struct.pack("<I", counter))
     payload.append((guid_low ^ 1) & 0xFF)
-    payload.extend(struct.pack("<f", float(getattr(session, "orientation", 0.0) or 0.0)))
+    payload.extend(struct.pack("<f", normalize_wire_orientation(getattr(session, "orientation", 0.0) or 0.0)))
 
     state.counter = (counter + 1) & 0xFFFFFFFF
     return bytes(payload)

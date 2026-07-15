@@ -6,6 +6,8 @@ import sys
 from types import SimpleNamespace
 import types
 
+import pytest
+
 replay_module = types.ModuleType("server.modules.handlers.world.bootstrap.replay")
 replay_module.build_database_gameobject_responses = lambda *args, **kwargs: []
 replay_module.build_multi_u32_update_object_payload = lambda *args, **kwargs: b""
@@ -23,6 +25,23 @@ from server.modules.handlers.world.opcodes import movement
 from server.modules.handlers.world.state.player_visible_snapshot import (
     build_player_visible_snapshot,
 )
+
+
+def test_same_map_teleport_normalizes_movement_info_orientation_on_wire():
+    session = SimpleNamespace(
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=-0.5,
+        char_guid=1,
+        movement_state=SimpleNamespace(counter=0),
+    )
+
+    payload = movement.build_same_map_teleport_payload(session)
+
+    assert struct.unpack_from("<f", payload, len(payload) - 4)[0] == pytest.approx(
+        math.tau - 0.5
+    )
 
 
 def _payload_bits_msb(payload: bytes):

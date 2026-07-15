@@ -471,7 +471,7 @@ def cmd_gps(session, args: list[str]) -> list[tuple[str, bytes]]:
 
 @register_command(
     "worldporttest",
-    ".worldporttest <map> <x> <y> <z> <o>|transport <transport_guid>",
+    ".worldporttest <map> <x> <y> <z> <o>|transport <transport_guid>|variant <A|B|C|D>",
     require_args=True,
 )
 def cmd_worldporttest(session, args: list[str]) -> list[tuple[str, bytes]]:
@@ -493,6 +493,13 @@ def cmd_worldporttest(session, args: list[str]) -> list[tuple[str, bytes]]:
     transport_guid = 0
     transport_entry: int | None = None
     source_map_id: int | None = None
+
+    if str(args[0]).casefold() == "variant":
+        if len(args) != 2 or str(args[1]).strip().upper() not in {"A", "B", "C", "D"}:
+            return _notification_response("Usage: .worldporttest variant <A|B|C|D>")
+        variant = str(args[1]).strip().upper()
+        session._worldport_bootstrap_variant = variant
+        return _notification_response(f"[WorldportTest] bootstrap variant={variant}")
 
     if str(args[0]).casefold() == "transport":
         if len(args) != 2:

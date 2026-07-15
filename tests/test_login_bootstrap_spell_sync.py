@@ -801,6 +801,121 @@ def test_transport_bootstrap_player_create_uses_runtime_position_with_transport_
     assert session.pending_transport_transfer is pending
 
 
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    (
+        ("A", ["SMSG_MOVE_SET_ACTIVE_MOVER", "transport", "player"]),
+        ("B", ["SMSG_MOVE_SET_ACTIVE_MOVER", "player", "transport"]),
+        (
+            "C",
+            [
+                "SMSG_MOVE_SET_ACTIVE_MOVER",
+                "transport",
+                "player",
+                "SMSG_MOVE_SET_ACTIVE_MOVER",
+            ],
+        ),
+        ("D", ["SMSG_MOVE_SET_ACTIVE_MOVER", "transport", "player"]),
+    ),
+)
+def test_transport_worldport_bootstrap_variants_change_only_targeted_create_order(
+    monkeypatch,
+    variant,
+    expected,
+) -> None:
+    session = SimpleNamespace(
+        _worldport_bootstrap_variant=variant,
+        _player_bootstrap_runtime_transport={
+            "transport_guid": 9,
+            "route_phase": 10,
+            "x": 1.0,
+            "y": 2.0,
+            "z": 3.0,
+            "orientation": 0.0,
+            "local_x": 0.0,
+            "local_y": 0.0,
+            "local_z": 0.0,
+            "local_o": 0.0,
+            "rotated_x": 0.0,
+            "rotated_y": 0.0,
+            "rotated_z": 0.0,
+            "transport_create_transform_matched": True,
+        },
+        movement_state=MovementState(),
+        player_object_sent=False,
+    )
+    ctx = SimpleNamespace(
+        x=1.0,
+        y=2.0,
+        z=3.0,
+        orientation=0.0,
+        has_transport_data=True,
+        transport_guid=9,
+        transport_x=0.0,
+        transport_y=0.0,
+        transport_z=0.0,
+        transport_orientation=0.0,
+        transport_time=10,
+    )
+    monkeypatch.setattr(login_handlers, "_build_world_login_context", lambda _session: ctx)
+    monkeypatch.setattr(login_handlers, "resolve_player_runtime", lambda _session: None)
+    monkeypatch.setattr(
+        login_handlers,
+        "build_login_packet",
+        lambda opcode, _ctx: b"active" if opcode == "SMSG_MOVE_SET_ACTIVE_MOVER" else b"player",
+    )
+    monkeypatch.setattr(
+        login_handlers,
+        "build_database_gameobject_responses",
+        lambda _session: [("transport", b"create")],
+    )
+    monkeypatch.setattr(login_handlers, "log_transport_packet_snapshot", lambda *args, **kwargs: None)
+
+    responses = login_handlers.build_player_bootstrap_packets(session)
+
+    labels = [
+        "player"
+        if opcode == "SMSG_UPDATE_OBJECT" and payload == b"player"
+        else opcode
+        for opcode, payload in responses
+    ]
+    assert labels == expected
+    assert labels.count("player") == 1
+
+
+def test_transport_worldport_variant_d_resets_and_replays_visibility_once(monkeypatch) -> None:
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+    session = SimpleNamespace(
+        _worldport_bootstrap_variant="D",
+        loaded_gameobjects={1},
+        loaded_gameobject_entries={1: {}},
+        loaded_transport_entries={1: {}},
+        loaded_npcs={2},
+        npc_flags_by_guid={2: 0},
+    )
+    contexts = []
+    monkeypatch.setattr(
+        movement_handlers,
+        "stream_world_objects_after_teleport",
+        lambda target, *, context: contexts.append(
+            (context, set(getattr(target, "loaded_gameobjects", set())))
+        ) or [("SMSG_UPDATE_OBJECT", context.encode())],
+    )
+    monkeypatch.setattr(login_handlers, "gameobjects_enabled", lambda: True)
+    monkeypatch.setattr(login_handlers, "npcs_enabled", lambda: True)
+    monkeypatch.setattr(login_handlers, "npc_auto_stream_enabled", lambda: True)
+
+    login_handlers._reset_loaded_world_object_state(session)
+    replay = movement_handlers.stream_world_objects_after_teleport(
+        session,
+        context="worldport-variant-d-visibility-replay",
+    )
+
+    assert contexts == [("worldport-variant-d-visibility-replay", set())]
+    assert replay == [("SMSG_UPDATE_OBJECT", b"worldport-variant-d-visibility-replay")]
+
+
 def test_build_player_bootstrap_packets_uses_native_builders(monkeypatch) -> None:
     session = SimpleNamespace()
     calls: list[str] = []
@@ -881,8 +996,8 @@ def test_pending_transport_transfer_syncs_before_player_bootstrap(monkeypatch) -
     assert session.movement_state.transport_time == 4321
 
 
-def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
-    """Queue a post-create spell sync so known spells land after player create."""
+def test_character_login_bootstrap_keeps_verify_world_and_existing_order(monkeypatch) -> None:
+    """Keep the initial-login pre-create bundle and its ordering unchanged."""
     from server.modules.handlers.world.opcodes import movement as movement_handlers
 
     session = SimpleNamespace(
@@ -902,7 +1017,11 @@ def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> 
     monkeypatch.setattr(
         login_handlers,
         "build_pre_update_object_packets",
-        lambda _ctx: [("PRE", b"pre")],
+        lambda _ctx: [
+            ("SMSG_LOGIN_VERIFY_WORLD", b"verify"),
+            ("SMSG_LOGIN_SET_TIME_SPEED", b"time"),
+            ("SMSG_BIND_POINT_UPDATE", b"bind"),
+        ],
     )
     monkeypatch.setattr(
         login_handlers,
@@ -952,7 +1071,9 @@ def test_world_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> 
 
     assert state_changes == [LoginState.WORLD_BOOTSTRAP]
     assert responses == [
-        ("PRE", b"pre"),
+        ("SMSG_LOGIN_VERIFY_WORLD", b"verify"),
+        ("SMSG_LOGIN_SET_TIME_SPEED", b"time"),
+        ("SMSG_BIND_POINT_UPDATE", b"bind"),
         ("SMSG_UPDATE_OBJECT", b"create"),
         ("SMSG_SEND_KNOWN_SPELLS", b"known-spells"),
         ("BOOT", b"boot"),
@@ -1166,8 +1287,55 @@ def test_active_mover_sends_mount_restore_after_known_spells(monkeypatch) -> Non
     ]
 
 
-def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) -> None:
-    """Queue a post-teleport spell sync so language/mount state survives world transfers."""
+def test_far_worldport_active_mover_does_not_replay_known_spells(monkeypatch) -> None:
+    session = SimpleNamespace(
+        login_state=LoginState.WORLD_BOOTSTRAP,
+        player_object_sent=True,
+        char_guid=8,
+        world_guid=8,
+        map_id=1,
+        instance_id=0,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.5,
+        motd="",
+        chat_motd_sent=False,
+        account_settings_sent=False,
+        pending_world_attachment_restore=None,
+        _far_worldport_known_spells_sent=True,
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(login_handlers, "sync_player_visibility", lambda _session: None)
+    monkeypatch.setattr(login_handlers, "sync_all_players_on_map", lambda _map_id: None)
+    monkeypatch.setattr(login_handlers, "_build_world_login_context", lambda _session: SimpleNamespace(motd=""))
+    monkeypatch.setattr(
+        login_handlers.spells_handlers,
+        "build_active_mover_spell_sync_responses",
+        lambda _session: calls.append("known") or [("SMSG_SEND_KNOWN_SPELLS", b"known")],
+    )
+    monkeypatch.setattr(
+        login_handlers.spells_handlers,
+        "build_login_mount_restore_responses",
+        lambda _session: calls.append("mount") or [("SMSG_MOVE_SET_CAN_FLY", b"fly")],
+    )
+
+    store = get_player_runtime_store()
+    store.clear()
+    try:
+        status, responses = login_handlers.handle_set_active_mover(session, SimpleNamespace())
+    finally:
+        store.clear()
+
+    assert status == 0
+    assert calls == ["mount"]
+    assert responses == [("SMSG_MOVE_SET_CAN_FLY", b"fly")]
+    assert session._far_worldport_known_spells_sent is False
+
+
+def test_far_transport_worldport_omits_verify_world_and_keeps_bootstrap_order(monkeypatch) -> None:
+    """Exclude login-only verification without changing the far-worldport sequence."""
     from server.modules.handlers.world import transport_runtime
     from server.modules.handlers.world.opcodes import movement as movement_handlers
 
@@ -1176,7 +1344,7 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
         post_loading_sent=False,
         teleport_pending=True,
         worldport_ack_pending=True,
-        near_teleport_pending=True,
+        near_teleport_pending=False,
         teleport_destination="test",
         loaded_gameobjects={0x1FC00000000186A7},
         loaded_transport_entries={0x1FC00000000186A7: 176495},
@@ -1217,7 +1385,11 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
         )
         or _session.loaded_gameobjects.add(0x1FC00000000186A7)
         or _session.loaded_transport_entries.update({0x1FC00000000186A7: {"entry": 176495}})
-        or [("SMSG_UPDATE_OBJECT", b"create")],
+        or [
+            ("SMSG_MOVE_SET_ACTIVE_MOVER", b"active-mover"),
+            ("SMSG_UPDATE_OBJECT", b"transport-create"),
+            ("SMSG_UPDATE_OBJECT", b"player-create"),
+        ],
     )
     monkeypatch.setattr(
         login_handlers,
@@ -1266,13 +1438,18 @@ def test_teleport_bootstrap_sends_known_spells_after_update_object(monkeypatch) 
     assert transport_refresh_state == [
         ({0x1FC00000000186A7}, {0x1FC00000000186A7: {"entry": 176495}})
     ]
-    assert ("SMSG_UPDATE_OBJECT", b"create") in responses
+    assert ("SMSG_LOGIN_VERIFY_WORLD", b"verify") not in responses
+    assert responses[:6] == [
+        ("SMSG_BIND_POINT_UPDATE", b"bind"),
+        ("SMSG_SEND_KNOWN_SPELLS", b"known-spells"),
+        ("SMSG_LOGIN_SET_TIME_SPEED", b"time"),
+        ("SMSG_MOVE_SET_ACTIVE_MOVER", b"active-mover"),
+        ("SMSG_UPDATE_OBJECT", b"transport-create"),
+        ("SMSG_UPDATE_OBJECT", b"player-create"),
+    ]
     assert ("SMSG_UPDATE_OBJECT", b"transport-values") in responses
     assert ("SMSG_UPDATE_OBJECT", b"visible:worldport-loading-complete") in responses
-    assert ("SMSG_SEND_KNOWN_SPELLS", b"known-spells") in responses
-    assert responses.index(("SMSG_SEND_KNOWN_SPELLS", b"known-spells")) > responses.index(
-        ("SMSG_UPDATE_OBJECT", b"create")
-    )
+    assert responses.count(("SMSG_SEND_KNOWN_SPELLS", b"known-spells")) == 1
     assert responses.index(("SMSG_UPDATE_OBJECT", b"transport-values")) > responses.index(
         ("SMSG_QUERY_TIME_RESPONSE", b"query-time")
     )

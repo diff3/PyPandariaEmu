@@ -781,16 +781,14 @@ def test_mount_and_dismount_broadcast_visual_update_to_visible_peers(monkeypatch
         ("SMSG_MOVE_SET_RUN_SPEED", b"run"),
         ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight"),
     ]
-    assert dispatched[0][1][3][0] == "SMSG_PLAYER_MOVE"
-    assert dispatched[0][1][3][1]
+    assert len(dispatched[0][1]) == 3
     assert dispatched[1][0] == [peer]
     assert dispatched[1][1][0:3] == [
         ("SMSG_UPDATE_OBJECT", b"mount-update-4"),
         ("SMSG_MOVE_SET_RUN_SPEED", b"run"),
         ("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight"),
     ]
-    assert dispatched[1][1][3][0] == "SMSG_PLAYER_MOVE"
-    assert dispatched[1][1][3][1]
+    assert len(dispatched[1][1]) == 3
     assert payload_calls[1] == {
         "map_id": 1,
         "guid": 3,
