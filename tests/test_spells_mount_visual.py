@@ -215,7 +215,8 @@ def test_handle_mount_and_dismount_use_aura_visual_and_speed(monkeypatch):
     )
 
     mount_responses = spells_handlers.handle_mount(session, 59535)
-    assert [opcode for opcode, _payload in mount_responses[:4]] == [
+    assert mount_responses[0][0] == "SMSG_MOVE_SET_COLLISION_HEIGHT"
+    assert [opcode for opcode, _payload in mount_responses[1:5]] == [
         "SMSG_AURA_UPDATE",
         "SMSG_UPDATE_OBJECT",
         "SMSG_MOVE_SET_RUN_SPEED",
@@ -226,13 +227,14 @@ def test_handle_mount_and_dismount_use_aura_visual_and_speed(monkeypatch):
     assert session.active_mount_aura_spell_id == 59535
 
     dismount_responses = spells_handlers.dismount(session)
-    assert [opcode for opcode, _payload in dismount_responses[:4]] == [
+    assert dismount_responses[0][0] == "SMSG_MOVE_SET_COLLISION_HEIGHT"
+    assert [opcode for opcode, _payload in dismount_responses[1:5]] == [
         "SMSG_AURA_UPDATE",
         "SMSG_DISMOUNT",
         "SMSG_UPDATE_OBJECT",
         "SMSG_MOVE_SET_WALK_SPEED",
     ]
-    assert [opcode for opcode, _payload in dismount_responses[3:7]] == [
+    assert [opcode for opcode, _payload in dismount_responses[4:8]] == [
         "SMSG_MOVE_SET_WALK_SPEED",
         "SMSG_MOVE_SET_RUN_SPEED",
         "SMSG_MOVE_SET_SWIM_SPEED",
@@ -290,7 +292,10 @@ def test_dismount_clears_persisted_mount_state(monkeypatch):
 
     responses = spells_handlers.dismount(session)
 
-    assert responses == [("SMSG_DISMOUNT", b"off")]
+    assert [opcode for opcode, _payload in responses] == [
+        "SMSG_MOVE_SET_COLLISION_HEIGHT",
+        "SMSG_DISMOUNT",
+    ]
     assert cleared == [(7, 1)]
 
 
@@ -413,7 +418,7 @@ def test_login_flying_mount_restore_sends_flying_enable(monkeypatch):
         "SMSG_PLAYER_MOVE",
     ]
     assert session.can_fly is True
-    assert session.is_flying is True
+    assert session.is_flying is False
     assert session.active_fly_aura_spell_id is not None
     assert session.fly_speed == session.run_speed * 3.2
     assert session.movement_state.x == 0.0
@@ -429,6 +434,8 @@ def test_login_flying_mount_restore_sends_flying_enable(monkeypatch):
 
 def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
     spells_handlers = _import_spells_handlers()
+    refresh_flags = []
+    refresh_flags2 = []
     monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda spell_id: 31007)
     monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda spell_id: True)
     monkeypatch.setattr(spells_handlers, "build_move_set_run_speed_payload", lambda session: b"run")
@@ -437,6 +444,15 @@ def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
         spells_handlers,
         "build_multi_u32_update_object_payload",
         lambda **fields: b"mount-update",
+    )
+    monkeypatch.setattr(
+        spells_handlers,
+        "resync_movement",
+        lambda target: (
+            refresh_flags.append(int(target.movement_state.flags)),
+            refresh_flags2.append(int(target.movement_state.flags2)),
+        )
+        and [("SMSG_PLAYER_MOVE", b"refresh")],
     )
 
     session = SimpleNamespace(
@@ -463,12 +479,25 @@ def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
     )
 
     mount_responses = spells_handlers.handle_mount(session, 72286)
+    assert session.can_fly is True
+    assert session.is_flying is False
+    assert session.movement_state.flags & spells_handlers._MOVEMENTFLAG_CAN_FLY
+    assert not session.movement_state.flags & spells_handlers._MOVEMENTFLAG_FLYING
+    assert refresh_flags[0] & spells_handlers._MOVEMENTFLAG_CAN_FLY
+    assert refresh_flags2[0] & spells_handlers._MOVEMENTFLAG2_CAN_SWIM_TO_FLY_TRANS
+    assert not refresh_flags[0] & (
+        spells_handlers._MOVEMENTFLAG_SWIMMING
+        | spells_handlers._MOVEMENTFLAG_FLYING
+    )
+    assert mount_responses[-1] == ("SMSG_PLAYER_MOVE", b"refresh")
+
     duplicate_responses = spells_handlers.handle_mount(session, 72286)
     assert session.can_fly is False
     assert session.is_flying is False
     assert not session.movement_state.flags & spells_handlers._MOVEMENTFLAG_FLYING_CAPABILITY
 
-    assert [opcode for opcode, _payload in mount_responses[:8]] == [
+    assert [opcode for opcode, _payload in mount_responses[:9]] == [
+        "SMSG_MOVE_SET_COLLISION_HEIGHT",
         "SMSG_AURA_UPDATE",
         "SMSG_UPDATE_OBJECT",
         "SMSG_AURA_UPDATE",
@@ -478,9 +507,10 @@ def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
         "SMSG_MOVE_SET_RUN_SPEED",
         "SMSG_MOVE_SET_FLIGHT_SPEED",
     ]
-    assert mount_responses[4][1] == bytes.fromhex("1002")
-    assert mount_responses[5][1] == b"can-fly-on"
-    assert [opcode for opcode, _payload in duplicate_responses[:6]] == [
+    assert mount_responses[5][1] == bytes.fromhex("1002")
+    assert mount_responses[6][1] == b"can-fly-on"
+    assert [opcode for opcode, _payload in duplicate_responses[:7]] == [
+        "SMSG_MOVE_SET_COLLISION_HEIGHT",
         "SMSG_AURA_UPDATE",
         "SMSG_AURA_UPDATE",
         "SMSG_AURA_UPDATE",
@@ -488,11 +518,137 @@ def test_flying_mount_enables_and_disables_flying_capability_once(monkeypatch):
         "SMSG_MOVE_UNSET_CAN_FLY",
         "SMSG_SPLINE_MOVE_UNSET_FLYING",
     ]
-    assert duplicate_responses[4][1] == b"can-fly-off"
-    assert duplicate_responses[5][1] == bytes.fromhex("0202")
+    assert duplicate_responses[5][1] == b"can-fly-off"
+    assert duplicate_responses[6][1] == bytes.fromhex("0202")
+    assert not refresh_flags2[-1] & spells_handlers._MOVEMENTFLAG2_CAN_SWIM_TO_FLY_TRANS
     assert session.can_fly is False
     assert session.is_flying is False
     assert not session.movement_state.flags & spells_handlers._MOVEMENTFLAG_FLYING_CAPABILITY
+
+
+def test_flying_capability_preserves_swimming_but_clears_spline_and_fall_flags(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+
+    state = SimpleNamespace(
+        flags=(
+            spells_handlers._MOVEMENTFLAG_SWIMMING
+            | spells_handlers._MOVEMENTFLAG_SPLINE_ELEVATION
+            | spells_handlers._MOVEMENTFLAG_FALLING
+        ),
+        flags2=0,
+        is_ascending=False,
+        is_descending=False,
+        has_fall_data=True,
+        fall_time=123,
+        fall_vertical_speed=-2.0,
+        fall_horizontal_speed=1.0,
+        fall_sin_angle=0.25,
+        fall_cos_angle=0.75,
+    )
+    session = SimpleNamespace(
+        can_fly=False,
+        is_flying=False,
+        movement_state=state,
+    )
+
+    assert spells_handlers._set_flying_capability_state(session, True) is True
+    assert session.can_fly is True
+    assert session.is_flying is False
+    assert state.flags & spells_handlers._MOVEMENTFLAG_CAN_FLY
+    assert state.flags & spells_handlers._MOVEMENTFLAG_SWIMMING
+    assert state.flags2 & spells_handlers._MOVEMENTFLAG2_CAN_SWIM_TO_FLY_TRANS
+    assert not state.flags & (
+        spells_handlers._MOVEMENTFLAG_SPLINE_ELEVATION
+        | spells_handlers._MOVEMENTFLAG_FALLING
+        | spells_handlers._MOVEMENTFLAG_FLYING
+    )
+    assert state.has_fall_data is False
+    assert state.fall_time == 0
+
+def test_non_flying_mount_preserves_swimming_and_dismount_preserves_later_water_state(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    state = SimpleNamespace(
+        flags=spells_handlers._MOVEMENTFLAG_SWIMMING,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        can_fly=False,
+        is_flying=False,
+        movement_state=state,
+    )
+
+    monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda _spell_id: False)
+    assert spells_handlers.build_mount_flying_capability_responses(session, 1) == []
+    assert state.flags == spells_handlers._MOVEMENTFLAG_SWIMMING
+
+    monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda _spell_id: True)
+    monkeypatch.setattr(spells_handlers, "apply_fly_aura", lambda _target: [])
+    monkeypatch.setattr(spells_handlers, "build_spline_move_flying_payload", lambda _target: b"")
+    monkeypatch.setattr(spells_handlers, "build_move_set_can_fly_payload", lambda *_args: b"")
+    spells_handlers.build_mount_flying_capability_responses(session, 1)
+    state.flags |= spells_handlers._MOVEMENTFLAG_SWIMMING
+    spells_handlers._set_flying_capability_state(session, False)
+
+    assert not state.flags & (
+        spells_handlers._MOVEMENTFLAG_CAN_FLY
+        | spells_handlers._MOVEMENTFLAG_FLYING
+    )
+    assert state.flags & spells_handlers._MOVEMENTFLAG_SWIMMING
+
+
+def test_dismount_while_swimming_keeps_water_state_and_removes_flight_capability(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    state = SimpleNamespace(
+        flags=(
+            spells_handlers._MOVEMENTFLAG_SWIMMING
+            | spells_handlers._MOVEMENTFLAG_CAN_FLY
+            | spells_handlers._MOVEMENTFLAG_FLYING
+        ),
+        flags2=spells_handlers._MOVEMENTFLAG2_CAN_SWIM_TO_FLY_TRANS,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        is_mounted=True,
+        mount_spell=72286,
+        mount_display_id=31007,
+        is_flying=True,
+        can_fly=True,
+        unit_flags=spells_handlers._UNIT_FLAG_MOUNT,
+        movement_state=state,
+        run_speed=14.0,
+        fly_speed=44.8,
+    )
+    monkeypatch.setattr(spells_handlers, "clear_persisted_mount_state", lambda _target: None)
+    monkeypatch.setattr(
+        spells_handlers,
+        "send_dismount_update",
+        lambda target: spells_handlers._set_flying_capability_state(target, False) and [],
+    )
+    monkeypatch.setattr(
+        spells_handlers,
+        "resync_movement",
+        lambda _target: [("SMSG_PLAYER_MOVE", b"swimming-dismount")],
+    )
+
+    responses = spells_handlers.dismount(session)
+
+    assert [opcode for opcode, _payload in responses] == [
+        "SMSG_MOVE_SET_COLLISION_HEIGHT",
+        "SMSG_PLAYER_MOVE",
+    ]
+    assert responses[-1][1] == b"swimming-dismount"
+    assert session.is_mounted is False
+    assert session.can_fly is False
+    assert session.is_flying is False
+    assert state.flags & spells_handlers._MOVEMENTFLAG_SWIMMING
+    assert not state.flags2 & spells_handlers._MOVEMENTFLAG2_CAN_SWIM_TO_FLY_TRANS
+    assert not state.flags & (
+        spells_handlers._MOVEMENTFLAG_CAN_FLY
+        | spells_handlers._MOVEMENTFLAG_FLYING
+    )
 
 
 def _mount_position_session(*, attached_to_transport: bool) -> SimpleNamespace:
@@ -565,6 +721,57 @@ def _position_snapshot(session) -> tuple[float, ...]:
         float(state.transport_z),
         float(state.transport_orientation),
     )
+
+
+def test_move_set_collision_height_matches_skyfire_548_field_order(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    monkeypatch.setattr(
+        spells_handlers,
+        "player_collision_height",
+        lambda _session, *, mounted: 3.25 if mounted else 1.75,
+    )
+    session = SimpleNamespace(
+        char_guid=3,
+        mount_display_id=2404,
+        movement_state=SimpleNamespace(counter=7),
+    )
+
+    mounted_payload = spells_handlers.build_move_set_collision_height_payload(
+        session,
+        mounted=True,
+    )
+    session.movement_state.counter = 7
+    unmounted_payload = spells_handlers.build_move_set_collision_height_payload(
+        session,
+        mounted=False,
+    )
+
+    assert mounted_payload == bytes.fromhex(
+        "40000000504064090000070000000000803F02"
+    )
+    assert unmounted_payload == bytes.fromhex(
+        "50000000E03F070000000000803F02"
+    )
+
+
+def test_collision_height_uses_native_and_mount_model_data(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    monkeypatch.setattr(
+        spells_handlers,
+        "_load_collision_height_data",
+        lambda: (
+            {100: 10, 200: 20},
+            {10: (2.0, 0.0), 20: (4.0, 3.0)},
+        ),
+    )
+    session = SimpleNamespace(
+        native_display_id=100,
+        mount_display_id=200,
+        object_scale=1.5,
+    )
+
+    assert spells_handlers.player_collision_height(session, mounted=False) == 2.0
+    assert spells_handlers.player_collision_height(session, mounted=True) == 5.5
 
 
 def test_flying_mount_and_dismount_preserve_terrain_position_and_orientation(monkeypatch):
@@ -712,7 +919,10 @@ def test_dismount_clears_flying_runtime_state(monkeypatch):
 
     responses = spells_handlers.dismount(session)
 
-    assert responses == [("SMSG_DISMOUNT", b"off")]
+    assert [opcode for opcode, _payload in responses] == [
+        "SMSG_MOVE_SET_COLLISION_HEIGHT",
+        "SMSG_DISMOUNT",
+    ]
     assert session.is_mounted is False
     assert session.mount_spell is None
     assert session.mount_display_id == 0

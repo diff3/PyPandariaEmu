@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 import json
 import math
@@ -19,6 +20,7 @@ from server.modules.handlers.world.feature_config import (
     elevators_enabled,
     moving_transports_enabled,
     transport_movement_debug_enabled,
+    transport_attachment_geometry_tolerances,
 )
 from server.modules.handlers.world.bootstrap.gameobjects import (
     _build_gameobject_update_payload,
@@ -567,7 +569,22 @@ class WorldTransportManager:
             return False
         return True
 
-    def record_attach(self, session: Any, world_guid: int, *, opcode_name: str = "") -> None:
+    def record_attach(
+        self,
+        session: Any,
+        world_guid: int,
+        *,
+        opcode_name: str = "",
+        local_x: float | None = None,
+        local_y: float | None = None,
+        local_z: float | None = None,
+        local_o: float | None = None,
+        transport_time: int | None = None,
+        transport_time2: int = 0,
+        transport_time3: int = 0,
+        seat: int = -1,
+        vehicle_id: int = 0,
+    ) -> None:
         state = self.state_for_guid(int(world_guid))
         char_guid = int(getattr(session, "char_guid", 0) or 0)
         previous_guid = int(getattr(session, "transport_attached_guid", 0) or 0)
@@ -580,15 +597,51 @@ class WorldTransportManager:
             )
         if state is not None and char_guid > 0:
             movement_state = getattr(session, "movement_state", None)
+            attachment_x = float(
+                getattr(movement_state, "transport_x", 0.0)
+                if local_x is None else local_x
+            )
+            attachment_y = float(
+                getattr(movement_state, "transport_y", 0.0)
+                if local_y is None else local_y
+            )
+            attachment_z = float(
+                getattr(movement_state, "transport_z", 0.0)
+                if local_z is None else local_z
+            )
+            attachment_o = float(
+                getattr(movement_state, "transport_orientation", 0.0)
+                if local_o is None else local_o
+            )
             attach_transport_passenger(
                 int(world_guid),
                 char_guid,
-                local_x=float(getattr(movement_state, "transport_x", 0.0) or 0.0),
-                local_y=float(getattr(movement_state, "transport_y", 0.0) or 0.0),
-                local_z=float(getattr(movement_state, "transport_z", 0.0) or 0.0),
-                local_o=float(getattr(movement_state, "transport_orientation", 0.0) or 0.0),
+                local_x=attachment_x,
+                local_y=attachment_y,
+                local_z=attachment_z,
+                local_o=attachment_o,
                 source_map=int(getattr(session, "map_id", 0) or 0),
             )
+            attachment = transport_passenger_attachment(int(world_guid), char_guid)
+            if attachment is not None:
+                from server.modules.handlers.world.position.publication import (
+                    publish_transport_local_offset,
+                )
+
+                publish_transport_local_offset(
+                    session,
+                    state,
+                    attachment,
+                    local_x=attachment_x,
+                    local_y=attachment_y,
+                    local_z=attachment_z,
+                    local_o=attachment_o,
+                    transport_time=transport_time,
+                    transport_time2=transport_time2,
+                    transport_time3=transport_time3,
+                    seat=seat,
+                    vehicle_id=vehicle_id,
+                )
         session.transport_attach_state = ATTACH_STATE_ATTACHED
         session.transport_attached_guid = int(world_guid)
         session.transport_attach_timestamp = float(time.monotonic())
@@ -880,6 +933,20 @@ class WorldTransportManager:
             previous_transform=previous_transform,
         )
         self.update_entry_transform_from_state(state)
+        if not bool(getattr(state, "transfer_active", False)):
+            from server.modules.handlers.world.position.publication import (
+                publish_transport,
+            )
+
+            for passenger_id, attachment in list(
+                _canonical_runtime_passengers(state, reason="position_publish").items()
+            ):
+                passenger_session = _find_transport_passenger_session(int(passenger_id))
+                if passenger_session is None:
+                    continue
+                if int(getattr(passenger_session, "map_id", -1)) != int(state.map_id):
+                    continue
+                publish_transport(passenger_session, state, attachment)
         current_transform = (
             int(state.map_id),
             float(state.x),
@@ -1471,6 +1538,9 @@ def _clear_session_transport_state(session: Any) -> None:
     session.transport_attached_guid = 0
     session.transport_attach_source_map = 0
     session.transport_attach_timestamp = 0.0
+    session._movement_rebuild_transport_guard = None
+    session._transport_missing_metadata_guid = 0
+    session._transport_missing_metadata_count = 0
 
 
 def _current_session_transport_guid(session: Any) -> int:
@@ -1770,6 +1840,78 @@ def transport_passenger_attachment(
     return passengers.get(int(passenger_id))
 
 
+def validate_attached_passenger_geometry(
+    session: Any,
+    *,
+    has_transport_data: bool,
+    transport_guid: int,
+    world_x: float,
+    world_y: float,
+    world_z: float,
+    local_x: float = 0.0,
+    local_y: float = 0.0,
+    local_z: float = 0.0,
+) -> tuple[bool, str, dict[str, float]]:
+    """Validate one accepted movement sample against canonical attachment geometry."""
+    current_guid = int(
+        getattr(getattr(session, "movement_state", None), "transport_guid", 0)
+        or getattr(session, "transport_attached_guid", 0)
+        or 0
+    )
+    passenger_id = int(getattr(session, "char_guid", 0) or 0)
+    state = runtime_transport_state_for_guid(current_guid)
+    attachment = transport_passenger_attachment(current_guid, passenger_id)
+    if state is None or attachment is None:
+        return True, "not_attached", {}
+    if bool(has_transport_data) and int(transport_guid) != current_guid:
+        return True, "changed_transport", {}
+    if int(getattr(state, "map_id", -1)) != int(getattr(session, "map_id", -2)):
+        return True, "map_transition", {}
+
+    horizontal_tolerance, vertical_tolerance, max_local_radius = (
+        transport_attachment_geometry_tolerances()
+    )
+    transport_o = float(getattr(state, "orientation", 0.0) or 0.0)
+    cos_o = math.cos(transport_o)
+    sin_o = math.sin(transport_o)
+    expected_x = float(state.x) + cos_o * float(attachment.local_x) - sin_o * float(attachment.local_y)
+    expected_y = float(state.y) + sin_o * float(attachment.local_x) + cos_o * float(attachment.local_y)
+    expected_z = float(state.z) + float(attachment.local_z)
+    canonical_horizontal = math.hypot(float(world_x) - expected_x, float(world_y) - expected_y)
+    canonical_vertical = abs(float(world_z) - expected_z)
+    metrics = {
+        "canonical_horizontal": canonical_horizontal,
+        "canonical_vertical": canonical_vertical,
+        "horizontal_tolerance": horizontal_tolerance,
+        "vertical_tolerance": vertical_tolerance,
+        "max_local_radius": max_local_radius,
+    }
+    if canonical_horizontal > horizontal_tolerance or canonical_vertical > vertical_tolerance:
+        return False, "absolute_position", metrics
+
+    if bool(has_transport_data):
+        local_radius = math.sqrt(
+            float(local_x) * float(local_x)
+            + float(local_y) * float(local_y)
+            + float(local_z) * float(local_z)
+        )
+        candidate_x = float(state.x) + cos_o * float(local_x) - sin_o * float(local_y)
+        candidate_y = float(state.y) + sin_o * float(local_x) + cos_o * float(local_y)
+        candidate_z = float(state.z) + float(local_z)
+        reported_horizontal = math.hypot(float(world_x) - candidate_x, float(world_y) - candidate_y)
+        reported_vertical = abs(float(world_z) - candidate_z)
+        metrics.update(
+            local_radius=local_radius,
+            reported_horizontal=reported_horizontal,
+            reported_vertical=reported_vertical,
+        )
+        if local_radius > max_local_radius:
+            return False, "local_offset_radius", metrics
+        if reported_horizontal > horizontal_tolerance or reported_vertical > vertical_tolerance:
+            return False, "reported_local_mismatch", metrics
+    return True, "within_tolerance", metrics
+
+
 def begin_transport_passenger_transfer(
     source_world_guid: int,
     destination_world_guid: int,
@@ -1897,8 +2039,147 @@ def can_attach_transport(session: Any, world_guid: int) -> bool:
     return get_world_transport_manager().can_attach(session, int(world_guid))
 
 
-def record_transport_attach(session: Any, world_guid: int, *, opcode_name: str = "") -> None:
-    get_world_transport_manager().record_attach(session, int(world_guid), opcode_name=opcode_name)
+def record_transport_attach(session: Any, world_guid: int, *, opcode_name: str = "", **offsets) -> None:
+    get_world_transport_manager().record_attach(
+        session,
+        int(world_guid),
+        opcode_name=opcode_name,
+        **offsets,
+    )
+
+
+def update_transport_passenger_offset(
+    session: Any,
+    world_guid: int,
+    **offsets,
+) -> bool:
+    """Update canonical and movement-local passenger coordinates together."""
+    state = runtime_transport_state_for_guid(int(world_guid))
+    attachment = transport_passenger_attachment(
+        int(world_guid),
+        int(getattr(session, "char_guid", 0) or 0),
+    )
+    if state is None or attachment is None:
+        return False
+    from server.modules.handlers.world.position.publication import (
+        publish_transport_local_offset,
+    )
+
+    publish_transport_local_offset(session, state, attachment, **offsets)
+    return True
+
+
+def prepare_attached_movement_rebuild(session: Any, *, reason: str) -> bool:
+    """Refresh an attached passenger offset and arm a bounded rebuild guard."""
+    world_guid = int(
+        getattr(session, "transport_attached_guid", 0)
+        or getattr(getattr(session, "movement_state", None), "transport_guid", 0)
+        or 0
+    )
+    passenger_id = int(getattr(session, "char_guid", 0) or 0)
+    state = runtime_transport_state_for_guid(world_guid)
+    attachment = transport_passenger_attachment(world_guid, passenger_id)
+    if state is None or attachment is None:
+        session._movement_rebuild_transport_guard = None
+        return False
+
+    from server.modules.handlers.world.position.publication import (
+        publish_transport_local_from_absolute,
+    )
+
+    publish_transport_local_from_absolute(session, state, attachment)
+    updated = transport_passenger_attachment(world_guid, passenger_id)
+    if updated is None:
+        session._movement_rebuild_transport_guard = None
+        return False
+
+    generation = int(
+        getattr(session, "_movement_rebuild_transport_generation", 0) or 0
+    ) + 1
+    session._movement_rebuild_transport_generation = generation
+    session._movement_rebuild_transport_guard = {
+        "generation": generation,
+        "transport_guid": world_guid,
+        "attachment_generation": int(getattr(updated, "attached_at_ms", 0) or 0),
+        "attachment_token": id(updated),
+        "missing_budget": 2,
+        "expires_at": float(time.monotonic()) + 2.0,
+        "reason": str(reason),
+    }
+    return True
+
+
+def publish_current_transport_attachment(session: Any) -> bool:
+    """Atomically rebase and publish an attachment without moving the player."""
+    world_guid = int(
+        getattr(session, "transport_attached_guid", 0)
+        or getattr(getattr(session, "movement_state", None), "transport_guid", 0)
+        or 0
+    )
+    passenger_id = int(getattr(session, "char_guid", 0) or 0)
+    state = runtime_transport_state_for_guid(world_guid)
+    attachment = transport_passenger_attachment(world_guid, passenger_id)
+    if state is None or attachment is None:
+        return False
+
+    from server.modules.handlers.world.position.publication import (
+        publish_transport,
+        publish_transport_local_from_absolute,
+    )
+
+    # RuntimeTransportState is advanced by the transport thread.  Mount packet
+    # construction must not inverse-project against one phase and forward-project
+    # against another, especially immediately after a worldport releases its
+    # bootstrap-pinned phase.
+    pinned_state = copy.copy(state)
+    publish_transport_local_from_absolute(session, pinned_state, attachment)
+    updated = transport_passenger_attachment(world_guid, passenger_id)
+    if updated is None:
+        return False
+
+    guard = getattr(session, "_movement_rebuild_transport_guard", None)
+    if isinstance(guard, dict) and int(guard.get("transport_guid", 0) or 0) == world_guid:
+        guard["attachment_generation"] = int(getattr(updated, "attached_at_ms", 0) or 0)
+        guard["attachment_token"] = id(updated)
+
+    publish_transport(session, pinned_state, updated)
+    return True
+
+
+def consume_movement_rebuild_transport_guard(
+    session: Any,
+    world_guid: int,
+) -> bool:
+    """Consume one temporary missing-transport allowance for this attachment."""
+    guard = getattr(session, "_movement_rebuild_transport_guard", None)
+    if not isinstance(guard, dict):
+        return False
+    attachment = transport_passenger_attachment(
+        int(world_guid),
+        int(getattr(session, "char_guid", 0) or 0),
+    )
+    valid = bool(
+        int(guard.get("transport_guid", 0) or 0) == int(world_guid)
+        and int(guard.get("generation", 0) or 0)
+        == int(getattr(session, "_movement_rebuild_transport_generation", 0) or 0)
+        and attachment is not None
+        and int(guard.get("attachment_generation", 0) or 0)
+        == int(getattr(attachment, "attached_at_ms", 0) or 0)
+        and int(guard.get("attachment_token", 0) or 0) == id(attachment)
+        and float(guard.get("expires_at", 0.0) or 0.0) >= float(time.monotonic())
+        and int(guard.get("missing_budget", 0) or 0) > 0
+    )
+    if not valid:
+        session._movement_rebuild_transport_guard = None
+        return False
+    guard["missing_budget"] = int(guard.get("missing_budget", 0) or 0) - 1
+    if int(guard["missing_budget"]) <= 0:
+        session._movement_rebuild_transport_guard = None
+    return True
+
+
+def clear_movement_rebuild_transport_guard(session: Any) -> None:
+    session._movement_rebuild_transport_guard = None
 
 
 def record_transport_detach(
@@ -3096,16 +3377,22 @@ def _start_boundary_worldport_for_passenger(
         )
         return False
     movement_state = getattr(session, "movement_state", None)
-    if movement_state is not None:
-        movement_state.has_transport_data = True
-        movement_state.transport_guid = int(state.guid)
-        movement_state.transport_x = float(attachment.local_x)
-        movement_state.transport_y = float(attachment.local_y)
-        movement_state.transport_z = float(attachment.local_z)
-        movement_state.transport_orientation = float(attachment.local_o)
-        movement_state.transport_time = int(getattr(state, "path_progress_ms", 0) or 0) & 0xFFFFFFFF
-        movement_state.transport_time2 = int(getattr(movement_state, "transport_time2", 0) or 0) & 0xFFFFFFFF
-        movement_state.transport_time3 = int(getattr(movement_state, "transport_time3", 0) or 0) & 0xFFFFFFFF
+    from server.modules.handlers.world.position.publication import (
+        publish_transport_local_offset,
+    )
+
+    publish_transport_local_offset(
+        session,
+        state,
+        attachment,
+        local_x=float(attachment.local_x),
+        local_y=float(attachment.local_y),
+        local_z=float(attachment.local_z),
+        local_o=float(attachment.local_o),
+        transport_time=int(getattr(state, "path_progress_ms", 0) or 0),
+        transport_time2=int(getattr(movement_state, "transport_time2", 0) or 0),
+        transport_time3=int(getattr(movement_state, "transport_time3", 0) or 0),
+    )
 
     transport_o = float(getattr(state, "orientation", 0.0) or 0.0)
     cos_o = math.cos(transport_o)
@@ -3529,12 +3816,19 @@ def _disabled_legacy_passenger_transport_transfer_impl(
     ):
         attachment = transport_passenger_attachment(int(world_guid), int(player_guid))
         if attachment is not None:
-            movement_state.has_transport_data = True
-            movement_state.transport_guid = int(world_guid)
-            movement_state.transport_x = float(attachment.local_x)
-            movement_state.transport_y = float(attachment.local_y)
-            movement_state.transport_z = float(attachment.local_z)
-            movement_state.transport_orientation = float(attachment.local_o)
+            from server.modules.handlers.world.position.publication import (
+                publish_transport_local_offset,
+            )
+
+            publish_transport_local_offset(
+                session,
+                runtime_state_for_guid(int(world_guid)),
+                attachment,
+                local_x=float(attachment.local_x),
+                local_y=float(attachment.local_y),
+                local_z=float(attachment.local_z),
+                local_o=float(attachment.local_o),
+            )
             attached = True
     if not attached:
         _log_transfer_exit("not_attached")

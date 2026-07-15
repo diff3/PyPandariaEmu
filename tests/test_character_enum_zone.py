@@ -95,6 +95,16 @@ def test_world_map_area_resolver_finds_orgrimmar_zone():
     assert resolve_area_from_position(1, 1572.95, -4395.64) > 0
 
 
+def test_thunder_bluff_rejects_wrong_map_area_from_map_file():
+    from server.modules.handlers.world.position.area_service import (
+        resolve_area_from_position,
+        resolve_zone_from_position,
+    )
+
+    assert resolve_area_from_position(1, -1305.09, 263.80) == 1640
+    assert resolve_zone_from_position(1, -1305.09, 263.80) == 1638
+
+
 def test_area_assignment_resolver_finds_smaller_area_inside_parent_zone():
     from server.modules.handlers.world.position.area_service import (
         resolve_area_from_position,

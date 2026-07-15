@@ -1175,14 +1175,22 @@ def _apply_fixplayer_destination(session, destination_name: str) -> str | None:
         session,
         opcode_name="fixplayer",
     )
-    session.map_id = map_id
-    session.x = x
-    session.y = y
-    session.z = z
-    session.orientation = orientation
-    session.zone = int(resolve_zone_from_position(map_id, x, y) or int(getattr(session, "zone", 0) or 0))
-    session.instance_id = 0
-    sync_player_runtime_from_session(session)
+    from server.modules.handlers.world.position.publication import (
+        publish_from_teleport,
+    )
+
+    publish_from_teleport(
+        session,
+        map_id=map_id,
+        instance_id=0,
+        x=x,
+        y=y,
+        z=z,
+        orientation=orientation,
+        synchronize_membership=False,
+        resolve_area=True,
+        capture_persistence=False,
+    )
     session.teleport_destination = str(destination["name"])
     return str(destination["name"])
 
@@ -1505,25 +1513,25 @@ def apply_player_state_change(
                 reason="teleport-start",
                 map_id=old_map_id,
             )
-        session.x = float(x)
-        session.y = float(y)
-        session.z = float(z)
-        session.orientation = float(orientation)
-        session.map_id = target_map_id
-        session.zone = int(
-            resolve_zone_from_position(target_map_id, float(x), float(y))
-            or int(getattr(session, "zone", 0) or 0)
+        from server.modules.handlers.world.position.publication import (
+            publish_from_teleport,
         )
-        session.instance_id = 0
-        sync_player_runtime_from_session(session)
+
+        publish_from_teleport(
+            session,
+            map_id=target_map_id,
+            instance_id=0,
+            x=float(x),
+            y=float(y),
+            z=float(z),
+            orientation=float(orientation),
+            synchronize_membership=True,
+            resolve_area=True,
+            capture_persistence=False,
+        )
         movement_state = movement_handlers._movement_state(session)
-        movement_state.x = float(x)
-        movement_state.y = float(y)
-        movement_state.z = float(z)
-        movement_state.orientation = float(orientation)
         movement_state.flags = 0
         movement_state.flags2 = 0
-        attach_session_to_world_state(session, map_id=target_map_id)
         movement_handlers._capture_persist_position_from_session(session)
         movement_handlers._mark_position_dirty(session)
         if same_map:

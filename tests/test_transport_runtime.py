@@ -404,6 +404,71 @@ def test_login_attachment_restores_elevator_world_object(monkeypatch):
     assert session._player_bootstrap_runtime_transport["transport_guid"] == int(
         entry["world_guid"]
     )
+    expected_x = float(state.x) + math.cos(float(state.orientation)) * 2.0 - math.sin(float(state.orientation)) * 3.0
+    expected_y = float(state.y) + math.sin(float(state.orientation)) * 2.0 + math.cos(float(state.orientation)) * 3.0
+    assert session.x == pytest.approx(expected_x)
+    assert session.y == pytest.approx(expected_y)
+    assert session.z == pytest.approx(float(state.z) + 4.0)
+    assert (session.x, session.y, session.z) != (-10.0, -20.0, -30.0)
+
+
+def test_login_attachment_prepare_is_idempotent_across_elevator_ticks(monkeypatch):
+    _reset_transport_states()
+    _entry, state, elevator = _registered_runtime_elevator(monkeypatch)
+    session = _attachment_restore_session(int(state.spawn_guid))
+
+    assert prepare_login_world_attachment(session) is True
+    first_position = (session.x, session.y, session.z, session.orientation)
+    first_attachment = transport_runtime.transport_passenger_attachment(
+        elevator.runtime_guid,
+        42,
+    )
+    first_bootstrap = dict(session._player_bootstrap_runtime_transport)
+
+    state.z += 25.0
+    state.path_progress_ms += 5000
+
+    assert prepare_login_world_attachment(session) is True
+    assert (session.x, session.y, session.z, session.orientation) == first_position
+    assert transport_runtime.transport_passenger_attachment(
+        elevator.runtime_guid,
+        42,
+    ) is first_attachment
+    assert session._player_bootstrap_runtime_transport == first_bootstrap
+
+
+def test_repeated_elevator_relog_never_changes_runtime_transform(monkeypatch):
+    _reset_transport_states()
+    _entry, state, _elevator = _registered_runtime_elevator(monkeypatch)
+    expected_transform = (
+        state.x,
+        state.y,
+        state.z,
+        state.orientation,
+        state.path_progress_ms,
+    )
+
+    for _cycle in range(4):
+        session = _attachment_restore_session(int(state.spawn_guid))
+        assert prepare_login_world_attachment(session) is True
+        assert (
+            state.x,
+            state.y,
+            state.z,
+            state.orientation,
+            state.path_progress_ms,
+        ) == expected_transform
+        transport_runtime.detach_session_transport_passenger(
+            session,
+            reason="disconnect",
+        )
+        assert (
+            state.x,
+            state.y,
+            state.z,
+            state.orientation,
+            state.path_progress_ms,
+        ) == expected_transform
 
 
 def test_login_attachment_uses_current_boat_transform_after_movement():
@@ -7112,10 +7177,25 @@ def _mount_test_session_on_runtime_transport(state, *, player_guid: int = 77):
     movement_state.transport_time3 = 456
     movement_state.transport_seat = -1
     movement_state.transport_vehicle_id = 0
+    cos_o = math.cos(float(state.orientation))
+    sin_o = math.sin(float(state.orientation))
+    world_x = float(state.x) + cos_o * movement_state.transport_x - sin_o * movement_state.transport_y
+    world_y = float(state.y) + sin_o * movement_state.transport_x + cos_o * movement_state.transport_y
+    world_z = float(state.z) + movement_state.transport_z
+    world_o = float(state.orientation) + movement_state.transport_orientation
+    movement_state.x = world_x
+    movement_state.y = world_y
+    movement_state.z = world_z
+    movement_state.orientation = world_o
     session = SimpleNamespace(
         char_guid=int(player_guid),
         realm_id=1,
         map_id=int(state.map_id),
+        instance_id=0,
+        x=world_x,
+        y=world_y,
+        z=world_z,
+        orientation=world_o,
         movement_state=movement_state,
         transport_attach_state=transport_runtime.ATTACH_STATE_ATTACHED,
         transport_attached_guid=int(state.guid),
@@ -7148,7 +7228,8 @@ def _assert_mount_did_not_change_attachment(session, state, expected):
     attachment = transport_runtime.transport_passenger_attachment(
         int(state.guid), int(session.char_guid)
     )
-    assert attachment is expected
+    assert attachment is not None
+    assert attachment.attached_at_ms == expected.attached_at_ms
     movement_state = session.movement_state
     assert movement_state.has_transport_data is True
     assert movement_state.transport_guid == int(state.guid)
@@ -7157,10 +7238,12 @@ def _assert_mount_did_not_change_attachment(session, state, expected):
         movement_state.transport_y,
         movement_state.transport_z,
         movement_state.transport_orientation,
+    ) == pytest.approx((1.25, -2.5, 3.75, 0.375))
+    assert (
         movement_state.transport_time,
         movement_state.transport_time2,
         movement_state.transport_time3,
-    ) == (1.25, -2.5, 3.75, 0.375, 4321, 123, 456)
+    ) == (4321, 123, 456)
     assert session.transport_attach_state == transport_runtime.ATTACH_STATE_ATTACHED
     assert session.transport_attached_guid == int(state.guid)
 
@@ -7190,10 +7273,261 @@ def test_mount_and_dismount_preserve_runtime_transport_attachment(monkeypatch, r
     monkeypatch.setattr(spells_handlers, "_persist_current_mount_state", lambda _target: None)
     monkeypatch.setattr(spells_handlers, "clear_persisted_mount_state", lambda _target: None)
 
+    world_before = (session.x, session.y, session.z, session.orientation)
     spells_handlers.handle_mount(session, 59535)
     _assert_mount_did_not_change_attachment(session, state, expected_attachment)
+    assert (session.x, session.y, session.z, session.orientation) == pytest.approx(world_before)
     spells_handlers.dismount(session)
     _assert_mount_did_not_change_attachment(session, state, expected_attachment)
+    assert (session.x, session.y, session.z, session.orientation) == pytest.approx(world_before)
+
+
+def test_mount_after_runtime_phase_change_preserves_world_position_before_refresh(monkeypatch):
+    from server.modules.handlers.world.opcodes import spells as spells_handlers
+
+    _reset_transport_states()
+    _entry, state, _transport = _registered_runtime_transport()
+    session = _mount_test_session_on_runtime_transport(state)
+    refresh_snapshots = []
+
+    monkeypatch.setattr(spells_handlers, "get_mount_display_id", lambda _spell_id: 2404)
+    monkeypatch.setattr(spells_handlers, "is_flying_mount_spell", lambda _spell_id: False)
+    monkeypatch.setattr(spells_handlers, "_broadcast_mount_visual_to_visible_peers", lambda *_args: None)
+    monkeypatch.setattr(spells_handlers, "_persist_current_mount_state", lambda _target: None)
+    monkeypatch.setattr(spells_handlers, "clear_persisted_mount_state", lambda _target: None)
+
+    def advance_transport_and_build_mount(_target, _spell_id):
+        state.x += 6.0
+        state.y -= 2.0
+        return [("SMSG_MOVE_SET_RUN_SPEED", b"mount")]
+
+    def advance_transport_and_build_dismount(_target):
+        state.x -= 3.0
+        state.y += 5.0
+        return [("SMSG_MOVE_SET_RUN_SPEED", b"dismount")]
+
+    def capture_refresh(target):
+        refresh_snapshots.append(
+            (
+                target.x,
+                target.y,
+                target.z,
+                target.orientation,
+                target.movement_state.transport_guid,
+            )
+        )
+        return [("SMSG_PLAYER_MOVE", b"refresh")]
+
+    monkeypatch.setattr(spells_handlers, "send_mount_update", advance_transport_and_build_mount)
+    monkeypatch.setattr(spells_handlers, "send_dismount_update", advance_transport_and_build_dismount)
+    monkeypatch.setattr(spells_handlers, "resync_movement", capture_refresh)
+    world_before_mount = (session.x, session.y, session.z, session.orientation)
+
+    mount_responses = spells_handlers.handle_mount(session, 59535)
+    assert mount_responses[-1] == ("SMSG_PLAYER_MOVE", b"refresh")
+    assert refresh_snapshots[-1][:4] == pytest.approx(world_before_mount)
+    assert refresh_snapshots[-1][4] == int(state.guid)
+
+    world_before_dismount = (session.x, session.y, session.z, session.orientation)
+    dismount_responses = spells_handlers.dismount(session)
+    assert dismount_responses[-1] == ("SMSG_PLAYER_MOVE", b"refresh")
+    assert refresh_snapshots[-1][:4] == pytest.approx(world_before_dismount)
+    assert refresh_snapshots[-1][4] == int(state.guid)
+    assert transport_runtime.transport_passenger_attachment(state.guid, session.char_guid) is not None
+
+
+def test_mount_speed_ack_preserves_transport_guid_and_refreshed_local_offset(monkeypatch):
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+    from server.modules.handlers.world.opcodes import spells as spells_handlers
+
+    _reset_transport_states()
+    _entry, state, _transport = _registered_runtime_transport()
+    session = _mount_test_session_on_runtime_transport(state)
+    session.x += 4.0
+    session.y -= 1.5
+    world_before = (session.x, session.y, session.z, session.orientation)
+    monkeypatch.setattr(spells_handlers, "send_mount_update", lambda *_args: [])
+    monkeypatch.setattr(spells_handlers, "_persist_current_mount_state", lambda *_args: None)
+    monkeypatch.setattr(movement_handlers, "build_smsg_player_move_payload", lambda *_args: b"move")
+
+    spells_handlers.handle_mount(session, 59535)
+    attachment = transport_runtime.transport_passenger_attachment(state.guid, session.char_guid)
+    local_before_ack = (
+        attachment.local_x,
+        attachment.local_y,
+        attachment.local_z,
+        attachment.local_o,
+    )
+    _count, responses = movement_handlers.handle_move_force_run_speed_change_ack(session, None)
+
+    assert responses == [("SMSG_PLAYER_MOVE", b"move")]
+    assert session.movement_state.transport_guid == int(state.guid)
+    assert (
+        session.movement_state.transport_x,
+        session.movement_state.transport_y,
+        session.movement_state.transport_z,
+        session.movement_state.transport_orientation,
+    ) == pytest.approx(local_before_ack)
+    assert (session.x, session.y, session.z, session.orientation) == pytest.approx(world_before)
+
+
+def test_mount_rebuild_missing_transport_guard_is_bounded_and_genuine_departure_detaches(monkeypatch):
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+    _reset_transport_states()
+    _entry, state, _transport = _registered_runtime_transport()
+    session = _mount_test_session_on_runtime_transport(state)
+    monkeypatch.setattr(transport_runtime.time, "monotonic", lambda: 10.0)
+    assert transport_runtime.prepare_attached_movement_rebuild(session, reason="test")
+    missing = {"has_transport_data": False}
+
+    movement_handlers._store_transport_state_from_parsed(session, "MSG_MOVE_HEARTBEAT", missing)
+    movement_handlers._store_transport_state_from_parsed(session, "MSG_MOVE_HEARTBEAT", missing)
+    assert transport_runtime.transport_passenger_attachment(state.guid, session.char_guid) is not None
+    assert session.movement_state.transport_guid == int(state.guid)
+
+    movement_handlers._store_transport_state_from_parsed(session, "MSG_MOVE_HEARTBEAT", missing)
+    assert transport_runtime.transport_passenger_attachment(state.guid, session.char_guid) is not None
+    movement_handlers._store_transport_state_from_parsed(session, "MSG_MOVE_HEARTBEAT", missing)
+    assert transport_runtime.transport_passenger_attachment(state.guid, session.char_guid) is None
+    assert session.movement_state.transport_guid == 0
+
+
+def _accepted_transport_sample(session, state, *, local_x, local_y, local_z, has_transport=True, guid=None):
+    cos_o = math.cos(float(state.orientation))
+    sin_o = math.sin(float(state.orientation))
+    return {
+        "has_transport_data": bool(has_transport),
+        "transport_guid": int(state.guid if guid is None else guid),
+        "transport_x": float(local_x),
+        "transport_y": float(local_y),
+        "transport_z": float(local_z),
+        "transport_orientation": 0.0,
+        "transport_time": 100,
+        "transport_time2": 0,
+        "transport_time3": 0,
+        "transport_seat": -1,
+        "transport_vehicle_id": 0,
+        "x": float(state.x) + cos_o * float(local_x) - sin_o * float(local_y),
+        "y": float(state.y) + sin_o * float(local_x) + cos_o * float(local_y),
+        "z": float(state.z) + float(local_z),
+    }
+
+
+@pytest.mark.parametrize("runtime_kind", ["boat", "elevator"])
+def test_geometric_departure_bypasses_mount_rebuild_guard_on_first_packet(monkeypatch, runtime_kind):
+    _reset_transport_states()
+    if runtime_kind == "boat":
+        _entry, state, _runtime = _registered_runtime_transport()
+    else:
+        _entry, state, _runtime = _registered_runtime_elevator(monkeypatch)
+    session = _mount_test_session_on_runtime_transport(state)
+    assert transport_runtime.prepare_attached_movement_rebuild(session, reason="mount")
+    attachment_before = transport_runtime.transport_passenger_attachment(state.guid, session.char_guid)
+    sample = _accepted_transport_sample(
+        session,
+        state,
+        local_x=attachment_before.local_x,
+        local_y=attachment_before.local_y,
+        local_z=attachment_before.local_z,
+        has_transport=False,
+    )
+    sample["x"] += 40.0
+
+    movement._store_transport_state_from_parsed(session, "MSG_MOVE_HEARTBEAT", sample)
+
+    assert transport_runtime.transport_passenger_attachment(state.guid, session.char_guid) is None
+    assert session.movement_state.transport_guid == 0
+    assert getattr(session, "_movement_rebuild_transport_guard", None) is None
+    assert transport_runtime._start_boundary_worldport_for_passenger(
+        session,
+        state,
+        attachment_before,
+        from_map=int(state.map_id),
+        to_map=int(state.map_id) + 1,
+        transfer_id="detached-test",
+    ) is False
+
+
+def test_same_guid_implausible_local_offset_detaches_instead_of_replacing_attachment():
+    _reset_transport_states()
+    _entry, state, _runtime = _registered_runtime_transport()
+    session = _mount_test_session_on_runtime_transport(state)
+    sample = _accepted_transport_sample(
+        session,
+        state,
+        local_x=200.0,
+        local_y=0.0,
+        local_z=0.0,
+    )
+
+    movement._store_transport_state_from_parsed(session, "MSG_MOVE_HEARTBEAT", sample)
+
+    assert transport_runtime.transport_passenger_attachment(state.guid, session.char_guid) is None
+    assert session.movement_state.transport_guid == 0
+
+
+def test_normal_deck_movement_jump_and_small_jitter_preserve_attachment():
+    _reset_transport_states()
+    _entry, state, _runtime = _registered_runtime_transport()
+    session = _mount_test_session_on_runtime_transport(state)
+
+    for opcode, local_x, local_y, local_z, jitter in (
+        ("MSG_MOVE_START_FORWARD", 2.0, -2.5, 3.75, 0.03),
+        ("MSG_MOVE_HEARTBEAT", 7.0, -1.0, 3.75, -0.04),
+        ("MSG_MOVE_JUMP", 8.0, 0.0, 6.0, 0.02),
+    ):
+        sample = _accepted_transport_sample(
+            session,
+            state,
+            local_x=local_x,
+            local_y=local_y,
+            local_z=local_z,
+        )
+        sample["x"] += jitter
+        movement._store_transport_state_from_parsed(session, opcode, sample)
+        attachment = transport_runtime.transport_passenger_attachment(state.guid, session.char_guid)
+        assert attachment is not None
+        assert (attachment.local_x, attachment.local_y, attachment.local_z) == pytest.approx(
+            (local_x, local_y, local_z)
+        )
+        assert session.movement_state.transport_guid == int(state.guid)
+
+
+def test_changed_transport_guid_keeps_existing_new_transport_detach_path(monkeypatch):
+    _reset_transport_states()
+    _entry, first, _runtime = _registered_runtime_transport()
+    session = _mount_test_session_on_runtime_transport(first)
+    second_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(808080))
+    second = copy.copy(first)
+    second.guid = second_guid
+    second.spawn_guid = 808080
+    second.passengers = {}
+    second.x = float(first.x) + 5.0
+    transport_runtime._runtime_transport_states()[second_guid] = second
+    reasons = []
+    original_detach = transport_runtime.detach_session_transport_passenger
+
+    def _capture_detach(target, **kwargs):
+        reasons.append(str(kwargs.get("reason", "")))
+        return original_detach(target, **kwargs)
+
+    monkeypatch.setattr(transport_runtime, "detach_session_transport_passenger", _capture_detach)
+    sample = _accepted_transport_sample(
+        session,
+        second,
+        local_x=1.0,
+        local_y=1.0,
+        local_z=1.0,
+        guid=second_guid,
+    )
+
+    movement._store_transport_state_from_parsed(session, "MSG_MOVE_HEARTBEAT", sample)
+
+    assert "new_transport" in reasons
+    assert transport_runtime.transport_passenger_attachment(first.guid, session.char_guid) is None
+    assert transport_runtime.transport_passenger_attachment(second_guid, session.char_guid) is not None
+    assert session.movement_state.transport_guid == second_guid
 
 
 def test_repeated_mount_cycles_preserve_attachment_while_transport_moves(monkeypatch):
@@ -7213,7 +7547,16 @@ def test_repeated_mount_cycles_preserve_attachment_while_transport_moves(monkeyp
 
     for path_progress_ms in (100, 250, 500, 750):
         state.path_progress_ms = path_progress_ms
+        state.x += 2.0
+        state.y -= 0.75
+        attachment = transport_runtime.transport_passenger_attachment(state.guid, session.char_guid)
+        from server.modules.handlers.world.position.publication import publish_transport
+
+        publish_transport(session, state, attachment)
+        world_before = (session.x, session.y, session.z, session.orientation)
         spells_handlers.handle_mount(session, 59535)
         _assert_mount_did_not_change_attachment(session, state, expected_attachment)
+        assert (session.x, session.y, session.z, session.orientation) == pytest.approx(world_before)
         spells_handlers.dismount(session)
         _assert_mount_did_not_change_attachment(session, state, expected_attachment)
+        assert (session.x, session.y, session.z, session.orientation) == pytest.approx(world_before)

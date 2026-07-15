@@ -234,25 +234,32 @@ def _verify_pending_boat_transfer_attachment(session, pending: dict[str, Any] | 
             source_map=transport_map,
         )
 
-    if movement_state is not None:
-        movement_state.has_transport_data = True
-        movement_state.transport_guid = destination_guid
-        movement_state.transport_x = local_x
-        movement_state.transport_y = local_y
-        movement_state.transport_z = local_z
-        movement_state.transport_orientation = local_o
-        movement_state.transport_time = int(pending.get("route_phase", 0) or 0) & 0xFFFFFFFF
-        movement_state.x = world_x
-        movement_state.y = world_y
-        movement_state.z = world_z
-        movement_state.orientation = world_o
+    from server.modules.handlers.world.position.publication import (
+        publish_absolute,
+    )
+    from server.modules.handlers.world.transport_runtime import (
+        update_transport_passenger_offset,
+    )
 
-    session.map_id = int(transport_map)
-    session.x = world_x
-    session.y = world_y
-    session.z = world_z
-    session.orientation = world_o
-    sync_player_runtime_from_session(session)
+    update_transport_passenger_offset(
+        session,
+        destination_guid,
+        local_x=local_x,
+        local_y=local_y,
+        local_z=local_z,
+        local_o=local_o,
+        transport_time=int(pending.get("route_phase", 0) or 0),
+    )
+    publish_absolute(
+        session,
+        map_id=int(transport_map),
+        instance_id=int(getattr(session, "instance_id", 0) or 0),
+        x=world_x,
+        y=world_y,
+        z=world_z,
+        orientation=world_o,
+        capture_persistence=True,
+    )
     Logger.info(
         "[TransportTransferDiag] verify transfer_id=%s kind=%s return_reason=completed "
         "early_return=false runtime_attachment=%s runtime_transport=%s rebase=true "
@@ -268,11 +275,6 @@ def _verify_pending_boat_transfer_attachment(session, pending: dict[str, Any] | 
     )
     session.transport_attach_state = "ATTACHED"
     session.transport_attach_source_map = int(transport_map)
-    session.persist_map_id = int(transport_map)
-    session.persist_x = world_x
-    session.persist_y = world_y
-    session.persist_z = world_z
-    session.persist_orientation = world_o
 
     loaded_entries = getattr(session, "loaded_transport_entries", None)
     if isinstance(loaded_entries, dict) and isinstance(destination_entry, dict):
@@ -313,6 +315,7 @@ _MOVEMENTFLAG_ASCENDING = 0x00200000
 _MOVEMENTFLAG_DESCENDING = 0x00400000
 _MOVEMENTFLAG_CAN_FLY = 0x00800000
 _MOVEMENTFLAG_FLYING = 0x01000000
+_MOVEMENTFLAG_SPLINE_ELEVATION = 0x02000000
 _MOVEMENTFLAG2_CIRCLE_RUN_SYNC = 0x00000800
 
 _SKYFIRE_FLYING_MOVEMENT_OPCODES = frozenset({
@@ -1102,15 +1105,26 @@ def _movement_sync_guid(
 
 def _movement_state(session):
     state = getattr(session, "movement_state", None)
+    state_created = state is None
     if state is None:
         from server.session.world_session import MovementState
 
         state = MovementState()
         session.movement_state = state
+    if state_created:
+        from server.modules.handlers.world.position.publication import (
+            publish_absolute,
+        )
 
-    state.x = float(getattr(state, "x", getattr(session, "x", 0.0)) or 0.0)
-    state.y = float(getattr(state, "y", getattr(session, "y", 0.0)) or 0.0)
-    state.z = float(getattr(state, "z", getattr(session, "z", 0.0)) or 0.0)
+        publish_absolute(
+            session,
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            instance_id=int(getattr(session, "instance_id", 0) or 0),
+            x=float(getattr(session, "x", 0.0) or 0.0),
+            y=float(getattr(session, "y", 0.0) or 0.0),
+            z=float(getattr(session, "z", 0.0) or 0.0),
+            orientation=float(getattr(session, "orientation", 0.0) or 0.0),
+        )
     previous_orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
     ensured_orientation = float(getattr(state, "orientation", getattr(session, "orientation", 0.0)) or 0.0)
     Logger.info(
@@ -1141,7 +1155,6 @@ def _movement_state(session):
         float(getattr(state, "transport_orientation", 0.0) or 0.0),
         str(getattr(session, "transport_attach_state", "") or ""),
     )
-    state.orientation = ensured_orientation
     state.flags = int(getattr(state, "flags", 0) or 0)
     state.flags2 = int(getattr(state, "flags2", 0) or 0)
     state.timestamp_ms = int(getattr(state, "timestamp_ms", 0) or 0) & 0xFFFFFFFF
@@ -1186,8 +1199,7 @@ def _movement_is_flying(session) -> bool:
         return False
     return bool(
         getattr(session, "is_flying", False)
-        or getattr(session, "can_fly", False)
-        or state_flags & (_MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING)
+        or state_flags & _MOVEMENTFLAG_FLYING
     )
 
 
@@ -1705,9 +1717,10 @@ def _last_known_valid_orientation(session) -> float | None:
 
 def _sync_session_from_movement_state(session) -> None:
     state = _movement_state(session)
-    session.x = float(state.x)
-    session.y = float(state.y)
-    session.z = float(state.z)
+    from server.modules.handlers.world.position.publication import (
+        publish_from_movement,
+    )
+
     _log_orientation_write(
         session,
         writer="_sync_session_from_movement_state",
@@ -1716,7 +1729,13 @@ def _sync_session_from_movement_state(session) -> None:
         new_value=float(state.orientation),
         reason="sync_from_movement_state",
     )
-    session.orientation = float(state.orientation)
+    publish_from_movement(
+        session,
+        x=float(state.x),
+        y=float(state.y),
+        z=float(state.z),
+        orientation=float(state.orientation),
+    )
     _remember_valid_orientation(session, state.orientation)
 
 
@@ -1774,6 +1793,47 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
     parsed_has_transport = bool(parsed.get("has_transport_data"))
     parsed_transport_guid = int(parsed.get("transport_guid", 0) or 0)
 
+    if previous_guid:
+        try:
+            from server.modules.handlers.world.transport_runtime import (
+                detach_session_transport_passenger,
+                validate_attached_passenger_geometry,
+            )
+
+            geometry_valid, geometry_reason, geometry = validate_attached_passenger_geometry(
+                session,
+                has_transport_data=parsed_has_transport,
+                transport_guid=parsed_transport_guid,
+                world_x=float(parsed.get("x", getattr(session, "x", 0.0)) or 0.0),
+                world_y=float(parsed.get("y", getattr(session, "y", 0.0)) or 0.0),
+                world_z=float(parsed.get("z", getattr(session, "z", 0.0)) or 0.0),
+                local_x=float(parsed.get("transport_x", 0.0) or 0.0),
+                local_y=float(parsed.get("transport_y", 0.0) or 0.0),
+                local_z=float(parsed.get("transport_z", 0.0) or 0.0),
+            )
+            if not geometry_valid:
+                Logger.info(
+                    "[TransportDetach] geometric departure opcode=%s player=%s "
+                    "transport=0x%016X reason=%s metrics=%s",
+                    opcode_name,
+                    int(getattr(session, "char_guid", 0) or 0),
+                    previous_guid & 0xFFFFFFFFFFFFFFFF,
+                    geometry_reason,
+                    geometry,
+                )
+                detach_session_transport_passenger(
+                    session,
+                    opcode_name=opcode_name,
+                    reason=f"geometric_departure:{geometry_reason}",
+                    world_guid=previous_guid,
+                )
+                return
+        except Exception as exc:
+            Logger.warning(
+                "[TransportAttach] geometric validation failed open err=%s",
+                exc,
+            )
+
     if (
         bool(getattr(session, "_worldporttest_active", False))
         and not bool(getattr(session, "_worldporttest_first_movement_logged", False))
@@ -1791,6 +1851,20 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
                 session._transport_missing_metadata_guid = 0
                 session._transport_missing_metadata_count = 0
                 return
+            try:
+                from server.modules.handlers.world.transport_runtime import (
+                    consume_movement_rebuild_transport_guard,
+                )
+
+                if consume_movement_rebuild_transport_guard(session, previous_guid):
+                    session._transport_missing_metadata_guid = 0
+                    session._transport_missing_metadata_count = 0
+                    return
+            except Exception as exc:
+                Logger.warning(
+                    "[TransportAttach] movement rebuild guard failed err=%s",
+                    exc,
+                )
             missing_guid = int(
                 getattr(session, "_transport_missing_metadata_guid", 0) or 0
             )
@@ -1841,6 +1915,14 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
         return
 
     transport_guid = int(parsed.get("transport_guid", 0) or 0)
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            clear_movement_rebuild_transport_guard,
+        )
+
+        clear_movement_rebuild_transport_guard(session)
+    except Exception:
+        pass
     session._transport_missing_metadata_guid = 0
     session._transport_missing_metadata_count = 0
     if previous_guid != transport_guid:
@@ -1882,25 +1964,33 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
         except Exception as exc:
             Logger.warning("[TransportAttach] lifecycle validation failed err=%s", exc)
 
-    state.has_transport_data = True
-    state.transport_guid = transport_guid
-    state.transport_x = float(parsed.get("transport_x", 0.0) or 0.0)
-    state.transport_y = float(parsed.get("transport_y", 0.0) or 0.0)
-    state.transport_z = float(parsed.get("transport_z", 0.0) or 0.0)
-    state.transport_orientation = float(parsed.get("transport_orientation", 0.0) or 0.0)
-    state.transport_time = int(parsed.get("transport_time", 0) or 0) & 0xFFFFFFFF
-    state.transport_time2 = int(parsed.get("transport_time2", 0) or 0) & 0xFFFFFFFF
-    state.transport_time3 = int(parsed.get("transport_time3", 0) or 0) & 0xFFFFFFFF
-    state.transport_seat = int(parsed.get("transport_seat", -1))
-    state.transport_vehicle_id = int(parsed.get("transport_vehicle_id", 0) or 0)
+    try:
+        from server.modules.handlers.world.transport_runtime import (
+            record_transport_attach,
+            update_transport_passenger_offset,
+        )
 
-    if previous_guid != transport_guid:
-        try:
-            from server.modules.handlers.world.transport_runtime import record_transport_attach
-
-            record_transport_attach(session, transport_guid, opcode_name=opcode_name)
-        except Exception as exc:
-            Logger.warning("[TransportAttach] lifecycle notify failed err=%s", exc)
+        publish_offset = (
+            record_transport_attach
+            if previous_guid != transport_guid
+            else update_transport_passenger_offset
+        )
+        publish_offset(
+            session,
+            transport_guid,
+            **({"opcode_name": opcode_name} if previous_guid != transport_guid else {}),
+            local_x=float(parsed.get("transport_x", 0.0) or 0.0),
+            local_y=float(parsed.get("transport_y", 0.0) or 0.0),
+            local_z=float(parsed.get("transport_z", 0.0) or 0.0),
+            local_o=float(parsed.get("transport_orientation", 0.0) or 0.0),
+            transport_time=int(parsed.get("transport_time", 0) or 0),
+            transport_time2=int(parsed.get("transport_time2", 0) or 0),
+            transport_time3=int(parsed.get("transport_time3", 0) or 0),
+            seat=int(parsed.get("transport_seat", -1)),
+            vehicle_id=int(parsed.get("transport_vehicle_id", 0) or 0),
+        )
+    except Exception as exc:
+        Logger.warning("[TransportAttach] lifecycle notify failed err=%s", exc)
 
 
 def _log_transport_parse_unknown_preserve(session, opcode_name: str, transport_guid: int) -> None:
@@ -2321,6 +2411,22 @@ def _disabled_legacy_transport_route_transfer_impl(
         Logger.warning("[TransportTransfer] source lifecycle detach failed err=%s", exc)
     session.transport_attach_state = "TRANSFERRING"
 
+    from server.modules.handlers.world.position.publication import (
+        publish_absolute,
+    )
+
+    publish_absolute(
+        session,
+        map_id=int(destination_map),
+        instance_id=int(getattr(session, "instance_id", 0) or 0),
+        x=float(player_x),
+        y=float(player_y),
+        z=float(player_z),
+        orientation=float(player_o),
+    )
+    # During the cross-map handoff there is intentionally no destination-side
+    # PassengerAttachment yet; this is transition snapshot data, not a live
+    # local-offset publication.
     state.has_transport_data = True
     state.transport_guid = int(destination_guid)
     state.transport_x = local_x
@@ -2330,9 +2436,6 @@ def _disabled_legacy_transport_route_transfer_impl(
     state.transport_time = int(getattr(runtime_state, "path_progress_ms", 0) or 0) & 0xFFFFFFFF
     state.transport_time2 = int(getattr(state, "transport_time2", 0) or 0) & 0xFFFFFFFF
     state.transport_time3 = int(getattr(state, "transport_time3", 0) or 0) & 0xFFFFFFFF
-    state.x = float(player_x)
-    state.y = float(player_y)
-    state.z = float(player_z)
     _log_orientation_write(
         session,
         writer="_maybe_start_transport_route_transfer",
@@ -2341,7 +2444,6 @@ def _disabled_legacy_transport_route_transfer_impl(
         new_value=float(player_o),
         reason="route_transition_begin_worldport",
     )
-    state.orientation = float(player_o)
 
     Logger.info(
         "[TransportTransfer] begin transport=0x%016X node=%s source_map=%s dest_map=%s",
@@ -3115,6 +3217,13 @@ def build_smsg_player_move_payload_stable_old(
     # through zero, which causes remote drift/correction artifacts.
     has_orientation = True
     has_counter = int(getattr(state, "counter", 0) or 0) != 0
+    transport_guid = int(getattr(state, "transport_guid", 0) or 0)
+    has_transport_data = bool(
+        getattr(state, "has_transport_data", False) and transport_guid
+    )
+    transport_raw_guid = transport_guid.to_bytes(8, "little", signed=False)
+    has_transport_time2 = bool(int(getattr(state, "transport_time2", 0) or 0))
+    has_transport_time3 = bool(int(getattr(state, "transport_time3", 0) or 0))
 
     bits = BitWriter()
     bits.write_bits(1, 1)  # MSEHasPitch -> !hasPitch
@@ -3126,8 +3235,16 @@ def build_smsg_player_move_payload_stable_old(
     bits.write_bits(0 if has_fall_data else 0, 1)  # MSEHasFallData; keep no-fall stable byte-for-byte.
     bits.write_bits(0 if has_counter else 1, 1)  # MSEHasCounter -> !counter
     bits.write_bits(1 if raw_guid[3] else 0, 1)
-    bits.write_bits(0, 1)  # MSEHasTransportData
+    bits.write_bits(1 if has_transport_data else 0, 1)  # MSEHasTransportData
     bits.write_bits(1 if raw_guid[4] else 0, 1)
+    if has_transport_data:
+        for index in (5, 4, 7, 2, 6):
+            bits.write_bits(1 if transport_raw_guid[index] else 0, 1)
+        bits.write_bits(1 if has_transport_time2 else 0, 1)
+        for index in (3, 1):
+            bits.write_bits(1 if transport_raw_guid[index] else 0, 1)
+        bits.write_bits(1 if has_transport_time3 else 0, 1)
+        bits.write_bits(1 if transport_raw_guid[0] else 0, 1)
     bits.write_bits(1, 1)  # MSEHasSplineElevation -> !hasSplineElevation
     bits.write_bits(0 if move_flags else 1, 1)  # MSEHasMovementFlags -> !hasMovementFlags
     bits.write_bits(0, 1)  # MSEZeroBit
@@ -3145,6 +3262,35 @@ def build_smsg_player_move_payload_stable_old(
 
     payload = bytearray(bits.getvalue())
     payload.extend(struct.pack("<f", y))  # MSEPositionY
+    if has_transport_data:
+        if transport_raw_guid[7]:
+            payload.append((transport_raw_guid[7] ^ 1) & 0xFF)
+        if has_transport_time2:
+            payload.extend(struct.pack("<I", int(state.transport_time2) & 0xFFFFFFFF))
+        payload.extend(struct.pack("<f", float(state.transport_x)))
+        if transport_raw_guid[5]:
+            payload.append((transport_raw_guid[5] ^ 1) & 0xFF)
+        payload.extend(struct.pack("<b", int(getattr(state, "transport_seat", -1))))
+        for index in (2, 0, 3):
+            if transport_raw_guid[index]:
+                payload.append((transport_raw_guid[index] ^ 1) & 0xFF)
+        payload.extend(struct.pack("<I", int(getattr(state, "transport_time", 0) or 0) & 0xFFFFFFFF))
+        if transport_raw_guid[4]:
+            payload.append((transport_raw_guid[4] ^ 1) & 0xFF)
+        payload.extend(struct.pack("<f", float(state.transport_z)))
+        if transport_raw_guid[1]:
+            payload.append((transport_raw_guid[1] ^ 1) & 0xFF)
+        payload.extend(struct.pack("<f", float(state.transport_y)))
+        payload.extend(
+            struct.pack(
+                "<f",
+                normalize_wire_orientation(float(state.transport_orientation)),
+            )
+        )
+        if transport_raw_guid[6]:
+            payload.append((transport_raw_guid[6] ^ 1) & 0xFF)
+        if has_transport_time3:
+            payload.extend(struct.pack("<I", int(state.transport_time3) & 0xFFFFFFFF))
     if raw_guid[5]:
         payload.append((raw_guid[5] ^ 1) & 0xFF)  # MSEGuidByte5
     if raw_guid[1]:
@@ -4229,18 +4375,54 @@ def _apply_movement_flags(state, opcode_name: str) -> None:
     elif opcode_name == "MSG_MOVE_STOP_SWIM":
         flags &= ~_MOVEMENTFLAG_SWIMMING
     elif opcode_name == "MSG_MOVE_START_ASCEND":
-        state.is_ascending = True
-        state.is_descending = False
-        flags |= _MOVEMENTFLAG_ASCENDING
-        flags &= ~_MOVEMENTFLAG_DESCENDING
+        if flags & _MOVEMENTFLAG_SWIMMING:
+            state.is_ascending = True
+            state.is_descending = False
+            flags |= _MOVEMENTFLAG_ASCENDING
+            flags &= ~(
+                _MOVEMENTFLAG_FLYING
+                | _MOVEMENTFLAG_DESCENDING
+            )
+        elif flags & _MOVEMENTFLAG_CAN_FLY:
+            state.is_ascending = True
+            state.is_descending = False
+            flags |= _MOVEMENTFLAG_ASCENDING
+            flags &= ~_MOVEMENTFLAG_DESCENDING
+            flags |= _MOVEMENTFLAG_FLYING
+            flags &= ~_MOVEMENTFLAG_SPLINE_ELEVATION
+        else:
+            state.is_ascending = False
+            state.is_descending = False
+            flags &= ~(
+                _MOVEMENTFLAG_FLYING
+                | _MOVEMENTFLAG_ASCENDING
+                | _MOVEMENTFLAG_DESCENDING
+            )
     elif opcode_name == "MSG_MOVE_STOP_ASCEND":
         state.is_ascending = False
         flags &= ~_MOVEMENTFLAG_ASCENDING
     elif opcode_name == "MSG_MOVE_START_DESCEND":
-        state.is_descending = True
-        state.is_ascending = False
-        flags |= _MOVEMENTFLAG_DESCENDING
-        flags &= ~_MOVEMENTFLAG_ASCENDING
+        if flags & _MOVEMENTFLAG_SWIMMING:
+            state.is_descending = True
+            state.is_ascending = False
+            flags |= _MOVEMENTFLAG_DESCENDING
+            flags &= ~(
+                _MOVEMENTFLAG_FLYING
+                | _MOVEMENTFLAG_ASCENDING
+            )
+        elif flags & _MOVEMENTFLAG_CAN_FLY:
+            state.is_descending = True
+            state.is_ascending = False
+            flags |= _MOVEMENTFLAG_FLYING | _MOVEMENTFLAG_DESCENDING
+            flags &= ~(_MOVEMENTFLAG_ASCENDING | _MOVEMENTFLAG_SPLINE_ELEVATION)
+        else:
+            state.is_descending = False
+            state.is_ascending = False
+            flags &= ~(
+                _MOVEMENTFLAG_FLYING
+                | _MOVEMENTFLAG_ASCENDING
+                | _MOVEMENTFLAG_DESCENDING
+            )
     elif opcode_name == "MSG_MOVE_STOP_DESCEND":
         state.is_descending = False
         flags &= ~_MOVEMENTFLAG_DESCENDING
@@ -5201,14 +5383,17 @@ def _build_collision_reject_responses(session, opcode_name: str) -> list[tuple[s
         correction_y = float(correction[1])
         correction_z = float(correction[2])
         correction_o = float(correction[3])
-        session.x = correction_x
-        session.y = correction_y
-        session.z = correction_z
-        session.orientation = correction_o
-        state.x = correction_x
-        state.y = correction_y
-        state.z = correction_z
-        state.orientation = correction_o
+        from server.modules.handlers.world.position.publication import (
+            publish_from_movement,
+        )
+
+        publish_from_movement(
+            session,
+            x=correction_x,
+            y=correction_y,
+            z=correction_z,
+            orientation=correction_o,
+        )
         _install_pending_geometry_wall_contact(session)
     flags_before_reject = int(getattr(state, "flags", 0) or 0)
     flags_before_reject2 = int(getattr(state, "flags2", 0) or 0)
@@ -5461,22 +5646,6 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
     _apply_post_parse_movement_cleanup(session, state, opcode_name)
     active_flying_mount = _has_active_flying_mount(session)
     if opcode_name == "MSG_MOVE_FALL_LAND":
-        if active_flying_mount:
-            Logger.info(
-                "[Movement] ignoring fall-land while flying mount is active guid=0x%X spell=%s",
-                _player_guid(session),
-                int(getattr(session, "mount_spell", 0) or 0),
-            )
-            state.has_fall_data = False
-            state.fall_time = 0
-            state.fall_vertical_speed = 0.0
-            state.fall_horizontal_speed = 0.0
-            state.fall_sin_angle = 0.0
-            state.fall_cos_angle = 0.0
-            state.flags |= _MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING
-            state.flags &= ~_MOVEMENTFLAG_FALLING
-            setattr(session, "is_flying", True)
-            return True
         setattr(session, "is_flying", False)
         state.is_ascending = False
         state.is_descending = False
@@ -5505,8 +5674,27 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
         )
         state.flags |= _MOVEMENTFLAG_SWIMMING
     elif opcode_name in {"MSG_MOVE_START_ASCEND", "MSG_MOVE_START_DESCEND"}:
-        setattr(session, "is_flying", True)
-    elif active_flying_mount:
+        current_flags = int(getattr(state, "flags", 0) or 0)
+        swimming_vertical = bool(current_flags & _MOVEMENTFLAG_SWIMMING)
+        can_enter_flight = bool(
+            current_flags & _MOVEMENTFLAG_CAN_FLY and not swimming_vertical
+        )
+        setattr(session, "is_flying", can_enter_flight)
+        if swimming_vertical:
+            state.flags &= ~_MOVEMENTFLAG_FLYING
+        elif can_enter_flight:
+            state.flags |= _MOVEMENTFLAG_FLYING
+        else:
+            state.is_ascending = False
+            state.is_descending = False
+            state.flags &= ~(
+                _MOVEMENTFLAG_FLYING
+                | _MOVEMENTFLAG_ASCENDING
+                | _MOVEMENTFLAG_DESCENDING
+            )
+    elif active_flying_mount and int(getattr(state, "flags", 0) or 0) & (
+        _MOVEMENTFLAG_FLYING | _MOVEMENTFLAG_ASCENDING | _MOVEMENTFLAG_DESCENDING
+    ):
         if int(getattr(state, "flags", 0) or 0) & _MOVEMENTFLAG_FALLING or bool(getattr(state, "has_fall_data", False)):
             Logger.info(
                 "[Movement] converting fall-state to flying mount state opcode=%s guid=0x%X flags=0x%X",
@@ -5544,9 +5732,6 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
         if clamped:
             z = float(clamped_z)
             _clear_falling_state(state)
-        state.x = float(x)
-        state.y = float(y)
-        state.z = float(z)
         _log_orientation_write(
             session,
             writer="_store_authoritative_movement",
@@ -5555,8 +5740,19 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
             new_value=float(orientation),
             reason=str(opcode_name),
         )
-        state.orientation = float(orientation)
-    _sync_session_from_movement_state(session)
+        from server.modules.handlers.world.position.publication import (
+            publish_from_movement,
+        )
+
+        publish_from_movement(
+            session,
+            x=float(x),
+            y=float(y),
+            z=float(z),
+            orientation=float(orientation),
+        )
+    else:
+        _sync_session_from_movement_state(session)
     return True
 
 
@@ -5611,31 +5807,19 @@ def _capture_persist_position_from_session(session) -> None:
             format_position(raw_position),
         )
         return
-    session.persist_map_id = int(position.map)
-    resolved_zone = int(
-        resolve_zone_from_position(
-            int(position.map),
-            float(position.x),
-            float(position.y),
-        ) or 0
+    from server.modules.handlers.world.position.publication import publish_absolute
+
+    publish_absolute(
+        session,
+        map_id=int(position.map),
+        instance_id=int(getattr(session, "instance_id", 0) or 0),
+        x=float(position.x),
+        y=float(position.y),
+        z=float(position.z),
+        orientation=float(position.orientation),
+        resolve_area=True,
+        capture_persistence=True,
     )
-    resolved_area = int(
-        resolve_area_from_position(
-            int(position.map),
-            float(position.x),
-            float(position.y),
-        ) or 0
-    )
-    session.persist_zone = resolved_zone or int(getattr(session, "zone", 0) or 0)
-    if resolved_zone:
-        session.zone = int(resolved_zone)
-    if resolved_area:
-        session.current_area = int(resolved_area)
-    session.persist_instance_id = int(getattr(session, "instance_id", 0) or 0)
-    session.persist_x = float(position.x)
-    session.persist_y = float(position.y)
-    session.persist_z = float(position.z)
-    session.persist_orientation = float(position.orientation)
     if POSITION_DEBUG_ENABLED:
         Logger.debug(
             "[POS_DEBUG] capture player=%s pos=%s source=%s",
@@ -6236,9 +6420,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         bool(orientation_accepted),
     )
 
-    state.x = float(x)
-    state.y = float(y)
-    state.z = float(z)
     if is_flying_movement:
         session.pitch = float(getattr(state, "pitch", 0.0) or 0.0)
         _log_orientation_write(
@@ -6249,11 +6430,18 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             new_value=float(normalized_orientation),
             reason=f"{opcode_name}:flying",
         )
-        state.orientation = float(normalized_orientation)
+        from server.modules.handlers.world.position.publication import (
+            publish_from_movement,
+        )
+
+        publish_from_movement(
+            session,
+            x=float(x),
+            y=float(y),
+            z=float(z),
+            orientation=float(normalized_orientation),
+        )
         _remember_valid_orientation(session, state.orientation)
-        session.x = float(state.x)
-        session.y = float(state.y)
-        session.z = float(state.z)
         _log_orientation_write(
             session,
             writer="handle_movement_packet",
@@ -6262,7 +6450,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             new_value=float(state.orientation),
             reason=f"{opcode_name}:flying",
         )
-        session.orientation = float(state.orientation)
         Logger.debug(
             "[FLY_PITCH] pitch=%.6f z=%.6f flags=0x%X",
             float(session.pitch),
@@ -6278,9 +6465,18 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             new_value=float(normalized_orientation),
             reason=str(opcode_name),
         )
-        state.orientation = float(normalized_orientation)
+        from server.modules.handlers.world.position.publication import (
+            publish_from_movement,
+        )
+
+        publish_from_movement(
+            session,
+            x=float(x),
+            y=float(y),
+            z=float(z),
+            orientation=float(normalized_orientation),
+        )
         _remember_valid_orientation(session, state.orientation)
-        _sync_session_from_movement_state(session)
     client_timestamp = int(getattr(state, "client_timestamp_ms", 0) or 0) & 0xFFFFFFFF
     movement_delta = math.sqrt(
         ((float(session.x) - previous_x) ** 2)
@@ -6428,8 +6624,17 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
         new_value=float(normalized_orientation),
         reason="MSG_MOVE_SET_FACING",
     )
-    state.orientation = float(normalized_orientation)
-    _sync_session_from_movement_state(session)
+    from server.modules.handlers.world.position.publication import (
+        publish_from_movement,
+    )
+
+    publish_from_movement(
+        session,
+        x=float(state.x),
+        y=float(state.y),
+        z=float(state.z),
+        orientation=float(normalized_orientation),
+    )
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     discovery_responses = _maybe_discover_current_area(session)

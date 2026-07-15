@@ -446,17 +446,24 @@ def _sit_on_chair(session, entry: dict) -> list[tuple[str, bytes]]:
         reason="teleport",
         opcode_name="chair",
     )
-    session.x = float(x)
-    session.y = float(y)
-    session.z = float(z)
-    session.orientation = float(orientation)
-    sync_player_runtime_from_session(session)
+    from server.modules.handlers.world.position.publication import (
+        publish_from_teleport,
+    )
+
+    publish_from_teleport(
+        session,
+        map_id=int(getattr(session, "map_id", 0) or 0),
+        instance_id=int(getattr(session, "instance_id", 0) or 0),
+        x=float(x),
+        y=float(y),
+        z=float(z),
+        orientation=float(orientation),
+        synchronize_membership=False,
+        resolve_area=False,
+        capture_persistence=False,
+    )
     movement_state = getattr(session, "movement_state", None)
     if movement_state is not None:
-        movement_state.x = float(x)
-        movement_state.y = float(y)
-        movement_state.z = float(z)
-        movement_state.orientation = float(orientation)
         movement_state.flags = 0
         movement_state.flags2 = 0
 

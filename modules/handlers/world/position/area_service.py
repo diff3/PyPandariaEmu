@@ -12,6 +12,7 @@ _WORLD_MAP_AREAS: Optional[list[tuple[int, int, float, float, float, float, int]
 _AREA_ASSIGNMENTS: Optional[dict[tuple[int, int, int], tuple[int, ...]]] = None
 _AREA_ASSIGNMENT_CENTERS: Optional[dict[tuple[int, int], tuple[float, float]]] = None
 _AREA_PARENTS: Optional[dict[int, int]] = None
+_AREA_MAP_IDS: Optional[dict[int, int]] = None
 _MAP_AREA_CACHE: dict[tuple[int, int, int], Optional[tuple[int, Optional[tuple[int, ...]]]]] = {}
 _MAPS_ROOT_LOGGED = False
 _ADT_TILE_SIZE = 533.3333333333334
@@ -135,11 +136,12 @@ def _load_area_assignments() -> dict[tuple[int, int, int], tuple[int, ...]]:
 
 
 def _load_area_parents() -> dict[int, int]:
-    global _AREA_PARENTS
+    global _AREA_PARENTS, _AREA_MAP_IDS
     if _AREA_PARENTS is not None:
         return _AREA_PARENTS
 
     _AREA_PARENTS = {}
+    _AREA_MAP_IDS = {}
     dbc_root = get_dbc_root()
     path = dbc_root / "AreaTable.dbc"
     if not path.exists():
@@ -156,11 +158,20 @@ def _load_area_parents() -> dict[int, int]:
         if len(row) < 3:
             continue
         area_id = int(row[0] or 0)
+        area_map_id = int(row[1] or 0)
         parent_area_id = int(row[2] or 0)
         if area_id > 0:
             _AREA_PARENTS[area_id] = parent_area_id
+            _AREA_MAP_IDS[area_id] = area_map_id
 
     return _AREA_PARENTS
+
+
+def _area_belongs_to_map(area_id: int, map_id: int) -> bool:
+    _load_area_parents()
+    area_maps = _AREA_MAP_IDS or {}
+    area_map_id = area_maps.get(int(area_id))
+    return area_map_id is None or int(area_map_id) < 0 or int(area_map_id) == int(map_id)
 
 
 def _bbox_area(x1: float, x2: float, y1: float, y2: float) -> float:
@@ -327,8 +338,12 @@ def resolve_zone_from_position(map_id: int, x: float, y: float) -> int:
 
 
 def resolve_area_from_position(map_id: int, x: float, y: float) -> int:
+    explicit_area = _resolve_explicit_area(int(map_id), float(x), float(y))
+    if explicit_area > 0:
+        return int(explicit_area)
+
     map_file_area = _resolve_map_file_area(int(map_id), float(x), float(y))
-    if map_file_area > 0:
+    if map_file_area > 0 and _area_belongs_to_map(map_file_area, int(map_id)):
         return int(map_file_area)
 
     assigned_area = _resolve_area_assignment(int(map_id), float(x), float(y))
@@ -345,7 +360,7 @@ def resolve_area_from_position(map_id: int, x: float, y: float) -> int:
             matches.append((_bbox_area(x1, x2, y1, y2), int(area_id)))
 
     if not matches:
-        return _resolve_explicit_area(int(map_id), float(x), float(y))
+        return 0
 
     matches.sort(key=lambda item: (float(item[0]), int(item[1])))
     return int(matches[0][1])

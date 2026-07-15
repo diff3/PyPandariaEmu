@@ -103,21 +103,26 @@ def _clear_runtime_attachment(session: Any) -> None:
 
 
 def _restore_safe_position(session: Any, pending: dict[str, Any]) -> None:
-    session.map_id = int(pending.get("safe_map", 0) or 0)
-    session.instance_id = int(pending.get("safe_instance_id", 0) or 0)
-    session.x = float(pending.get("safe_x", 0.0) or 0.0)
-    session.y = float(pending.get("safe_y", 0.0) or 0.0)
-    session.z = float(pending.get("safe_z", 0.0) or 0.0)
-    session.orientation = float(pending.get("safe_o", 0.0) or 0.0)
-    if (
+    synchronize_membership = bool(
         getattr(session, "region", None) is not None
         or getattr(session, "global_state", None) is not None
-    ):
-        from server.modules.handlers.world.state.runtime import (
-            attach_session_to_world_state,
-        )
+    )
+    from server.modules.handlers.world.position.publication import (
+        publish_from_teleport,
+    )
 
-        attach_session_to_world_state(session, map_id=int(session.map_id))
+    publish_from_teleport(
+        session,
+        map_id=int(pending.get("safe_map", 0) or 0),
+        instance_id=int(pending.get("safe_instance_id", 0) or 0),
+        x=float(pending.get("safe_x", 0.0) or 0.0),
+        y=float(pending.get("safe_y", 0.0) or 0.0),
+        z=float(pending.get("safe_z", 0.0) or 0.0),
+        orientation=float(pending.get("safe_o", 0.0) or 0.0),
+        synchronize_membership=synchronize_membership,
+        resolve_area=False,
+        capture_persistence=False,
+    )
 
 
 def abort_login_world_attachment(
@@ -149,6 +154,11 @@ def prepare_login_world_attachment(session: Any) -> bool:
     pending = getattr(session, "pending_world_attachment_restore", None)
     if not isinstance(pending, dict):
         return False
+    if str(pending.get("status", "") or "") == "PREPARED":
+        # The character-load path prepares before building WorldLoginContext,
+        # and the bootstrap queue calls this entry point again.  Keep the first
+        # pinned transport phase; a moving elevator may advance between calls.
+        return True
 
     from server.modules.handlers.world.transport_runtime import (
         ATTACH_STATE_ATTACHED,
@@ -203,46 +213,6 @@ def prepare_login_world_attachment(session: Any) -> bool:
     rotated_x = cos_o * local_x - sin_o * local_y
     rotated_y = sin_o * local_x + cos_o * local_y
     runtime_guid = int(world_object.runtime_guid)
-    previous_map_id = int(getattr(session, "map_id", 0) or 0)
-    session.map_id = int(world_object.map_id)
-    session.instance_id = int(world_object.instance_id)
-    session.x = float(world_object.x) + rotated_x
-    session.y = float(world_object.y) + rotated_y
-    session.z = float(world_object.z) + local_z
-    session.orientation = float(world_object.orientation) + local_o
-    if (
-        previous_map_id != int(session.map_id)
-        and (
-            getattr(session, "region", None) is not None
-            or getattr(session, "global_state", None) is not None
-        )
-    ):
-        from server.modules.handlers.world.state.runtime import (
-            attach_session_to_world_state,
-        )
-
-        attach_session_to_world_state(session, map_id=int(session.map_id))
-
-    movement = getattr(session, "movement_state", None)
-    if movement is None:
-        from server.session.world_session import MovementState
-
-        movement = MovementState()
-        session.movement_state = movement
-    movement.has_transport_data = True
-    movement.transport_guid = runtime_guid
-    movement.transport_x = local_x
-    movement.transport_y = local_y
-    movement.transport_z = local_z
-    movement.transport_orientation = local_o
-    movement.transport_time = int(
-        getattr(runtime_state, "path_progress_ms", 0) or 0
-    ) & 0xFFFFFFFF
-    movement.transport_time2 = 0
-    movement.transport_time3 = 0
-    movement.transport_seat = -1
-    movement.transport_vehicle_id = 0
-
     attached = attach_transport_passenger(
         runtime_guid,
         int(getattr(session, "char_guid", 0) or 0),
@@ -258,6 +228,36 @@ def prepare_login_world_attachment(session: Any) -> bool:
             reason="passenger_registration_failed",
         )
         return False
+    from server.modules.handlers.world.position.publication import (
+        publish_transport,
+        publish_transport_local_offset,
+    )
+    from server.modules.handlers.world.transport_runtime import (
+        transport_passenger_attachment,
+    )
+
+    attachment = transport_passenger_attachment(runtime_guid, int(getattr(session, "char_guid", 0) or 0))
+    if attachment is None:
+        abort_login_world_attachment(session, reason="passenger_attachment_missing")
+        return False
+    publish_transport_local_offset(
+        session,
+        runtime_state,
+        attachment,
+        local_x=local_x,
+        local_y=local_y,
+        local_z=local_z,
+        local_o=local_o,
+    )
+    publish_transport(
+        session,
+        runtime_state,
+        attachment,
+        synchronize_membership=bool(
+            getattr(session, "region", None) is not None
+            or getattr(session, "global_state", None) is not None
+        ),
+    )
     session.transport_attach_state = ATTACH_STATE_ATTACHED
     session.transport_attached_guid = runtime_guid
     session.transport_attach_source_map = int(world_object.map_id)

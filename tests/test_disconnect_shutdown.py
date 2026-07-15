@@ -159,3 +159,4 @@ def test_handle_disconnect_session_finalizes_taxi_before_position_save(monkeypat
     assert session.taxi_state is None
     assert session.taxi_controls_locked is False
     assert session.player_travel_state == "NORMAL"
+

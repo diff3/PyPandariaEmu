@@ -102,6 +102,87 @@ def test_build_smsg_player_move_payload_uses_session_state() -> None:
     assert struct.pack("<f", 0.75) in payload
 
 
+def test_build_smsg_player_move_payload_serializes_complete_transport_attachment() -> None:
+    transport_guid = 0x0102030405060708
+    state = SimpleNamespace(
+        x=101.5,
+        y=202.5,
+        z=303.5,
+        orientation=0.75,
+        flags=0,
+        flags2=0,
+        timestamp_ms=123,
+        counter=0,
+        has_fall_data=False,
+        has_transport_data=True,
+        transport_guid=transport_guid,
+        transport_x=1.25,
+        transport_y=-2.5,
+        transport_z=3.75,
+        transport_orientation=0.375,
+        transport_time=4321,
+        transport_time2=123,
+        transport_time3=456,
+        transport_seat=-1,
+    )
+    session = SimpleNamespace(char_guid=7, world_guid=7, movement_state=state)
+
+    payload = movement.build_smsg_player_move_payload(session)
+    bit_sequence = (
+        "MSEHasPitch", "MSEHasGuidByte2", "MSEZeroBit", "MSEZeroBit",
+        "MSEHasGuidByte0", "MSEHasOrientation", "MSEHasFallData",
+        "MSEHasCounter", "MSEHasGuidByte3", "MSEHasFallDirection",
+        "MSEHasTransportData", "MSEHasGuidByte4", "MSEHasTransportGuidByte5",
+        "MSEHasTransportGuidByte4", "MSEHasTransportGuidByte7",
+        "MSEHasTransportGuidByte2", "MSEHasTransportGuidByte6",
+        "MSEHasTransportTime2", "MSEHasTransportGuidByte3",
+        "MSEHasTransportGuidByte1", "MSEHasTransportTime3",
+        "MSEHasTransportGuidByte0", "MSEHasSplineElevation",
+        "MSEHasMovementFlags", "MSEZeroBit", "MSEMovementFlags",
+        "MSEHasMovementFlags2", "MSEHasGuidByte7", "MSEHasGuidByte1",
+        "MSEHasTimestamp", "MSEMovementFlags2", "MSEHasGuidByte5",
+        "MSEForcesCount", "MSEHasGuidByte6",
+    )
+    bits, offset = movement._read_skyfire_movement_bit_fields(payload, bit_sequence)
+
+    assert bits["hasTransportData"] is True
+    assert bits["hasTransportTime2"] is True
+    assert bits["hasTransportTime3"] is True
+    assert all(bits[f"MSEHasTransportGuidByte{index}"] for index in range(8))
+
+    assert struct.unpack_from("<f", payload, offset)[0] == pytest.approx(202.5)
+    offset += 4
+    raw_transport = transport_guid.to_bytes(8, "little")
+    assert payload[offset] == (raw_transport[7] ^ 1)
+    offset += 1
+    assert struct.unpack_from("<I", payload, offset)[0] == 123
+    offset += 4
+    assert struct.unpack_from("<f", payload, offset)[0] == pytest.approx(1.25)
+    offset += 4
+    assert payload[offset] == (raw_transport[5] ^ 1)
+    offset += 1
+    assert struct.unpack_from("<b", payload, offset)[0] == -1
+    offset += 1
+    for index in (2, 0, 3):
+        assert payload[offset] == (raw_transport[index] ^ 1)
+        offset += 1
+    assert struct.unpack_from("<I", payload, offset)[0] == 4321
+    offset += 4
+    assert payload[offset] == (raw_transport[4] ^ 1)
+    offset += 1
+    assert struct.unpack_from("<f", payload, offset)[0] == pytest.approx(3.75)
+    offset += 4
+    assert payload[offset] == (raw_transport[1] ^ 1)
+    offset += 1
+    assert struct.unpack_from("<f", payload, offset)[0] == pytest.approx(-2.5)
+    offset += 4
+    assert struct.unpack_from("<f", payload, offset)[0] == pytest.approx(0.375)
+    offset += 4
+    assert payload[offset] == (raw_transport[6] ^ 1)
+    offset += 1
+    assert struct.unpack_from("<I", payload, offset)[0] == 456
+
+
 def test_build_smsg_player_move_payload_adds_flying_flags_for_peers() -> None:
     state = SimpleNamespace(
         x=1.5,
@@ -1697,7 +1778,7 @@ def test_jump_then_current_fall_land_updates_position_and_clears_fall_state() ->
     assert state.has_fall_data is False
 
 
-def test_fall_land_does_not_cancel_active_flying_mount() -> None:
+def test_fall_land_ends_active_flight_but_preserves_flying_mount_capability() -> None:
     state = SimpleNamespace(
         x=0.0,
         y=0.0,
@@ -1734,11 +1815,17 @@ def test_fall_land_does_not_cancel_active_flying_mount() -> None:
     ok = movement._store_authoritative_movement(session, "MSG_MOVE_FALL_LAND", payload, None)
 
     assert ok is True
-    assert session.is_flying is True
+    assert session.is_flying is False
     assert state.flags & movement._MOVEMENTFLAG_CAN_FLY
-    assert state.flags & movement._MOVEMENTFLAG_FLYING
+    assert not state.flags & movement._MOVEMENTFLAG_FLYING
     assert not state.flags & movement._MOVEMENTFLAG_FALLING
     assert state.has_fall_data is False
+
+    ok = movement._store_authoritative_movement(session, "MSG_MOVE_START_SWIM", b"", None)
+    assert ok is True
+    assert state.flags & movement._MOVEMENTFLAG_CAN_FLY
+    assert state.flags & movement._MOVEMENTFLAG_SWIMMING
+    assert not state.flags & movement._MOVEMENTFLAG_FLYING
 
 
 def test_start_swim_enters_swimming_and_clears_fall_and_flying() -> None:
@@ -2405,6 +2492,123 @@ def test_handle_start_ascend_sets_flight_speed_once_on_flying_entry(monkeypatch)
     assert responses == [("SMSG_MOVE_SET_FLIGHT_SPEED", b"flight-speed")]
 
 
+def test_start_ascend_enters_flight_from_can_fly_capability() -> None:
+    state = SimpleNamespace(
+        flags=movement._MOVEMENTFLAG_CAN_FLY,
+        flags2=0,
+        is_ascending=False,
+        is_descending=False,
+    )
+
+    movement._apply_movement_flags(state, "MSG_MOVE_START_ASCEND")
+
+    assert state.flags & movement._MOVEMENTFLAG_CAN_FLY
+    assert state.flags & movement._MOVEMENTFLAG_FLYING
+    assert state.flags & movement._MOVEMENTFLAG_ASCENDING
+    assert not state.flags & movement._MOVEMENTFLAG_SWIMMING
+
+
+def test_flying_mount_swims_underwater_then_enters_flight_after_breaking_surface() -> None:
+    state = SimpleNamespace(
+        flags=movement._MOVEMENTFLAG_CAN_FLY | movement._MOVEMENTFLAG_SWIMMING,
+        flags2=0,
+        is_ascending=False,
+        is_descending=False,
+    )
+
+    movement._apply_movement_flags(state, "MSG_MOVE_START_ASCEND")
+    assert state.flags & movement._MOVEMENTFLAG_CAN_FLY
+    assert state.flags & movement._MOVEMENTFLAG_SWIMMING
+    assert not state.flags & movement._MOVEMENTFLAG_FLYING
+    assert state.flags & movement._MOVEMENTFLAG_ASCENDING
+
+    movement._apply_movement_flags(state, "MSG_MOVE_STOP_SWIM")
+    movement._apply_movement_flags(state, "MSG_MOVE_START_ASCEND")
+    assert not state.flags & movement._MOVEMENTFLAG_SWIMMING
+    assert state.flags & movement._MOVEMENTFLAG_FLYING
+    assert state.flags & movement._MOVEMENTFLAG_ASCENDING
+
+
+def test_swimming_player_can_dive_without_entering_flight() -> None:
+    for capability in (0, movement._MOVEMENTFLAG_CAN_FLY):
+        state = SimpleNamespace(
+            flags=movement._MOVEMENTFLAG_SWIMMING | capability,
+            flags2=0,
+            is_ascending=False,
+            is_descending=False,
+        )
+
+        movement._apply_movement_flags(state, "MSG_MOVE_START_DESCEND")
+
+        assert state.flags & movement._MOVEMENTFLAG_SWIMMING
+        assert state.flags & movement._MOVEMENTFLAG_DESCENDING
+        assert not state.flags & movement._MOVEMENTFLAG_FLYING
+        assert state.is_descending is True
+
+
+def test_accepted_swimming_descend_preserves_dive_state_for_flying_mount() -> None:
+    state = SimpleNamespace(
+        x=0.0,
+        y=0.0,
+        z=5.0,
+        orientation=0.0,
+        flags=movement._MOVEMENTFLAG_CAN_FLY | movement._MOVEMENTFLAG_SWIMMING,
+        flags2=0,
+        timestamp_ms=1000,
+        client_timestamp_ms=1000,
+        server_movement_timestamp_ms=0,
+        counter=0,
+        has_fall_data=False,
+        fall_time=0,
+        fall_vertical_speed=0.0,
+        fall_horizontal_speed=0.0,
+        fall_sin_angle=0.0,
+        fall_cos_angle=0.0,
+        is_ascending=False,
+        is_descending=False,
+    )
+    session = SimpleNamespace(
+        char_guid=7,
+        movement_state=state,
+        can_fly=True,
+        is_flying=False,
+        mount_spell=72286,
+    )
+
+    ok = movement._store_authoritative_movement(
+        session,
+        "MSG_MOVE_START_DESCEND",
+        b"",
+        None,
+    )
+
+    assert ok is True
+    assert session.is_flying is False
+    assert state.flags & movement._MOVEMENTFLAG_SWIMMING
+    assert state.flags & movement._MOVEMENTFLAG_DESCENDING
+    assert not state.flags & movement._MOVEMENTFLAG_FLYING
+
+
+def test_start_ascend_cannot_enter_flight_without_flying_capability() -> None:
+    for initial_flags in (0, movement._MOVEMENTFLAG_SWIMMING):
+        state = SimpleNamespace(
+            flags=initial_flags,
+            flags2=0,
+            is_ascending=False,
+            is_descending=False,
+        )
+
+        movement._apply_movement_flags(state, "MSG_MOVE_START_ASCEND")
+
+        assert not state.flags & movement._MOVEMENTFLAG_FLYING
+        assert bool(state.flags & movement._MOVEMENTFLAG_ASCENDING) is bool(
+            initial_flags & movement._MOVEMENTFLAG_SWIMMING
+        )
+        assert bool(state.flags & movement._MOVEMENTFLAG_SWIMMING) is bool(
+            initial_flags & movement._MOVEMENTFLAG_SWIMMING
+        )
+
+
 def test_handle_fall_land_clears_flying_state_and_restores_run_speed(monkeypatch) -> None:
     broadcast_calls: list[bool] = []
     session = SimpleNamespace(
@@ -2564,7 +2768,7 @@ def test_handle_ground_fall_land_does_not_restore_unchanged_run_speed(monkeypatc
     assert movement_state.flags & movement._MOVEMENTFLAG_FORWARD
 
 
-def test_handle_fall_land_on_active_flying_mount_does_not_restore_run_speed(monkeypatch) -> None:
+def test_handle_fall_land_on_active_flying_mount_ends_flight_without_restoring_run_speed(monkeypatch) -> None:
     run_speed_responses: list[bool] = []
     session = SimpleNamespace(
         x=10.0,
@@ -2634,9 +2838,9 @@ def test_handle_fall_land_on_active_flying_mount_does_not_restore_run_speed(monk
     assert status == 0
     assert responses is None
     assert run_speed_responses == []
-    assert session.is_flying is True
+    assert session.is_flying is False
     assert movement_state.flags & movement._MOVEMENTFLAG_CAN_FLY
-    assert movement_state.flags & movement._MOVEMENTFLAG_FLYING
+    assert not movement_state.flags & movement._MOVEMENTFLAG_FLYING
     assert not movement_state.flags & movement._MOVEMENTFLAG_FALLING
 
 

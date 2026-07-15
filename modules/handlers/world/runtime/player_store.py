@@ -80,10 +80,15 @@ def sync_player_runtime_from_session(session) -> Player | None:
     if player is None:
         return None
 
-    player.map_id = int(getattr(session, "map_id", 0) or 0)
-    player.instance_id = int(getattr(session, "instance_id", 0) or 0)
-    player.x = float(getattr(session, "x", 0.0) or 0.0)
-    player.y = float(getattr(session, "y", 0.0) or 0.0)
-    player.z = float(getattr(session, "z", 0.0) or 0.0)
-    player.orientation = float(getattr(session, "orientation", 0.0) or 0.0)
+    from server.modules.handlers.world.position.publication import publish_absolute
+
+    publish_absolute(
+        session,
+        map_id=int(getattr(session, "map_id", 0) or 0),
+        instance_id=int(getattr(session, "instance_id", 0) or 0),
+        x=float(getattr(session, "x", 0.0) or 0.0),
+        y=float(getattr(session, "y", 0.0) or 0.0),
+        z=float(getattr(session, "z", 0.0) or 0.0),
+        orientation=float(getattr(session, "orientation", 0.0) or 0.0),
+    )
     return player

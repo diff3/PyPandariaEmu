@@ -1448,13 +1448,11 @@ def test_far_transport_worldport_omits_verify_world_and_keeps_bootstrap_order(mo
         ("SMSG_UPDATE_OBJECT", b"player-create"),
     ]
     assert ("SMSG_UPDATE_OBJECT", b"transport-values") in responses
-    assert ("SMSG_UPDATE_OBJECT", b"visible:worldport-loading-complete") in responses
+    assert not any(payload.startswith(b"visible:") for _opcode, payload in responses)
+    assert session._worldport_destination_visibility_refresh_pending is True
     assert responses.count(("SMSG_SEND_KNOWN_SPELLS", b"known-spells")) == 1
     assert responses.index(("SMSG_UPDATE_OBJECT", b"transport-values")) > responses.index(
         ("SMSG_QUERY_TIME_RESPONSE", b"query-time")
-    )
-    assert responses.index(("SMSG_UPDATE_OBJECT", b"visible:worldport-loading-complete")) > responses.index(
-        ("SMSG_UPDATE_OBJECT", b"transport-values")
     )
     assert session.loading_screen_done is True
     assert session.post_loading_sent is True
@@ -1546,23 +1544,20 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
     monkeypatch.setattr(login_handlers, "trigger_inventory_activation", lambda _session: [])
     monkeypatch.setattr(login_handlers, "build_explored_zones_update_response", lambda _session: None)
     monkeypatch.setattr(transport_runtime, "build_bootstrap_transport_value_updates", lambda _session: [])
-    def stream_during_bootstrap(target, *, context):
-        assert is_player_world_active(target) is False
-        assert (target.x, target.y, target.z) == pytest.approx(
-            (97.0, 202.0, 14.0)
-        )
+    def stream_after_commit(target, *, context):
         calls.append(context)
         return [("SMSG_UPDATE_OBJECT", b"visible-now")]
 
     monkeypatch.setattr(
         movement_handlers,
         "stream_world_objects_after_teleport",
-        stream_during_bootstrap,
+        stream_after_commit,
     )
     responses = login_handlers._queue_teleport_world_transition(session, ctx)
 
-    assert calls == ["worldport-loading-complete"]
-    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"visible-now")
+    assert calls == []
+    assert ("SMSG_UPDATE_OBJECT", b"visible-now") not in responses
+    assert session._worldport_destination_visibility_refresh_pending is True
     assert (session.x, session.y, session.z, session.orientation) == pytest.approx(
         (97.0, 202.0, 14.0, (math.pi / 2.0) + 0.25)
     )
@@ -1579,6 +1574,80 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
     before_late_ack = dict(vars(session))
     assert movement_handlers.handle_move_worldport_ack(session, SimpleNamespace()) == (0, None)
     assert vars(session) == before_late_ack
+
+
+def test_worldport_active_mover_streams_destination_objects_once(monkeypatch) -> None:
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+    session = SimpleNamespace(
+        login_state=LoginState.WORLD_BOOTSTRAP,
+        player_object_sent=True,
+        char_guid=9,
+        world_guid=9,
+        map_id=0,
+        instance_id=0,
+        x=-14445.0,
+        y=500.0,
+        z=10.0,
+        orientation=1.0,
+        motd="",
+        chat_motd_sent=False,
+        account_settings_sent=False,
+        pending_world_attachment_restore=None,
+        _far_worldport_known_spells_sent=True,
+        _worldport_destination_visibility_refresh_pending=True,
+        loaded_gameobjects=set(),
+        loaded_npcs=set(),
+    )
+    stream_calls: list[str] = []
+
+    def stream_once(target, *, context):
+        stream_calls.append(context)
+        responses = []
+        if 101 not in target.loaded_gameobjects:
+            target.loaded_gameobjects.add(101)
+            responses.append(("SMSG_UPDATE_OBJECT", b"gameobject-create"))
+        if 202 not in target.loaded_npcs:
+            target.loaded_npcs.add(202)
+            responses.append(("SMSG_UPDATE_OBJECT", b"npc-create"))
+        return responses
+
+    monkeypatch.setattr(login_handlers, "sync_player_visibility", lambda _session: None)
+    monkeypatch.setattr(login_handlers, "sync_all_players_on_map", lambda _map_id: None)
+    monkeypatch.setattr(login_handlers, "_build_world_login_context", lambda _session: SimpleNamespace(motd=""))
+    monkeypatch.setattr(
+        movement_handlers,
+        "stream_world_objects_after_teleport",
+        stream_once,
+    )
+    monkeypatch.setattr(
+        login_handlers.spells_handlers,
+        "build_login_mount_restore_responses",
+        lambda _session: [],
+    )
+
+    store = get_player_runtime_store()
+    store.clear()
+    try:
+        status, responses = login_handlers.handle_set_active_mover(
+            session,
+            SimpleNamespace(),
+        )
+        duplicate = login_handlers.handle_set_active_mover(session, SimpleNamespace())
+        later_movement_refresh = stream_once(session, context="normal-movement")
+    finally:
+        store.clear()
+
+    assert status == 0
+    assert responses == [
+        ("SMSG_UPDATE_OBJECT", b"gameobject-create"),
+        ("SMSG_UPDATE_OBJECT", b"npc-create"),
+    ]
+    assert session.login_state == LoginState.IN_WORLD
+    assert session._worldport_destination_visibility_refresh_pending is False
+    assert duplicate == (0, None)
+    assert later_movement_refresh == []
+    assert stream_calls == ["worldport-active-mover-commit", "normal-movement"]
 
 
 def test_failed_worldport_bootstrap_enters_terminal_failure_and_fallback(

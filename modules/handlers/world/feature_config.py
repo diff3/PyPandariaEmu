@@ -17,6 +17,9 @@ CONFIG_DEBUG_TRANSPORT_PACKETS = "Transport.DebugPackets"
 CONFIG_DEBUG_TRANSPORT_MESSAGES = "Transport.DebugMessages"
 CONFIG_AUTONOMOUS_TRANSPORT_VISIBILITY = "Transport.AutonomousVisibility"
 CONFIG_EXPERIMENTAL_PLAYER_CREATE_LIVING_MOVEMENT = "Transport.ExperimentalPlayerCreateLivingMovement"
+CONFIG_TRANSPORT_ATTACHMENT_HORIZONTAL_TOLERANCE = "Transport.AttachmentHorizontalTolerance"
+CONFIG_TRANSPORT_ATTACHMENT_VERTICAL_TOLERANCE = "Transport.AttachmentVerticalTolerance"
+CONFIG_TRANSPORT_ATTACHMENT_MAX_LOCAL_RADIUS = "Transport.AttachmentMaxLocalRadius"
 CONFIG_ENABLE_FLIGHT_PATHS = "Taxi.EnableFlightPaths"
 CONFIG_DEBUG_TAXI_MOVEMENT = "Taxi.DebugMovement"
 CONFIG_ENABLE_MAP_CHEAT = "Player.EnableMapExploreCheat"
@@ -32,6 +35,9 @@ CONFIG_EXPERIMENTAL_GEOMETRY_SHADOW = "World.ExperimentalGeometryShadow"
 CONFIG_GAMEOBJECT_COLLISION_MODE = "World.GameObjectCollisionMode"
 CONFIG_GEOMETRY_CONTACT_SEPARATION_EPSILON = "World.GeometryContactSeparationEpsilon"
 DEFAULT_GEOMETRY_CONTACT_SEPARATION_EPSILON = 0.05
+DEFAULT_TRANSPORT_ATTACHMENT_HORIZONTAL_TOLERANCE = 25.0
+DEFAULT_TRANSPORT_ATTACHMENT_VERTICAL_TOLERANCE = 12.0
+DEFAULT_TRANSPORT_ATTACHMENT_MAX_LOCAL_RADIUS = 150.0
 
 GAMEOBJECT_COLLISION_MODE_LEGACY = "legacy"
 GAMEOBJECT_COLLISION_MODE_SHADOW_COMPARE = "shadow_compare"
@@ -133,6 +139,33 @@ def autonomous_transport_visibility_enabled() -> bool:
 
 def experimental_player_create_living_movement_enabled() -> bool:
     return feature_enabled(CONFIG_EXPERIMENTAL_PLAYER_CREATE_LIVING_MOVEMENT)
+
+
+def _positive_float_config(dotted_key: str, default: float) -> float:
+    config = ConfigLoader.get_config() or {}
+    value = _lookup_key(config, dotted_key)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if math.isfinite(parsed) and parsed > 0.0 else float(default)
+
+
+def transport_attachment_geometry_tolerances() -> tuple[float, float, float]:
+    return (
+        _positive_float_config(
+            CONFIG_TRANSPORT_ATTACHMENT_HORIZONTAL_TOLERANCE,
+            DEFAULT_TRANSPORT_ATTACHMENT_HORIZONTAL_TOLERANCE,
+        ),
+        _positive_float_config(
+            CONFIG_TRANSPORT_ATTACHMENT_VERTICAL_TOLERANCE,
+            DEFAULT_TRANSPORT_ATTACHMENT_VERTICAL_TOLERANCE,
+        ),
+        _positive_float_config(
+            CONFIG_TRANSPORT_ATTACHMENT_MAX_LOCAL_RADIUS,
+            DEFAULT_TRANSPORT_ATTACHMENT_MAX_LOCAL_RADIUS,
+        ),
+    )
 
 
 def flight_paths_enabled() -> bool:

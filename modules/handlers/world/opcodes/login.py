@@ -401,6 +401,7 @@ def _reset_login_flow_state(session, *, preserve_loading_screen_done: bool = Fal
     session.world_transition_terminal_generation = 0
     session.world_transition_terminal_owner = None
     session.world_transition_failure_reason = None
+    session._worldport_destination_visibility_refresh_pending = False
     try:
         from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
 
@@ -700,31 +701,36 @@ def _sync_pending_transport_before_player_bootstrap(session) -> bool:
 
             state = MovementState()
             session.movement_state = state
-        state.has_transport_data = True
-        state.transport_guid = destination_guid
-        state.transport_x = local_x
-        state.transport_y = local_y
-        state.transport_z = local_z
-        state.transport_orientation = local_o
-        state.transport_time = int(getattr(runtime_state, "path_progress_ms", 0) or 0) & 0xFFFFFFFF
-        state.transport_time2 = 0
-        state.transport_time3 = 0
-        state.transport_seat = -1
-        state.x = player_x
-        state.y = player_y
-        state.z = player_z
-        state.orientation = player_o
-
-        session.map_id = destination_map
-        session.x = player_x
-        session.y = player_y
-        session.z = player_z
-        session.orientation = player_o
-        from server.modules.handlers.world.runtime.player_store import (
-            sync_player_runtime_from_session,
+        from server.modules.handlers.world.transport_runtime import (
+            update_transport_passenger_offset,
         )
 
-        sync_player_runtime_from_session(session)
+        if not update_transport_passenger_offset(
+            session,
+            destination_guid,
+            local_x=local_x,
+            local_y=local_y,
+            local_z=local_z,
+            local_o=local_o,
+            transport_time=int(getattr(runtime_state, "path_progress_ms", 0) or 0),
+            transport_time2=0,
+            transport_time3=0,
+            seat=-1,
+        ):
+            raise RuntimeError("destination passenger attachment missing during bootstrap")
+        from server.modules.handlers.world.position.publication import (
+            publish_absolute,
+        )
+
+        publish_absolute(
+            session,
+            map_id=destination_map,
+            instance_id=int(getattr(session, "instance_id", 0) or 0),
+            x=player_x,
+            y=player_y,
+            z=player_z,
+            orientation=player_o,
+        )
         region = getattr(session, "region", None)
         if (
             region is not None
@@ -1044,46 +1050,6 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
         len(responses),
     )
     from server.modules.handlers.world.opcodes import movement as movement_handlers
-
-    step_started = time.monotonic()
-    Logger.info(
-        "[LoadingScreenTrace] trace_id=%s stage=world_stream_packets event=entering",
-        trace_id,
-    )
-    try:
-        world_stream_packets = movement_handlers.stream_world_objects_after_teleport(
-            session,
-            context="worldport-loading-complete",
-        )
-    except Exception as exc:
-        Logger.info(
-            "[LoadingScreenTrace] trace_id=%s stage=world_stream_packets "
-            "event=exception elapsed_ms=%.3f error=%s",
-            trace_id,
-            (time.monotonic() - step_started) * 1000.0,
-            str(exc),
-        )
-        raise
-    responses.extend(world_stream_packets)
-    Logger.info(
-        "[LoadingScreenTrace] trace_id=%s stage=world_stream_packets "
-        "event=leaving elapsed_ms=%.3f packets=%s total_packets=%s",
-        trace_id,
-        (time.monotonic() - step_started) * 1000.0,
-        len(world_stream_packets),
-        len(responses),
-    )
-    if _worldport_bootstrap_variant(session) == "D":
-        _reset_loaded_world_object_state(session)
-        replay_packets = movement_handlers.stream_world_objects_after_teleport(
-            session,
-            context="worldport-variant-d-visibility-replay",
-        )
-        responses.extend(replay_packets)
-        Logger.info(
-            "[WorldportBootstrapVariant] variant=D visibility_replay packets=%s",
-            len(replay_packets),
-        )
     from server.modules.handlers.world.opcodes import taxi as taxi_handlers
 
     taxi_responses = taxi_handlers.continue_pending_cross_map_taxi(session)
@@ -1110,6 +1076,7 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     )
 
     complete_world_transition(session)
+    session._worldport_destination_visibility_refresh_pending = True
     if isinstance(pending_transport, dict):
         try:
             from server.modules.handlers.world.transport_debug_messages import build_message
@@ -1547,9 +1514,6 @@ def handle_player_login(session, ctx: PacketContext):
         f"char_guid={char_guid} realm={realm_id}"
     )
 
-    session.map_id = int(row.map or 0)
-    session.instance_id = int(row.instance_id or 0)
-
     loaded_position = position_from_row(row)
     normalized_loaded_position = normalize_position(correct_z_if_invalid(loaded_position), safe_z=True)
 
@@ -1567,24 +1531,19 @@ def handle_player_login(session, ctx: PacketContext):
             orientation=0.0,
         )
 
-    session.x = float(normalized_loaded_position.x)
-    session.y = float(normalized_loaded_position.y)
-    session.z = float(normalized_loaded_position.z)
-    session.orientation = float(normalized_loaded_position.orientation)
+    session.zone = int(row.zone or 0)
+    session.current_area = int(session.zone)
+    from server.modules.handlers.world.position.publication import publish_absolute
 
-    session.zone = int(
-        resolve_zone_from_position(
-            int(session.map_id),
-            float(session.x),
-            float(session.y),
-        ) or int(row.zone or 0)
-    )
-    session.current_area = int(
-        resolve_area_from_position(
-            int(session.map_id),
-            float(session.x),
-            float(session.y),
-        ) or int(session.zone)
+    publish_absolute(
+        session,
+        map_id=int(row.map or 0),
+        instance_id=int(row.instance_id or 0),
+        x=float(normalized_loaded_position.x),
+        y=float(normalized_loaded_position.y),
+        z=float(normalized_loaded_position.z),
+        orientation=float(normalized_loaded_position.orientation),
+        resolve_area=True,
     )
 
     Logger.info(
@@ -2006,6 +1965,22 @@ def handle_set_active_mover(session, ctx: PacketContext):
     sync_player_visibility(session)
     sync_all_players_on_map(int(player.map_id))
     responses: list[tuple[str, bytes]] = []
+    if bool(
+        getattr(
+            session,
+            "_worldport_destination_visibility_refresh_pending",
+            False,
+        )
+    ):
+        session._worldport_destination_visibility_refresh_pending = False
+        from server.modules.handlers.world.opcodes import movement as movement_handlers
+
+        responses.extend(
+            movement_handlers.stream_world_objects_after_teleport(
+                session,
+                context="worldport-active-mover-commit",
+            )
+        )
     responses.extend(_build_pending_cinematic_response(session))
     motd = str(getattr(_build_world_login_context(session), "motd", "") or "").strip()
     if motd and not session.chat_motd_sent:

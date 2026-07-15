@@ -548,13 +548,19 @@ def cmd_worldporttest(session, args: list[str]) -> list[tuple[str, bytes]]:
         source_map_id = from_map
 
         if movement_state is not None:
-            movement_state.has_transport_data = True
-            movement_state.transport_guid = int(transport_guid)
-            movement_state.transport_x = local_x
-            movement_state.transport_y = local_y
-            movement_state.transport_z = local_z
-            movement_state.transport_orientation = local_o
-            movement_state.transport_time = int(getattr(runtime_state, "path_progress_ms", 0) or 0) & 0xFFFFFFFF
+            from server.modules.handlers.world.transport_runtime import (
+                update_transport_passenger_offset,
+            )
+
+            update_transport_passenger_offset(
+                session,
+                int(transport_guid),
+                local_x=local_x,
+                local_y=local_y,
+                local_z=local_z,
+                local_o=local_o,
+                transport_time=int(getattr(runtime_state, "path_progress_ms", 0) or 0),
+            )
     else:
         if len(args) != 5:
             return _notification_response("Usage: .worldporttest <map> <x> <y> <z> <o>")

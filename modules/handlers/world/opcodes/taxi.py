@@ -1048,19 +1048,23 @@ def _begin_cross_map_taxi_transfer(
         reason="teleport",
         opcode_name="taxi_map_transfer",
     )
-    session.map_id = int(destination_map)
-    session.x = float(transfer_point.x)
-    session.y = float(transfer_point.y)
-    session.z = float(transfer_point.z)
-    session.orientation = float(getattr(session, "orientation", 0.0) or 0.0)
-    sync_player_runtime_from_session(session)
+    from server.modules.handlers.world.position.publication import (
+        publish_from_teleport,
+    )
+
+    publish_from_teleport(
+        session,
+        map_id=int(destination_map),
+        instance_id=int(getattr(session, "instance_id", 0) or 0),
+        x=float(transfer_point.x),
+        y=float(transfer_point.y),
+        z=float(transfer_point.z),
+        orientation=float(getattr(session, "orientation", 0.0) or 0.0),
+        synchronize_membership=False,
+        resolve_area=False,
+        capture_persistence=False,
+    )
     sync_flight_path_runtime_from_session(session)
-    movement_state = getattr(session, "movement_state", None)
-    if movement_state is not None:
-        movement_state.x = float(transfer_point.x)
-        movement_state.y = float(transfer_point.y)
-        movement_state.z = float(transfer_point.z)
-        movement_state.orientation = float(session.orientation)
 
     loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
     if isinstance(loaded_gameobjects, set):

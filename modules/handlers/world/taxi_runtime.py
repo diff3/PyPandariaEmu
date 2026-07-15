@@ -941,13 +941,19 @@ def _stop_taxi_movement_state(session) -> None:
 
 def _apply_taxi_position(session, point: TaxiPathPoint, orientation: float) -> None:
     orientation = _normalize_orientation(orientation)
-    if point.map_id is not None:
-        session.map_id = int(point.map_id)
-    session.x = float(point.x)
-    session.y = float(point.y)
-    session.z = float(point.z)
-    session.orientation = float(orientation)
-    sync_player_runtime_from_session(session)
+    from server.modules.handlers.world.position.publication import (
+        publish_absolute,
+    )
+
+    publish_absolute(
+        session,
+        map_id=int(point.map_id) if point.map_id is not None else int(getattr(session, "map_id", 0) or 0),
+        instance_id=int(getattr(session, "instance_id", 0) or 0),
+        x=float(point.x),
+        y=float(point.y),
+        z=float(point.z),
+        orientation=float(orientation),
+    )
     sync_flight_path_runtime_from_session(session)
     session.position_dirty = True
 
@@ -958,10 +964,6 @@ def _apply_taxi_position(session, point: TaxiPathPoint, orientation: float) -> N
         movement_state = MovementState()
         session.movement_state = movement_state
 
-    movement_state.x = float(point.x)
-    movement_state.y = float(point.y)
-    movement_state.z = float(point.z)
-    movement_state.orientation = float(orientation)
     movement_state.last_valid_orientation = float(orientation)
     movement_state.has_fall_data = False
     movement_state.fall_time = 0

@@ -90,7 +90,10 @@ _UNIT_FIELD_MOUNTDISPLAYID = 0x6A
 _MOUNT_SPEED_MULTIPLIER = 2.0
 _MOVEMENTFLAG_CAN_FLY = 0x00800000
 _MOVEMENTFLAG_FALLING = 0x00000800
+_MOVEMENTFLAG_SWIMMING = 0x00100000
+_MOVEMENTFLAG2_CAN_SWIM_TO_FLY_TRANS = 0x00000400
 _MOVEMENTFLAG_FLYING = 0x01000000
+_MOVEMENTFLAG_SPLINE_ELEVATION = 0x02000000
 _MOVEMENTFLAG_ASCENDING = 0x00200000
 _MOVEMENTFLAG_DESCENDING = 0x00400000
 _MOVEMENTFLAG_FLYING_CAPABILITY = _MOVEMENTFLAG_CAN_FLY | _MOVEMENTFLAG_FLYING
@@ -99,6 +102,10 @@ _MOVEMENTFLAG_FLYING_STATE = (
     | _MOVEMENTFLAG_ASCENDING
     | _MOVEMENTFLAG_DESCENDING
 )
+_CREATURE_DISPLAY_INFO_FMT = "dixxfxxxxxxxxxxxxxxx"
+_CREATURE_MODEL_DATA_FMT = "dxxxxxxxxxxxxxxffxxxxxxxxxxxxxxxxx"
+_creature_display_models: dict[int, int] | None = None
+_creature_model_heights: dict[int, tuple[float, float]] | None = None
 _LANG_ORCISH = 1
 _LANG_COMMON = 7
 _KNOWN_LANGUAGES_ALL = 0xFFFFFFFF
@@ -915,6 +922,81 @@ def _append_guid_xor_bytes(
             payload.append((value ^ 1) & 0xFF)
 
 
+def _load_collision_height_data() -> tuple[dict[int, int], dict[int, tuple[float, float]]]:
+    global _creature_display_models, _creature_model_heights
+    if _creature_display_models is not None and _creature_model_heights is not None:
+        return _creature_display_models, _creature_model_heights
+
+    from server.modules.dbc.DBCReader import read_dbc
+
+    dbc_root = Path(__file__).resolve().parents[5] / "data/client/dbc"
+    display_rows = read_dbc(dbc_root / "CreatureDisplayInfo.dbc", _CREATURE_DISPLAY_INFO_FMT)
+    model_rows = read_dbc(dbc_root / "CreatureModelData.dbc", _CREATURE_MODEL_DATA_FMT)
+    _creature_display_models = {
+        int(display_id): int(model_id)
+        for display_id, model_id, _scale in display_rows
+    }
+    _creature_model_heights = {
+        int(model_id): (float(collision_height), float(mount_height))
+        for model_id, collision_height, mount_height in model_rows
+    }
+    return _creature_display_models, _creature_model_heights
+
+
+def player_collision_height(session, *, mounted: bool) -> float:
+    """Mirror SkyFire Player::GetCollisionHeight without changing world Z."""
+    display_models, model_heights = _load_collision_height_data()
+    native_display_id = int(
+        getattr(session, "native_display_id", 0)
+        or getattr(session, "display_id", 0)
+        or 0
+    )
+    native_model_id = int(display_models.get(native_display_id, 0) or 0)
+    native_collision_height = float(model_heights.get(native_model_id, (2.0, 0.0))[0])
+    object_scale = float(getattr(session, "object_scale", 1.0) or 1.0)
+    if not mounted:
+        return max(0.1, native_collision_height)
+
+    mount_display_id = int(getattr(session, "mount_display_id", 0) or 0)
+    mount_model_id = int(display_models.get(mount_display_id, 0) or 0)
+    mount_height = float(model_heights.get(mount_model_id, (0.0, 0.0))[1])
+    if mount_model_id <= 0:
+        return max(0.1, native_collision_height)
+    return max(0.1, object_scale * mount_height + native_collision_height * 0.5)
+
+
+def build_move_set_collision_height_payload(session, *, mounted: bool) -> bytes:
+    """Serialize SkyFire 5.4.8 MoveSetCollisionHeight (build 18414 layout)."""
+    guid_value = _movement_guid_value(session)
+    raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
+    mount_display_id = int(getattr(session, "mount_display_id", 0) or 0) if mounted else 0
+    height = player_collision_height(session, mounted=mounted)
+    state = getattr(session, "movement_state", None)
+    counter = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
+
+    bits = BitWriter()
+    for index in (7, 0, 1):
+        bits.write_bits(1 if raw_guid[index] else 0, 1)
+    bits.write_bits(0 if mount_display_id else 1, 1)
+    bits.write_bits(1 if raw_guid[3] else 0, 1)
+    bits.write_bits(0, 1)
+    bits.write_bits(0, 1)
+    for index in (2, 6, 5, 4):
+        bits.write_bits(1 if raw_guid[index] else 0, 1)
+
+    payload = bytearray(bits.getvalue())
+    payload.extend(struct.pack("<f", height))
+    if mount_display_id:
+        payload.extend(struct.pack("<I", mount_display_id))
+    _append_guid_xor_bytes(payload, raw_guid, (3, 2, 5, 6))
+    payload.extend(struct.pack("<I", counter))
+    payload.extend(struct.pack("<f", 1.0))
+    _append_guid_xor_bytes(payload, raw_guid, (7, 1, 4, 0))
+    if state is not None:
+        state.counter = (counter + 1) & 0xFFFFFFFF
+    return bytes(payload)
+
+
 def build_spline_move_flying_payload(session) -> bytes:
     guid_value = _movement_guid_value(session)
     raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
@@ -964,13 +1046,22 @@ def _set_flying_capability_state(session, enabled: bool) -> bool:
     )
     previous = bool(getattr(session, "can_fly", False))
     session.can_fly = bool(enabled)
-    session.is_flying = bool(enabled)
+    session.is_flying = False
 
     state = getattr(session, "movement_state", None)
     if state is not None:
         flags = int(getattr(state, "flags", 0) or 0)
+        flags2 = int(getattr(state, "flags2", 0) or 0)
         if enabled:
-            flags |= _MOVEMENTFLAG_FLYING_CAPABILITY
+            flags |= _MOVEMENTFLAG_CAN_FLY
+            flags2 |= _MOVEMENTFLAG2_CAN_SWIM_TO_FLY_TRANS
+            flags &= ~(
+                _MOVEMENTFLAG_SPLINE_ELEVATION
+                | _MOVEMENTFLAG_FALLING
+                | _MOVEMENTFLAG_FLYING_STATE
+            )
+            state.is_ascending = False
+            state.is_descending = False
             state.has_fall_data = False
             state.fall_time = 0
             state.fall_vertical_speed = 0.0
@@ -982,9 +1073,11 @@ def _set_flying_capability_state(session, enabled: bool) -> bool:
                 _MOVEMENTFLAG_CAN_FLY
                 | _MOVEMENTFLAG_FLYING_STATE
             )
+            flags2 &= ~_MOVEMENTFLAG2_CAN_SWIM_TO_FLY_TRANS
             state.is_ascending = False
             state.is_descending = False
         state.flags = int(flags)
+        state.flags2 = int(flags2)
 
     _log_mount_transport_state(
         session,
@@ -1212,6 +1305,12 @@ def mount_direct(player, display_id: int, run_speed: float | None = None) -> lis
         bool(getattr(player, "is_mounted", False)),
         int(getattr(player, "mount_spell", 0) or 0),
     )
+    from server.modules.handlers.world.transport_runtime import (
+        prepare_attached_movement_rebuild,
+        publish_current_transport_attachment,
+    )
+
+    prepare_attached_movement_rebuild(player, reason="mount_direct")
     player.is_mounted = True
     player.mount_spell = None
     if run_speed is None:
@@ -1227,6 +1326,8 @@ def mount_direct(player, display_id: int, run_speed: float | None = None) -> lis
     )
     responses.append(_build_run_speed_update_response(player))
     responses.extend(_notification_response(f"Mounted display={int(display_id)} speed={float(player.run_speed):.2f}"))
+    publish_current_transport_attachment(player)
+    responses.extend(resync_movement(player))
     Logger.info("[Mount][Debug] mount_direct total_responses=%s", len(responses))
     return responses
 
@@ -1242,19 +1343,39 @@ def handle_mount(player, spell_id: int):
         )
         return dismount(player)
 
+    from server.modules.handlers.world.transport_runtime import (
+        prepare_attached_movement_rebuild,
+        publish_current_transport_attachment,
+    )
+
+    prepare_attached_movement_rebuild(player, reason="mount")
     player.is_mounted = True
     player.mount_spell = spell_id
     player.active_mount_aura_slot = int(getattr(player, "active_mount_aura_slot", 0) or 0)
     _apply_mount_movement_speeds(player)
     _log_mount_transport_state(player, "mount", "after_state_set")
-    responses = send_mount_update(player, spell_id)
+    responses = [
+        (
+            "SMSG_MOVE_SET_COLLISION_HEIGHT",
+            build_move_set_collision_height_payload(player, mounted=True),
+        )
+    ]
+    responses.extend(send_mount_update(player, spell_id))
     _persist_current_mount_state(player)
+    publish_current_transport_attachment(player)
+    responses.extend(resync_movement(player))
     _log_mount_transport_state(player, "mount", "handle_exit")
     return responses
 
 
 def dismount(player) -> list[tuple[str, bytes]]:
     _log_mount_transport_state(player, "dismount", "handle_enter")
+    from server.modules.handlers.world.transport_runtime import (
+        prepare_attached_movement_rebuild,
+        publish_current_transport_attachment,
+    )
+
+    prepare_attached_movement_rebuild(player, reason="dismount")
     clear_persisted_mount_state(player)
     player.is_mounted = False
     player.mount_spell = None
@@ -1275,7 +1396,15 @@ def dismount(player) -> list[tuple[str, bytes]]:
         state.flags = int(flags)
     _restore_default_movement_speeds(player)
     _log_mount_transport_state(player, "dismount", "after_state_clear")
-    responses = send_dismount_update(player)
+    responses = [
+        (
+            "SMSG_MOVE_SET_COLLISION_HEIGHT",
+            build_move_set_collision_height_payload(player, mounted=False),
+        )
+    ]
+    responses.extend(send_dismount_update(player))
+    publish_current_transport_attachment(player)
+    responses.extend(resync_movement(player))
     _log_mount_transport_state(player, "dismount", "handle_exit")
     return responses
 

@@ -47,10 +47,6 @@ def _reset_movement_for_teleport(
         if state is None:
             return
 
-    state.x = float(destination.x)
-    state.y = float(destination.y)
-    state.z = float(destination.z)
-    state.orientation = float(destination.orientation)
     state.flags = 0
     state.flags2 = 0
     state.pitch = 0.0
