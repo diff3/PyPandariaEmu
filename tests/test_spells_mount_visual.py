@@ -155,12 +155,15 @@ def test_apply_and_remove_mount_aura_track_runtime_state():
     )
 
     apply_responses = spells_handlers.apply_mount_aura(session, 59535)
+    assert session.active_auras[0].spell_id == 59535
+    assert session.active_auras[0].applied_effects == ("mount",)
     remove_responses = spells_handlers.remove_mount_aura(session)
 
     assert apply_responses[0][0] == "SMSG_AURA_UPDATE"
     assert apply_responses[0][1][14:18] == (59535).to_bytes(4, "little")
     assert session.active_mount_aura_spell_id is None
-    assert remove_responses == [("SMSG_AURA_UPDATE", bytes.fromhex("8000004400000602"))]
+    assert 0 not in session.active_auras
+    assert remove_responses[0][0] == "SMSG_AURA_UPDATE"
 
 
 def test_apply_and_remove_fly_aura_track_runtime_state():
@@ -295,6 +298,8 @@ def test_dismount_clears_persisted_mount_state(monkeypatch):
     assert [opcode for opcode, _payload in responses] == [
         "SMSG_MOVE_SET_COLLISION_HEIGHT",
         "SMSG_DISMOUNT",
+        "SMSG_SPELL_FAILURE",
+        "SMSG_SPELL_FAILED_OTHER",
     ]
     assert cleared == [(7, 1)]
 
@@ -637,6 +642,8 @@ def test_dismount_while_swimming_keeps_water_state_and_removes_flight_capability
 
     assert [opcode for opcode, _payload in responses] == [
         "SMSG_MOVE_SET_COLLISION_HEIGHT",
+        "SMSG_SPELL_FAILURE",
+        "SMSG_SPELL_FAILED_OTHER",
         "SMSG_PLAYER_MOVE",
     ]
     assert responses[-1][1] == b"swimming-dismount"
@@ -847,6 +854,44 @@ def test_handle_cast_spell_mount_button_toggles_to_dismount(monkeypatch):
     assert calls == ["dismount"]
 
 
+def test_cast_spell_candidates_find_unaligned_mount_id_from_live_packet():
+    spells_handlers = _import_spells_handlers()
+    ctx = SimpleNamespace(
+        payload=bytes.fromhex("06220100E076000027FC430200"),
+        decoded={},
+    )
+
+    candidates = spells_handlers._extract_packet_spell_id_candidates(ctx)
+
+    assert 30432 in candidates
+    assert 148476 in candidates
+
+
+def test_cancel_cast_echoes_mount_spell_and_client_cast_counter(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    calls = []
+
+    class Service:
+        def interrupt_cast(self, session, **kwargs):
+            calls.append(kwargs)
+            return [("SMSG_SPELL_FAILURE", b"stop")]
+
+    service_module = importlib.import_module("server.modules.handlers.world.spell_cast.service")
+    monkeypatch.setattr(service_module, "get_spell_cast_service", lambda: Service())
+    monkeypatch.setattr(spells_handlers, "is_mount_spell", lambda value: int(value) == 148476)
+    ctx = SimpleNamespace(
+        name="CMSG_CANCEL_CAST",
+        payload=bytes.fromhex("00FC43020008"),
+        decoded={},
+    )
+
+    status, responses = spells_handlers.handle_cancel_cast(SimpleNamespace(active_auras={}), ctx)
+
+    assert status == 0
+    assert responses == [("SMSG_SPELL_FAILURE", b"stop")]
+    assert calls == [{"spell_id": 148476, "cast_count": 8}]
+
+
 def test_cancel_mount_aura_suppresses_followup_cast_of_same_mount(monkeypatch):
     spells_handlers = _import_spells_handlers()
     monkeypatch.setattr(spells_handlers, "is_mount_spell", lambda spell_id: int(spell_id) == 59535)
@@ -922,6 +967,8 @@ def test_dismount_clears_flying_runtime_state(monkeypatch):
     assert [opcode for opcode, _payload in responses] == [
         "SMSG_MOVE_SET_COLLISION_HEIGHT",
         "SMSG_DISMOUNT",
+        "SMSG_SPELL_FAILURE",
+        "SMSG_SPELL_FAILED_OTHER",
     ]
     assert session.is_mounted is False
     assert session.mount_spell is None

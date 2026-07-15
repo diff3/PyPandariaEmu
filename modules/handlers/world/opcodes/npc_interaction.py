@@ -430,7 +430,15 @@ def handle_use_item(session, ctx: PacketContext):
     if item_entry != HEARTHSTONE_ITEM_ID and not _session_has_hearthstone(session):
         return 0, None
 
-    return 0, handle_hearthstone_cast(session)
+    from server.modules.handlers.world.spell_cast import SpellSource
+    from server.modules.handlers.world.spell_cast.service import get_spell_cast_service
+
+    return 0, get_spell_cast_service().begin_cast(
+        session,
+        spell_id=HEARTHSTONE_SPELL_ID,
+        source=SpellSource.ITEM,
+        source_item_entry=HEARTHSTONE_ITEM_ID,
+    )
 
 
 @register("CMSG_BINDER_ACTIVATE")
@@ -493,7 +501,7 @@ def handle_binder_activate(session, ctx: PacketContext):
     ]
 
 
-def handle_hearthstone_cast(session) -> list[tuple[str, bytes]]:
+def execute_hearthstone_teleport(session) -> list[tuple[str, bytes]]:
     bind_map = int(getattr(session, "bind_map_id", 0) or getattr(session, "map_id", 0) or 0)
     bind_area = int(getattr(session, "bind_area_id", 0) or getattr(session, "zone", 0) or 0)
     bind_x = float(getattr(session, "bind_x", getattr(session, "x", 0.0)) or 0.0)
@@ -514,10 +522,18 @@ def handle_hearthstone_cast(session) -> list[tuple[str, bytes]]:
     )
     from server.modules.handlers.world.opcodes import chat
 
-    responses = chat.apply_player_state_change(
+    teleport_responses = chat.apply_player_state_change(
         session,
         position=(bind_x, bind_y, bind_z, bind_o),
         map_id=bind_map,
     )
     session.current_area = bind_area
-    return responses
+    return teleport_responses
+
+
+def handle_hearthstone_cast(session) -> list[tuple[str, bytes]]:
+    """Compatibility entrypoint routed through canonical cast ownership."""
+    from server.modules.handlers.world.spell_cast import SpellSource
+    from server.modules.handlers.world.spell_cast.service import get_spell_cast_service
+
+    return get_spell_cast_service().begin_cast(session, spell_id=HEARTHSTONE_SPELL_ID, source=SpellSource.SPELL)

@@ -6024,6 +6024,8 @@ def _maybe_discover_current_area(session) -> list[tuple[str, bytes]]:
                 float(getattr(session, "persist_z", 0.0) or 0.0),
             )
         responses = discover_area(session, area_id)
+        from server.modules.handlers.world.mount.restrictions import enforce_active_mount_legality
+        responses.extend(enforce_active_mount_legality(session))
         if responses:
             Logger.info(
                 "[Explore] discovery responses area=%s count=%s player=%s",

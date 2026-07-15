@@ -216,6 +216,42 @@ chat_handlers = _import_chat_handlers()
 chat_codec = _import_chat_codec()
 
 
+def test_testbuff_command_applies_default_visible_aura(monkeypatch):
+    calls = []
+    monkeypatch.setattr(chat_handlers.chat_commands.spells_handlers, "find_by_spell", lambda *_args: None, raising=False)
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.spells_handlers,
+        "apply_active_aura",
+        lambda session, spell_id, **kwargs: calls.append((spell_id, kwargs)) or [("SMSG_AURA_UPDATE", b"buff")],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands.spells_handlers,
+        "replay_active_auras",
+        lambda session: [("SMSG_AURA_UPDATE", b"full-buff-replay")],
+        raising=False,
+    )
+
+    responses = chat_handlers.chat_commands.cmd_testbuff(SimpleNamespace(), [])
+
+    assert calls == [(21562, {"positive": True, "cancelable": True, "duration_ms": -1, "applied_effects": ("test_buff",)})]
+    assert responses[0] == ("SMSG_AURA_UPDATE", b"full-buff-replay")
+
+
+def test_addhearthstone_uses_normal_inventory_delta(monkeypatch):
+    result = SimpleNamespace(ok=True, message="item added")
+    calls = []
+    monkeypatch.setattr(chat_handlers.chat_commands, "add_item_to_character", lambda session, entry, count: calls.append((entry, count)) or result)
+    monkeypatch.setattr(chat_handlers.chat_commands, "build_inventory_delta_responses", lambda session, value: [("SMSG_UPDATE_OBJECT", b"item")])
+
+    responses = chat_handlers.chat_commands.cmd_addhearthstone(SimpleNamespace(inventory_dirty=False), [])
+
+    assert calls == [(6948, 1)]
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"item")
+    assert chat_handlers.chat_commands.COMMANDS["addhearthstone"].handler is chat_handlers.chat_commands.cmd_addhearthstone
+    assert "addheartstone" not in chat_handlers.chat_commands.COMMANDS
+
+
 def _install_worldserver_stub(monkeypatch, *, running=True, started_at=0.0, active_clients=None):
     class _Lock:
         def __enter__(self):
@@ -1883,7 +1919,8 @@ def test_castspell_rejects_unknown_runtime_spell(monkeypatch):
 
     responses = chat_handlers._handle_chat_command(alice, ".castspell 12345")
 
-    assert responses == [("SMSG_MESSAGECHAT", b"system|Spell 12345 has no runtime cast handler")]
+    assert [opcode for opcode, _payload in responses] == ["SMSG_CAST_FAILED", "SMSG_MESSAGECHAT"]
+    assert responses[-1] == ("SMSG_MESSAGECHAT", b"system|Spell 12345 has no runtime cast handler")
 
 
 def test_spawngo_loads_nearby_gameobjects_and_tracks_loaded_guids(monkeypatch):

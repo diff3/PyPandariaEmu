@@ -18,6 +18,19 @@ from server.modules.handlers.world.bootstrap.playerobjects import (
     build_multi_u32_update_object_payload,
 )
 from server.modules.handlers.world.dispatcher import register
+from server.modules.handlers.world.active_aura import (
+    AURA_EFFECT_MOUNT,
+    ActiveAura,
+    aura_owner_guid,
+    build_aura_remove,
+    build_aura_update,
+    find_by_effect,
+    find_by_spell,
+    register as register_active_aura,
+    registry as active_aura_registry,
+    replay_response as active_aura_replay_response,
+    unregister as unregister_active_aura,
+)
 from server.modules.handlers.world.opcodes.movement import (
     build_move_set_can_fly_payload,
     build_move_set_flight_speed_payload,
@@ -568,6 +581,22 @@ def _extract_packet_spell_id(ctx: PacketContext) -> Optional[int]:
     return None
 
 
+def _extract_packet_spell_id_candidates(ctx: PacketContext) -> list[int]:
+    """Return plausible ids, including unaligned MoP bit-packed fields."""
+    candidates: list[int] = []
+
+    preferred = _extract_packet_spell_id(ctx)
+    if preferred:
+        candidates.append(int(preferred))
+
+    payload = bytes(ctx.payload or b"")
+    for offset in range(max(0, len(payload) - 3)):
+        value = int(struct.unpack_from("<I", payload, offset)[0])
+        if 0 < value <= 500000 and value not in candidates:
+            candidates.append(value)
+    return candidates
+
+
 def _extract_mount_spell_id_from_payload(payload: bytes) -> Optional[int]:
     if not payload or len(payload) < 4 or not ALL_MOUNT_SPELLS:
         return None
@@ -848,27 +877,95 @@ def apply_mount_aura(session, spell_id: int) -> list[tuple[str, bytes]]:
     if spell_id <= 0:
         return []
 
-    slot = int(getattr(session, "active_mount_aura_slot", 0) or 0) & 0xFF
-    session.active_mount_aura_spell_id = spell_id
+    existing = find_by_effect(session, AURA_EFFECT_MOUNT)
+    slot = int(existing.slot if existing else getattr(session, "active_mount_aura_slot", 0) or 0) & 0xFF
+    aura = ActiveAura(
+        spell_id=spell_id,
+        slot=slot,
+        caster_guid=aura_owner_guid(session),
+        duration_ms=-1,
+        remaining_ms=-1,
+        stack_count=1,
+        positive=True,
+        cancelable=True,
+        applied_effects=(AURA_EFFECT_MOUNT,),
+        effect_mask=1,
+        caster_level=max(1, int(getattr(session, "level", 1) or 1)),
+    )
+    register_active_aura(session, aura)
+    session.active_mount_aura_spell_id = spell_id  # compatibility for older callers
     session.active_mount_aura_slot = slot
 
-    payload = bytearray(_MOUNT_AURA_APPLY_TEMPLATE)
-    payload[14:18] = int(spell_id).to_bytes(4, "little", signed=False)
-    payload[28] = slot & 0xFF
-
     Logger.info("[MOUNT_AURA] apply spell=%s slot=%s", spell_id, slot)
-    return [("SMSG_AURA_UPDATE", bytes(payload))]
+    return [("SMSG_AURA_UPDATE", build_aura_update(session, [aura]))]
+
+
+def apply_active_aura(
+    session,
+    spell_id: int,
+    *,
+    positive: bool = True,
+    cancelable: bool = True,
+    duration_ms: int = -1,
+    applied_effects: tuple[str, ...] = (),
+) -> list[tuple[str, bytes]]:
+    """Register and publish one reusable non-combat aura."""
+    spell_id = int(spell_id or 0)
+    if spell_id <= 0:
+        return []
+    existing = find_by_spell(session, spell_id)
+    if existing is not None:
+        return [("SMSG_AURA_UPDATE", build_aura_update(session, [existing]))]
+    used_slots = set(int(slot) & 0xFF for slot in active_aura_registry(session))
+    # SkyFire VisibleAuraMap uses MAX_AURAS=64 and takes the first free slot,
+    # beginning at zero. Do not reserve slot zero when no mount occupies it.
+    slot = next((candidate for candidate in range(64) if candidate not in used_slots), None)
+    if slot is None:
+        return []
+    owner_guid = aura_owner_guid(session)
+    aura = ActiveAura(
+        spell_id=spell_id,
+        slot=slot,
+        caster_guid=owner_guid,
+        duration_ms=int(duration_ms),
+        remaining_ms=int(duration_ms),
+        stack_count=1,
+        positive=bool(positive),
+        cancelable=bool(cancelable),
+        applied_effects=tuple(applied_effects),
+        effect_mask=1,
+        caster_level=max(1, int(getattr(session, "level", 1) or 1)),
+    )
+    register_active_aura(session, aura)
+    Logger.info("[AURA] apply spell=%s slot=%s effects=%s", spell_id, slot, aura.applied_effects)
+    return [("SMSG_AURA_UPDATE", build_aura_update(session, [aura]))]
+
+
+def remove_active_aura(session, aura: ActiveAura) -> list[tuple[str, bytes]]:
+    """Remove a registry entry and publish its 5.4.8 slot removal."""
+    removed = unregister_active_aura(session, aura.slot, spell_id=aura.spell_id)
+    if removed is None:
+        return []
+    Logger.info("[AURA] remove spell=%s slot=%s effects=%s", removed.spell_id, removed.slot, removed.applied_effects)
+    return [("SMSG_AURA_UPDATE", build_aura_remove(session, removed.slot))]
+
+
+def replay_active_auras(session) -> list[tuple[str, bytes]]:
+    """Replay the complete visible-aura map as SkyFire does for a target."""
+    return [active_aura_replay_response(session)]
 
 
 def remove_mount_aura(session) -> list[tuple[str, bytes]]:
-    slot = int(getattr(session, "active_mount_aura_slot", 0) or 0) & 0xFF
+    aura = find_by_effect(session, AURA_EFFECT_MOUNT)
+    if aura is None:
+        session.active_mount_aura_spell_id = None
+        return []
+    slot = int(aura.slot) & 0xFF
+    unregister_active_aura(session, slot, spell_id=aura.spell_id)
     session.active_mount_aura_spell_id = None
 
-    payload = bytearray(_MOUNT_AURA_REMOVE_TEMPLATE)
-    payload[5] = slot & 0xFF
-
     Logger.info("[MOUNT_AURA] remove spell=%s slot=%s", int(getattr(session, "mount_spell", 0) or 0), slot)
-    return [("SMSG_AURA_UPDATE", bytes(payload))]
+    return [("SMSG_AURA_UPDATE", build_aura_remove(session, slot))]
 
 
 def apply_fly_aura(session, spell_id: int = _FLY_AURA_SPELL_ID) -> list[tuple[str, bytes]]:
@@ -1024,7 +1121,10 @@ def build_spline_move_unset_flying_payload(session) -> bytes:
 
 
 def build_smsg_dismount_payload(session) -> bytes:
-    guid_value = _movement_guid_value(session)
+    # SkyFire Unit::Dismount targets Unit::GetGUID(), i.e. the same player
+    # presentation GUID used by CREATE/value and aura packets, not PPE's
+    # database-low or internal realm-aware GUID.
+    guid_value = aura_owner_guid(session)
     raw_guid = int(guid_value).to_bytes(8, "little", signed=False)
 
     bits = BitWriter()
@@ -1032,9 +1132,7 @@ def build_smsg_dismount_payload(session) -> bytes:
         bits.write_bits(1 if raw_guid[index] else 0, 1)
 
     payload = bytearray(bits.getvalue())
-    for index in (3, 6, 7, 5, 1, 4, 2, 0):
-        if raw_guid[index]:
-            payload.append(raw_guid[index])
+    _append_guid_xor_bytes(payload, raw_guid, (3, 6, 7, 5, 1, 4, 2, 0))
     return bytes(payload)
 
 
@@ -1167,11 +1265,16 @@ def build_raw_update_object(player, fields):
     return ("SMSG_UPDATE_OBJECT", bytes(payload))
 
 
-def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
+def send_mount_update(
+    player,
+    spell_id: int,
+    *,
+    aura_responses: list[tuple[str, bytes]] | None = None,
+) -> list[tuple[str, bytes]]:
     _log_mount_transport_state(player, "mount", "send_update_enter")
     responses: list[tuple[str, bytes]] = []
     display_id = get_mount_display_id(spell_id)
-    responses.extend(apply_mount_aura(player, spell_id))
+    responses.extend(aura_responses if aura_responses is not None else apply_mount_aura(player, spell_id))
     if display_id > 0:
         responses.extend(build_mount_visual_responses(player, display_id))
         _log_mount_transport_state(player, "mount", "after_visual")
@@ -1185,9 +1288,15 @@ def send_mount_update(player, spell_id: int) -> list[tuple[str, bytes]]:
     return responses
 
 
-def send_dismount_update(player) -> list[tuple[str, bytes]]:
+def send_dismount_update(
+    player,
+    *,
+    aura_responses: list[tuple[str, bytes]] | None = None,
+) -> list[tuple[str, bytes]]:
     _log_mount_transport_state(player, "dismount", "send_update_enter")
-    responses: list[tuple[str, bytes]] = list(remove_mount_aura(player))
+    responses: list[tuple[str, bytes]] = list(
+        aura_responses if aura_responses is not None else remove_mount_aura(player)
+    )
     if int(getattr(player, "active_fly_aura_spell_id", 0) or 0):
         responses.extend(remove_fly_aura(player))
     responses.append(("SMSG_DISMOUNT", build_smsg_dismount_payload(player)))
@@ -1268,6 +1377,7 @@ def restore_persisted_mount_state(session, char_guid: int, realm_id: int) -> boo
     session.mount_spell = int(spell_id)
     session.mount_display_id = int(display_id)
     session.active_mount_aura_slot = int(getattr(session, "active_mount_aura_slot", 0) or 0)
+    apply_mount_aura(session, spell_id)
     session.unit_flags = int(getattr(session, "unit_flags", 0) or 0) | _UNIT_FLAG_MOUNT
     _apply_mount_movement_speeds(session)
     Logger.info(
@@ -1288,7 +1398,9 @@ def build_login_mount_restore_responses(session) -> list[tuple[str, bytes]]:
 
     responses: list[tuple[str, bytes]] = []
     responses.extend(build_mount_visual_responses(session, display_id))
-    responses.extend(apply_mount_aura(session, spell_id))
+    if find_by_spell(session, spell_id) is None:
+        apply_mount_aura(session, spell_id)
+    responses.append(active_aura_replay_response(session))
     responses.extend(build_mount_flying_capability_responses(session, spell_id))
     responses.append(_build_run_speed_update_response(session))
     responses.append(("SMSG_MOVE_SET_FLIGHT_SPEED", build_move_set_flight_speed_payload(session)))
@@ -1348,19 +1460,29 @@ def handle_mount(player, spell_id: int):
         publish_current_transport_attachment,
     )
 
+    previous = find_by_effect(player, AURA_EFFECT_MOUNT)
+    replacement_responses: list[tuple[str, bytes]] = []
+    if previous is not None and int(previous.spell_id) != spell_id:
+        replacement_responses = dismount(player)
     prepare_attached_movement_rebuild(player, reason="mount")
+    aura_responses = apply_mount_aura(player, spell_id)
     player.is_mounted = True
     player.mount_spell = spell_id
     player.active_mount_aura_slot = int(getattr(player, "active_mount_aura_slot", 0) or 0)
     _apply_mount_movement_speeds(player)
     _log_mount_transport_state(player, "mount", "after_state_set")
-    responses = [
+    responses = replacement_responses + [
         (
             "SMSG_MOVE_SET_COLLISION_HEIGHT",
             build_move_set_collision_height_payload(player, mounted=True),
         )
     ]
-    responses.extend(send_mount_update(player, spell_id))
+    try:
+        responses.extend(send_mount_update(player, spell_id, aura_responses=aura_responses))
+    except TypeError as exc:
+        if "aura_responses" not in str(exc):
+            raise
+        responses.extend(send_mount_update(player, spell_id))
     _persist_current_mount_state(player)
     publish_current_transport_attachment(player)
     responses.extend(resync_movement(player))
@@ -1370,12 +1492,19 @@ def handle_mount(player, spell_id: int):
 
 def dismount(player) -> list[tuple[str, bytes]]:
     _log_mount_transport_state(player, "dismount", "handle_enter")
+    active_mount_aura = find_by_effect(player, AURA_EFFECT_MOUNT)
+    animation_spell_id = int(
+        (active_mount_aura.spell_id if active_mount_aura is not None else 0)
+        or getattr(player, "mount_spell", 0)
+        or 0
+    )
     from server.modules.handlers.world.transport_runtime import (
         prepare_attached_movement_rebuild,
         publish_current_transport_attachment,
     )
 
     prepare_attached_movement_rebuild(player, reason="dismount")
+    aura_responses = remove_mount_aura(player)
     clear_persisted_mount_state(player)
     player.is_mounted = False
     player.mount_spell = None
@@ -1402,7 +1531,23 @@ def dismount(player) -> list[tuple[str, bytes]]:
             build_move_set_collision_height_payload(player, mounted=False),
         )
     ]
-    responses.extend(send_dismount_update(player))
+    try:
+        responses.extend(send_dismount_update(player, aura_responses=aura_responses))
+    except TypeError as exc:
+        # Compatibility for narrow tests/extensions that replace the legacy
+        # one-argument packet builder; production always accepts the aura batch.
+        if "aura_responses" not in str(exc):
+            raise
+        responses.extend(send_dismount_update(player))
+    if animation_spell_id > 0:
+        from server.modules.handlers.world.spell_cast.service import get_spell_cast_service
+
+        responses.extend(
+            get_spell_cast_service().interrupt_cast(
+                player,
+                spell_id=animation_spell_id,
+            )
+        )
     publish_current_transport_attachment(player)
     responses.extend(resync_movement(player))
     _log_mount_transport_state(player, "dismount", "handle_exit")
@@ -1412,84 +1557,66 @@ def dismount(player) -> list[tuple[str, bytes]]:
 @register("CMSG_CAST_SPELL")
 def handle_cast_spell(session, ctx: PacketContext):
     Logger.debug(f"[SPELL] opcode={ctx.name}")
-    try:
-        from server.modules.handlers.world.taxi_runtime import is_taxi_active
-    except Exception:
-        is_taxi_active = None
-    if callable(is_taxi_active) and is_taxi_active(session):
-        Logger.warning(
-            "[TAXI] blocked spellcast while in flight player=%s",
-            int(getattr(session, "char_guid", 0) or 0),
-        )
+    spell_ids = _extract_packet_spell_id_candidates(ctx)
+    if not spell_ids:
         return 0, None
+    from server.modules.handlers.world.spell_cast import SpellSource
+    from server.modules.handlers.world.spell_cast.service import get_spell_cast_service
 
-    packet_spell_id = _extract_packet_spell_id(ctx)
-    if packet_spell_id == 8690:
-        from server.modules.handlers.world.opcodes import npc_interaction
+    responses = get_spell_cast_service().begin_cast_candidates(
+        session,
+        spell_ids=spell_ids,
+        source=SpellSource.SPELL,
+        packet_payload=bytes(ctx.payload or b""),
+    )
+    return 0, (responses or None)
 
-        return 0, npc_interaction.handle_hearthstone_cast(session)
 
-    if packet_spell_id and is_mount_spell(packet_spell_id):
-        Logger.debug(f"[SPELL] packet mount spell_id={int(packet_spell_id)}")
-        pending_cancel_spell = int(getattr(session, "pending_mount_cancel_spell", 0) or 0)
-        if pending_cancel_spell:
-            session.pending_mount_cancel_spell = None
-            if pending_cancel_spell == int(packet_spell_id) and not bool(getattr(session, "is_mounted", False)):
-                Logger.debug("[SPELL] ignored duplicate mount cast after cancel spell_id=%s", int(packet_spell_id))
-                return 0, None
-        active_mount = int(getattr(session, "mount_spell", 0) or 0)
-        if active_mount == int(packet_spell_id) and bool(getattr(session, "is_mounted", False)):
-            return 0, dismount(session)
-        return 0, handle_mount(session, int(packet_spell_id))
-
-    if packet_spell_id and battle_pet_by_spell(int(packet_spell_id)) is not None:
-        from server.modules.handlers.world.opcodes import pets as pet_handlers
-
-        Logger.debug("[SPELL] packet companion pet spell_id=%s", int(packet_spell_id))
-        return 0, pet_handlers.summon_companion_pet_by_spell(session, int(packet_spell_id))
-
-    spell_id = extract_mount_spell_id(session, ctx, include_active_fallback=False)
-    if not spell_id:
+@register("CMSG_CANCEL_CAST")
+def handle_cancel_cast(session, ctx: PacketContext):
+    """Echo the client's cast identity through canonical animation cleanup."""
+    spell_ids = _extract_packet_spell_id_candidates(ctx)
+    if not spell_ids:
         return 0, None
+    payload = bytes(ctx.payload or b"")
+    active_mount = find_by_effect(session, AURA_EFFECT_MOUNT)
+    spell_id = (
+        int(active_mount.spell_id)
+        if active_mount is not None
+        else int(next((candidate for candidate in spell_ids if is_mount_spell(candidate)), spell_ids[0]))
+    )
+    marker = spell_id.to_bytes(4, "little")
+    offset = payload.find(marker)
+    cast_count_offset = offset + len(marker)
+    cast_count = int(payload[cast_count_offset]) if offset >= 0 and cast_count_offset < len(payload) else None
 
-    Logger.debug(f"[SPELL] cast spell_id={int(spell_id)}")
-    if int(spell_id) == 8690:
-        from server.modules.handlers.world.opcodes import npc_interaction
+    from server.modules.handlers.world.spell_cast.service import get_spell_cast_service
 
-        return 0, npc_interaction.handle_hearthstone_cast(session)
-
-    if not is_mount_spell(int(spell_id)):
-        if battle_pet_by_spell(int(spell_id)) is not None:
-            from server.modules.handlers.world.opcodes import pets as pet_handlers
-
-            Logger.debug("[SPELL] companion pet spell_id=%s", int(spell_id))
-            return 0, pet_handlers.summon_companion_pet_by_spell(session, int(spell_id))
-        return 0, None
-
-    pending_cancel_spell = int(getattr(session, "pending_mount_cancel_spell", 0) or 0)
-    if pending_cancel_spell:
-        session.pending_mount_cancel_spell = None
-        if pending_cancel_spell == int(spell_id) and not bool(getattr(session, "is_mounted", False)):
-            Logger.debug("[SPELL] ignored duplicate mount cast after cancel spell_id=%s", int(spell_id))
-            return 0, None
-    active_mount = int(getattr(session, "mount_spell", 0) or 0)
-    if active_mount == int(spell_id) and bool(getattr(session, "is_mounted", False)):
-        return 0, dismount(session)
-    responses = handle_mount(session, int(spell_id))
-    return 0, responses
+    responses = get_spell_cast_service().interrupt_cast(
+        session,
+        spell_id=spell_id,
+        cast_count=cast_count,
+    )
+    return 0, (responses or None)
 
 
 @register("CMSG_CANCEL_AURA")
 def handle_cancel_aura(session, ctx: PacketContext):
     Logger.debug(f"[SPELL] opcode={ctx.name}")
-    spell_id = extract_mount_spell_id(session, ctx)
-    active_mount = int(getattr(session, "mount_spell", 0) or 0)
-    if not spell_id and not active_mount:
+    spell_id = _extract_packet_spell_id(ctx)
+    if not spell_id:
         return 0, None
-    if spell_id and not is_mount_spell(spell_id):
+    aura = find_by_spell(session, spell_id)
+    if aura is None or not aura.positive or not aura.cancelable:
         return 0, None
-
-    responses = dismount(session)
+    decoded = ctx.decoded or {}
+    requested_slot = decoded.get("slot", decoded.get("aura_slot"))
+    if requested_slot is not None and int(requested_slot) != int(aura.slot):
+        return 0, None
+    if AURA_EFFECT_MOUNT in aura.applied_effects:
+        responses = dismount(session)
+    else:
+        responses = remove_active_aura(session, aura)
     return 0, responses
 
 

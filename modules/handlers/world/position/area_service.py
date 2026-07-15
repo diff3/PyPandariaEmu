@@ -13,6 +13,7 @@ _AREA_ASSIGNMENTS: Optional[dict[tuple[int, int, int], tuple[int, ...]]] = None
 _AREA_ASSIGNMENT_CENTERS: Optional[dict[tuple[int, int], tuple[float, float]]] = None
 _AREA_PARENTS: Optional[dict[int, int]] = None
 _AREA_MAP_IDS: Optional[dict[int, int]] = None
+_AREA_FLAGS: Optional[dict[int, int]] = None
 _MAP_AREA_CACHE: dict[tuple[int, int, int], Optional[tuple[int, Optional[tuple[int, ...]]]]] = {}
 _MAPS_ROOT_LOGGED = False
 _ADT_TILE_SIZE = 533.3333333333334
@@ -136,12 +137,13 @@ def _load_area_assignments() -> dict[tuple[int, int, int], tuple[int, ...]]:
 
 
 def _load_area_parents() -> dict[int, int]:
-    global _AREA_PARENTS, _AREA_MAP_IDS
+    global _AREA_PARENTS, _AREA_MAP_IDS, _AREA_FLAGS
     if _AREA_PARENTS is not None:
         return _AREA_PARENTS
 
     _AREA_PARENTS = {}
     _AREA_MAP_IDS = {}
+    _AREA_FLAGS = {}
     dbc_root = get_dbc_root()
     path = dbc_root / "AreaTable.dbc"
     if not path.exists():
@@ -163,8 +165,15 @@ def _load_area_parents() -> dict[int, int]:
         if area_id > 0:
             _AREA_PARENTS[area_id] = parent_area_id
             _AREA_MAP_IDS[area_id] = area_map_id
+            _AREA_FLAGS[area_id] = int(row[4] or 0) if len(row) > 4 else 0
 
     return _AREA_PARENTS
+
+
+def area_flags(area_id: int) -> int:
+    """Return AreaTable flags from the same metadata used by area resolution."""
+    _load_area_parents()
+    return int((_AREA_FLAGS or {}).get(int(area_id), 0) or 0)
 
 
 def _area_belongs_to_map(area_id: int, map_id: int) -> bool:

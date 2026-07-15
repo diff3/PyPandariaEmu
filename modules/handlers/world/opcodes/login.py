@@ -1583,6 +1583,9 @@ def handle_player_login(session, ctx: PacketContext):
 
     session.is_mounted = False
     session.mount_spell = None
+    session.active_auras = {}
+    session.active_mount_aura_spell_id = None
+    session.active_mount_aura_slot = 0
     _reset_morph_state(session, session.race, session.gender)
     _reset_loaded_world_object_state(session)
 

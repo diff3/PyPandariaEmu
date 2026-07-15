@@ -1505,63 +1505,27 @@ def cmd_castspell(session, args: list[str]) -> list[tuple[str, bytes]]:
     )
     Logger.info("[CAST_SPELL] player=%s spell=%s", player_name, int(spell_id))
 
-    if not bool(getattr(spells_handlers, "is_mount_spell", lambda _spell_id: False)(int(spell_id))):
-        return _notification_response(f"Spell {int(spell_id)} has no runtime cast handler")
+    from server.modules.handlers.world.spell_cast import SpellSource
+    from server.modules.handlers.world.spell_cast.service import get_spell_cast_service
 
-    responses = list(spells_handlers.handle_mount(session, int(spell_id)))
-    responses.extend(_notification_response(f"Casted spell {int(spell_id)}"))
+    responses = list(get_spell_cast_service().begin_cast(session, spell_id=int(spell_id), source=SpellSource.SPELL))
+    failed = any(opcode == "SMSG_CAST_FAILED" for opcode, _payload in responses)
+    message = (
+        f"Spell {int(spell_id)} has no runtime cast handler"
+        if failed
+        else f"Casted spell {int(spell_id)}"
+    )
+    responses.extend(_notification_response(message))
     return responses
-
-def build_spell_go(player, spell_id: int) -> tuple[str, bytes]:
-    payload = bytearray.fromhex(
-        "46 00 00 00 00 00 00 00 00 04 00 02 01 00 80 00 "
-        "05 28 00 C4 00 00 B4 00 00 01 21 00 02 06 81 E5 "
-        "B6 05 06 00 09 00 00 00 E0 93 04 00 02 01 F4 7D "
-        "00 00 02 06"
-    )
-
-    # --- PATCH SPELL ID ---
-    spell_offset = 44
-    payload[spell_offset:spell_offset + 4] = int(spell_id).to_bytes(4, "little")
-
-    # --- PATCH GUID (packed) ---
-    guid = int(player.char_guid)
-
-    mask = 0
-    bytes_out = bytearray()
-
-    for i in range(8):
-        b = (guid >> (i * 8)) & 0xFF
-        if b != 0:
-            mask |= (1 << i)
-            bytes_out.append(b)
-
-    # ⚠️ Här måste du veta exakt offset i packet
-    guid_mask_offset = 0
-    payload[guid_mask_offset] = mask
-
-    # skriv bytes direkt efter mask
-    payload[guid_mask_offset + 1:guid_mask_offset + 1 + len(bytes_out)] = bytes_out
-
-    return ("SMSG_SPELL_GO", bytes(payload))
-
-
-def build_spell_start(player, spell_id: int) -> tuple[str, bytes]:
-    payload = bytearray.fromhex(
-        "00 00 00 40 00 00 00 00 00 00 00 00 40 00 01 00 "
-        "EA 00 5C 00 00 00 0B 38 DC 05 00 00 E0 93 04 00 "
-        "00 02 08 00 00 06 01 06 02 02 F4 7D 00 00"
-    )
-
-    spell_offset = 42
-    payload[spell_offset:spell_offset + 4] = int(spell_id).to_bytes(4, "little")
-    return ("SMSG_SPELL_START", bytes(payload))
 
 @register_command("mount", ".mount", allow_args=False)
 def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
     mount_spell_id = int(_helper("chat_mount_spell_id"))
     Logger.info("[Mount] spell_id=%s", mount_spell_id)
-    responses = list(spells_handlers.handle_mount(session, mount_spell_id))
+    from server.modules.handlers.world.spell_cast import SpellSource
+    from server.modules.handlers.world.spell_cast.service import get_spell_cast_service
+
+    responses = list(get_spell_cast_service().begin_cast(session, spell_id=mount_spell_id, source=SpellSource.SPELL))
     Logger.info(
         "[Mount] speed=%.2f mounted=%s",
         float(getattr(session, "run_speed", 0.0) or 0.0),
@@ -1583,6 +1547,60 @@ def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
     Logger.info("[Mount] committed")
     Logger.info("[Mount][Debug] chat .dismount responses=%s", len(responses))
     return _append_feedback_response(responses, "[Mount] dismount requested")
+
+
+_DEFAULT_TEST_BUFF_SPELL_ID = 21562  # Power Word: Fortitude; stable client icon.
+
+
+@register_command("testbuff", ".testbuff [spell_id]")
+def cmd_testbuff(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Toggle a removable, icon-visible test aura without combat effects."""
+    if len(args) > 1:
+        return _notification_response("Usage: .testbuff [spell_id]")
+    try:
+        spell_id = int(args[0], 0) if args else _DEFAULT_TEST_BUFF_SPELL_ID
+    except ValueError:
+        return _notification_response("Usage: .testbuff [spell_id]")
+    if spell_id <= 0:
+        return _notification_response("Usage: .testbuff [spell_id]")
+
+    aura = spells_handlers.find_by_spell(session, spell_id)
+    if aura is not None:
+        responses = list(spells_handlers.remove_active_aura(session, aura))
+        responses.extend(_notification_response(f"[Aura] removed test buff {spell_id}"))
+        return responses
+
+    spells_handlers.apply_active_aura(
+        session,
+        spell_id,
+        positive=True,
+        cancelable=True,
+        duration_ms=-1,
+        applied_effects=("test_buff",),
+    )
+    responses = list(spells_handlers.replay_active_auras(session))
+    responses.extend(
+        _notification_response(
+            f"[Aura] applied test buff {spell_id}; right-click the icon to remove it"
+        )
+    )
+    return responses
+
+
+@register_command(
+    "addhearthstone",
+    ".addhearthstone",
+    allow_args=False,
+)
+def cmd_addhearthstone(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Add item 6948 (Hearthstone) through normal inventory sync."""
+    if bool(getattr(session, "inventory_dirty", False)):
+        persist_session_inventory(session)
+    result = add_item_to_character(session, 6948, 1)
+    Logger.info("[Inventory] .addhearthstone entry=6948 result=%s", result.message)
+    responses = build_inventory_delta_responses(session, result) if result.ok else []
+    responses.extend(_notification_response(f"[Inventory] {result.message}"))
+    return responses
 
 
 def _parse_money_delta(raw: str) -> int | None:
@@ -2600,6 +2618,7 @@ def cmd_time(session, args: list[str]) -> list[tuple[str, bytes]]:
 # Real commands live here for quick scanning.
 PRIMARY_COMMANDS = {
     "achievement": Command(handler=cmd_achievement, usage=".achievement <add|fix> [name]", require_args=True),
+    "addhearthstone": Command(handler=cmd_addhearthstone, usage=".addhearthstone", allow_args=False),
     "additem": Command(handler=cmd_additem, usage=".additem <itemEntry> [count]"),
     "addmoney": Command(handler=cmd_addmoney, usage=".addmoney <copper | 10g10s10c>", require_args=False),
     "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>"),
@@ -2641,6 +2660,7 @@ PRIMARY_COMMANDS = {
     "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
     "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),
     "taxi": Command(handler=cmd_taxi, usage=".taxi <on|off|status>"),
+    "testbuff": Command(handler=cmd_testbuff, usage=".testbuff [spell_id]"),
     "time": Command(handler=cmd_time, usage=".time", allow_args=False),
     "title": Command(handler=cmd_title, usage=".title <bitIndex|explorer|off>", require_args=True),
     "world": Command(handler=cmd_world, usage=".world <go|npc|lift|boat> <hide|show|status|on|off|test|clear>"),

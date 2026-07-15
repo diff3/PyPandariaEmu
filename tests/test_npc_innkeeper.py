@@ -145,7 +145,12 @@ def test_hearthstone_uses_saved_bind_position(monkeypatch):
 
     responses = npc_interaction.handle_hearthstone_cast(session)
 
-    assert [opcode for opcode, _payload in responses] == ["SMSG_TRANSFER_PENDING", "SMSG_NEW_WORLD"]
+    assert [opcode for opcode, _payload in responses] == [
+        "SMSG_SPELL_FAILURE",
+        "SMSG_SPELL_FAILED_OTHER",
+        "SMSG_TRANSFER_PENDING",
+        "SMSG_NEW_WORLD",
+    ]
     assert session.map_id == 1
     assert session.zone == 34
     assert session.x == 20.0
