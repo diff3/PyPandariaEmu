@@ -311,7 +311,7 @@ def test_resolve_segment_direct_wall_hit():
     assert math.isclose(result.fraction, 0.5, abs_tol=1e-6)
     assert result.hit_position == Vec3(0.0, 0.5, 0.5)
     assert result.hit_normal is not None
-    assert math.isclose(result.resolved_end.x, DEFAULT_CONTACT_EPSILON, abs_tol=1e-6)
+    assert math.isclose(result.resolved_end.x, -DEFAULT_CONTACT_EPSILON, abs_tol=1e-6)
     assert math.isclose(result.resolved_end.y, 0.5, abs_tol=1e-6)
     assert math.isclose(result.resolved_end.z, 0.5, abs_tol=1e-6)
     _assert_movement_result_invariants(result)
@@ -352,7 +352,7 @@ def test_resolve_segment_ending_exactly_on_surface():
 
     assert result.hit is not None
     assert math.isclose(result.fraction, 1.0, abs_tol=1e-6)
-    assert math.isclose(result.resolved_end.x, DEFAULT_CONTACT_EPSILON, abs_tol=1e-6)
+    assert math.isclose(result.resolved_end.x, -DEFAULT_CONTACT_EPSILON, abs_tol=1e-6)
     assert math.isclose(result.resolved_end.y, 0.5, abs_tol=1e-6)
     _assert_movement_result_invariants(result)
 
@@ -390,8 +390,8 @@ def test_resolve_segment_epsilon_behaves_consistently():
 
     assert result.hit is not None
     assert math.isclose(result.hit_position.x, 0.0, abs_tol=1e-6)
-    assert math.isclose(result.resolved_end.x, 0.25, abs_tol=1e-6)
-    assert math.isclose(result.remaining_vector.x, 1.75, abs_tol=1e-6)
+    assert math.isclose(result.resolved_end.x, -0.25, abs_tol=1e-6)
+    assert math.isclose(result.remaining_vector.x, 2.25, abs_tol=1e-6)
     _assert_movement_result_invariants(result)
 
 
@@ -427,7 +427,7 @@ def test_resolve_segment_fraction_zero_separates_and_next_zero_length_stays_off_
     assert first.hit is not None
     assert first.fraction == 0.0
     assert first.hit_position == surface
-    assert first.resolved_end == Vec3(0.05, 0.5, 0.5)
+    assert first.resolved_end == Vec3(-0.05, 0.5, 0.5)
     assert math.isclose((first.resolved_end - first.hit_position).length(), 0.05, abs_tol=1e-9)
 
     second = resolve_segment(first.resolved_end, first.resolved_end, world, contact_epsilon=0.05)

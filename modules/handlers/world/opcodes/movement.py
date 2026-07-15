@@ -5177,7 +5177,7 @@ def _accept_movement_update(
         opcode_name,
     )
     if gameobject_collision_enabled():
-        from server.modules.handlers.world.collision import gameobject_collision_index
+        from server.modules.handlers.world.query import WorldQuery
         state = _movement_state(session)
         session._last_collision_flags_in = (
             int(getattr(state, "flags", 0) or 0),
@@ -5189,13 +5189,14 @@ def _accept_movement_update(
             int(getattr(session, "char_guid", 0) or 0), opcode_name,
             int(getattr(session, "map_id", 0) or 0),
             current_x, current_y, current_z, float(x), float(y), float(z),
-            len(gameobject_collision_index),
+            WorldQuery.registered_collision_objects(),
         )
-        collision = gameobject_collision_index.blocked(
-            int(getattr(session, "map_id", 0) or 0),
-            (current_x, current_y, current_z),
-            (float(x), float(y), float(z)),
+        collision_query = WorldQuery.query_collision(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            start=(current_x, current_y, current_z),
+            end=(float(x), float(y), float(z)),
         )
+        collision = collision_query.collision
         legacy_resolved_end = (float(x), float(y), float(z))
         collision_fraction = None
         if collision is not None:
@@ -5251,18 +5252,17 @@ def _accept_movement_update(
 
         shadow_comparison = None
         if shadow_enabled:
-            from server.modules.handlers.world.collision.geometry_shadow import run_geometry_shadow_comparison
-
-            shadow_comparison = run_geometry_shadow_comparison(
-                session,
-                opcode_name,
+            shadow_comparison = WorldQuery.query_geometry_shadow(
+                player_guid=int(getattr(session, "char_guid", 0) or 0),
+                opcode_name=opcode_name,
                 map_id=int(getattr(session, "map_id", 0) or 0),
                 start=(current_x, current_y, current_z),
                 end=(float(x), float(y), float(z)),
-                old_collision=collision,
-                old_resolved_end=legacy_resolved_end,
+                legacy_collision=collision,
+                legacy_resolved_end=legacy_resolved_end,
                 authoritative_mode=collision_mode,
             )
+            session._last_geometry_shadow_comparison = shadow_comparison
         else:
             Logger.info("[GeometryShadow] skipped reason=config_disabled")
 
@@ -5304,13 +5304,9 @@ def _accept_movement_update(
                         ),
                     }
             if authoritative_hit and gameobject_collision_debug_enabled():
-                from server.modules.handlers.world.collision.geometry_shadow import (
-                    build_manual_trophy_authoritative_contact_probe,
-                )
-
-                probe = build_manual_trophy_authoritative_contact_probe(
-                    int(getattr(session, "map_id", 0) or 0),
-                    shadow_comparison,
+                probe = WorldQuery.build_collision_contact_probe(
+                    map_id=int(getattr(session, "map_id", 0) or 0),
+                    comparison=shadow_comparison,
                 )
                 if probe is not None:
                     sequence = int(getattr(session, "_geometry_shadow_collision_sequence", 0) or 0) + 1

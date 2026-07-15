@@ -203,6 +203,50 @@ def test_transport_and_chair_types_are_excluded():
         assert not gameobject_is_eligible(_entry(type=go_type), _display_bounds())
 
 
+def test_mailbox_is_registered_for_central_world_query_fallback():
+    assert gameobject_is_eligible(
+        _entry(type=19, name="Mailbox"),
+        _display_bounds(),
+    )
+
+
+def test_mailbox_world_query_contact_is_outside_collision_volume(monkeypatch):
+    from server.modules.handlers.world.collision.geometry import (
+        MeshAccelerator,
+        Transform,
+        Vec3,
+        WorldGeometryMap,
+        WorldMeshInstance,
+        resolve_segment,
+    )
+    from server.modules.handlers.world.collision.geometry_shadow import _box_mesh_for_half_extents
+
+    bounds = build_oriented_bounds(
+        _display_bounds(), position=(4.0, 0.0, 0.0), orientation=0.0, scale=1.0
+    )
+    assert bounds is not None
+    world = WorldGeometryMap()
+    world.add_instance(
+        WorldMeshInstance(
+            provider=MeshAccelerator(_box_mesh_for_half_extents(bounds.half_extents)),
+            transform=Transform(translation=Vec3(*bounds.center)),
+            instance_id=12,
+        )
+    )
+
+    result = resolve_segment(
+        Vec3(0.0, 0.0, 1.0),
+        Vec3(8.0, 0.0, 1.0),
+        world,
+        contact_epsilon=0.05,
+    )
+
+    assert result.hit is not None
+    assert result.hit_normal is not None
+    assert result.hit_normal.dot(Vec3(8.0, 0.0, 0.0)) <= 0.0
+    assert not bounds.contains(result.resolved_end.to_tuple())
+
+
 def test_large_severed_head_button_is_eligible_but_regular_button_is_not():
     trophy_bounds = DisplayBounds((-4.5, -5.9, 0.0), (8.3, 6.8, 25.9))
     assert gameobject_is_eligible(

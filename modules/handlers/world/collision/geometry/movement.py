@@ -46,7 +46,14 @@ def resolve_segment(
         )
 
     epsilon_distance = max(DEFAULT_CONTACT_EPSILON, float(contact_epsilon))
-    resolved_end = hit.position + (hit.normal.normalize() * epsilon_distance)
+    contact_normal = hit.normal.normalize()
+    # Authored triangle winding is not guaranteed to face the mover.  Contact
+    # separation must always be applied back toward the side the segment came
+    # from; otherwise a valid hit can publish a point just inside the volume
+    # and trap the next movement packet there.
+    if contact_normal.dot(delta) > 0.0:
+        contact_normal = contact_normal * -1.0
+    resolved_end = hit.position + (contact_normal * epsilon_distance)
     remaining_vector = end - resolved_end
 
     return MovementResult(
@@ -56,7 +63,7 @@ def resolve_segment(
         requested_end=end,
         resolved_end=resolved_end,
         hit_position=hit.position,
-        hit_normal=hit.normal,
+        hit_normal=contact_normal,
         remaining_distance=remaining_vector.length(),
         remaining_vector=remaining_vector,
     )

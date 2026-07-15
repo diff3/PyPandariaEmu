@@ -235,9 +235,14 @@ def _rotation_components(
     entry: Mapping[str, Any],
     gameobject: RuntimeObject | None = None,
 ) -> tuple[float, float, float, float]:
+    runtime_gameobject_type = (
+        None
+        if gameobject is None
+        else getattr(gameobject, "gameobject_type", None)
+    )
     gameobject_type = (
-        int(getattr(gameobject, "gameobject_type", _entry_int(entry, "type")))
-        if gameobject is not None
+        int(runtime_gameobject_type)
+        if runtime_gameobject_type is not None
         else _entry_int(entry, "type")
     ) & 0xFF
     if gameobject_type in (
@@ -253,10 +258,11 @@ def _rotation_components(
         )
 
     raw_rotation = _raw_rotation_components(entry, gameobject)
-    if _rotation_has_quaternion(
-        entry,
-        gameobject,
-    ) and _quaternion_is_unit(*raw_rotation):
+    # SkyFire preserves an authored unit parent quaternion, including the
+    # identity quaternion (0, 0, 0, 1).  Parent rotation is a separate update
+    # field from the stationary world yaw and packed world rotation; replacing
+    # identity with a yaw quaternion changes the client model transform.
+    if _quaternion_is_unit(*raw_rotation):
         return _normalize_quaternion(*raw_rotation)
 
     orientation = _stationary_orientation(entry, gameobject)

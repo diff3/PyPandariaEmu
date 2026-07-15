@@ -24,12 +24,13 @@ GAMEOBJECT_TYPE_GOOBER = 10
 GAMEOBJECT_TYPE_TRANSPORT = 11
 GAMEOBJECT_TYPE_MAP_OBJECT = 14
 GAMEOBJECT_TYPE_MO_TRANSPORT = 15
+GAMEOBJECT_TYPE_MAILBOX = 19
 GAMEOBJECT_TYPE_DESTRUCTIBLE_BUILDING = 33
 GAMEOBJECT_TYPE_TRAPDOOR = 35
 
 # These types commonly describe authored solid scenery. Tiny ambiguous models are
 # filtered separately; transports and chairs are deliberately never considered.
-SOLID_TYPES = frozenset({0, 1, 3, 5, 8, 10, 14, 33, 35})
+SOLID_TYPES = frozenset({0, 1, 3, 5, 8, 10, 14, 19, 33, 35})
 GO_STATE_READY = 1
 GO_FLAG_DAMAGED = 0x0200
 GO_FLAG_DESTROYED = 0x0400

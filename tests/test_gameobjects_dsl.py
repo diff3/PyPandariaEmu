@@ -1,4 +1,5 @@
 import json
+import math
 import struct
 import sys
 from pathlib import Path
@@ -870,6 +871,57 @@ def test_deeprun_preserves_spawn_quaternion_fields_from_db():
     assert gameobjects._GAMEOBJECT_FIELD_ROTATION_START + 2 in fields
     assert gameobjects._GAMEOBJECT_FIELD_ROTATION_START + 3 not in fields
     assert fields[gameobjects._GAMEOBJECT_FIELD_ROTATION_START + 2] == 0x3F800000
+
+
+def test_mailbox_create_preserves_skyfire_parent_rotation_and_world_yaw():
+    entry = {
+        **_entry(),
+        "guid": 73385,
+        "entry": 206726,
+        "type": 19,
+        "display_id": 2128,
+        "orientation": 3.91827,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 0.0,
+        "rotation3": 1.0,
+        "size": 1.0,
+        "flags": 0,
+        "faction": 1735,
+    }
+    world_guid = GameObjectGuid.from_spawn_guid(entry["guid"], 1)
+    fields = gameobjects._build_gameobject_field_values(entry, world_guid=world_guid)
+
+    assert gameobjects._stationary_orientation(entry) == gameobjects._normalize_orientation(3.91827)
+    assert gameobjects._rotation_components(entry) == (0.0, 0.0, 0.0, 1.0)
+    assert fields[gameobjects._GAMEOBJECT_FIELD_ROTATION_START + 3] == 0x3F800000
+    assert gameobjects._GAMEOBJECT_FIELD_ROTATION_START + 2 not in fields
+    assert fields[gameobjects._GAMEOBJECT_FIELD_DISPLAY_ID] == 2128
+    assert fields[gameobjects._OBJECT_FIELD_SCALE] == 0x3F800000
+    assert fields[gameobjects._GAMEOBJECT_FIELD_PERCENT_HEALTH] == (1 | (19 << 8))
+    assert gameobjects._gameobject_rotation_packed(entry) != 0
+
+
+def test_rotation_components_uses_entry_type_for_transport_transform_object():
+    entry = {
+        **_entry(),
+        "type": 15,
+        "orientation": 1.25,
+        "_runtime_transport_orientation_authoritative": True,
+    }
+    transport = SimpleNamespace(
+        orientation=1.25,
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    components = gameobjects._rotation_components(entry, transport)
+
+    assert components == gameobjects._normalize_quaternion(
+        0.0,
+        0.0,
+        math.sin(1.25 * 0.5),
+        math.cos(1.25 * 0.5),
+    )
 
 
 def test_deeprun_packed_rotation_still_uses_orientation_seed():

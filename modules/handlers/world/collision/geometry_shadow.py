@@ -210,9 +210,10 @@ def format_geometry_shadow_stats_lines() -> list[str]:
 
 
 def run_geometry_shadow_comparison(
-    session,
-    opcode_name: str,
+    session=None,
+    opcode_name: str = "",
     *,
+    player_guid: int | None = None,
     map_id: int,
     start: tuple[float, float, float],
     end: tuple[float, float, float],
@@ -226,9 +227,12 @@ def run_geometry_shadow_comparison(
         geometry_contact_separation_epsilon,
     )
 
+    if player_guid is None:
+        player_guid = int(getattr(session, "char_guid", 0) or 0)
+
     Logger.info(
         "[GeometryShadow] movement_hook player=%s opcode=%s map=%s start=(%.3f %.3f %.3f) end=(%.3f %.3f %.3f)",
-        int(getattr(session, "char_guid", 0) or 0),
+        int(player_guid),
         opcode_name,
         int(map_id),
         float(start[0]),
@@ -323,7 +327,7 @@ def run_geometry_shadow_comparison(
     Logger.info("[GeometryShadow] comparison_ready old=%s new=%s", "hit" if old_hit else "miss", "hit" if new_hit else "miss")
     _record_comparison(comparison, authoritative_mode=authoritative_mode)
     _maybe_log_comparison(
-        session,
+        int(player_guid),
         opcode_name,
         int(map_id),
         start,
@@ -332,7 +336,7 @@ def run_geometry_shadow_comparison(
         verbose=bool(gameobject_collision_debug_enabled()),
     )
     _maybe_log_manual_trophy_miss_diagnostics(
-        session,
+        int(player_guid),
         opcode_name,
         map_id=int(map_id),
         start=start,
@@ -340,7 +344,8 @@ def run_geometry_shadow_comparison(
         comparison=comparison,
         enabled=bool(gameobject_collision_debug_enabled()),
     )
-    setattr(session, "_last_geometry_shadow_comparison", comparison)
+    if session is not None:
+        setattr(session, "_last_geometry_shadow_comparison", comparison)
     return comparison
 
 
@@ -459,7 +464,7 @@ def _record_comparison(
 
 
 def _maybe_log_comparison(
-    session,
+    player_guid: int,
     opcode_name: str,
     map_id: int,
     start: tuple[float, float, float],
@@ -491,7 +496,7 @@ def _maybe_log_comparison(
         "HIT" if comparison.new_hit else "MISS",
         float(comparison.delta),
         opcode_name,
-        int(getattr(session, "char_guid", 0) or 0),
+        int(player_guid),
         int(map_id),
         (
             "none"
@@ -524,7 +529,7 @@ def _maybe_log_comparison(
 
 
 def _maybe_log_manual_trophy_miss_diagnostics(
-    session,
+    player_guid: int,
     opcode_name: str,
     *,
     map_id: int,
@@ -575,7 +580,7 @@ def _maybe_log_manual_trophy_miss_diagnostics(
         "[GeometryShadow] trophy_miss opcode=%s player=%s map=%s guid=%s entry=%s displayId=%s mesh=%s "
         "start=(%.3f %.3f %.3f) end=(%.3f %.3f %.3f) segment_length=%.3f",
         opcode_name,
-        int(getattr(session, "char_guid", 0) or 0),
+        int(player_guid),
         int(map_id),
         int(collision.guid),
         int(collision.entry),
