@@ -25,6 +25,7 @@ from server.modules.handlers.world.runtime.lifecycle import (
 
 from server.modules.handlers.world.opcodes import chat as _chat  # noqa: F401
 from server.modules.handlers.world.opcodes import achievements as _achievements  # noqa: F401
+from server.modules.handlers.world.opcodes import calendar as _calendar  # noqa: F401
 from server.modules.handlers.world.opcodes import entities as _entities  # noqa: F401
 from server.modules.handlers.world.opcodes import inventory as _inventory  # noqa: F401
 from server.modules.handlers.world.opcodes import login as _login  # noqa: F401
