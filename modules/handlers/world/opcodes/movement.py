@@ -3607,10 +3607,7 @@ def _complete_owned_near_teleport_from_movement(
     client signal that the same-map teleport completed; later movement packets
     resume through the ordinary movement path.
     """
-    from server.modules.handlers.world.teleport.transition import (
-        complete_world_transition,
-        current_near_teleport_is_owned,
-    )
+    from server.modules.handlers.world.teleport.transition import current_near_teleport_is_owned
 
     if not bool(getattr(session, "near_teleport_pending", False)):
         return False, []
@@ -3635,12 +3632,12 @@ def _complete_owned_near_teleport_from_movement(
     destination = str(getattr(session, "teleport_destination", "") or "?")
     session.near_teleport_pending = False
     session.worldport_ack_pending = False
-    complete_world_transition(session)
-    from server.modules.handlers.world.world_refresh import get_world_refresh_service
+    from server.modules.handlers.world.teleport.lifecycle import get_teleport_lifecycle
 
-    responses = get_world_refresh_service().refresh_after_teleport(
+    responses = get_teleport_lifecycle().complete_transition(
         session,
         context="near-teleport-movement-fallback",
+        refresh="teleport",
         resync_multiplayer=False,
         _object_refresh=stream_world_objects_after_teleport,
     )
@@ -6122,21 +6119,17 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
     destination = str(getattr(session, "teleport_destination", "") or "?")
     session.near_teleport_pending = False
     session.worldport_ack_pending = False
-    from server.modules.handlers.world.teleport.transition import (
-        complete_world_transition,
-    )
-
-    complete_world_transition(session)
     fixspeed_pending = bool(getattr(session, "fixspeed_pending", False))
     session.fixspeed_pending = False
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     _save_session_position(session, reason="near-teleport", online=1, force=True)
-    from server.modules.handlers.world.world_refresh import get_world_refresh_service
+    from server.modules.handlers.world.teleport.lifecycle import get_teleport_lifecycle
 
-    world_refresh_responses = get_world_refresh_service().refresh_after_teleport(
+    world_refresh_responses = get_teleport_lifecycle().complete_transition(
         session,
         context="near-teleport-ack",
+        refresh="teleport",
         _teleport_resync=_post_teleport_multiplayer_resync,
         _object_refresh=stream_world_objects_after_teleport,
     )

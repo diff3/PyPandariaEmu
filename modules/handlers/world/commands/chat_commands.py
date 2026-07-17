@@ -1943,10 +1943,22 @@ def _telxyz(session, args: list[str]) -> list[tuple[str, bytes]]:
     current_map_id = int(getattr(session, "map_id", 0) or 0)
     session.teleport_destination = f"manual:{map_id}:{x:.2f}:{y:.2f}:{z:.2f}:{orientation:.2f}"
 
-    responses = _helper("apply_player_state_change")(
+    from server.modules.handlers.world.teleport.map_transfer import (
+        TeleportDestination,
+        apply_map_transfer,
+    )
+
+    responses = apply_map_transfer(
         session,
-        position=(x, y, z, orientation),
-        map_id=map_id,
+        TeleportDestination(
+            map_id=map_id,
+            x=x,
+            y=y,
+            z=z,
+            orientation=orientation,
+            name=session.teleport_destination,
+        ),
+        reason="gm-teleport-coordinates",
     )
 
     if current_map_id == int(map_id):
@@ -2045,10 +2057,22 @@ def cmd_tel(session, args: list[str]) -> list[tuple[str, bytes]]:
     )
     current_map_id = int(getattr(session, "map_id", 0) or 0)
     session.teleport_destination = str(destination["name"])
-    responses = _helper("apply_player_state_change")(
+    from server.modules.handlers.world.teleport.map_transfer import (
+        TeleportDestination,
+        apply_map_transfer,
+    )
+
+    responses = apply_map_transfer(
         session,
-        position=(x, y, z, orientation),
-        map_id=map_id,
+        TeleportDestination(
+            map_id=map_id,
+            x=x,
+            y=y,
+            z=z,
+            orientation=orientation,
+            name=session.teleport_destination,
+        ),
+        reason="gm-teleport-named",
     )
     if current_map_id == int(map_id):
         return _append_feedback_response(
@@ -2168,17 +2192,22 @@ def cmd_goto(session, args: list[str]) -> list[tuple[str, bytes]]:
     if target is None:
         return _notification_response("Player not found")
 
-    from server.modules.handlers.world.opcodes import chat as chat_handlers
+    from server.modules.handlers.world.teleport.map_transfer import (
+        TeleportDestination,
+        apply_map_transfer,
+    )
 
-    responses = chat_handlers.apply_player_state_change(
+    responses = apply_map_transfer(
         session,
-        position=(
-            float(getattr(target, "x", 0.0) or 0.0),
-            float(getattr(target, "y", 0.0) or 0.0),
-            float(getattr(target, "z", 0.0) or 0.0),
-            float(getattr(target, "orientation", 0.0) or 0.0),
+        TeleportDestination(
+            map_id=int(getattr(target, "map_id", 0) or 0),
+            x=float(getattr(target, "x", 0.0) or 0.0),
+            y=float(getattr(target, "y", 0.0) or 0.0),
+            z=float(getattr(target, "z", 0.0) or 0.0),
+            orientation=float(getattr(target, "orientation", 0.0) or 0.0),
+            name=f"goto:{target_name}",
         ),
-        map_id=int(getattr(target, "map_id", 0) or 0),
+        reason="gm-goto",
     )
 
     return _append_feedback_response(
@@ -2196,17 +2225,22 @@ def cmd_fetch(session, args: list[str]) -> list[tuple[str, bytes]]:
     if target is None:
         return _notification_response("Player not found")
 
-    from server.modules.handlers.world.opcodes import chat as chat_handlers
+    from server.modules.handlers.world.teleport.map_transfer import (
+        TeleportDestination,
+        apply_map_transfer,
+    )
 
-    responses = chat_handlers.apply_player_state_change(
+    responses = apply_map_transfer(
         target,
-        position=(
-            float(getattr(session, "x", 0.0) or 0.0),
-            float(getattr(session, "y", 0.0) or 0.0),
-            float(getattr(session, "z", 0.0) or 0.0),
-            float(getattr(session, "orientation", 0.0) or 0.0),
+        TeleportDestination(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            x=float(getattr(session, "x", 0.0) or 0.0),
+            y=float(getattr(session, "y", 0.0) or 0.0),
+            z=float(getattr(session, "z", 0.0) or 0.0),
+            orientation=float(getattr(session, "orientation", 0.0) or 0.0),
+            name=f"fetch:{getattr(session, 'player_name', 'gm')}",
         ),
-        map_id=int(getattr(session, "map_id", 0) or 0),
+        reason="gm-fetch",
     )
 
     target.send_response(responses)

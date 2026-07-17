@@ -16,12 +16,8 @@ from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.handlers.world.dispatcher import register
 from server.modules.game.guid import GameObjectGuid, GuidHelper
 from server.modules.handlers.world.bootstrap.playerobjects import build_single_u32_update_object_payload
-from server.modules.handlers.world.opcodes.movement import build_same_map_teleport_payload
 from server.modules.handlers.world.runtime.player_store import (
     sync_player_runtime_from_session,
-)
-from server.modules.handlers.world.transport_runtime import (
-    clear_player_transport_state,
 )
 from server.modules.handlers.world.teleport.gameobject_teleport import (
     activate_gameobject_teleport,
@@ -441,39 +437,30 @@ def _sit_on_chair(session, entry: dict) -> list[tuple[str, bytes]]:
     player_guid = _player_guid(session)
     _get_chair_occupancy(session).setdefault(chair_guid, {})[int(seat)] = player_guid
 
-    clear_player_transport_state(
-        session,
-        reason="teleport",
-        opcode_name="chair",
-    )
-    from server.modules.handlers.world.position.publication import (
-        publish_from_teleport,
+    from server.modules.handlers.world.teleport import (
+        TeleportDestination,
+        get_teleport_lifecycle,
     )
 
-    publish_from_teleport(
+    teleport_responses = get_teleport_lifecycle().teleport(
         session,
-        map_id=int(getattr(session, "map_id", 0) or 0),
-        instance_id=int(getattr(session, "instance_id", 0) or 0),
-        x=float(x),
-        y=float(y),
-        z=float(z),
-        orientation=float(orientation),
-        synchronize_membership=False,
-        resolve_area=False,
-        capture_persistence=False,
+        TeleportDestination(
+            map_id=int(getattr(session, "map_id", 0) or 0),
+            x=float(x),
+            y=float(y),
+            z=float(z),
+            orientation=float(orientation),
+            name=f"chair:{int(chair_guid)}:{int(seat)}",
+        ),
+        reason="chair",
+        same_map_resync=False,
+        release_chair=False,
     )
-    movement_state = getattr(session, "movement_state", None)
-    if movement_state is not None:
-        movement_state.flags = 0
-        movement_state.flags2 = 0
 
     stand_state = _chair_stand_state(entry)
     session.player_stand_state = int(stand_state)
     session.current_chair = int(chair_guid)
     session.current_seat = int(seat)
-    session.near_teleport_pending = True
-    session.teleport_pending = False
-    session.worldport_ack_pending = False
 
     Logger.info(
         "[CHAIR] sit player=%s entry=%s chair=0x%016X seat=%s pos=(%.3f %.3f %.3f %.3f) stand=%s",
@@ -490,10 +477,7 @@ def _sit_on_chair(session, entry: dict) -> list[tuple[str, bytes]]:
 
     stand_response = _stand_state_update_response(session, stand_state)
     _send_stand_state_to_peers(session, stand_response)
-    return [
-        ("SMSG_MOVE_TELEPORT", build_same_map_teleport_payload(session)),
-        stand_response,
-    ]
+    return list(teleport_responses) + [stand_response]
 
 
 @register("CMSG_GAME_OBJ_REPORT_USE")

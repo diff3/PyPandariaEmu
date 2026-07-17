@@ -10,7 +10,6 @@ from DSL.modules.EncoderHandler import EncoderHandler
 from shared.Logger import Logger
 from server.modules.protocol.PacketContext import PacketContext
 from server.modules.protocol.packet_batch import (
-    bind_packet_batch_to_current_transition,
     preserve_packet_batch_metadata,
 )
 from server.modules.database.DatabaseConnection import DatabaseConnection
@@ -1196,14 +1195,13 @@ def _apply_fixplayer_destination(session, destination_name: str) -> str | None:
 
 
 def _build_fixspeed_responses(session) -> list[tuple[str, bytes]]:
-    from server.modules.handlers.world.opcodes.movement import build_same_map_teleport_payload
-    from server.modules.handlers.world.teleport.transition import (
-        mark_near_teleport_pending,
+    from server.modules.handlers.world.teleport.map_transfer import (
+        TeleportDestination,
+    )
+    from server.modules.handlers.world.teleport.lifecycle import (
+        get_teleport_lifecycle,
     )
 
-    session.teleport_pending = False
-    if not mark_near_teleport_pending(session):
-        session.near_teleport_pending = True
     session.fixspeed_pending = True
     Logger.info(
         "[FIXSPEED] guid=%s queued same-map teleport pos=(%.2f,%.2f,%.2f,%.2f) run=%.2f",
@@ -1214,13 +1212,28 @@ def _build_fixspeed_responses(session) -> list[tuple[str, bytes]]:
         float(getattr(session, "orientation", 0.0) or 0.0),
         float(getattr(session, "run_speed", 7.0) or 7.0),
     )
-    return [
+    responses = [
         (
             "SMSG_MESSAGECHAT",
             encode_skyfire_messagechat_system_payload("[FixSpeed] queued same-map resync"),
         ),
-        ("SMSG_MOVE_TELEPORT", build_same_map_teleport_payload(session)),
     ]
+    responses.extend(
+        get_teleport_lifecycle().teleport(
+            session,
+            TeleportDestination(
+                map_id=int(getattr(session, "map_id", 0) or 0),
+                x=float(getattr(session, "x", 0.0) or 0.0),
+                y=float(getattr(session, "y", 0.0) or 0.0),
+                z=float(getattr(session, "z", 0.0) or 0.0),
+                orientation=float(getattr(session, "orientation", 0.0) or 0.0),
+                name="fixspeed",
+            ),
+            reason="fixspeed",
+            same_map_resync=False,
+        )
+    )
+    return responses
 
 
 def _build_level_command_responses(session) -> list[tuple[str, bytes]]:
@@ -1365,33 +1378,13 @@ def _clear_loaded_world_objects_for_teleport(
 
 
 def _cancel_ordinary_teleport_runtime_state(session, *, opcode_name: str) -> None:
-    """Cancel transitions superseded by an ordinary player teleport."""
-    from server.modules.handlers.world.taxi_runtime import cancel_taxi_flight
-    from server.modules.handlers.world.teleport.transition import (
-        begin_ordinary_teleport_transition,
-    )
-    from server.modules.handlers.world.transport_runtime import (
-        clear_player_transport_state,
-    )
+    """Compatibility delegate for callers outside TeleportLifecycle."""
+    from server.modules.handlers.world.teleport.lifecycle import get_teleport_lifecycle
 
-    replacement_destination = getattr(session, "teleport_destination", None)
-    begin_ordinary_teleport_transition(session)
-    cancel_taxi_flight(
+    get_teleport_lifecycle()._prepare_ordinary_runtime(
         session,
-        "ordinary_teleport",
-        send_updates=False,
+        opcode_name=opcode_name,
     )
-    session.pending_taxi_transfer = None
-    session.teleport_pending = False
-    session.worldport_ack_pending = False
-    session.near_teleport_pending = False
-    session.teleport_destination = None
-    clear_player_transport_state(
-        session,
-        reason="teleport",
-        opcode_name=str(opcode_name),
-    )
-    session.teleport_destination = replacement_destination
 
 
 def build_display_id_responses(session, display_id: int) -> list[tuple[str, bytes]]:
@@ -1460,11 +1453,7 @@ def apply_player_state_change(
     """
     Mutate session state first, then derive the packets from that state.
     """
-    from server.modules.handlers.world.opcodes import movement as movement_handlers
-    from server.modules.handlers.world.opcodes import spells as spells_handlers
-
     field_updates: dict[int, int] = {}
-    pre_position_responses: list[tuple[str, bytes]] = []
 
     if display_id is not None:
         session.display_id = int(display_id)
@@ -1487,142 +1476,34 @@ def apply_player_state_change(
         field_updates[_UNIT_FIELD_FLAGS] = int(unit_flags)
 
     if position is not None:
-        try:
-            from server.modules.handlers.world.opcodes.entities import release_current_chair
-            release_current_chair(session, reason="teleport")
-        except Exception as exc:
-            Logger.debug("[CHAIR] release on teleport failed: %s", exc)
-        if not suppress_worldport_cleanup:
-            _cancel_ordinary_teleport_runtime_state(
-                session,
-                opcode_name="chat_teleport",
-            )
+        from server.modules.handlers.world.teleport.map_transfer import (
+            TeleportDestination,
+            apply_map_transfer,
+        )
 
-        old_map_id = int(getattr(session, "map_id", 0) or 0)
-        target_map_id = old_map_id if map_id is None else int(map_id)
-        same_map = old_map_id == target_map_id
+        target_map_id = (
+            int(getattr(session, "map_id", 0) or 0)
+            if map_id is None
+            else int(map_id)
+        )
         x, y, z, orientation = position
-
-        if (
-            bool(getattr(session, "is_mounted", False))
-            or int(getattr(session, "mount_spell", 0) or 0)
-            or int(getattr(session, "mount_display_id", 0) or 0)
-        ):
-            pre_position_responses.extend(spells_handlers.dismount(session))
-
-        if not suppress_worldport_cleanup and not same_map:
-            pre_position_responses.extend(
-                _clear_loaded_world_objects_for_teleport(
-                    session,
-                    movement_handlers,
-                    map_id=old_map_id,
-                    send_out_of_range=False,
-                )
-            )
-            force_player_visibility_destroy(
-                session,
-                reason="teleport-start",
-                map_id=old_map_id,
-            )
-        from server.modules.handlers.world.position.publication import (
-            publish_from_teleport,
-        )
-
-        publish_from_teleport(
+        return apply_map_transfer(
             session,
-            map_id=target_map_id,
-            instance_id=0,
-            x=float(x),
-            y=float(y),
-            z=float(z),
-            orientation=float(orientation),
-            synchronize_membership=True,
-            resolve_area=True,
-            capture_persistence=False,
-        )
-        movement_state = movement_handlers._movement_state(session)
-        movement_state.flags = 0
-        movement_state.flags2 = 0
-        movement_handlers._capture_persist_position_from_session(session)
-        movement_handlers._mark_position_dirty(session)
-        if same_map:
-            from server.modules.handlers.world.teleport.transition import (
-                mark_near_teleport_pending,
-            )
-
-            session.teleport_pending = False
-            session.worldport_ack_pending = False
-            if not mark_near_teleport_pending(session):
-                session.near_teleport_pending = True
-            teleport_responses = apply_state_and_resync(
-                session,
-                [
-                    (
-                        "SMSG_MOVE_TELEPORT",
-                        movement_handlers.build_same_map_teleport_payload(
-                            session
-                        ),
-                    )
-                ],
-            )
-            return bind_packet_batch_to_current_transition(
-                session,
-                pre_position_responses + teleport_responses,
-            )
-
-        session.teleport_pending = True
-        session.worldport_ack_pending = True
-        session.near_teleport_pending = False
-        responses = bind_packet_batch_to_current_transition(
-            session,
-            pre_position_responses
-            + [
-                (
-                    "SMSG_TRANSFER_PENDING",
-                    build_login_packet(
-                        "SMSG_TRANSFER_PENDING",
-                        type("Ctx", (), {"map_id": int(target_map_id)})(),
-                    ),
-                ),
-                (
-                    "SMSG_NEW_WORLD",
-                    build_login_packet(
-                        "SMSG_NEW_WORLD",
-                        type(
-                            "Ctx",
-                            (),
-                            {
-                                "map_id": int(target_map_id),
-                                "x": float(x),
-                                "y": float(y),
-                                "z": float(z),
-                                "orientation": float(orientation),
-                            },
-                        )(),
-                    ),
-                ),
-            ],
-        )
-        batch_id = (
-            f"{int(responses.transition_generation or 0)}:"
-            "manual-worldport-start"
-        )
-        for opcode_name in ("SMSG_TRANSFER_PENDING", "SMSG_NEW_WORLD"):
-            log_transport_packet_snapshot(
-                session,
-                opcode=opcode_name,
-                source_subsystem="manual_teleport",
-                batch_id=batch_id,
+            TeleportDestination(
                 map_id=target_map_id,
-                position=(
-                    float(x),
-                    float(y),
-                    float(z),
-                    float(orientation),
+                x=float(x),
+                y=float(y),
+                z=float(z),
+                orientation=float(orientation),
+                name=str(
+                    getattr(session, "teleport_destination", "")
+                    or "player-state-change"
                 ),
-                transport_offsets=(0.0, 0.0, 0.0, 0.0),
-            )
-        return responses
+            ),
+            reason="player-state-change",
+            keep_transport=bool(suppress_worldport_cleanup),
+        )
+
 
     responses = _build_field_update_responses(session, field_updates)
 

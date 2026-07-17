@@ -520,12 +520,22 @@ def execute_hearthstone_teleport(session) -> list[tuple[str, bytes]]:
         bind_z,
         bind_o,
     )
-    from server.modules.handlers.world.opcodes import chat
+    from server.modules.handlers.world.teleport.map_transfer import (
+        TeleportDestination,
+        apply_map_transfer,
+    )
 
-    teleport_responses = chat.apply_player_state_change(
+    teleport_responses = apply_map_transfer(
         session,
-        position=(bind_x, bind_y, bind_z, bind_o),
-        map_id=bind_map,
+        TeleportDestination(
+            map_id=bind_map,
+            x=bind_x,
+            y=bind_y,
+            z=bind_z,
+            orientation=bind_o,
+            name=session.teleport_destination,
+        ),
+        reason="hearthstone",
     )
     session.current_area = bind_area
     return teleport_responses

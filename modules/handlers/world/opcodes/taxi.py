@@ -1026,11 +1026,12 @@ def _begin_cross_map_taxi_transfer(
         state.active = True
         state.phase = "TAXI_TRANSFER"
 
-    from server.modules.handlers.world.teleport.transition import (
-        begin_taxi_worldport_transition,
-    )
+    from server.modules.handlers.world.teleport.lifecycle import get_teleport_lifecycle
 
-    transition_generation = begin_taxi_worldport_transition(session)
+    transition_generation = get_teleport_lifecycle().begin_owned_transition(
+        session,
+        owner="taxi_worldport",
+    )
     session.pending_taxi_transfer = {
         "source_map": int(source_map),
         "destination_map": int(destination_map),
@@ -1038,58 +1039,30 @@ def _begin_cross_map_taxi_transfer(
         "destination_node": int(destination_node),
         "world_transition_generation": int(transition_generation),
     }
-    session.teleport_pending = True
-    session.worldport_ack_pending = True
-    session.near_teleport_pending = False
-    session.teleport_destination = f"taxi:{int(source_node)}->{int(destination_node)}"
 
     clear_player_transport_state(
         session,
         reason="teleport",
         opcode_name="taxi_map_transfer",
     )
-    from server.modules.handlers.world.position.publication import (
-        publish_from_teleport,
-    )
+    from server.modules.handlers.world.teleport.map_transfer import TeleportDestination
 
-    publish_from_teleport(
+    responses = get_teleport_lifecycle().perform_owned_worldport(
         session,
-        map_id=int(destination_map),
-        instance_id=int(getattr(session, "instance_id", 0) or 0),
-        x=float(transfer_point.x),
-        y=float(transfer_point.y),
-        z=float(transfer_point.z),
-        orientation=float(getattr(session, "orientation", 0.0) or 0.0),
+        TeleportDestination(
+            map_id=int(destination_map),
+            x=float(transfer_point.x),
+            y=float(transfer_point.y),
+            z=float(transfer_point.z),
+            orientation=float(getattr(session, "orientation", 0.0) or 0.0),
+            name=f"taxi:{int(source_node)}->{int(destination_node)}",
+        ),
+        reason="taxi",
         synchronize_membership=False,
         resolve_area=False,
-        capture_persistence=False,
+        _attach_world=attach_session_to_world_state,
     )
     sync_flight_path_runtime_from_session(session)
-
-    loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
-    if isinstance(loaded_gameobjects, set):
-        loaded_gameobjects.clear()
-    loaded_npcs = getattr(session, "loaded_npcs", None)
-    if isinstance(loaded_npcs, set):
-        loaded_npcs.clear()
-    loaded_transports = getattr(session, "loaded_transport_entries", None)
-    if isinstance(loaded_transports, dict):
-        loaded_transports.clear()
-    attach_session_to_world_state(session, map_id=int(destination_map))
-
-    from server.modules.handlers.world.login.packets import build_login_packet
-
-    ctx = type(
-        "Ctx",
-        (),
-        {
-            "map_id": int(destination_map),
-            "x": float(transfer_point.x),
-            "y": float(transfer_point.y),
-            "z": float(transfer_point.z),
-            "orientation": float(session.orientation),
-        },
-    )()
     Logger.info(
         "[TAXI] cross-map transfer player=%s source_node=%s destination_node=%s map=%s->%s",
         int(getattr(session, "char_guid", 0) or 0),
@@ -1098,10 +1071,6 @@ def _begin_cross_map_taxi_transfer(
         int(source_map),
         int(destination_map),
     )
-    responses = [
-        ("SMSG_TRANSFER_PENDING", build_login_packet("SMSG_TRANSFER_PENDING", ctx)),
-        ("SMSG_NEW_WORLD", build_login_packet("SMSG_NEW_WORLD", ctx)),
-    ]
     _taxi_xmap_debug(
         "[TAXI_XMAP_DEBUG] transfer_begin_packets player=%s route=%s leg=%s "
         "source=%s destination=%s source_map=%s destination_map=%s phase=%s "

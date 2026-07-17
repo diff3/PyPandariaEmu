@@ -81,54 +81,16 @@ def apply_map_transfer(
     source_map = int(getattr(session, "map_id", 0) or 0)
     same_map = source_map == int(target.map_id)
 
-    if not same_map:
-        try:
-            from server.modules.handlers.world.features.plants_vs_ghouls import (
-                get_plants_vs_ghouls_manager,
-            )
-
-            get_plants_vs_ghouls_manager().handle_map_change(session, int(target.map_id))
-        except Exception as exc:
-            Logger.warning("[PvG] map-transfer cleanup failed: %s", exc)
-        try:
-            from server.modules.handlers.world.features.halfhill_farming import (
-                get_halfhill_farm_manager,
-            )
-
-            get_halfhill_farm_manager().clear_for_map_transfer(session)
-        except Exception as exc:
-            Logger.warning("[HalfhillFarm] map-transfer cleanup failed: %s", exc)
-        try:
-            from server.modules.handlers.world.features.pet_battles import (
-                get_pet_battle_manager,
-            )
-
-            get_pet_battle_manager().handle_map_transfer(session)
-        except Exception as exc:
-            Logger.warning("[PetBattle] map-transfer cleanup failed: %s", exc)
-
-    session.teleport_destination = target.name or str(reason)
-    if keep_transport and not same_map:
-        from server.modules.handlers.world.teleport.transition import (
-            begin_transport_worldport_transition,
-        )
-
-        transition_generation = begin_transport_worldport_transition(session)
-        pending_transport = getattr(session, "pending_transport_transfer", None)
-        if isinstance(pending_transport, dict):
-            pending_transport["world_transition_generation"] = transition_generation
     session._area_trigger_suppressed_until = (
         time.monotonic() + _POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS
     )
-    # TODO: move chat command teleports onto this helper once the older command
-    # path can be changed without altering its user-facing command feedback.
-    from server.modules.handlers.world.opcodes import chat as chat_handlers
+    from server.modules.handlers.world.teleport.lifecycle import get_teleport_lifecycle
 
-    responses = chat_handlers.apply_player_state_change(
+    responses = get_teleport_lifecycle().teleport(
         session,
-        position=(target.x, target.y, target.z, target.orientation),
-        map_id=target.map_id,
-        suppress_worldport_cleanup=bool(keep_transport),
+        target,
+        reason=reason,
+        keep_transport=bool(keep_transport),
     )
     _reset_movement_for_teleport(session, target)
     if keep_transport and transport_entry is not None:

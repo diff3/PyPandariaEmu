@@ -3460,7 +3460,7 @@ def test_manual_teleport_supersedes_incomplete_transport_worldport(monkeypatch):
     player_store.clear()
 
 
-def test_teleport_cleanup_allows_transport_create_on_visibility_rebuild(monkeypatch):
+def test_same_map_teleport_defers_transport_tracking_reset_until_refresh(monkeypatch):
     transport_guid = 11
     movement_module = _install_movement_stub(
         monkeypatch,
@@ -3505,9 +3505,13 @@ def test_teleport_cleanup_allows_transport_create_on_visibility_rebuild(monkeypa
         map_id=1,
     )
 
-    assert ("SMSG_UPDATE_OBJECT", b"clear|1|11") in responses
-    assert transport_guid not in alice.loaded_gameobjects
-    assert transport_guid not in alice.loaded_transport_entries
+    assert not any(payload.startswith(b"clear|") for _opcode, payload in responses)
+    assert transport_guid in alice.loaded_gameobjects
+    assert transport_guid in alice.loaded_transport_entries
+
+    from server.modules.handlers.world.world_refresh import get_world_refresh_service
+
+    get_world_refresh_service()._reset_world_object_tracking(alice)
 
     rebuild_responses = gameobjects_module.build_database_gameobject_responses(
         alice,
@@ -3567,7 +3571,10 @@ def test_teleport_to_dock_recreates_metadata_only_transport_before_values(monkey
     assert packets == []
     assert ("SMSG_UPDATE_OBJECT", b"transport-create") not in responses
     assert transport_guid not in alice.loaded_gameobjects
-    assert transport_guid not in alice.loaded_transport_entries
+    assert transport_guid in alice.loaded_transport_entries
+    from server.modules.handlers.world.world_refresh import get_world_refresh_service
+
+    get_world_refresh_service()._reset_world_object_tracking(alice)
     ack_updates = stream_transport(
         alice,
         context="near-teleport-ack",
