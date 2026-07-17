@@ -988,6 +988,9 @@ def world_npc_hide(session, _args):
     npc_flags_by_guid = getattr(session, "npc_flags_by_guid", None)
     if isinstance(npc_flags_by_guid, dict):
         npc_flags_by_guid.clear()
+    npc_entries_by_guid = getattr(session, "npc_entries_by_guid", None)
+    if isinstance(npc_entries_by_guid, dict):
+        npc_entries_by_guid.clear()
     responses.extend(_notification_response("[WorldNPC] hidden"))
     return responses
 

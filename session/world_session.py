@@ -228,6 +228,7 @@ class WorldSession:
     npc_auto_stream: bool = False
     loaded_npcs: set[int] = field(default_factory=set)
     npc_flags_by_guid: Dict[int, int] = field(default_factory=dict)
+    npc_entries_by_guid: Dict[int, int] = field(default_factory=dict)
     npc_positions_by_guid: Dict[int, tuple] = field(default_factory=dict)
     npc_names_by_guid: Dict[int, str] = field(default_factory=dict)
     taxi_cheat_enabled: bool = False

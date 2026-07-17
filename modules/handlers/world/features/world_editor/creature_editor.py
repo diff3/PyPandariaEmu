@@ -205,7 +205,12 @@ def remove_runtime_references(session, entry: dict[str, Any], world_guid: int) -
         loaded = getattr(target, "loaded_npcs", None)
         if isinstance(loaded, set):
             loaded.discard(int(world_guid))
-        for attr in ("npc_flags_by_guid", "npc_positions_by_guid", "npc_names_by_guid"):
+        for attr in (
+            "npc_flags_by_guid",
+            "npc_entries_by_guid",
+            "npc_positions_by_guid",
+            "npc_names_by_guid",
+        ):
             values = getattr(target, attr, None)
             if isinstance(values, dict):
                 values.pop(int(world_guid), None)

@@ -434,6 +434,7 @@ def _reset_loaded_world_object_state(session) -> None:
     session.loaded_transport_entries = {}
     session.loaded_npcs = set()
     session.npc_flags_by_guid = {}
+    session.npc_entries_by_guid = {}
     session.gameobjects_visible = bool(gameobjects_enabled())
     session.npcs_visible = bool(npcs_enabled())
     session.npc_auto_stream = bool(npc_auto_stream_enabled())

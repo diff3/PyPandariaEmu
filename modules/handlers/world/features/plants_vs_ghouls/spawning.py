@@ -127,7 +127,12 @@ def build_creature_move_response(
 def build_creature_despawn_response(session, *, world_guid: int) -> tuple[str, bytes]:
     loaded_npcs = _ensure_loaded_npcs(session)
     loaded_npcs.discard(int(world_guid))
-    for attr_name in ("npc_flags_by_guid", "npc_positions_by_guid", "npc_names_by_guid"):
+    for attr_name in (
+        "npc_flags_by_guid",
+        "npc_entries_by_guid",
+        "npc_positions_by_guid",
+        "npc_names_by_guid",
+    ):
         mapping = getattr(session, attr_name, None)
         if isinstance(mapping, dict):
             mapping.pop(int(world_guid), None)

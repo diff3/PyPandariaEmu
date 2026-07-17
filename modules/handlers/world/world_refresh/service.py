@@ -100,6 +100,7 @@ class WorldRefreshService:
         session.loaded_transport_entries = {}
         session.loaded_npcs = set()
         session.npc_flags_by_guid = {}
+        session.npc_entries_by_guid = {}
         session.last_gameobject_stream_at = 0.0
         session.last_npc_stream_at = 0.0
 

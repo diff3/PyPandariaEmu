@@ -8,6 +8,8 @@ import struct
 import types
 from types import SimpleNamespace
 
+import pytest
+
 from DSL.modules.bitsHandler import BitWriter
 from server.modules.handlers.world import dispatcher
 from server.modules.handlers.world import feature_config
@@ -23,6 +25,7 @@ from server.modules.protocol.packet_batch import PacketBatch
 
 def _quiet_logger():
     return SimpleNamespace(
+        debug=lambda *args, **kwargs: None,
         info=lambda *args, **kwargs: None,
         warning=lambda *args, **kwargs: None,
     )
@@ -64,6 +67,91 @@ def _activate_taxi_reply_code(payload: bytes) -> int:
 
 def _taxi_node_status(payload: bytes) -> int:
     return int(payload[0]) & 0x03
+
+
+@pytest.mark.parametrize(
+    ("player_faction", "flight_master_faction", "expected"),
+    (
+        (1, 12, True),   # Alliance player, Alliance flight master
+        (2, 29, True),   # Horde player, Horde flight master
+        (1, 35, True),   # Alliance player, neutral flight master
+        (2, 35, True),   # Horde player, neutral flight master
+        (1, 29, False),  # Alliance player, Horde flight master
+        (2, 12, False),  # Horde player, Alliance flight master
+    ),
+)
+def test_flight_master_eligibility_uses_faction_templates(
+    monkeypatch,
+    player_faction,
+    flight_master_faction,
+    expected,
+):
+    from server.modules.database.DatabaseConnection import DatabaseConnection
+
+    guid = 0x0F000100000123
+    monkeypatch.setattr(taxi, "Logger", _quiet_logger())
+    monkeypatch.setattr(
+        DatabaseConnection,
+        "get_creature_template",
+        staticmethod(lambda entry: {
+            "entry": entry,
+            "faction_A": flight_master_faction,
+            "faction_H": flight_master_faction,
+        }),
+    )
+    session = SimpleNamespace(
+        faction_template=player_faction,
+        map_id=0,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        npc_flags_by_guid={guid: taxi._TAXI_NPC_FLAG},
+        npc_entries_by_guid={guid: 123},
+        npc_positions_by_guid={guid: (0, 0.0, 0.0, 0.0, 0.0)},
+    )
+
+    assert taxi._can_use_taxi_interaction(session, guid) is expected
+
+
+def test_opposing_flight_master_cannot_learn_or_open_taxi(monkeypatch):
+    guid = 0x0F000100000123
+    monkeypatch.setattr(taxi, "Logger", _quiet_logger())
+    monkeypatch.setattr(taxi, "_decode_taxi_available_nodes_guid", lambda data: guid)
+    monkeypatch.setattr(taxi, "_flight_master_faction_eligible", lambda session, value: False)
+    monkeypatch.setattr(
+        taxi,
+        "_discover_taxi_node",
+        lambda *args, **kwargs: pytest.fail("opposing flight master learned a taxi node"),
+    )
+    session = SimpleNamespace(
+        map_id=0,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        npc_flags_by_guid={guid: taxi._TAXI_NPC_FLAG},
+    )
+
+    _status, responses = taxi.handle_taxi_query_available_nodes(session, b"")
+
+    assert responses == [("SMSG_GOSSIP_COMPLETE", b"")]
+
+
+def test_opposing_flight_master_cannot_activate_known_route(monkeypatch):
+    guid = 0x0F000100000123
+    monkeypatch.setattr(taxi, "Logger", _quiet_logger())
+    monkeypatch.setattr(taxi, "flight_paths_enabled", lambda: True)
+    monkeypatch.setattr(taxi, "_decode_activate_taxi", lambda data: (guid, 1, 2))
+    monkeypatch.setattr(taxi, "_flight_master_faction_eligible", lambda session, value: False)
+    session = SimpleNamespace(
+        npc_flags_by_guid={guid: taxi._TAXI_NPC_FLAG},
+        npc_entries_by_guid={guid: 123},
+        taximask_raw=_taximask_with_nodes(1, 2),
+    )
+
+    _status, responses = taxi.handle_activate_taxi(session, b"")
+
+    assert [opcode for opcode, _payload in responses] == ["SMSG_ACTIVATE_TAXI_REPLY"]
+    assert _activate_taxi_reply_code(responses[0][1]) == taxi._TAXI_ACTIVATE_UNSPECIFIED_SERVER_ERROR
 
 
 def _pack_guid_for_decode(

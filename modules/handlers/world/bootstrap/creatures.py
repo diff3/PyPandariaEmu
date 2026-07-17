@@ -356,6 +356,12 @@ def build_database_creature_responses(session, *, loaded_guids: set[int] | None 
             session.npc_flags_by_guid = npc_flags_by_guid
         npc_flags_by_guid[int(world_guid)] = int(runtime_creature.npc_flags)
         npc_flags_by_guid[int(spawn_guid)] = int(runtime_creature.npc_flags)
+        npc_entries_by_guid = getattr(session, "npc_entries_by_guid", None)
+        if not isinstance(npc_entries_by_guid, dict):
+            npc_entries_by_guid = {}
+            session.npc_entries_by_guid = npc_entries_by_guid
+        npc_entries_by_guid[int(world_guid)] = int(runtime_creature.entry)
+        npc_entries_by_guid[int(spawn_guid)] = int(runtime_creature.entry)
         npc_positions_by_guid = getattr(session, "npc_positions_by_guid", None)
         if not isinstance(npc_positions_by_guid, dict):
             npc_positions_by_guid = {}

@@ -16,6 +16,10 @@ from server.modules.dbc.DBCReader import read_dbc
 from server.modules.game.guid import GuidHelper
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
 from server.modules.handlers.world.dispatcher import register
+from server.modules.handlers.world.factions import (
+    creature_faction_for_player,
+    is_friendly_faction,
+)
 from server.modules.handlers.world.feature_config import (
     flight_paths_enabled,
     taxi_movement_debug_enabled,
@@ -49,6 +53,7 @@ _TAXI_NODE_STATUS_KNOWN = 1
 _TAXI_NODE_STATUS_UNKNOWN = 3
 _TAXI_ACTIVATE_OK = 0
 _TAXI_ACTIVATE_NOT_ENOUGH_MONEY = 4
+_TAXI_ACTIVATE_UNSPECIFIED_SERVER_ERROR = 5
 _TAXI_NODE_MASK_BYTES = 256
 _TAXI_MASK_WORDS = _TAXI_NODE_MASK_BYTES // 4
 _TAXI_NPC_FLAG = 0x00002000
@@ -542,6 +547,83 @@ def _is_taxi_npc(session, guid: int) -> bool:
     return bool(flags & _TAXI_NPC_FLAG)
 
 
+def _resolved_taxi_npc_guid(session, guid: int) -> int:
+    flags_by_guid = getattr(session, "npc_flags_by_guid", None)
+    if not isinstance(flags_by_guid, dict):
+        return 0
+
+    candidates = [int(guid)]
+    try:
+        candidates.append(int(GuidHelper.decode(int(guid)).low))
+    except Exception:
+        pass
+    for candidate in candidates:
+        if int(flags_by_guid.get(candidate, 0) or 0) & _TAXI_NPC_FLAG:
+            return candidate
+
+    positions = getattr(session, "npc_positions_by_guid", None)
+    if not isinstance(positions, dict):
+        return 0
+    player_map = int(getattr(session, "map_id", 0) or 0)
+    player_x = float(getattr(session, "x", 0.0) or 0.0)
+    player_y = float(getattr(session, "y", 0.0) or 0.0)
+    player_z = float(getattr(session, "z", 0.0) or 0.0)
+    nearest_guid = 0
+    nearest_distance = 80.0
+    for candidate, position in positions.items():
+        if not int(flags_by_guid.get(int(candidate), 0) or 0) & _TAXI_NPC_FLAG:
+            continue
+        if not isinstance(position, (tuple, list)) or len(position) < 4:
+            continue
+        if int(position[0]) != player_map:
+            continue
+        distance = math.sqrt(
+            (float(position[1]) - player_x) ** 2
+            + (float(position[2]) - player_y) ** 2
+            + (float(position[3]) - player_z) ** 2
+        )
+        if distance <= nearest_distance:
+            nearest_guid = int(candidate)
+            nearest_distance = distance
+    return nearest_guid
+
+
+def _flight_master_faction_eligible(session, guid: int) -> bool:
+    """Authorize a flight master through creature and DBC faction templates."""
+    entries_by_guid = getattr(session, "npc_entries_by_guid", None)
+    # Compatibility for isolated opcode fixtures created before NPC entry
+    # publication existed. Real WorldSession instances always own this map.
+    if not isinstance(entries_by_guid, dict):
+        return True
+
+    resolved_guid = _resolved_taxi_npc_guid(session, int(guid))
+    entry = int(entries_by_guid.get(resolved_guid, 0) or 0)
+    player_faction = int(getattr(session, "faction_template", 0) or 0)
+    flight_master_faction = 0
+    eligible = False
+    if entry > 0 and player_faction > 0:
+        from server.modules.database.DatabaseConnection import DatabaseConnection
+
+        template = DatabaseConnection.get_creature_template(entry) or {}
+        flight_master_faction = creature_faction_for_player(
+            faction_a=int(template.get("faction_A", 0) or 0),
+            faction_h=int(template.get("faction_H", 0) or 0),
+            player_faction_template=player_faction,
+        )
+        eligible = is_friendly_faction(flight_master_faction, player_faction)
+
+    Logger.debug(
+        "[TaxiFaction] player_faction=%s flight_master_entry=%s "
+        "flight_master_faction=%s eligible=%s allowed=%s",
+        player_faction,
+        entry,
+        flight_master_faction,
+        int(eligible),
+        "yes" if eligible else "no",
+    )
+    return eligible
+
+
 def _has_nearby_taxi_context(session) -> bool:
     """Recover from bad packed GUID decodes when the client is at a taxi node."""
     current = _nearest_taxi_node(session)
@@ -562,7 +644,12 @@ def _has_nearby_taxi_context(session) -> bool:
 
 
 def _can_use_taxi_interaction(session, guid: int) -> bool:
-    return _is_taxi_npc(session, int(guid)) or _has_nearby_taxi_context(session)
+    is_taxi = _is_taxi_npc(session, int(guid)) or _has_nearby_taxi_context(session)
+    return bool(is_taxi and _flight_master_faction_eligible(session, int(guid)))
+
+
+def _has_canonical_npc_entry_context(session) -> bool:
+    return isinstance(getattr(session, "npc_entries_by_guid", None), dict)
 
 
 def _build_node_mask(node_ids: tuple[int, ...]) -> bytes:
@@ -596,6 +683,11 @@ def build_taxi_node_status_payload(guid: int, *, known: int = _TAXI_NODE_STATUS_
 
 
 def _taxi_node_status_for_guid(session, guid: int) -> int:
+    if (
+        _has_canonical_npc_entry_context(session)
+        and not _can_use_taxi_interaction(session, int(guid))
+    ):
+        return _TAXI_NODE_STATUS_UNKNOWN
     node = _taxi_node_for_npc_guid(session, int(guid))
     if node is None:
         return _TAXI_NODE_STATUS_KNOWN
@@ -1274,6 +1366,14 @@ def handle_activate_taxi(session, ctx):
         Logger.info("[Taxi] flight paths disabled; rejecting CMSG_ACTIVATE_TAXI")
         return 0, _flight_paths_disabled_responses()
 
+    if (
+        _has_canonical_npc_entry_context(session)
+        and not _can_use_taxi_interaction(session, guid)
+    ):
+        return 0, [("SMSG_ACTIVATE_TAXI_REPLY", build_activate_taxi_reply_payload(
+            _TAXI_ACTIVATE_UNSPECIFIED_SERVER_ERROR
+        ))]
+
     responses = [("SMSG_ACTIVATE_TAXI_REPLY", build_activate_taxi_reply_payload())]
     destination = _taxi_destination_position(destination_node)
     if destination is None:
@@ -1347,6 +1447,14 @@ def handle_activate_taxi_express(session, ctx):
     if not flight_paths_enabled():
         Logger.info("[Taxi] flight paths disabled; rejecting CMSG_ACTIVATE_TAXI_EXPRESS")
         return 0, _flight_paths_disabled_responses()
+
+    if (
+        _has_canonical_npc_entry_context(session)
+        and not _can_use_taxi_interaction(session, guid)
+    ):
+        return 0, [("SMSG_ACTIVATE_TAXI_REPLY", build_activate_taxi_reply_payload(
+            _TAXI_ACTIVATE_UNSPECIFIED_SERVER_ERROR
+        ))]
 
     responses = [("SMSG_ACTIVATE_TAXI_REPLY", build_activate_taxi_reply_payload())]
     if destination_node <= 0:
