@@ -6983,93 +6983,75 @@ def test_transport_rehydrate_preserves_shared_clock_phase(monkeypatch):
 
 
 
-def test_autonomous_transport_visibility_creates_then_updates_stationary_player(monkeypatch):
+def test_transport_observers_reuse_existing_interest_and_passenger_state(monkeypatch):
     from server.modules.handlers.world.state import runtime as world_runtime
 
     world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(7))
-    state = SimpleNamespace(
-        guid=world_guid,
-        map_id=1,
-        x=10.0,
-        y=20.0,
-        z=5.0,
-        orientation=0.25,
-        path_progress_ms=1000,
-        route_period_ms=2000,
-        last_sent_x=float("inf"),
-        last_sent_y=float("inf"),
-        last_sent_z=float("inf"),
-        last_sent_map_id=-1,
-    )
-    entry = {
-        "guid": 7,
-        "world_guid": world_guid,
-        "entry": 20808,
-        "type": transport_runtime.GAMEOBJECT_TYPE_MO_TRANSPORT,
-        "map": 1,
-        "phase_mask": 1,
-        "world_db_transport": True,
-        "runtime_route": [(1, 0.0, 0.0, 0.0), (0, 100.0, 100.0, 0.0)],
-    }
-    sent = []
-    session = SimpleNamespace(
+    subscribed = SimpleNamespace(
         char_guid=16,
+        map_id=1,
+        login_state="IN_WORLD",
+        loaded_transport_entries={world_guid: {"entry": 20808}},
+    )
+    passenger = SimpleNamespace(
+        char_guid=17,
+        map_id=1,
+        login_state="IN_WORLD",
+        loaded_transport_entries={},
+    )
+    distant = SimpleNamespace(
+        char_guid=18,
+        map_id=1,
+        login_state="IN_WORLD",
+        loaded_transport_entries={},
+    )
+    monkeypatch.setattr(
+        world_runtime,
+        "iter_in_world_sessions",
+        lambda **_kwargs: [subscribed, passenger, distant],
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "session_is_transport_passenger",
+        lambda session, guid: session is passenger and guid == world_guid,
+    )
+
+    assert transport_runtime._transport_observer_sessions(world_guid, map_id=1) == [
+        subscribed,
+        passenger,
+    ]
+    assert transport_runtime._transport_observer_count(world_guid, map_id=1) == 2
+
+
+def test_zero_transport_observers_generate_no_movement_packets(monkeypatch):
+    session = SimpleNamespace(
+        char_guid=19,
         realm_id=1,
         map_id=1,
-        phase_mask=1,
-        x=10.0,
-        y=20.0,
-        z=5.0,
+        x=0.0,
+        y=0.0,
+        z=0.0,
         login_state="IN_WORLD",
         gameobjects_visible=True,
         loaded_gameobjects=set(),
         loaded_transport_entries={},
-        loaded_gameobject_entries={},
-        send_response=lambda _responses: None,
     )
-    monkeypatch.setattr(world_runtime, "iter_in_world_sessions", lambda **_kwargs: [session])
     monkeypatch.setattr(
         transport_runtime,
         "_build_gameobject_update_payload",
-        lambda **_kwargs: b"create",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CREATE serialization must not run without observers")
+        ),
     )
     monkeypatch.setattr(
         transport_runtime,
         "_build_gameobject_values_update_payload",
-        lambda **_kwargs: b"values",
-    )
-    monkeypatch.setattr(
-        transport_runtime,
-        "make_update_object_response",
-        lambda payload: ("SMSG_UPDATE_OBJECT", payload),
-    )
-    monkeypatch.setattr(
-        transport_runtime,
-        "_send_responses",
-        lambda target, responses: sent.append((target, responses)),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("movement serialization must not run without observers")
+        ),
     )
 
-    transport_runtime._push_autonomous_transport_visibility(state, entry)
-    transport_runtime._push_autonomous_transport_visibility(state, entry)
-
-    assert [responses for _target, responses in sent] == [
-        [("SMSG_UPDATE_OBJECT", b"create")],
-        [("SMSG_UPDATE_OBJECT", b"values")],
-    ]
-    assert world_guid in session.loaded_gameobjects
-    assert world_guid in session.loaded_transport_entries
-    assert world_guid in session.loaded_gameobject_entries
-
-
-def test_autonomous_transport_visibility_excludes_elevators():
-    elevator = {
-        "entry": 219175,
-        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
-        "world_db_transport": True,
-        "runtime_route": [(1, 0.0, 0.0, 0.0), (1, 0.0, 0.0, 10.0)],
-    }
-
-    assert transport_runtime._supports_autonomous_transport_visibility(elevator) is False
+    assert transport_runtime._build_visible_transport_updates(session, {}) == []
 
 
 def _mount_test_session_on_runtime_transport(state, *, player_guid: int = 77):

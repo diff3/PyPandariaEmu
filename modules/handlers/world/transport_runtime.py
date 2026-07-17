@@ -16,7 +16,6 @@ from shared.Logger import Logger
 from shared.PathUtils import get_data_root, get_dbc_root
 from server.modules.dbc import read_dbc
 from server.modules.handlers.world.feature_config import (
-    autonomous_transport_visibility_enabled,
     elevators_enabled,
     moving_transports_enabled,
     transport_movement_debug_enabled,
@@ -960,20 +959,6 @@ class WorldTransportManager:
                         )
                     )
                     _send_responses(passenger_session, visibility_responses)
-        current_transform = (
-            int(state.map_id),
-            float(state.x),
-            float(state.y),
-            float(state.z),
-            float(state.orientation),
-        )
-        if (
-            autonomous_transport_visibility_enabled()
-            and current_transform != previous_transform
-        ):
-            entry = self.entry_for_guid(int(world_guid))
-            if _supports_autonomous_transport_visibility(entry):
-                _push_autonomous_transport_visibility(state, entry)
         return bool(boundary_started)
 
     def _maybe_write_runtime_snapshot(self, states: list[tuple[int, RuntimeTransportState]]) -> None:
@@ -2525,117 +2510,30 @@ def _transport_phase_matches_session(session: Any, entry: dict[str, Any]) -> boo
     )
 
 
-def _supports_autonomous_transport_visibility(entry: dict[str, Any] | None) -> bool:
-    return bool(
-        is_cross_map_boat_entry(entry)
-        or is_cross_map_zeppelin_entry(entry)
-    )
-
-
-def _push_autonomous_transport_visibility(
-    state: RuntimeTransportState,
-    entry: dict[str, Any] | None,
-) -> None:
-    """Push one moved cross-map transport without rebuilding world visibility."""
-    if not isinstance(entry, dict):
-        return
-
+def _transport_observer_sessions(
+    world_guid: int,
+    *,
+    map_id: int | None = None,
+) -> list[Any]:
+    """Read transport subscribers from canonical per-session interest state."""
     from server.modules.handlers.world.state.runtime import iter_in_world_sessions
 
-    world_guid = int(state.guid)
-    transport = get_world_transport_manager().sync_transport_object(state)
-    transport_map = int(
-        transport.map_id if transport is not None else state.map_id
-    )
-    transport_x = float(transport.x if transport is not None else state.x)
-    transport_y = float(transport.y if transport is not None else state.y)
-    transport_z = float(transport.z if transport is not None else state.z)
-    moved_entry = dict(entry)
-    moved_entry["world_guid"] = world_guid
-    moved_entry["map"] = transport_map
-    moved_entry["map_id"] = transport_map
-    moved_entry["x"] = transport_x
-    moved_entry["y"] = transport_y
-    moved_entry["z"] = transport_z
-    moved_entry["orientation"] = float(
-        transport.orientation if transport is not None else state.orientation
-    )
-    moved_entry["transport_path_progress"] = int(state.path_progress_ms) & 0xFFFFFFFF
-    if int(getattr(state, "route_period_ms", 0) or 0) > 0:
-        moved_entry["transport_period"] = int(state.route_period_ms)
-
-    for session in iter_in_world_sessions(map_id=transport_map):
-        transition_identity = _transport_transition_identity(session)
-        if not bool(getattr(session, "gameobjects_visible", True)):
-            continue
-        if not _transport_phase_matches_session(session, moved_entry):
-            continue
-        distance = _transport_distance(
-            float(getattr(session, "x", 0.0) or 0.0),
-            float(getattr(session, "y", 0.0) or 0.0),
-            float(getattr(session, "z", 0.0) or 0.0),
-            transport_x,
-            transport_y,
-            transport_z,
-        )
-        if distance > _TRANSPORT_VISIBILITY_RADIUS:
-            continue
+    observers: list[Any] = []
+    for session in iter_in_world_sessions(map_id=map_id):
         ready, _state_name = _session_ready_for_runtime_transport_updates(session)
         if not ready:
-            loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
-            operation = (
-                "update"
-                if isinstance(loaded_gameobjects, set) and world_guid in loaded_gameobjects
-                else "create"
-            )
-            _log_suppressed_runtime_transport_update(
-                session,
-                world_guid,
-                session_state=_state_name,
-                operation=operation,
-            )
             continue
+        loaded = getattr(session, "loaded_transport_entries", None)
+        subscribed = isinstance(loaded, dict) and int(world_guid) in loaded
+        if not subscribed:
+            subscribed = session_is_transport_passenger(session, int(world_guid))
+        if subscribed:
+            observers.append(session)
+    return observers
 
-        loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
-        if not isinstance(loaded_gameobjects, set):
-            loaded_gameobjects = set()
-            session.loaded_gameobjects = loaded_gameobjects
-        loaded_entries = getattr(session, "loaded_transport_entries", None)
-        if not isinstance(loaded_entries, dict):
-            loaded_entries = {}
-            session.loaded_transport_entries = loaded_entries
-        realm_id = int(getattr(session, "realm_id", 1) or 1)
 
-        if world_guid not in loaded_gameobjects:
-            payload = _build_gameobject_update_payload(
-                map_id=transport_map,
-                entry=moved_entry,
-                realm_id=realm_id,
-                transport=transport,
-            )
-            loaded_gameobjects.add(world_guid)
-            loaded_entries[world_guid] = dict(moved_entry)
-            loaded_go_entries = getattr(session, "loaded_gameobject_entries", None)
-            if not isinstance(loaded_go_entries, dict):
-                loaded_go_entries = {}
-                session.loaded_gameobject_entries = loaded_go_entries
-            loaded_go_entries[world_guid] = dict(moved_entry)
-        else:
-            loaded_entries[world_guid] = dict(moved_entry)
-            payload = _build_gameobject_values_update_payload(
-                map_id=transport_map,
-                entry=moved_entry,
-                realm_id=realm_id,
-                transport=transport,
-            )
-        responses = _bind_transport_batch_to_active_transition(
-            session,
-            [make_update_object_response(payload)],
-            transition_identity=transition_identity,
-        )
-        _send_responses(session, responses)
-
-    _mark_transport_update_sent(state)
+def _transport_observer_count(world_guid: int, *, map_id: int | None = None) -> int:
+    return len(_transport_observer_sessions(int(world_guid), map_id=map_id))
 
 
 def _log_suppressed_runtime_transport_update(
@@ -2906,6 +2804,15 @@ def _build_visible_transport_updates(
                 context=context,
             )
             rejected_guids.append(int(world_guid))
+            responses.extend(
+                _despawn_loaded_transport(
+                    session,
+                    entries,
+                    int(world_guid),
+                    map_id=session_map,
+                    reason="distance",
+                )
+            )
             continue
 
         loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
