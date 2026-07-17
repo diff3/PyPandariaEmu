@@ -487,3 +487,169 @@ def test_client_areatrigger_can_use_nearby_teleport_mapping(monkeypatch):
 
     assert responses == [("SMSG_NEW_WORLD", b"fallback")]
     assert captured["destination"].name == "areatrigger:801"
+
+
+def test_area_trigger_fires_once_until_player_leaves_and_reenters(monkeypatch):
+    session = SimpleNamespace(
+        char_guid=1001,
+        map_id=1,
+        x=50.0,
+        y=0.0,
+        z=0.0,
+        near_teleport_pending=False,
+        teleport_pending=False,
+    )
+    definition = area_trigger.AreaTriggerDefinition(
+        trigger_id=900,
+        map_id=1,
+        x=50.0,
+        y=0.0,
+        z=0.0,
+        radius=2.0,
+        box_x=0.0,
+        box_y=0.0,
+        box_z=0.0,
+        box_orientation=0.0,
+    )
+    row = {
+        "id": 900,
+        "target_map": 1,
+        "target_position_x": 50.0,
+        "target_position_y": 0.0,
+        "target_position_z": 0.0,
+        "target_orientation": 0.0,
+    }
+    activations = []
+
+    monkeypatch.setattr(area_trigger, "_area_trigger_definitions", lambda: {900: definition})
+    monkeypatch.setattr(area_trigger, "_teleport_trigger_rows", lambda: {900: row})
+    monkeypatch.setattr(
+        area_trigger.DatabaseConnection,
+        "get_areatrigger_teleport",
+        lambda trigger_id: row if int(trigger_id) == 900 else None,
+    )
+    monkeypatch.setattr(
+        area_trigger,
+        "apply_map_transfer",
+        lambda *_args, **_kwargs: activations.append(900)
+        or [("SMSG_MOVE_TELEPORT", b"area")],
+    )
+
+    assert area_trigger.check_movement_segment_for_area_triggers(
+        session, (40.0, 0.0, 0.0), (50.0, 0.0, 0.0)
+    ) == [("SMSG_MOVE_TELEPORT", b"area")]
+    assert area_trigger.check_movement_segment_for_area_triggers(
+        session, (50.0, 0.0, 0.0), (51.0, 0.0, 0.0)
+    ) is None
+    assert activations == [900]
+
+    assert area_trigger.check_movement_segment_for_area_triggers(
+        session, (51.0, 0.0, 0.0), (60.0, 0.0, 0.0)
+    ) is None
+    assert session.active_area_triggers == set()
+
+    assert area_trigger.check_movement_segment_for_area_triggers(
+        session, (60.0, 0.0, 0.0), (50.0, 0.0, 0.0)
+    ) == [("SMSG_MOVE_TELEPORT", b"area")]
+    assert activations == [900, 900]
+
+
+def test_position_discontinuity_seeds_destination_trigger_without_firing(monkeypatch):
+    session = SimpleNamespace(map_id=2, x=100.0, y=0.0, z=0.0)
+    destination = area_trigger.AreaTriggerDefinition(
+        trigger_id=901,
+        map_id=2,
+        x=100.0,
+        y=0.0,
+        z=0.0,
+        radius=2.0,
+        box_x=0.0,
+        box_y=0.0,
+        box_z=0.0,
+        box_orientation=0.0,
+    )
+    monkeypatch.setattr(area_trigger, "_area_trigger_definitions", lambda: {901: destination})
+
+    assert area_trigger.synchronize_area_trigger_state(session) == {901}
+    assert area_trigger.activate_area_trigger(session, 901, source="client") == []
+
+
+def test_client_only_trigger_leave_clears_active_state(monkeypatch):
+    session = SimpleNamespace(
+        map_id=2,
+        x=110.0,
+        y=0.0,
+        z=0.0,
+        near_teleport_pending=False,
+        teleport_pending=False,
+        active_area_triggers={902},
+    )
+    definition = area_trigger.AreaTriggerDefinition(
+        trigger_id=902,
+        map_id=2,
+        x=100.0,
+        y=0.0,
+        z=0.0,
+        radius=2.0,
+        box_x=0.0,
+        box_y=0.0,
+        box_z=0.0,
+        box_orientation=0.0,
+    )
+    monkeypatch.setattr(area_trigger, "_area_trigger_definitions", lambda: {902: definition})
+    monkeypatch.setattr(area_trigger, "_teleport_trigger_rows", lambda: {})
+
+    assert area_trigger.check_movement_segment_for_area_triggers(
+        session,
+        (100.0, 0.0, 0.0),
+        (110.0, 0.0, 0.0),
+    ) is None
+    assert session.active_area_triggers == set()
+
+
+def test_map_transfer_reconciles_active_state_to_destination_volume(monkeypatch):
+    from server.modules.handlers.world.teleport import lifecycle, map_transfer
+
+    session = SimpleNamespace(
+        map_id=1,
+        instance_id=0,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        orientation=0.0,
+        active_area_triggers={910},
+    )
+    destination_trigger = area_trigger.AreaTriggerDefinition(
+        trigger_id=911,
+        map_id=2,
+        x=100.0,
+        y=200.0,
+        z=30.0,
+        radius=2.0,
+        box_x=0.0,
+        box_y=0.0,
+        box_z=0.0,
+        box_orientation=0.0,
+    )
+
+    class _Lifecycle:
+        def teleport(self, target, destination, **_kwargs):
+            target.map_id = destination.map_id
+            target.x = destination.x
+            target.y = destination.y
+            target.z = destination.z
+            target.orientation = destination.orientation
+            return [("SMSG_NEW_WORLD", b"destination")]
+
+    monkeypatch.setattr(lifecycle, "get_teleport_lifecycle", lambda: _Lifecycle())
+    monkeypatch.setattr(map_transfer, "_reset_movement_for_teleport", lambda *_args: None)
+    monkeypatch.setattr(area_trigger, "_area_trigger_definitions", lambda: {911: destination_trigger})
+
+    responses = map_transfer.apply_map_transfer(
+        session,
+        TeleportDestination(2, 100.0, 200.0, 30.0, 0.5),
+        reason="test",
+    )
+
+    assert responses == [("SMSG_NEW_WORLD", b"destination")]
+    assert session.active_area_triggers == {911}

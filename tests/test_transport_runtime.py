@@ -1054,11 +1054,6 @@ def test_runtime_transport_map_mismatch_destroy_is_suppressed_during_worldport(m
 def test_map_transfer_clears_transport_by_default(monkeypatch):
     from server.modules.handlers.world.teleport import map_transfer
 
-    monkeypatch.setattr(
-        map_transfer,
-        "_POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS",
-        0.0,
-    )
     session = SimpleNamespace(
         map_id=0,
         x=0.0,
@@ -1132,11 +1127,6 @@ def test_map_transfer_clears_transport_by_default(monkeypatch):
 def test_map_transfer_keep_transport_preserves_transport_state(monkeypatch):
     from server.modules.handlers.world.teleport import map_transfer
 
-    monkeypatch.setattr(
-        map_transfer,
-        "_POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS",
-        0.0,
-    )
     session = SimpleNamespace(
         map_id=0,
         x=0.0,
@@ -1427,11 +1417,6 @@ def test_record_attach_detaches_previous_transport_before_new_transport():
 def test_map_transfer_detaches_transport_by_default_from_runtime_passengers(monkeypatch):
     from server.modules.handlers.world.teleport import map_transfer
 
-    monkeypatch.setattr(
-        map_transfer,
-        "_POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS",
-        0.0,
-    )
     _reset_transport_states()
     world_guid = int(transport_runtime.MoTransportGuid.from_spawn_guid(7))
     transport_runtime._runtime_transport_states()[world_guid] = transport_runtime.RuntimeTransportState(
@@ -1529,11 +1514,6 @@ def test_path_241_transfer_pending_transport_wire_layout_both_directions(
 def test_map_transfer_keep_transport_replaces_transfer_pending_with_transport_payload(monkeypatch):
     from server.modules.handlers.world.teleport import map_transfer
 
-    monkeypatch.setattr(
-        map_transfer,
-        "_POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS",
-        0.0,
-    )
     session = SimpleNamespace(
         map_id=0,
         x=0.0,

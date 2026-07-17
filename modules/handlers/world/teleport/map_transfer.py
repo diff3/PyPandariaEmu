@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import dataclass
 
 from shared.Logger import Logger
@@ -14,7 +13,6 @@ from server.modules.protocol.packet_batch import (
 )
 
 
-_POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -81,9 +79,6 @@ def apply_map_transfer(
     source_map = int(getattr(session, "map_id", 0) or 0)
     same_map = source_map == int(target.map_id)
 
-    session._area_trigger_suppressed_until = (
-        time.monotonic() + _POST_TRANSFER_AREA_TRIGGER_SUPPRESS_SECONDS
-    )
     from server.modules.handlers.world.teleport.lifecycle import get_teleport_lifecycle
 
     responses = get_teleport_lifecycle().teleport(
@@ -93,6 +88,11 @@ def apply_map_transfer(
         keep_transport=bool(keep_transport),
     )
     _reset_movement_for_teleport(session, target)
+    from server.modules.handlers.world.teleport.area_trigger import (
+        synchronize_area_trigger_state,
+    )
+
+    synchronize_area_trigger_state(session)
     if keep_transport and transport_entry is not None:
         from server.modules.handlers.world.login.packets import build_login_packet
 

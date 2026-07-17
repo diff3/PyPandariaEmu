@@ -184,6 +184,7 @@ class WorldSession:
     world_states: Dict[str, Any] = field(default_factory=dict)
     single_world_state: Dict[str, Any] = field(default_factory=dict)
     weather: Dict[str, Any] = field(default_factory=dict)
+    active_area_triggers: set[int] = field(default_factory=set)
 
     # --------------------------------------------------
     # Time / sync

@@ -25,9 +25,7 @@ _AREA_TRIGGER_SAFE_DELTA = 5.0
 _AREA_TRIGGER_WORLD_MOVEMENT_SAFE_DELTA = 4.0
 _AREA_TRIGGER_INSTANCE_MOVEMENT_SAFE_DELTA = 1.0
 _AREA_TRIGGER_DEFAULT_RADIUS = 5.0
-_AREA_TRIGGER_REENTRY_COOLDOWN_SECONDS = 1.0
 _AREA_TRIGGER_MAX_SEGMENT_SCAN_DISTANCE = 120.0
-_AREA_TRIGGER_RETURN_BLOCK_SECONDS = 8.0
 _AREA_TRIGGER_MISS_LOG_RADIUS = 14.0
 _AREA_TRIGGER_MISS_LOG_INTERVAL_SECONDS = 1.5
 _INSTANCEABLE_MAP_TYPES = {1, 2, 3, 4, 5}
@@ -330,59 +328,37 @@ def _destination_from_row(trigger_id: int, row: dict[str, Any]) -> TeleportDesti
         return None
 
 
-def _recently_triggered(session, trigger_id: int) -> bool:
-    now = time.monotonic()
-    recent = getattr(session, "_recent_areatriggers", None)
-    if not isinstance(recent, dict):
-        recent = {}
-        setattr(session, "_recent_areatriggers", recent)
-
-    previous = float(recent.get(int(trigger_id), 0.0) or 0.0)
-    if previous > 0.0 and (now - previous) < _AREA_TRIGGER_REENTRY_COOLDOWN_SECONDS:
-        Logger.info(
-            "[AREATRIGGER] cooldown id=%s elapsed=%.3f",
-            int(trigger_id),
-            float(now - previous),
-        )
-        return True
-
-    recent[int(trigger_id)] = now
-    return False
+def _active_area_triggers(session) -> set[int]:
+    active = getattr(session, "active_area_triggers", None)
+    if not isinstance(active, set):
+        active = set()
+        session.active_area_triggers = active
+    return active
 
 
-def _block_immediate_return(session, source_map_id: int, destination: TeleportDestination) -> None:
-    if int(destination.map_id) == int(source_map_id):
-        return
+def synchronize_area_trigger_state(session) -> set[int]:
+    """Synchronize containment without executing enter events.
 
-    setattr(session, "_area_trigger_return_block_map", int(source_map_id))
-    setattr(
-        session,
-        "_area_trigger_return_block_until",
-        time.monotonic() + _AREA_TRIGGER_RETURN_BLOCK_SECONDS,
+    Position discontinuities such as login and teleport establish which
+    volumes contain the player. Normal movement then produces leave/re-enter
+    events from this canonical per-player state.
+    """
+    map_id = int(getattr(session, "map_id", 0) or 0)
+    position = (
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
     )
-
-
-def _return_blocked(session, row: dict[str, Any], trigger_id: int) -> bool:
-    blocked_until = float(getattr(session, "_area_trigger_return_block_until", 0.0) or 0.0)
-    if blocked_until <= time.monotonic():
-        return False
-
-    blocked_map_id = int(getattr(session, "_area_trigger_return_block_map", -1) or -1)
-    try:
-        target_map_id = int(row["target_map"])
-    except Exception:
-        return False
-
-    if target_map_id != blocked_map_id:
-        return False
-
-    Logger.info(
-        "[AREATRIGGER] crossing skipped id=%s reason=return_block target_map=%s remaining=%.3f",
-        int(trigger_id),
-        int(target_map_id),
-        blocked_until - time.monotonic(),
-    )
-    return True
+    active = _active_area_triggers(session)
+    contained = {
+        int(trigger_id)
+        for trigger_id, definition in _area_trigger_definitions().items()
+        if int(definition.map_id) == map_id
+        and _point_inside_trigger(definition, *position)
+    }
+    active.clear()
+    active.update(contained)
+    return set(active)
 
 
 def _movement_scan_padding_for_transition(
@@ -514,6 +490,12 @@ def activate_area_trigger(
             Logger.info("[AREATRIGGER] failed id=%s reason=outside_bounds", int(trigger_id))
             return []
 
+    active = _active_area_triggers(session)
+    if int(trigger_id) in active:
+        Logger.debug("[AREATRIGGER] remain id=%s source=%s", int(trigger_id), str(source))
+        return []
+    active.add(int(trigger_id))
+
     activation_id = int(trigger_id)
     row = DatabaseConnection.get_areatrigger_teleport(activation_id)
     if not row and definition is not None:
@@ -525,14 +507,10 @@ def activate_area_trigger(
         Logger.info("[AREATRIGGER] failed id=%s reason=no_teleport_mapping", int(trigger_id))
         return None
 
-    if _recently_triggered(session, activation_id):
-        return []
-
     destination = _destination_from_row(activation_id, row)
     if destination is None:
         return []
 
-    _block_immediate_return(session, current_map_id, destination)
     responses = apply_map_transfer(session, destination, reason="areatrigger")
     Logger.info(
         "[AREATRIGGER] transition id=%s map=%s pos=(%.3f %.3f %.3f %.6f) responses=%s",
@@ -555,15 +533,8 @@ def check_movement_segment_for_area_triggers(
     if bool(getattr(session, "near_teleport_pending", False) or getattr(session, "teleport_pending", False)):
         return None
 
-    suppressed_until = float(getattr(session, "_area_trigger_suppressed_until", 0.0) or 0.0)
-    if suppressed_until > time.monotonic():
-        Logger.info(
-            "[AREATRIGGER] crossing skipped reason=post_teleport_suppression remaining=%.3f",
-            suppressed_until - time.monotonic(),
-        )
-        return None
-
     current_map_id = int(getattr(session, "map_id", 0) or 0)
+    active = _active_area_triggers(session)
     segment_length_sq = _distance_sq_3d(*start, *end)
     if segment_length_sq <= 0.000001:
         return None
@@ -575,11 +546,25 @@ def check_movement_segment_for_area_triggers(
         return None
 
     teleport_rows = _teleport_trigger_rows()
-    if not teleport_rows:
-        return None
-
     definitions = _area_trigger_definitions()
     if not definitions:
+        return None
+
+    # Client-reported or script-only triggers may not have teleport rows, but
+    # their enter/leave lifecycle still uses the same per-player state.
+    for trigger_id in tuple(active):
+        if int(trigger_id) in teleport_rows:
+            continue
+        definition = definitions.get(int(trigger_id))
+        if (
+            definition is None
+            or int(definition.map_id) != current_map_id
+            or not _point_inside_trigger(definition, *end)
+        ):
+            active.discard(int(trigger_id))
+            Logger.info("[AREATRIGGER] movement exit id=%s", int(trigger_id))
+
+    if not teleport_rows:
         return None
 
     candidates: list[AreaTriggerDefinition] = []
@@ -587,18 +572,14 @@ def check_movement_segment_for_area_triggers(
         definition = definitions.get(int(trigger_id))
         if definition is None or int(definition.map_id) != current_map_id:
             continue
-        if _return_blocked(session, row, int(trigger_id)):
-            continue
         movement_padding = _movement_scan_padding_for_transition(current_map_id, row)
-        if _point_inside_trigger(
-            definition,
-            *start,
-            padding=movement_padding,
-        ) and not _point_inside_trigger(
+        end_inside = _point_inside_trigger(
             definition,
             *end,
             padding=movement_padding,
-        ):
+        )
+        if int(trigger_id) in active and not end_inside:
+            active.discard(int(trigger_id))
             Logger.info(
                 "[AREATRIGGER] movement exit id=%s start=(%.3f %.3f %.3f) end=(%.3f %.3f %.3f)",
                 int(definition.trigger_id),
@@ -610,7 +591,9 @@ def check_movement_segment_for_area_triggers(
                 end[2],
             )
             continue
-        if _segment_crosses_trigger(
+        if int(trigger_id) in active:
+            continue
+        if end_inside or _segment_crosses_trigger(
             definition,
             start,
             end,
@@ -644,6 +627,13 @@ def check_movement_segment_for_area_triggers(
         )
     )
     chosen = candidates[0]
+    chosen_row = teleport_rows.get(int(chosen.trigger_id), {})
+    chosen_padding = _movement_scan_padding_for_transition(current_map_id, chosen_row)
+    ends_inside_chosen = _point_inside_trigger(
+        chosen,
+        *end,
+        padding=chosen_padding,
+    )
     Logger.info(
         "[AREATRIGGER] movement crossing id=%s start=(%.3f %.3f %.3f) end=(%.3f %.3f %.3f)",
         int(chosen.trigger_id),
@@ -654,4 +644,12 @@ def check_movement_segment_for_area_triggers(
         end[1],
         end[2],
     )
-    return activate_area_trigger(session, int(chosen.trigger_id), source="movement", crossed=True)
+    responses = activate_area_trigger(
+        session,
+        int(chosen.trigger_id),
+        source="movement",
+        crossed=True,
+    )
+    if not ends_inside_chosen:
+        active.discard(int(chosen.trigger_id))
+    return responses
