@@ -5,32 +5,103 @@ from types import SimpleNamespace
 WORLD_ROOT = Path(__file__).parents[1] / "modules" / "handlers" / "world"
 
 
-def test_deeprun_production_module_is_removed():
+def test_deeprun_has_no_custom_route_or_feature_module():
+    project_root = WORLD_ROOT.parents[3]
+
     assert not (WORLD_ROOT / "features" / "deeprun_collision.py").exists()
+    assert not (project_root / "data" / "transports" / "runtime_routes.json").exists()
 
 
-def test_deeprun_identifiers_are_absent_from_production_code():
-    forbidden = (
-        "deeprun",
-        "deep run",
-        "_static_type11",
-        "176080",
-        "176081",
-        "176082",
-        "176083",
-        "176084",
-        "176085",
-        "194675",
+def test_legacy_world_entries_resolve_to_canonical_dbc_transport_entries():
+    from server.modules.handlers.world import transport_runtime
+
+    expected = {
+        176080: 218203,
+        176081: 218204,
+        176082: 218205,
+        176083: 218206,
+        176084: 218207,
+        176085: 218208,
+    }
+
+    assert {
+        entry: transport_runtime._canonical_local_transport_entry_id(entry)
+        for entry in expected
+    } == expected
+
+
+def test_deeprun_uses_transport_animation_dbc_through_normal_runtime():
+    from server.modules.handlers.world import transport_runtime
+
+    entry = {
+        "guid": 18802,
+        "entry": 176080,
+        "map": 369,
+        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+        "display_id": 3831,
+        "x": 4.58065,
+        "y": 28.2097,
+        "z": 7.01107,
+        "orientation": 1.5708,
+        "rotation0": 0.0,
+        "rotation1": 0.0,
+        "rotation2": 1.0,
+        "rotation3": 0.0,
+    }
+
+    prepared = transport_runtime.prepare_runtime_transport_entry(entry)
+
+    assert prepared["db_entry"] == 176080
+    assert prepared["entry"] == 218203
+    assert prepared["client_driven_transport_animation"] is True
+    assert prepared["transport_period"] == 143333
+    assert "runtime_route" not in prepared
+    animation = transport_runtime._transport_animation_for_entry(prepared["entry"])
+    assert animation is not None
+    assert len(animation.nodes) == 53
+    route = transport_runtime._build_dbc_animation_route(prepared)
+    assert max(node.y for node in route) > 2400.0
+    assert max(abs(node.x - entry["x"]) for node in route) < 0.01
+
+
+def test_deeprun_registers_as_normal_transport_not_elevator():
+    from server.modules.game.guid import MoTransportGuid
+    from server.modules.handlers.world import transport_runtime
+
+    transport_runtime.reset_world_transport_manager_for_tests()
+    entry = transport_runtime.prepare_runtime_transport_entry(
+        {
+            "guid": 18802,
+            "entry": 176080,
+            "map": 369,
+            "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+            "display_id": 3831,
+            "x": 4.58065,
+            "y": 28.2097,
+            "z": 7.01107,
+            "orientation": 1.5708,
+            "rotation0": 0.0,
+            "rotation1": 0.0,
+            "rotation2": 1.0,
+            "rotation3": 0.0,
+        }
+    )
+    entry["world_guid"] = int(MoTransportGuid.from_spawn_guid(entry["guid"]))
+
+    state = transport_runtime.get_world_transport_manager().register_transport(
+        entry,
+        source="test",
     )
 
-    matches: list[str] = []
-    for path in WORLD_ROOT.rglob("*.py"):
-        source = path.read_text(encoding="utf-8").lower()
-        for marker in forbidden:
-            if marker in source:
-                matches.append(f"{path.relative_to(WORLD_ROOT)}: {marker}")
-
-    assert matches == []
+    assert state is not None
+    assert state.route_period_ms == 143333
+    assert transport_runtime.get_world_transport_manager().transport_for_guid(
+        entry["world_guid"]
+    ) is not None
+    assert transport_runtime.get_world_transport_manager().elevator_for_guid(
+        entry["world_guid"]
+    ) is None
+    transport_runtime.reset_world_transport_manager_for_tests()
 
 
 def test_generic_transport_framework_remains_available():

@@ -93,6 +93,16 @@ _PHASELESS_ELEVATOR_MAP_ALIASES = {
 }
 _ZEPPELIN_NAME_TOKENS = ("zeppelin", "the thundercaller", "cloudkisser")
 _ZEPPELIN_ENTRY_IDS = frozenset({176495, 186238})
+# SkyFire's legacy local-transport compatibility maps old world DB template
+# entries to the client entries that own their TransportAnimation.dbc paths.
+_LOCAL_TRANSPORT_ENTRY_ALIASES = {
+    176080: 218203,
+    176081: 218204,
+    176082: 218205,
+    176083: 218206,
+    176084: 218207,
+    176085: 218208,
+}
 
 
 def _transport_debug_log(message: str, *args) -> None:
@@ -437,7 +447,7 @@ class WorldTransportManager:
         source = entry if isinstance(entry, dict) else self.entries.get(int(state.guid))
         if not isinstance(source, dict) or not source:
             return None
-        if _has_transport_animation(source):
+        if _uses_elevator_runtime(source):
             return self._sync_elevator_object_locked(state, source)
         state.elevator = None
         get_elevator_runtime_store().remove(int(state.guid))
@@ -919,7 +929,25 @@ class WorldTransportManager:
                     continue
                 if int(getattr(passenger_session, "map_id", -1)) != int(state.map_id):
                     continue
-                publish_transport(passenger_session, state, attachment)
+                before_position = (
+                    float(getattr(passenger_session, "x", 0.0) or 0.0),
+                    float(getattr(passenger_session, "y", 0.0) or 0.0),
+                    float(getattr(passenger_session, "z", 0.0) or 0.0),
+                )
+                position = publish_transport(passenger_session, state, attachment)
+                after_position = (float(position.x), float(position.y), float(position.z))
+                if after_position != before_position:
+                    from server.modules.handlers.world.world_refresh import (
+                        get_world_refresh_service,
+                    )
+
+                    visibility_responses = (
+                        get_world_refresh_service().refresh_after_movement(
+                            passenger_session,
+                            context="movement:transport-passenger",
+                        )
+                    )
+                    _send_responses(passenger_session, visibility_responses)
         current_transform = (
             int(state.map_id),
             float(state.x),
@@ -1099,6 +1127,19 @@ def _has_transport_animation(entry: dict[str, Any] | None) -> bool:
     return _transport_animation_for_entry(int(entry.get("entry", 0) or 0)) is not None
 
 
+def _uses_elevator_runtime(entry: dict[str, Any] | None) -> bool:
+    """Separate legacy local transports from vertical type-11 elevators."""
+    if not _has_transport_animation(entry):
+        return False
+    db_entry = int(entry.get("db_entry", entry.get("entry", 0)) or 0)
+    return db_entry not in _LOCAL_TRANSPORT_ENTRY_ALIASES
+
+
+def _canonical_local_transport_entry_id(entry_id: int) -> int:
+    """Resolve an old world DB entry to its canonical client transport entry."""
+    return int(_LOCAL_TRANSPORT_ENTRY_ALIASES.get(int(entry_id), int(entry_id)))
+
+
 def is_cross_map_boat_entry(entry: dict[str, Any] | None) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -1156,6 +1197,11 @@ def prepare_runtime_transport_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Normalize runtime transport metadata without changing client-visible lift type."""
     prepared = dict(entry)
     gameobject_type = int(prepared.get("type", 0) or 0)
+    db_entry = int(prepared.get("entry", 0) or 0)
+    client_entry = _canonical_local_transport_entry_id(db_entry)
+    if gameobject_type == GAMEOBJECT_TYPE_TRANSPORT and client_entry != db_entry:
+        prepared["db_entry"] = db_entry
+        prepared["entry"] = client_entry
     if not _runtime_enabled_for_entry(prepared):
         return prepared
     animation = _transport_animation_for_entry(int(prepared.get("entry", 0) or 0))
@@ -4248,7 +4294,7 @@ def _transport_animation_for_entry(entry_id: int) -> TransportAnimationPath | No
     if int(entry_id) <= 0:
         return None
     paths = _transport_animation_paths()
-    return paths.get(int(entry_id))
+    return paths.get(_canonical_local_transport_entry_id(int(entry_id)))
 
 
 def _transport_animation_paths() -> dict[int, TransportAnimationPath]:
@@ -4363,8 +4409,10 @@ def _load_world_db_elevator_entries() -> tuple[dict[str, Any], ...]:
         return cached
 
     animation_entry_ids = sorted(
-        int(entry_id)
-        for entry_id in _transport_animation_paths()
+        {
+            *(int(entry_id) for entry_id in _transport_animation_paths()),
+            *(int(entry_id) for entry_id in _LOCAL_TRANSPORT_ENTRY_ALIASES),
+        }
     )
     if not animation_entry_ids:
         setattr(_load_world_db_elevator_entries, "_entries", ())
@@ -4387,6 +4435,10 @@ def _load_world_db_elevator_entries() -> tuple[dict[str, Any], ...]:
                     g.position_y AS y,
                     g.position_z AS z,
                     g.orientation,
+                    g.rotation0,
+                    g.rotation1,
+                    g.rotation2,
+                    g.rotation3,
                     gt.name,
                     gt.displayId AS display_id,
                     gt.type,
@@ -4440,6 +4492,14 @@ def _load_world_db_elevator_entries() -> tuple[dict[str, Any], ...]:
                 "y": float(row.get("y", 0.0) or 0.0),
                 "z": float(row.get("z", 0.0) or 0.0),
                 "orientation": float(row.get("orientation", 0.0) or 0.0),
+                "rotation0": float(row.get("rotation0", 0.0) or 0.0),
+                "rotation1": float(row.get("rotation1", 0.0) or 0.0),
+                "rotation2": float(row.get("rotation2", 0.0) or 0.0),
+                "rotation3": float(
+                    row.get("rotation3")
+                    if row.get("rotation3") is not None
+                    else 1.0
+                ),
                 "type": int(row.get("type", GAMEOBJECT_TYPE_TRANSPORT) or GAMEOBJECT_TYPE_TRANSPORT),
                 "original_type": GAMEOBJECT_TYPE_TRANSPORT,
                 "display_id": int(row.get("display_id", 0) or 0),
@@ -4982,14 +5042,44 @@ def _build_dbc_animation_route(entry: dict[str, Any]) -> list[TransportRouteNode
     base_y = float(entry.get("y", 0.0) or 0.0)
     base_z = float(entry.get("z", 0.0) or 0.0)
     orientation = float(entry.get("orientation", 0.0) or 0.0)
-    cos_o = math.cos(orientation)
-    sin_o = math.sin(orientation)
+    rotation = (
+        float(entry.get("rotation0", 0.0) or 0.0),
+        float(entry.get("rotation1", 0.0) or 0.0),
+        float(entry.get("rotation2", 0.0) or 0.0),
+        float(entry.get("rotation3", 0.0) or 0.0),
+    )
+    rotation_norm = math.sqrt(sum(component * component for component in rotation))
+
+    def rotate_offset(x: float, y: float, z: float) -> tuple[float, float, float]:
+        if rotation_norm <= 0.000001:
+            cos_o = math.cos(orientation)
+            sin_o = math.sin(orientation)
+            return (
+                (x * cos_o) - (y * sin_o),
+                (x * sin_o) + (y * cos_o),
+                z,
+            )
+
+        qx, qy, qz, qw = (component / rotation_norm for component in rotation)
+        tx = 2.0 * ((qy * z) - (qz * y))
+        ty = 2.0 * ((qz * x) - (qx * z))
+        tz = 2.0 * ((qx * y) - (qy * x))
+        return (
+            x + (qw * tx) + ((qy * tz) - (qz * ty)),
+            y + (qw * ty) + ((qz * tx) - (qx * tz)),
+            z + (qw * tz) + ((qx * ty) - (qy * tx)),
+        )
 
     route: list[TransportRouteNode] = []
     for node in animation.nodes:
-        world_x = base_x + (float(node.x) * cos_o) - (float(node.y) * sin_o)
-        world_y = base_y + (float(node.x) * sin_o) + (float(node.y) * cos_o)
-        world_z = base_z + float(node.z)
+        offset_x, offset_y, offset_z = rotate_offset(
+            float(node.x),
+            float(node.y),
+            float(node.z),
+        )
+        world_x = base_x + offset_x
+        world_y = base_y + offset_y
+        world_z = base_z + offset_z
         route.append(
             TransportRouteNode(
                 map_id,

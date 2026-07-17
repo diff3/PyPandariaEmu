@@ -3795,23 +3795,7 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
     stale_guids = sorted(int(guid) for guid in loaded_gameobjects if int(guid) not in keep_guids)
     loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
     for guid in stale_guids:
-        is_transport = (
-            isinstance(loaded_transport_entries, dict)
-            and int(guid) in loaded_transport_entries
-        )
-        if is_transport:
-            transport = loaded_transport_entries.get(int(guid), {})
-            _transport_debug_log(
-                "[TransportStream] keep-authoritative guid=0x%X entry=%s pos=(%.2f %.2f %.2f)",
-                int(guid),
-                int(transport.get("entry", 0) or 0) if isinstance(transport, dict) else 0,
-                float(transport.get("x", 0.0) or 0.0) if isinstance(transport, dict) else 0.0,
-                float(transport.get("y", 0.0) or 0.0) if isinstance(transport, dict) else 0.0,
-                float(transport.get("z", 0.0) or 0.0) if isinstance(transport, dict) else 0.0,
-            )
-            continue
-        else:
-            Logger.debug("[GO_STREAM] despawn guid=0x%X", int(guid))
+        Logger.debug("[GO_STREAM] despawn guid=0x%X", int(guid))
         responses.append(
             (
                 "SMSG_UPDATE_OBJECT",
@@ -3939,7 +3923,7 @@ def stream_world_objects_after_teleport(
 def _refresh_after_movement(session, *, context: str) -> list[tuple[str, bytes]]:
     from server.modules.handlers.world.world_refresh import get_world_refresh_service
 
-    return get_world_refresh_service().refresh_player_world(
+    return get_world_refresh_service().refresh_after_movement(
         session,
         context=context,
         _object_streamer=_maybe_stream_world_objects,

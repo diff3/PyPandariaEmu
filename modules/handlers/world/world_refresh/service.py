@@ -123,6 +123,22 @@ class WorldRefreshService:
             _object_refresh=_object_refresh,
         )
 
+    def refresh_after_movement(
+        self,
+        session,
+        *,
+        context: str,
+        _object_streamer=None,
+        _object_refresh=None,
+    ) -> list[tuple[str, bytes]]:
+        """Run the normal throttled, incremental visibility pipeline."""
+        return self.refresh_player_world(
+            session,
+            context=context,
+            _object_streamer=_object_streamer,
+            _object_refresh=_object_refresh,
+        )
+
     def refresh_after_login(
         self,
         session,

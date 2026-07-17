@@ -33,6 +33,10 @@ LEGACY_ELEVATOR_ENTRIES = {
     11899,
 }
 
+# These client entries are native local transports.  Their DBC node order is
+# consumed directly by SkyFire rather than using the legacy elevator reversal.
+LOCAL_TRANSPORT_ANIMATION_ENTRIES = frozenset(range(218203, 218209))
+
 
 def _movement_node_time(node: MovementNode) -> int:
     return int(node.time_ms)
@@ -219,7 +223,11 @@ def _load_transport_animation_templates() -> dict[int, MovementTemplate]:
         # Reverse positions so elevators move in the correct direction while
         # preserving monotonic DBC timing for MovementManager validation.
         #
-        ordered = _reverse_elevator_nodes_preserving_time(ordered_nodes)
+        ordered = (
+            tuple(ordered_nodes)
+            if int(entry) in LOCAL_TRANSPORT_ANIMATION_ENTRIES
+            else _reverse_elevator_nodes_preserving_time(ordered_nodes)
+        )
 
         if ordered and transport_movement_debug_enabled():
             Logger.info(

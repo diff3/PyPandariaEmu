@@ -7368,3 +7368,63 @@ def test_repeated_mount_cycles_preserve_attachment_while_transport_moves(monkeyp
         spells_handlers.dismount(session)
         _assert_mount_did_not_change_attachment(session, state, expected_attachment)
         assert (session.x, session.y, session.z, session.orientation) == pytest.approx(world_before)
+
+
+def test_transport_tick_runs_normal_incremental_visibility_for_stationary_passenger(
+    monkeypatch,
+):
+    from server.modules.handlers.world import world_refresh
+
+    _reset_transport_states()
+    _entry, state, _transport = _registered_runtime_transport()
+    session = _mount_test_session_on_runtime_transport(state)
+    attachment = transport_runtime.transport_passenger_attachment(
+        state.guid,
+        session.char_guid,
+    )
+    sent = []
+    session.send_response = lambda responses: sent.extend(responses)
+    calls = []
+
+    class _Refresh:
+        def refresh_after_movement(self, target, *, context):
+            calls.append((target, context, target.x, target.y, target.z))
+            return [("SMSG_UPDATE_OBJECT", b"visibility")]
+
+    monkeypatch.setattr(world_refresh, "get_world_refresh_service", lambda: _Refresh())
+    monkeypatch.setattr(
+        transport_runtime,
+        "_canonical_runtime_passengers",
+        lambda *_args, **_kwargs: {session.char_guid: attachment},
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "_find_transport_passenger_session",
+        lambda player_guid: session if int(player_guid) == session.char_guid else None,
+    )
+    monkeypatch.setattr(
+        transport_runtime.get_movement_manager(),
+        "tick_instance",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def move_transport(runtime_state):
+        runtime_state.x += 5.0
+        transport_runtime.get_world_transport_manager().sync_transport_object(runtime_state)
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "_commit_transport_state_from_movement_cache",
+        move_transport,
+    )
+
+    transport_runtime.get_world_transport_manager()._tick_transport_state(
+        state.guid,
+        state,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] is session
+    assert calls[0][1] == "movement:transport-passenger"
+    assert session.x == pytest.approx(calls[0][2])
+    assert sent == [("SMSG_UPDATE_OBJECT", b"visibility")]

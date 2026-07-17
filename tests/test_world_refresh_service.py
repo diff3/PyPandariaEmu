@@ -22,7 +22,7 @@ def test_movement_refresh_uses_throttled_existing_streamer():
     session = _session()
     calls = []
 
-    responses = WorldRefreshService().refresh_player_world(
+    responses = WorldRefreshService().refresh_after_movement(
         session,
         context="movement:heartbeat",
         _object_streamer=lambda target: calls.append(target)
