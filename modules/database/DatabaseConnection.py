@@ -25,6 +25,7 @@ from server.modules.database.WorldModel import (
     WorldGameObject,
     WorldGameObjectTemplate,
     GameEventGameObject,
+    GameEventCreature,
     PlayerFactionchangeAchievement,
     PlayerFactionchangeItems,
     PlayerFactionchangeQuests,
@@ -476,7 +477,13 @@ class DatabaseConnection:
                 DatabaseConnection._cache_creature_templates = {}
 
             try:
-                rows = session.query(WorldCreature).all()
+                rows = (
+                    session.query(WorldCreature)
+                    .outerjoin(GameEventCreature, GameEventCreature.guid == WorldCreature.guid)
+                    .filter(GameEventCreature.guid.is_(None))
+                    .filter(WorldCreature.phaseId == 0, WorldCreature.phaseGroup == 0)
+                    .all()
+                )
                 by_map: dict[int, list[dict]] = {}
                 for row in rows:
                     candidate = DatabaseConnection._build_creature_candidate(row)
@@ -533,6 +540,9 @@ class DatabaseConnection:
                         WorldGameObject.guid,
                         WorldGameObject.id,
                         WorldGameObject.map,
+                        WorldGameObject.spawnMask,
+                        WorldGameObject.phaseId,
+                        WorldGameObject.phaseGroup,
                         WorldGameObject.position_x,
                         WorldGameObject.position_y,
                         WorldGameObject.position_z,
@@ -558,6 +568,7 @@ class DatabaseConnection:
                     .join(WorldGameObjectTemplate, WorldGameObjectTemplate.entry == WorldGameObject.id)
                     .outerjoin(GameEventGameObject, GameEventGameObject.guid == WorldGameObject.guid)
                     .filter(GameEventGameObject.guid.is_(None))
+                    .filter(WorldGameObject.phaseId == 0, WorldGameObject.phaseGroup == 0)
                     .all()
                 )
                 by_map: dict[int, list[dict]] = {}
@@ -2023,6 +2034,11 @@ class DatabaseConnection:
                 movementId,
                 Health_mod,
                 Mana_mod,
+                InhabitType,
+                HoverHeight,
+                unit_flags,
+                unit_flags2,
+                flags_extra,
                 RacialLeader,
                 questItem1,
                 questItem2,
@@ -2044,6 +2060,76 @@ class DatabaseConnection:
         if row is None:
             return None
         return dict(row)
+
+    @staticmethod
+    def get_creature_addons(
+        spawn_ids: list[int] | tuple[int, ...],
+        entry_ids: list[int] | tuple[int, ...],
+    ) -> dict[str, dict[int, dict]]:
+        """Resolve per-spawn addon data with template-addon fallback in bulk."""
+        normalized_spawns = sorted({int(value) for value in spawn_ids if int(value) > 0})
+        normalized_entries = sorted({int(value) for value in entry_ids if int(value) > 0})
+        if not normalized_spawns and not normalized_entries:
+            return {}
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning("[DB] creature addon lookup unavailable: %s", exc)
+            return {}
+
+        spawn_rows = []
+        template_rows = []
+        try:
+            if normalized_spawns:
+                params = {f"id{index}": value for index, value in enumerate(normalized_spawns)}
+                placeholders = ", ".join(f":id{index}" for index in range(len(normalized_spawns)))
+                stmt = text(
+                    "SELECT guid, mount, bytes1, bytes2, emote, auras "
+                    f"FROM creature_addon WHERE guid IN ({placeholders})"
+                )
+                spawn_rows = session.execute(stmt, params).mappings().all()
+            if normalized_entries:
+                params = {f"id{index}": value for index, value in enumerate(normalized_entries)}
+                placeholders = ", ".join(f":id{index}" for index in range(len(normalized_entries)))
+                stmt = text(
+                    "SELECT entry, mount, bytes1, bytes2, emote, auras "
+                    f"FROM creature_template_addon WHERE entry IN ({placeholders})"
+                )
+                template_rows = session.execute(stmt, params).mappings().all()
+        except Exception as exc:
+            Logger.warning("[DB] creature addon lookup failed: %s", exc)
+            return {}
+
+        by_spawn = {int(row["guid"]): dict(row) for row in spawn_rows}
+        by_entry = {int(row["entry"]): dict(row) for row in template_rows}
+        return {"spawn": by_spawn, "template": by_entry}
+
+    @staticmethod
+    def get_creature_transport_rows(
+        transport_entries: list[int] | tuple[int, ...],
+    ) -> list[dict]:
+        """Load canonical local Creature spawns for visible transports."""
+        normalized = sorted({int(value) for value in transport_entries if int(value) > 0})
+        if not normalized:
+            return []
+        try:
+            session = DatabaseConnection.world()
+        except Exception as exc:
+            Logger.warning("[DB] creature_transport lookup unavailable: %s", exc)
+            return []
+        params = {f"id{index}": value for index, value in enumerate(normalized)}
+        placeholders = ", ".join(f":id{index}" for index in range(len(normalized)))
+        stmt = text(
+            "SELECT guid, transport_entry, npc_entry, TransOffsetX, "
+            "TransOffsetY, TransOffsetZ, TransOffsetO, emote "
+            f"FROM creature_transport WHERE transport_entry IN ({placeholders})"
+        )
+        try:
+            rows = session.execute(stmt, params).mappings().all()
+        except Exception as exc:
+            Logger.warning("[DB] creature_transport lookup failed: %s", exc)
+            return []
+        return [dict(row) for row in rows]
 
     @staticmethod
     def get_gameobject_template(entry: int) -> dict | None:
@@ -2175,6 +2261,9 @@ class DatabaseConnection:
         try:
             rows = (
                 session.query(WorldCreature)
+                .outerjoin(GameEventCreature, GameEventCreature.guid == WorldCreature.guid)
+                .filter(GameEventCreature.guid.is_(None))
+                .filter(WorldCreature.phaseId == 0, WorldCreature.phaseGroup == 0)
                 .filter(
                     WorldCreature.map == int(map_id),
                     WorldCreature.position_x >= min_x,
@@ -2616,6 +2705,9 @@ class DatabaseConnection:
                     WorldGameObject.guid,
                     WorldGameObject.id,
                     WorldGameObject.map,
+                    WorldGameObject.spawnMask,
+                    WorldGameObject.phaseId,
+                    WorldGameObject.phaseGroup,
                     WorldGameObject.position_x,
                     WorldGameObject.position_y,
                     WorldGameObject.position_z,
@@ -2641,6 +2733,7 @@ class DatabaseConnection:
                 .join(WorldGameObjectTemplate, WorldGameObjectTemplate.entry == WorldGameObject.id)
                 .outerjoin(GameEventGameObject, GameEventGameObject.guid == WorldGameObject.guid)
                 .filter(GameEventGameObject.guid.is_(None))
+                .filter(WorldGameObject.phaseId == 0, WorldGameObject.phaseGroup == 0)
                 .filter(
                     WorldGameObject.map == int(map_id),
                     WorldGameObject.position_x >= min_x,
@@ -3225,6 +3318,11 @@ class DatabaseConnection:
             "movementId": int(getattr(row, "movementId", 0) or 0),
             "Health_mod": float(getattr(row, "Health_mod", 0.0) or 0.0),
             "Mana_mod": float(getattr(row, "Mana_mod", 0.0) or 0.0),
+            "InhabitType": int(getattr(row, "InhabitType", 3) or 3),
+            "HoverHeight": float(getattr(row, "HoverHeight", 1.0) or 1.0),
+            "unit_flags": int(getattr(row, "unit_flags", 0) or 0),
+            "unit_flags2": int(getattr(row, "unit_flags2", 0) or 0),
+            "flags_extra": int(getattr(row, "flags_extra", 0) or 0),
             "RacialLeader": int(getattr(row, "RacialLeader", 0) or 0),
             "questItem1": int(getattr(row, "questItem1", 0) or 0),
             "questItem2": int(getattr(row, "questItem2", 0) or 0),
@@ -3245,6 +3343,9 @@ class DatabaseConnection:
             "guid": guid,
             "entry": entry,
             "map_id": int(getattr(row, "map", 0) or 0),
+            "spawnMask": int(getattr(row, "spawnMask", 1) or 1),
+            "phaseId": int(getattr(row, "phaseId", 0) or 0),
+            "phaseGroup": int(getattr(row, "phaseGroup", 0) or 0),
             "modelid": int(getattr(row, "modelid", 0) or 0),
             "equipment_id": int(getattr(row, "equipment_id", 0) or 0),
             "x": float(getattr(row, "position_x", 0.0) or 0.0),

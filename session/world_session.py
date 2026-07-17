@@ -173,6 +173,7 @@ class WorldSession:
     action_buttons: List[int] = field(default_factory=lambda: [0] * 132)
     is_mounted: bool = False
     mount_spell: Optional[int] = None
+    mount_owns_flight_capability: bool = False
     active_mount_aura_spell_id: Optional[int] = None
     active_mount_aura_slot: int = 0
     active_fly_aura_spell_id: Optional[int] = None
@@ -186,6 +187,7 @@ class WorldSession:
     single_world_state: Dict[str, Any] = field(default_factory=dict)
     weather: Dict[str, Any] = field(default_factory=dict)
     active_area_triggers: set[int] = field(default_factory=set)
+    area_trigger_teleport_cooldown_until: float = 0.0
 
     # --------------------------------------------------
     # Time / sync

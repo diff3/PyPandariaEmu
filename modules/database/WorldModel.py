@@ -131,6 +131,11 @@ class WorldCreatureTemplate(Base):
     movementId = Column(INTEGER(unsigned=True), nullable=False, default=0)
     Health_mod = Column(Float, nullable=False, default=1.0)
     Mana_mod = Column(Float, nullable=False, default=1.0)
+    InhabitType = Column(TINYINT(unsigned=True), nullable=False, default=3)
+    HoverHeight = Column(Float, nullable=False, default=1.0)
+    unit_flags = Column(Integer, nullable=False, default=0)
+    unit_flags2 = Column(Integer, nullable=False, default=0)
+    flags_extra = Column(Integer, nullable=False, default=0)
     RacialLeader = Column(TINYINT(unsigned=True), nullable=False, default=0)
     questItem1 = Column(INTEGER(unsigned=True), nullable=False, default=0)
     questItem2 = Column(INTEGER(unsigned=True), nullable=False, default=0)
@@ -190,6 +195,13 @@ class GameEventGameObject(Base):
 
     guid = Column(Integer, primary_key=True)
     eventEntry = Column(Integer)
+
+
+class GameEventCreature(Base):
+    __tablename__ = "game_event_creature"
+
+    eventEntry = Column(Integer, primary_key=True)
+    guid = Column(Integer, primary_key=True)
 
 
 class PlayerLevelStats(Base):

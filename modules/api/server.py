@@ -65,6 +65,16 @@ API_DOCUMENTATION = {
                 "message": "string",
             },
         },
+        {
+            "method": "POST",
+            "path": "/api/mail/system",
+            "description": "Send persisted system mail to a character",
+            "body": {
+                "recipient": "character name or guid",
+                "subject": "string",
+                "body": "string",
+            },
+        },
     ],
 }
 
@@ -163,6 +173,21 @@ def build_handler(token: str):
                     source=str(payload.get("source", "Discord") or "Discord"),
                 )
                 _write_json(self, 202, {"ok": True, "queued": command})
+                return
+            if parsed.path == "/api/mail/system":
+                from server.modules.database.DatabaseConnection import DatabaseConnection
+                from server.modules.mail.api import MailAPI
+                try:
+                    DatabaseConnection.initialize()
+                    mail = MailAPI.send_system(
+                        payload.get("recipient", ""),
+                        str(payload.get("subject", "") or ""),
+                        str(payload.get("body", "") or ""),
+                    )
+                except ValueError as exc:
+                    _write_json(self, 400, {"error": str(exc)})
+                    return
+                _write_json(self, 201, {"ok": True, "mail_id": int(mail.id)})
                 return
             _write_json(self, 404, {"error": "not_found"})
 

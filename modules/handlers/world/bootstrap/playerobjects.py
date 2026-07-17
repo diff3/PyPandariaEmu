@@ -714,6 +714,8 @@ def _player_create_movement_state(
 def _build_player_create_movement_bits(
     ctx=None,
     player: Player | None = None,
+    *,
+    is_self: bool = True,
 ) -> bytes:
     """Build the SkyFire 5.4.8 CREATE_OBJECT living movement bit region."""
     transport = _player_create_transport_data(ctx) if ctx is not None else None
@@ -750,7 +752,7 @@ def _build_player_create_movement_bits(
         (_PLAYER_CREATE_BIT476, 1),
         (_PLAYER_CREATE_HAS_GAMEOBJECT_ROTATION, 1),
         (0, 1),  # fake bit
-        (_PLAYER_CREATE_BIT680, 1),
+        (_PLAYER_CREATE_BIT680 if is_self else 0, 1),
         (_PLAYER_CREATE_HAS_ATTACKING_TARGET, 1),
         (_PLAYER_CREATE_HAS_SCENE_OBJECT_DATA, 1),
         (_PLAYER_CREATE_BIT1064, 1),
@@ -873,6 +875,8 @@ def _build_legacy_player_create_movement_header() -> bytes:
 def _build_skyfire_player_create_movement_header(
     ctx=None,
     player: Player | None = None,
+    *,
+    is_self: bool = True,
 ) -> bytes:
     """Build the SkyFire 5.4.8 CREATE_OBJECT living movement pre-position region."""
     transport = _player_create_transport_data(ctx) if ctx is not None else None
@@ -883,7 +887,7 @@ def _build_skyfire_player_create_movement_header(
     )
     has_time2 = bool(transport and int(transport["time2"]) != 0)
     has_time3 = bool(transport and int(transport["time3"]) != 0)
-    output = bytearray(_build_player_create_movement_bits(ctx, player))
+    output = bytearray(_build_player_create_movement_bits(ctx, player, is_self=is_self))
     if transport is not None:
         def append_guid_byte(index: int) -> None:
             output.extend(_guid_byte_seq(transport_guid_bytes, index))
@@ -926,12 +930,16 @@ def build_player_create_movement_header(
 def build_skyfire_player_create_living_movement_block(
     ctx,
     player: Player | None = None,
+    *,
+    is_self: bool = True,
 ) -> bytes:
     """Build the player CREATE_OBJECT living movement block in SkyFire 5.4.8 order."""
     state = _player_create_movement_state(ctx, player)
     player_guid = _resolve_player_create_movement_guid(ctx, player)
     player_guid_bytes = int(player_guid).to_bytes(8, "little", signed=False)
-    output = bytearray(_build_skyfire_player_create_movement_header(ctx, player))
+    output = bytearray(
+        _build_skyfire_player_create_movement_header(ctx, player, is_self=is_self)
+    )
 
     output.extend(_guid_byte_seq(player_guid_bytes, 4))
     # Player CREATE has no spline payload for the local player in the current path.

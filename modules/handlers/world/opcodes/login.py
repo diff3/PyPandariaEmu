@@ -1732,6 +1732,8 @@ def handle_player_login(session, ctx: PacketContext):
     responses: list[tuple[str, bytes]] = []
     responses.extend(build_player_login_packets(login_ctx))
     responses.extend(achievement_login_responses)
+    from server.modules.mail.service import get_mail_service
+    responses.extend(get_mail_service().notification_packets(int(char_guid)))
 
     if getattr(session, "loading_screen_done", False):
         Logger.info("[WorldHandlers] PLAYER_LOGIN consuming deferred LOADING_SCREEN_NOTIFY show=0")

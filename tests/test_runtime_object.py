@@ -325,6 +325,43 @@ def test_creature_runtime_snapshot_retains_no_mapping_reference():
     assert creature.npc_flags == 0x2000
 
 
+def test_trigger_creature_uses_invisible_player_model():
+    creature = Creature.from_mapping(
+        {
+            "guid": 76806,
+            "entry": 21993,
+            "map_id": 530,
+            "modelid": 0,
+            "template": {
+                "modelid1": 20698,
+                "modelid2": 11686,
+                "flags_extra": 0x80,
+            },
+        },
+        runtime_guid=789,
+    )
+
+    assert creature.display_id == 11686
+
+
+def test_trigger_creature_without_second_model_uses_invisible_fallback():
+    creature = Creature.from_mapping(
+        {
+            "guid": 1,
+            "entry": 2,
+            "map_id": 0,
+            "template": {
+                "modelid1": 17519,
+                "modelid2": 0,
+                "flags_extra": 0x80,
+            },
+        },
+        runtime_guid=789,
+    )
+
+    assert creature.display_id == 11686
+
+
 def test_creature_setters_and_persistence_snapshot_use_runtime_authority():
     mapping = {
         "guid": 321,

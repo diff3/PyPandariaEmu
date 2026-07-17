@@ -550,6 +550,9 @@ def test_area_trigger_fires_once_until_player_leaves_and_reenters(monkeypatch):
     ) is None
     assert session.active_area_triggers == set()
 
+    # This test covers enter/leave state independently of the temporary
+    # AreaTrigger teleport cooldown.
+    session.area_trigger_teleport_cooldown_until = 0.0
     session.x = 50.0
     assert area_trigger.check_movement_segment_for_area_triggers(
         session, (60.0, 0.0, 0.0), (50.0, 0.0, 0.0)
@@ -733,3 +736,112 @@ def test_trigger_bounds_have_no_implicit_position_padding():
 
     assert not area_trigger._point_inside_trigger(definition, 45.0, 0.0, 0.0)
     assert area_trigger._point_inside_trigger(definition, 49.0, 0.0, 0.0)
+
+
+def test_area_trigger_teleport_cooldown_is_per_player_and_expires(monkeypatch):
+    clock = {"now": 100.0}
+    transfers = []
+    definitions = {
+        trigger_id: area_trigger.AreaTriggerDefinition(
+            trigger_id=trigger_id,
+            map_id=1,
+            x=10.0,
+            y=20.0,
+            z=30.0,
+            radius=2.0,
+            box_x=0.0,
+            box_y=0.0,
+            box_z=0.0,
+            box_orientation=0.0,
+        )
+        for trigger_id in (930, 931, 932)
+    }
+    rows = {
+        trigger_id: {
+            "id": trigger_id,
+            "target_map": 2,
+            "target_position_x": 1.0,
+            "target_position_y": 2.0,
+            "target_position_z": 3.0,
+            "target_orientation": 0.0,
+        }
+        for trigger_id in definitions
+    }
+    session = SimpleNamespace(
+        char_guid=1001,
+        map_id=1,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        active_area_triggers=set(),
+        area_trigger_teleport_cooldown_until=0.0,
+    )
+
+    monkeypatch.setattr(area_trigger.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(area_trigger, "_area_trigger_definitions", lambda: definitions)
+    monkeypatch.setattr(
+        area_trigger.DatabaseConnection,
+        "get_areatrigger_teleport",
+        lambda trigger_id: rows.get(trigger_id),
+    )
+    monkeypatch.setattr(
+        area_trigger,
+        "apply_map_transfer",
+        lambda _session, destination, **_kwargs: transfers.append(destination) or [
+            ("SMSG_NEW_WORLD", b"ok")
+        ],
+    )
+
+    assert area_trigger.activate_area_trigger(session, 930, source="test")
+    assert session.area_trigger_teleport_cooldown_until == 130.0
+
+    clock["now"] = 110.0
+    assert area_trigger.activate_area_trigger(session, 931, source="test") == []
+    assert len(transfers) == 1
+
+    clock["now"] = 130.0
+    assert area_trigger.activate_area_trigger(session, 932, source="test")
+    assert len(transfers) == 2
+
+
+def test_failed_area_trigger_transfer_does_not_start_cooldown(monkeypatch):
+    definition = area_trigger.AreaTriggerDefinition(
+        trigger_id=933,
+        map_id=1,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        radius=2.0,
+        box_x=0.0,
+        box_y=0.0,
+        box_z=0.0,
+        box_orientation=0.0,
+    )
+    row = {
+        "id": 933,
+        "target_map": 2,
+        "target_position_x": 1.0,
+        "target_position_y": 2.0,
+        "target_position_z": 3.0,
+        "target_orientation": 0.0,
+    }
+    session = SimpleNamespace(
+        char_guid=1002,
+        map_id=1,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        active_area_triggers=set(),
+        area_trigger_teleport_cooldown_until=0.0,
+    )
+    monkeypatch.setattr(area_trigger.time, "monotonic", lambda: 200.0)
+    monkeypatch.setattr(area_trigger, "_area_trigger_definitions", lambda: {933: definition})
+    monkeypatch.setattr(
+        area_trigger.DatabaseConnection,
+        "get_areatrigger_teleport",
+        lambda trigger_id: row,
+    )
+    monkeypatch.setattr(area_trigger, "apply_map_transfer", lambda *args, **kwargs: [])
+
+    assert area_trigger.activate_area_trigger(session, 933, source="test") == []
+    assert session.area_trigger_teleport_cooldown_until == 0.0

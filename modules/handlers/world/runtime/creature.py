@@ -18,6 +18,10 @@ from server.modules.handlers.world.runtime.spawned_world_object import (
 )
 
 
+CREATURE_FLAG_EXTRA_TRIGGER = 0x00000080
+INVISIBLE_TRIGGER_DISPLAY_ID = 11686
+
+
 def _normalized_creature_orientation(value: float) -> float:
     """Normalize orientation using the established Creature packet rules."""
     orientation = math.fmod(float(value or 0.0), math.tau)
@@ -28,10 +32,19 @@ def _normalized_creature_orientation(value: float) -> float:
 
 def _mapping_creature_display_id(data: Mapping[str, Any]) -> int:
     """Resolve the effective display ID from spawn and template metadata."""
+    template = data.get("template")
+    if isinstance(template, Mapping):
+        # Trigger creatures are server-side markers. SkyFire publishes their
+        # second model (or the canonical invisible fallback) to normal players.
+        if _mapping_int(template, "flags_extra") & CREATURE_FLAG_EXTRA_TRIGGER:
+            return _mapping_int(
+                template,
+                "modelid2",
+                INVISIBLE_TRIGGER_DISPLAY_ID,
+            ) or INVISIBLE_TRIGGER_DISPLAY_ID
     display_id = _mapping_int(data, "modelid")
     if display_id > 0:
         return display_id
-    template = data.get("template")
     if isinstance(template, Mapping):
         for key in ("modelid1", "modelid2", "modelid3", "modelid4"):
             display_id = _mapping_int(template, key)

@@ -3856,7 +3856,10 @@ def _stream_nearby_npcs(session) -> list[tuple[str, bytes]]:
         loaded_npcs = set()
         session.loaded_npcs = loaded_npcs
 
-    from server.modules.handlers.world.bootstrap.creatures import build_database_creature_responses
+    from server.modules.handlers.world.bootstrap.creatures import (
+        _transport_creature_entries,
+        build_database_creature_responses,
+    )
 
     realm_id = int(getattr(session, "realm_id", 1) or 1)
     x = float(getattr(session, "x", 0.0) or 0.0)
@@ -3874,6 +3877,10 @@ def _stream_nearby_npcs(session) -> list[tuple[str, bytes]]:
         int(CreatureGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), realm_id))
         for entry in keep_entries
     }
+    keep_guids.update(
+        int(CreatureGuid.from_spawn_guid(int(entry.get("guid", 0) or 0), realm_id))
+        for entry in _transport_creature_entries(session, DatabaseConnection)
+    )
 
     stale_guids = sorted(int(guid) for guid in loaded_npcs if int(guid) not in keep_guids)
     for guid in stale_guids:

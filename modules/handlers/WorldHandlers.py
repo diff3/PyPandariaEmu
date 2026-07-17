@@ -29,6 +29,7 @@ from server.modules.handlers.world.opcodes import calendar as _calendar  # noqa:
 from server.modules.handlers.world.opcodes import entities as _entities  # noqa: F401
 from server.modules.handlers.world.opcodes import inventory as _inventory  # noqa: F401
 from server.modules.handlers.world.opcodes import login as _login  # noqa: F401
+from server.modules.handlers.world.opcodes import mail as _mail  # noqa: F401
 from server.modules.handlers.world.opcodes import misc as _misc  # noqa: F401
 from server.modules.handlers.world.opcodes import movement as _movement  # noqa: F401
 from server.modules.handlers.world.opcodes import npc_interaction as _npc_interaction  # noqa: F401

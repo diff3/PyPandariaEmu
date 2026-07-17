@@ -26,6 +26,7 @@ _AREA_TRIGGER_DEFAULT_RADIUS = 5.0
 _AREA_TRIGGER_MAX_SEGMENT_SCAN_DISTANCE = 120.0
 _AREA_TRIGGER_MISS_LOG_RADIUS = 14.0
 _AREA_TRIGGER_MISS_LOG_INTERVAL_SECONDS = 1.5
+_AREA_TRIGGER_TELEPORT_COOLDOWN_SECONDS = 30.0
 _INSTANCEABLE_MAP_TYPES = {1, 2, 3, 4, 5}
 
 
@@ -541,7 +542,30 @@ def activate_area_trigger(
     if destination is None:
         return []
 
+    now = time.monotonic()
+    cooldown_until = float(
+        getattr(session, "area_trigger_teleport_cooldown_until", 0.0) or 0.0
+    )
+    remaining_cooldown = max(0.0, cooldown_until - now)
+    teleport_allowed = remaining_cooldown <= 0.0
+    Logger.info(
+        "[AREATRIGGER_COOLDOWN] player_guid=%s trigger_id=%s "
+        "teleport_allowed=%s remaining=%.3f",
+        int(getattr(session, "char_guid", 0) or 0),
+        int(trigger_id),
+        "yes" if teleport_allowed else "no",
+        remaining_cooldown,
+    )
+    if not teleport_allowed:
+        return []
+
     responses = apply_map_transfer(session, destination, reason="areatrigger")
+    if responses:
+        # TODO: Temporary safeguard. Remove when the underlying AreaTrigger
+        # detection/retrigger issue has been identified and corrected.
+        session.area_trigger_teleport_cooldown_until = (
+            time.monotonic() + _AREA_TRIGGER_TELEPORT_COOLDOWN_SECONDS
+        )
     Logger.info(
         "[AREATRIGGER] transition id=%s map=%s pos=(%.3f %.3f %.3f %.6f) responses=%s",
         activation_id,

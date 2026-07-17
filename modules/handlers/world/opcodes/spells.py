@@ -1187,8 +1187,16 @@ def _set_flying_capability_state(session, enabled: bool) -> bool:
 
 def build_mount_flying_capability_responses(player, spell_id: int) -> list[tuple[str, bytes]]:
     if not is_flying_mount_spell(int(spell_id)):
+        player.mount_owns_flight_capability = False
         return []
     player.fly_speed = float(getattr(player, "run_speed", _DEFAULT_RUN_SPEED) or _DEFAULT_RUN_SPEED) * 3.2
+    state = getattr(player, "movement_state", None)
+    state_flags = int(getattr(state, "flags", 0) or 0) if state is not None else 0
+    already_capable = bool(
+        getattr(player, "can_fly", False)
+        or state_flags & _MOVEMENTFLAG_CAN_FLY
+    )
+    player.mount_owns_flight_capability = not already_capable
     if not _set_flying_capability_state(player, True):
         return []
     responses: list[tuple[str, bytes]] = []
@@ -1210,11 +1218,64 @@ def build_dismount_flying_capability_responses(player) -> list[tuple[str, bytes]
     )
     if not has_flying_state:
         return []
+    if not bool(getattr(player, "mount_owns_flight_capability", True)):
+        return []
     _set_flying_capability_state(player, False)
     return [
         ("SMSG_MOVE_UNSET_CAN_FLY", build_move_set_can_fly_payload(player, False)),
         ("SMSG_SPLINE_MOVE_UNSET_FLYING", build_spline_move_unset_flying_payload(player)),
     ]
+
+
+def _player_is_airborne_in_flight(state, player) -> bool:
+    if state is None:
+        return False
+    flags = int(getattr(state, "flags", 0) or 0)
+    if flags & _MOVEMENTFLAG_SWIMMING:
+        return False
+    if bool(getattr(state, "has_transport_data", False)) or int(
+        getattr(state, "transport_guid", 0) or 0
+    ):
+        return False
+    return bool(
+        getattr(player, "is_flying", False)
+        or flags & _MOVEMENTFLAG_FLYING_STATE
+    )
+
+
+def _begin_player_fall_after_flight_loss(
+    player,
+    *,
+    lost_flight_capability: bool,
+) -> bool:
+    """Enter the normal player fall state without changing world position."""
+    state = getattr(player, "movement_state", None)
+    if (
+        state is None
+        or not lost_flight_capability
+        or bool(getattr(player, "can_fly", False))
+    ):
+        return False
+    flags = int(getattr(state, "flags", 0) or 0)
+    if flags & _MOVEMENTFLAG_SWIMMING:
+        return False
+    if bool(getattr(state, "has_transport_data", False)) or int(
+        getattr(state, "transport_guid", 0) or 0
+    ):
+        return False
+
+    state.flags = int(
+        (flags & ~_MOVEMENTFLAG_FLYING_STATE) | _MOVEMENTFLAG_FALLING
+    )
+    state.is_ascending = False
+    state.is_descending = False
+    state.has_fall_data = True
+    state.fall_time = 0
+    state.fall_vertical_speed = 0.0
+    state.fall_horizontal_speed = 0.0
+    state.fall_sin_angle = 0.0
+    state.fall_cos_angle = 0.0
+    return True
 
 
 def build_raw_update_object(player, fields):
@@ -1297,7 +1358,10 @@ def send_dismount_update(
     responses: list[tuple[str, bytes]] = list(
         aura_responses if aura_responses is not None else remove_mount_aura(player)
     )
-    if int(getattr(player, "active_fly_aura_spell_id", 0) or 0):
+    if (
+        bool(getattr(player, "mount_owns_flight_capability", True))
+        and int(getattr(player, "active_fly_aura_spell_id", 0) or 0)
+    ):
         responses.extend(remove_fly_aura(player))
     responses.append(("SMSG_DISMOUNT", build_smsg_dismount_payload(player)))
     responses.extend(build_dismount_flying_capability_responses(player))
@@ -1498,6 +1562,15 @@ def dismount(player) -> list[tuple[str, bytes]]:
         or getattr(player, "mount_spell", 0)
         or 0
     )
+    state = getattr(player, "movement_state", None)
+    was_airborne = _player_is_airborne_in_flight(state, player)
+    mount_owned_flight = bool(getattr(player, "mount_owns_flight_capability", True))
+    state_flags_before = int(getattr(state, "flags", 0) or 0) if state is not None else 0
+    had_flight_capability = bool(
+        getattr(player, "can_fly", False)
+        or state_flags_before & _MOVEMENTFLAG_FLYING_CAPABILITY
+        or was_airborne
+    )
     from server.modules.handlers.world.transport_runtime import (
         prepare_attached_movement_rebuild,
         publish_current_transport_attachment,
@@ -1509,20 +1582,12 @@ def dismount(player) -> list[tuple[str, bytes]]:
     player.is_mounted = False
     player.mount_spell = None
     player.mount_display_id = 0
-    player.is_flying = False
+    if mount_owned_flight:
+        player.is_flying = False
     player.unit_flags = int(getattr(player, "unit_flags", 0) or 0) & ~_UNIT_FLAG_MOUNT
-    state = getattr(player, "movement_state", None)
     if state is not None:
         state.is_ascending = False
         state.is_descending = False
-        flags = int(getattr(state, "flags", 0) or 0)
-        flags &= ~(
-            _MOVEMENTFLAG_CAN_FLY
-            | _MOVEMENTFLAG_FLYING
-            | _MOVEMENTFLAG_ASCENDING
-            | _MOVEMENTFLAG_DESCENDING
-        )
-        state.flags = int(flags)
     _restore_default_movement_speeds(player)
     _log_mount_transport_state(player, "dismount", "after_state_clear")
     responses = [
@@ -1539,6 +1604,19 @@ def dismount(player) -> list[tuple[str, bytes]]:
         if "aura_responses" not in str(exc):
             raise
         responses.extend(send_dismount_update(player))
+    remaining_state_flags = int(getattr(state, "flags", 0) or 0) if state is not None else 0
+    if mount_owned_flight and bool(
+        getattr(player, "can_fly", False)
+        or remaining_state_flags & _MOVEMENTFLAG_FLYING_CAPABILITY
+    ):
+        # Keep state canonical even for narrow integrations which replace the
+        # packet-building helper.
+        _set_flying_capability_state(player, False)
+    _begin_player_fall_after_flight_loss(
+        player,
+        lost_flight_capability=bool(mount_owned_flight and had_flight_capability),
+    )
+    player.mount_owns_flight_capability = False
     if animation_spell_id > 0:
         from server.modules.handlers.world.spell_cast.service import get_spell_cast_service
 

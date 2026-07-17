@@ -214,6 +214,7 @@ class ChatApiTest(unittest.TestCase):
                 ("GET", "/api/chat/events"),
                 ("POST", "/api/chat/world"),
                 ("POST", "/api/chat/whisper"),
+                ("POST", "/api/mail/system"),
             },
         )
 

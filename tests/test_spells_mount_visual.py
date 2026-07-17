@@ -976,7 +976,76 @@ def test_dismount_clears_flying_runtime_state(monkeypatch):
     assert session.is_flying is False
     assert session.movement_state.is_ascending is False
     assert session.movement_state.is_descending is False
-    assert session.movement_state.flags == 0
+    assert session.movement_state.flags == spells_handlers._MOVEMENTFLAG_FALLING
+    assert session.movement_state.has_fall_data is True
+    assert session.movement_state.fall_time == 0
+
+
+def test_ground_dismount_enters_normal_fall_without_repositioning(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    state = SimpleNamespace(
+        flags=spells_handlers._MOVEMENTFLAG_CAN_FLY,
+        is_ascending=False,
+        is_descending=False,
+        has_fall_data=False,
+        transport_guid=0,
+        has_transport_data=False,
+    )
+    session = SimpleNamespace(
+        is_mounted=True,
+        mount_spell=72286,
+        mount_display_id=31007,
+        is_flying=False,
+        can_fly=True,
+        mount_owns_flight_capability=True,
+        unit_flags=spells_handlers._UNIT_FLAG_MOUNT,
+        movement_state=state,
+    )
+    monkeypatch.setattr(spells_handlers, "clear_persisted_mount_state", lambda _target: None)
+    monkeypatch.setattr(spells_handlers, "send_dismount_update", lambda target: spells_handlers._set_flying_capability_state(target, False) and [])
+    monkeypatch.setattr(spells_handlers, "resync_movement", lambda _target: [])
+
+    position_before = (getattr(session, "x", 0.0), getattr(session, "y", 0.0), getattr(session, "z", 0.0))
+    spells_handlers.dismount(session)
+
+    assert state.flags & spells_handlers._MOVEMENTFLAG_FALLING
+    assert state.has_fall_data is True
+    assert (getattr(session, "x", 0.0), getattr(session, "y", 0.0), getattr(session, "z", 0.0)) == position_before
+
+
+def test_aerial_dismount_with_independent_flight_capability_keeps_flying(monkeypatch):
+    spells_handlers = _import_spells_handlers()
+    state = SimpleNamespace(
+        flags=(
+            spells_handlers._MOVEMENTFLAG_CAN_FLY
+            | spells_handlers._MOVEMENTFLAG_FLYING
+        ),
+        is_ascending=False,
+        is_descending=False,
+        has_fall_data=False,
+        transport_guid=0,
+        has_transport_data=False,
+    )
+    session = SimpleNamespace(
+        is_mounted=True,
+        mount_spell=72286,
+        mount_display_id=31007,
+        is_flying=True,
+        can_fly=True,
+        mount_owns_flight_capability=False,
+        unit_flags=spells_handlers._UNIT_FLAG_MOUNT,
+        movement_state=state,
+    )
+    monkeypatch.setattr(spells_handlers, "clear_persisted_mount_state", lambda _target: None)
+    monkeypatch.setattr(spells_handlers, "send_dismount_update", lambda _target: [])
+    monkeypatch.setattr(spells_handlers, "resync_movement", lambda _target: [])
+
+    spells_handlers.dismount(session)
+
+    assert session.can_fly is True
+    assert session.is_flying is True
+    assert state.flags & spells_handlers._MOVEMENTFLAG_FLYING
+    assert not state.flags & spells_handlers._MOVEMENTFLAG_FALLING
 
 
 def test_mount_and_dismount_broadcast_visual_update_to_visible_peers(monkeypatch):

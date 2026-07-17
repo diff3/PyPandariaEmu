@@ -1039,6 +1039,181 @@ def test_build_creature_update_payload_uses_create_object2():
     assert payload[6] == 2
 
 
+def test_flying_creature_uses_addon_mount_and_canonical_air_movement():
+    creatures = _import_creatures()
+    entry = {
+        "guid": 161145,
+        "entry": 51346,
+        "modelid": 0,
+        "npcflag": 0,
+        "template": {
+            "modelid1": 35518,
+            "faction_A": 85,
+            "unit_flags": 32768,
+            "InhabitType": 7,
+            "HoverHeight": 1.0,
+        },
+        "addon": {"mount": 17719, "bytes1": 50331648, "bytes2": 257},
+        "x": 1798.11,
+        "y": -4391.28,
+        "z": 118.519,
+        "orientation": 1.0,
+    }
+    world_guid = creatures.CreatureGuid.from_spawn_guid(entry["guid"], 1)
+
+    fields = creatures._build_creature_field_values(entry, world_guid=world_guid)
+    movement_flags = creatures._creature_movement_flags(entry["template"])
+    create_flags = creatures._build_creature_create_flags_with_movement(movement_flags)
+    bits = [
+        (byte >> (7 - bit)) & 1
+        for byte in create_flags
+        for bit in range(8)
+    ]
+
+    assert fields[creatures._UNIT_FIELD_MOUNT_DISPLAY_ID] == 17719
+    assert fields[creatures._UNIT_FIELD_BYTES_1] == 50331648
+    assert fields[creatures._UNIT_FIELD_FLAGS] == 32768
+    assert int("".join(str(value) for value in bits[97:127]), 2) == 0x00000200
+
+
+def test_ground_creature_does_not_disable_gravity():
+    creatures = _import_creatures()
+
+    assert creatures._creature_movement_flags({"InhabitType": 1}) == 0
+
+
+def test_ground_creature_keeps_existing_create_movement_flags():
+    creatures = _import_creatures()
+
+    assert (
+        creatures._build_creature_create_flags_with_movement(0)
+        == creatures._build_creature_create_flags()
+    )
+
+
+def test_transport_creature_uses_canonical_local_offsets(monkeypatch):
+    creatures = _import_creatures()
+    transport_guid = 0x1FC0000000012345
+    session = SimpleNamespace(
+        map_id=1,
+        loaded_transport_entries={
+            transport_guid: {
+                "entry": 176310,
+                "map": 1,
+                "x": 100.0,
+                "y": 200.0,
+                "z": 30.0,
+                "orientation": 0.0,
+            }
+        }
+    )
+    db = SimpleNamespace(
+        get_creature_transport_rows=lambda entries: [{
+            "guid": 17,
+            "transport_entry": 176310,
+            "npc_entry": 25012,
+            "TransOffsetX": 18.0,
+            "TransOffsetY": -7.0,
+            "TransOffsetZ": 6.0,
+            "TransOffsetO": 1.5,
+            "emote": 0,
+        }]
+    )
+    monkeypatch.setattr(
+        "server.modules.handlers.world.transport_runtime.authoritative_transport_entry_for_guid",
+        lambda _guid: None,
+    )
+
+    entries = creatures._transport_creature_entries(session, db)
+
+    assert len(entries) == 1
+    assert entries[0]["entry"] == 25012
+    assert (entries[0]["x"], entries[0]["y"], entries[0]["z"]) == (118.0, 193.0, 36.0)
+    assert entries[0]["transport"] == {
+        "guid": transport_guid,
+        "x": 18.0,
+        "y": -7.0,
+        "z": 6.0,
+        "orientation": 1.5,
+        "time": 0,
+    }
+
+
+def test_transport_creature_is_not_visible_after_transport_changes_map(monkeypatch):
+    creatures = _import_creatures()
+    transport_guid = 0x1FC0000000012345
+    session = SimpleNamespace(
+        map_id=1,
+        loaded_transport_entries={transport_guid: {"entry": 176310, "map": 0}},
+    )
+    db = SimpleNamespace(get_creature_transport_rows=lambda _entries: [])
+    monkeypatch.setattr(
+        "server.modules.handlers.world.transport_runtime.authoritative_transport_entry_for_guid",
+        lambda _guid: {"entry": 176310, "map": 0},
+    )
+
+    assert creatures._transport_creature_entries(session, db) == []
+
+
+def test_transport_creature_create_contains_attached_living_block():
+    creatures = _import_creatures()
+    entry = {
+        "guid": creatures._TRANSPORT_CREATURE_GUID_BASE | 17,
+        "entry": 25012,
+        "map_id": 1,
+        "x": 118.0,
+        "y": 193.0,
+        "z": 36.0,
+        "orientation": 1.5,
+        "template": {"modelid1": 28045, "InhabitType": 3},
+        "addon": {},
+        "transport": {
+            "guid": 0x1FC0000000012345,
+            "x": 18.0,
+            "y": -7.0,
+            "z": 6.0,
+            "orientation": 1.5,
+            "time": 1234,
+        },
+    }
+
+    payload = creatures._build_creature_update_payload(
+        map_id=1,
+        entry=entry,
+        realm_id=1,
+    )
+
+    assert payload[0:2] == b"\x01\x00"
+    assert payload[6] == 2
+    assert len(payload) > 100
+
+
+def test_transport_creature_living_block_does_not_set_player_self_flag():
+    creatures = _import_creatures()
+    from server.modules.handlers.world.bootstrap.playerobjects import (
+        build_skyfire_player_create_living_movement_block,
+    )
+    ctx = SimpleNamespace(
+        world_guid=creatures.CreatureGuid.from_spawn_guid(
+            creatures._TRANSPORT_CREATURE_GUID_BASE | 17,
+            1,
+        ),
+        x=1.0, y=2.0, z=3.0, orientation=0.5,
+        movement_flags=0, movement_flags2=0, movement_counter=0,
+        movement_timestamp=1, has_transport_data=True,
+        transport_guid=0x1FC0000000012345,
+        transport_x=4.0, transport_y=5.0, transport_z=6.0,
+        transport_orientation=0.25, transport_time=10,
+        transport_time2=0, transport_time3=0, transport_seat=-1,
+    )
+
+    player_block = build_skyfire_player_create_living_movement_block(ctx)
+    creature_block = build_skyfire_player_create_living_movement_block(ctx, is_self=False)
+
+    assert player_block[4] & 0x40
+    assert not creature_block[4] & 0x40
+
+
 def test_build_creature_update_payload_normalizes_negative_orientation():
     creatures = _import_creatures()
     entry = {
