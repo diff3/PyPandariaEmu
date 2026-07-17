@@ -97,6 +97,26 @@ def test_transport_and_login_refresh_share_the_canonical_pipeline():
         session,
         context="login-bootstrap",
         _object_streamer=stream,
+        _area_trigger_sync=lambda target: calls.append(("area", target)),
     )
 
-    assert calls == [True, True]
+    assert calls == [True, ("area", session), True]
+
+
+def test_login_seeds_area_trigger_state_before_world_streaming():
+    session = _session()
+    calls = []
+
+    WorldRefreshService().refresh_after_login(
+        session,
+        context="login-bootstrap",
+        _area_trigger_sync=lambda target: calls.append(("area", target)),
+        _object_streamer=lambda target, *, transition_bootstrap=False: calls.append(
+            ("stream", target, transition_bootstrap)
+        ) or [],
+    )
+
+    assert calls == [
+        ("area", session),
+        ("stream", session, True),
+    ]

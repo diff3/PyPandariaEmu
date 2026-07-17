@@ -233,6 +233,69 @@ def test_gm_hierarchical_roots_are_in_live_registry():
     assert registry["cheat"].usage.startswith(".cheat <fly | taxi | map")
     assert "time | weather | message" in registry["server"].usage
     assert "world" not in registry
+    assert registry["toprison"].usage == ".toprison <player>"
+    assert registry["release"].usage == ".release <player>"
+
+
+def test_toprison_sets_state_teleports_and_notifies(monkeypatch):
+    commands = chat_handlers.chat_commands
+    sent = []
+    target = SimpleNamespace(
+        player_name="Thrall",
+        imprisoned=False,
+        send_response=lambda responses: sent.append(responses),
+    )
+    location = SimpleNamespace(
+        name="Test Holding Cell",
+        destination=SimpleNamespace(map_id=369),
+    )
+    transfer_calls = []
+
+    from server.modules.handlers.world.teleport import imprisonment, map_transfer
+
+    monkeypatch.setattr(commands, "find_online_player_by_name", lambda name: target)
+    monkeypatch.setattr(commands.random, "choice", lambda locations: location)
+    monkeypatch.setattr(imprisonment, "PRISON_LOCATIONS", (location,))
+    monkeypatch.setattr(
+        map_transfer,
+        "apply_map_transfer",
+        lambda session, destination, **kwargs: transfer_calls.append(
+            (session, destination, kwargs)
+        ) or [("SMSG_MOVE_TELEPORT", b"prison")],
+    )
+
+    responses = commands.cmd_toprison(SimpleNamespace(), ["Thrall"])
+
+    assert target.imprisoned is True
+    assert transfer_calls == [
+        (
+            target,
+            location.destination,
+            {"reason": "gm-prison", "allow_imprisoned": True},
+        )
+    ]
+    assert sent and sent[0][0] == ("SMSG_MOVE_TELEPORT", b"prison")
+    assert any(b"imprisoned until released" in payload for _opcode, payload in sent[0])
+    assert b"Test Holding Cell" in responses[0][1]
+
+
+def test_release_clears_state_without_teleport(monkeypatch):
+    commands = chat_handlers.chat_commands
+    sent = []
+    target = SimpleNamespace(
+        player_name="Thrall",
+        imprisoned=True,
+        send_response=lambda responses: sent.append(responses),
+    )
+    monkeypatch.setattr(commands, "find_online_player_by_name", lambda name: target)
+
+    responses = commands.cmd_release(SimpleNamespace(), ["Thrall"])
+
+    assert target.imprisoned is False
+    assert len(sent) == 1
+    assert sent[0][0][0] == "SMSG_MESSAGECHAT"
+    assert b"You have been released by a Game Master." in sent[0][0][1]
+    assert b"has been released" in responses[0][1]
 
 
 def test_every_live_command_declares_a_gm_level():

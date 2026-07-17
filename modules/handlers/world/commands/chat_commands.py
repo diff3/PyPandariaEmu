@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 import math
+import random
 import re
 import time
 from types import SimpleNamespace
@@ -2247,6 +2248,76 @@ def cmd_fetch(session, args: list[str]) -> list[tuple[str, bytes]]:
 
     return _notification_response(f"[Fetch] {target_name} -> you")
 
+
+def cmd_toprison(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args:
+        return _notification_response("Usage: .toprison <player>")
+
+    target_name = " ".join(args).strip()
+    target = find_online_player_by_name(target_name)
+    if target is None:
+        return _notification_response("Player not found or is not online")
+
+    from server.modules.handlers.world.teleport.imprisonment import (
+        PRISON_LOCATIONS,
+        imprison,
+    )
+    from server.modules.handlers.world.teleport.map_transfer import apply_map_transfer
+
+    location = random.choice(PRISON_LOCATIONS)
+    was_imprisoned = bool(getattr(target, "imprisoned", False))
+    imprison(target)
+    try:
+        responses = apply_map_transfer(
+            target,
+            location.destination,
+            reason="gm-prison",
+            allow_imprisoned=True,
+        )
+    except Exception:
+        if not was_imprisoned:
+            target.imprisoned = False
+        raise
+
+    responses.extend(
+        _notification_response("The city guard escorts you into custody.")
+    )
+    responses.extend(
+        _notification_response(
+            "You have been imprisoned until released by a Game Master."
+        )
+    )
+    target.send_response(responses)
+    player_name = str(getattr(target, "player_name", target_name) or target_name)
+    return _notification_response(
+        f"Player {player_name} has been imprisoned in the {location.name}."
+    )
+
+
+def cmd_release(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args:
+        return _notification_response("Usage: .release <player>")
+
+    target_name = " ".join(args).strip()
+    target = find_online_player_by_name(target_name)
+    if target is None:
+        return _notification_response("Player not found or is not online")
+
+    from server.modules.handlers.world.teleport.imprisonment import (
+        is_imprisoned,
+        release,
+    )
+
+    if not is_imprisoned(target):
+        return _notification_response(f"Player {target_name} is not imprisoned.")
+
+    release(target)
+    target.send_response(
+        _notification_response("You have been released by a Game Master.")
+    )
+    player_name = str(getattr(target, "player_name", target_name) or target_name)
+    return _notification_response(f"Player {player_name} has been released.")
+
 _DEFAULT_MOTD = "Welcome to PyPandaria!"
 _MOTD = _DEFAULT_MOTD
 _DEFAULT_CONFIG_MOTD_PATH = Path(__file__).resolve().parents[5] / "config" / "default.yaml"
@@ -2549,6 +2620,7 @@ PRIMARY_COMMANDS = {
     ),
     "petbattle": Command(handler=cmd_petbattle, usage=".petbattle <start | stop | status>", required_level=GMLevel.GAME_MASTER, description="Controls the pet-battle test mode."),
     "pvg": Command(handler=cmd_plants_vs_ghouls, usage=".pvg <start | stop | status | plant <lane 1-5> <spitter | rocknut>>", required_level=GMLevel.GAME_MASTER, description="Controls the Plants vs. Ghouls test event."),
+    "release": Command(handler=cmd_release, usage=".release <player>", required_level=GMLevel.GAME_MASTER, description="Releases an online player from prison without teleporting them.", require_args=True),
     "save": Command(handler=cmd_save, usage=".save", required_level=GMLevel.PLAYER, description="Saves the current character state.", allow_args=False),
     "server": Command(
         handler=cmd_server,
@@ -2560,6 +2632,7 @@ PRIMARY_COMMANDS = {
     "speed": Command(handler=cmd_speed, usage=".speed <multiplier | default>", required_level=GMLevel.GAME_MASTER, description="Changes your movement-speed multiplier."),
     "spell": Command(handler=cmd_spell, usage=".spell <cast | aura> ...", required_level=GMLevel.GAME_MASTER, description="Casts a spell or applies a removable test aura.", require_args=True),
     "title": Command(handler=cmd_title, usage=".title <bitIndex | explorer | off>", required_level=GMLevel.GAME_MASTER, description="Grants, selects, or clears a character title.", require_args=True),
+    "toprison": Command(handler=cmd_toprison, usage=".toprison <player>", required_level=GMLevel.GAME_MASTER, description="Teleports an online player to a random holding cell and blocks player teleports.", require_args=True),
     # "telxyz": Command(handler=cmd_telxyz, usage=".telxyz <map> <x> <y> <z> <orientation>"),
     "tel": Command(
         handler=cmd_tel,

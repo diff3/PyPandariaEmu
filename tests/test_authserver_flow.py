@@ -3,9 +3,13 @@ import struct
 import time
 
 from server.authserver import (
+    AUTH_RATE_LIMIT,
+    AUTH_RATE_MAX,
     ConnectionContext,
     INITIAL_STATE,
     StepResult,
+    apply_auth_rate_result,
+    auth_rate_limit_exceeded,
     next_state,
     previous_state,
     step_controller,
@@ -34,6 +38,79 @@ def test_state_helpers_follow_expected_auth_flow():
     assert previous_state("REALM_LIST") == "AUTH_LOGON_PROOF"
     assert previous_state("AUTH_LOGON_PROOF") == "AUTH_LOGON_CHALLENGE"
     assert previous_state("AUTH_LOGON_CHALLENGE") == INITIAL_STATE
+
+
+def test_successful_logins_never_accumulate_rate_limit_entries():
+    ip = "192.0.2.10"
+    AUTH_RATE_LIMIT.pop(ip, None)
+
+    for attempt in range(AUTH_RATE_MAX * 3):
+        apply_auth_rate_result(
+            ip,
+            "AUTH_LOGON_PROOF_C",
+            StepResult.SUCCESS,
+            auth_failed=False,
+            now=float(attempt),
+        )
+
+    assert AUTH_RATE_LIMIT.get(ip) is None
+    assert auth_rate_limit_exceeded(ip, now=100.0) is False
+
+
+def test_repeated_invalid_passwords_still_trigger_rate_limit():
+    ip = "192.0.2.11"
+    AUTH_RATE_LIMIT.pop(ip, None)
+
+    for attempt in range(AUTH_RATE_MAX):
+        apply_auth_rate_result(
+            ip,
+            "AUTH_LOGON_PROOF_C",
+            StepResult.SUCCESS,
+            auth_failed=True,
+            now=float(attempt),
+        )
+
+    assert len(AUTH_RATE_LIMIT[ip]) == AUTH_RATE_MAX
+    assert auth_rate_limit_exceeded(ip, now=float(AUTH_RATE_MAX)) is True
+
+
+def test_successful_login_resets_previous_failures():
+    ip = "192.0.2.12"
+    AUTH_RATE_LIMIT[ip] = [1.0, 2.0, 3.0]
+
+    apply_auth_rate_result(
+        ip,
+        "AUTH_LOGON_PROOF_C",
+        StepResult.SUCCESS,
+        auth_failed=False,
+        now=4.0,
+    )
+
+    assert AUTH_RATE_LIMIT.get(ip) is None
+    assert auth_rate_limit_exceeded(ip, now=4.0) is False
+
+
+def test_realm_list_and_successful_reconnect_do_not_accumulate_failures():
+    ip = "192.0.2.13"
+    AUTH_RATE_LIMIT[ip] = [1.0, 2.0]
+
+    apply_auth_rate_result(
+        ip,
+        "REALM_LIST_C",
+        StepResult.SUCCESS,
+        auth_failed=False,
+        now=3.0,
+    )
+    assert AUTH_RATE_LIMIT[ip] == [1.0, 2.0]
+
+    apply_auth_rate_result(
+        ip,
+        "AUTH_RECONNECT_CHALLENGE_C",
+        StepResult.SUCCESS,
+        auth_failed=False,
+        now=4.0,
+    )
+    assert AUTH_RATE_LIMIT.get(ip) is None
 
 
 def test_realm_list_size_counts_payload_after_three_byte_header():

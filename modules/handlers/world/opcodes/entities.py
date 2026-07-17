@@ -516,14 +516,16 @@ def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[li
             note="visible_lookup_miss",
         )
         Logger.info(
-            "[GAMEOBJECT_USE] missing visible gameobject guid=0x%016X; trying nearest teleport/chair",
+            "[GAMEOBJECT_USE] ignoring unavailable gameobject guid=0x%016X",
             int(guid),
         )
-        entry = _find_nearest_teleport_gameobject(session)
-        if entry is None:
-            entry = _find_nearest_chair(session)
-        if entry is None:
-            return 0, None
+        # The 5.4.8 client can emit REPORT_USE followed by USE for one click.
+        # A successful first interaction may already have moved the session to
+        # another map, so substituting a different nearby object here can start
+        # a second, unrelated teleport while the first worldport is in flight.
+        # Nearest-object compatibility is only safe when no target GUID could
+        # be decoded at all.
+        return 0, None
 
     _log_gameobject_interaction_packet(
         session,

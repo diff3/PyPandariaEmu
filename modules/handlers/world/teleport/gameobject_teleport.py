@@ -8,7 +8,9 @@ import time
 from typing import Any
 
 from shared.Logger import Logger
+from shared.PathUtils import get_dbc_root
 from server.modules.database.DatabaseConnection import DatabaseConnection
+from server.modules.dbc import read_dbc
 from server.modules.handlers.world.teleport.map_transfer import (
     TeleportDestination,
     apply_map_transfer,
@@ -25,6 +27,10 @@ GO_FLAG_NOT_SELECTABLE = 0x00000010
 TELEPORT_GAMEOBJECT_USE_RADIUS = 10.0
 TELEPORT_GAMEOBJECT_SPAM_GUARD_SECONDS = 1.0
 PORTAL_NAME_TOKENS = ("portal", "teleport")
+_DBC_SPELL_EFFECT_FMT = "i" * 30
+_SPELL_EFFECT_TRIGGER_SPELL_INDEX = 23
+_SPELL_EFFECT_SPELL_ID_INDEX = 27
+_triggered_spells_by_spell: dict[int, tuple[int, ...]] | None = None
 
 
 def _entry_int(entry: dict[str, Any], key: str, default: int = 0) -> int:
@@ -92,6 +98,41 @@ def _spell_id_for_gameobject(entry: dict[str, Any]) -> int:
     if gameobject_type == GAMEOBJECT_TYPE_TRAP:
         return _entry_int(entry, "data3")
     return 0
+
+
+def _load_triggered_spells_by_spell() -> dict[int, tuple[int, ...]]:
+    global _triggered_spells_by_spell
+    if _triggered_spells_by_spell is not None:
+        return _triggered_spells_by_spell
+
+    discovered: dict[int, list[int]] = {}
+    dbc_root = get_dbc_root()
+    spell_effect_path = dbc_root / "SpellEffect.dbc" if dbc_root else None
+    if spell_effect_path and spell_effect_path.is_file():
+        try:
+            for record in read_dbc(spell_effect_path, _DBC_SPELL_EFFECT_FMT):
+                spell_id = int(record[_SPELL_EFFECT_SPELL_ID_INDEX] or 0)
+                triggered_spell_id = int(record[_SPELL_EFFECT_TRIGGER_SPELL_INDEX] or 0)
+                if spell_id > 0 and triggered_spell_id > 0:
+                    values = discovered.setdefault(spell_id, [])
+                    if triggered_spell_id not in values:
+                        values.append(triggered_spell_id)
+        except Exception as exc:
+            Logger.warning("[GO_TELEPORT] failed to read triggered spells from SpellEffect.dbc: %s", exc)
+
+    _triggered_spells_by_spell = {
+        spell_id: tuple(triggered_spell_ids)
+        for spell_id, triggered_spell_ids in discovered.items()
+    }
+    return _triggered_spells_by_spell
+
+
+def _teleport_spell_ids(spell_id: int) -> tuple[int, ...]:
+    """Return the authored GO spell followed by any directly triggered spells."""
+    root_spell_id = int(spell_id or 0)
+    if root_spell_id <= 0:
+        return ()
+    return (root_spell_id, *_load_triggered_spells_by_spell().get(root_spell_id, ()))
 
 
 def _is_named_portal(entry: dict[str, Any]) -> bool:
@@ -193,7 +234,14 @@ def resolve_gameobject_teleport_destination(entry: dict[str, Any]) -> TeleportDe
         )
         return None
 
-    spell_row = DatabaseConnection.get_spell_target_position(spell_id)
+    destination_spell_id = 0
+    spell_row = None
+    for candidate_spell_id in _teleport_spell_ids(spell_id):
+        spell_row = DatabaseConnection.get_spell_target_position(candidate_spell_id)
+        if spell_row:
+            destination_spell_id = candidate_spell_id
+            break
+
     if not spell_row:
         Logger.info(
             "[GO_TELEPORT] spell has no target guid=%s entry=%s spell=%s name=%r",
@@ -205,12 +253,16 @@ def resolve_gameobject_teleport_destination(entry: dict[str, Any]) -> TeleportDe
         return _destination_from_portal_name(template, spell_id=spell_id)
 
     Logger.info(
-        "[GO_TELEPORT] destination spell guid=%s entry=%s spell=%s",
+        "[GO_TELEPORT] destination spell guid=%s entry=%s spell=%s destination_spell=%s",
         int(spawn_guid),
         int(go_entry),
         int(spell_id),
+        int(destination_spell_id),
     )
-    return _destination_from_row(spell_row, name=f"go:{go_entry}:spell:{spell_id}")
+    return _destination_from_row(
+        spell_row,
+        name=f"go:{go_entry}:spell:{destination_spell_id}",
+    )
 
 
 def _has_invalid_interaction_flags(entry: dict[str, Any]) -> bool:

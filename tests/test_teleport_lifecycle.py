@@ -80,9 +80,51 @@ def test_map_transfer_is_compatibility_entry_into_lifecycle(monkeypatch):
         (
             session,
             destination,
-            {"reason": "delegate-test", "keep_transport": False},
+            {
+                "reason": "delegate-test",
+                "keep_transport": False,
+                "allow_imprisoned": False,
+            },
         )
     ]
+
+
+def test_imprisoned_player_cannot_enter_teleport_pipeline(monkeypatch):
+    session = _session()
+    session.imprisoned = True
+    lifecycle = TeleportLifecycle()
+    monkeypatch.setattr(
+        "server.modules.handlers.world.chat.codec.encode_skyfire_messagechat_system_payload",
+        lambda message: message.encode(),
+    )
+
+    responses = lifecycle.teleport(
+        session,
+        TeleportDestination(1, 10.0, 20.0, 30.0, 0.0, "blocked"),
+        reason="hearthstone",
+    )
+
+    assert responses[0][0] == "SMSG_MESSAGECHAT"
+    assert b"imprisoned" in responses[0][1]
+    assert session.teleport_destination is None
+    assert session.world_transition_generation == 0
+
+
+def test_administrative_prison_transfer_can_enter_pipeline(monkeypatch):
+    session = _session()
+    session.imprisoned = True
+    lifecycle = TeleportLifecycle()
+    destination = TeleportDestination(369, 1.0, 2.0, 3.0, 0.0, "cell")
+    transition = object()
+    monkeypatch.setattr(lifecycle, "begin_transition", lambda *args, **kwargs: transition)
+    monkeypatch.setattr(lifecycle, "perform_transfer", lambda target, value: [("OK", b"")])
+
+    assert lifecycle.teleport(
+        session,
+        destination,
+        reason="gm-prison",
+        allow_imprisoned=True,
+    ) == [("OK", b"")]
 
 
 def test_deferred_completion_uses_existing_worldport_refresh_flag():
@@ -94,8 +136,14 @@ def test_deferred_completion_uses_existing_worldport_refresh_flag():
         session,
         context="test-complete",
         refresh="deferred",
+        _area_trigger_sync=lambda target: setattr(
+            target,
+            "area_trigger_state_seeded",
+            True,
+        ),
     )
 
     assert responses == []
     assert session.world_transition_owner is None
     assert session._worldport_destination_visibility_refresh_pending is True
+    assert session.area_trigger_state_seeded is True

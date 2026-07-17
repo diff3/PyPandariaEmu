@@ -196,6 +196,66 @@ def test_gameobject_use_resolves_spellcaster_spell_teleport(monkeypatch):
     assert captured["destination"].name == "go:201:spell:76543"
 
 
+def test_gameobject_use_resolves_triggered_spell_teleport(monkeypatch):
+    portal = _goober(
+        guid=63,
+        entry=215457,
+        type=gameobject_teleport.GAMEOBJECT_TYPE_SPELLCASTER,
+        data0=130703,
+        data10=0,
+        name="Portal to Paw don Village",
+    )
+    requested_spells = []
+
+    monkeypatch.setattr(
+        gameobject_teleport.DatabaseConnection,
+        "get_gameobject_teleport",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        gameobject_teleport.DatabaseConnection,
+        "get_gameobject_template",
+        lambda entry: portal,
+    )
+    monkeypatch.setattr(
+        gameobject_teleport,
+        "_teleport_spell_ids",
+        lambda spell_id: (spell_id, 130702),
+    )
+
+    def target_position(spell_id, effect_index=0):
+        requested_spells.append(spell_id)
+        if spell_id != 130702:
+            return None
+        return {
+            "id": 130702,
+            "effIndex": effect_index,
+            "target_map": 870,
+            "target_position_x": -437.214,
+            "target_position_y": -1907.87,
+            "target_position_z": 53.5862,
+            "target_orientation": 2.89331,
+        }
+
+    monkeypatch.setattr(
+        gameobject_teleport.DatabaseConnection,
+        "get_spell_target_position",
+        target_position,
+    )
+
+    destination = gameobject_teleport.resolve_gameobject_teleport_destination(portal)
+
+    assert requested_spells == [130703, 130702]
+    assert destination == TeleportDestination(
+        map_id=870,
+        x=-437.214,
+        y=-1907.87,
+        z=53.5862,
+        orientation=2.89331,
+        name="go:215457:spell:130702",
+    )
+
+
 def test_gameobject_use_resolves_named_portal_via_game_tele_when_spell_target_is_missing(monkeypatch):
     session = _session()
     portal = _goober(
@@ -389,6 +449,37 @@ def test_chair_use_falls_back_to_nearest_chair_when_guid_payload_is_unknown(monk
     assert responses == [("SMSG_MOVE_TELEPORT", b"teleport"), ("SMSG_UPDATE_OBJECT", b"stand")]
     assert session.player_stand_state == 5
     assert session.current_seat == 0
+
+
+def test_decoded_gameobject_miss_never_activates_a_different_nearby_portal(monkeypatch):
+    session = _session()
+    requested_guid = GameObjectGuid.from_spawn_guid(999, 1)
+    nearby_portal = _goober(guid=60, entry=200)
+
+    monkeypatch.setattr(
+        entities.DatabaseConnection,
+        "get_gameobjects_near",
+        lambda *args, **kwargs: [nearby_portal],
+    )
+    monkeypatch.setattr(
+        entities,
+        "_find_nearest_teleport_gameobject",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("decoded target miss must not use a different portal")
+        ),
+    )
+
+    code, responses = entities.handle_gameobject_use(
+        session,
+        SimpleNamespace(
+            name="CMSG_GAME_OBJ_USE",
+            payload=b"",
+            decoded={"guid": requested_guid},
+        ),
+    )
+
+    assert code == 0
+    assert responses is None
 
 
 def test_chair_multi_seat_blocks_occupied_seat(monkeypatch):

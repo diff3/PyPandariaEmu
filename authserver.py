@@ -128,6 +128,72 @@ class ConnectionContext:
     username: str | None = None
     srp_session: SRP6Session | None = None
     auth_failed: bool = False
+    last_auth_failed: bool = False
+
+
+def _prune_auth_failures(ip: str, now: float) -> list[float]:
+    bucket = [
+        timestamp
+        for timestamp in AUTH_RATE_LIMIT.get(str(ip), [])
+        if float(now) - float(timestamp) < AUTH_RATE_WINDOW
+    ]
+    if bucket:
+        AUTH_RATE_LIMIT[str(ip)] = bucket
+    else:
+        AUTH_RATE_LIMIT.pop(str(ip), None)
+    return bucket
+
+
+def auth_rate_limit_exceeded(ip: str, *, now: float | None = None) -> bool:
+    current_time = time.time() if now is None else float(now)
+    with RATE_LIMIT_LOCK:
+        return len(_prune_auth_failures(str(ip), current_time)) >= AUTH_RATE_MAX
+
+
+def record_auth_failure(ip: str, *, now: float | None = None) -> None:
+    current_time = time.time() if now is None else float(now)
+    with RATE_LIMIT_LOCK:
+        bucket = _prune_auth_failures(str(ip), current_time)
+        before = len(bucket)
+        bucket.append(current_time)
+        AUTH_RATE_LIMIT[str(ip)] = bucket
+        after = len(bucket)
+    Logger.debug(
+        "[AUTH_RATE] failed login ip=%s counter_before=%s counter_after=%s",
+        ip,
+        before,
+        after,
+    )
+
+
+def reset_auth_failures(ip: str) -> None:
+    with RATE_LIMIT_LOCK:
+        before = len(AUTH_RATE_LIMIT.get(str(ip), []))
+        AUTH_RATE_LIMIT.pop(str(ip), None)
+    Logger.debug(
+        "[AUTH_RATE] successful login ip=%s counter_before=%s counter_after=0",
+        ip,
+        before,
+    )
+
+
+def apply_auth_rate_result(
+    ip: str,
+    opcode_name: str,
+    result: StepResult,
+    *,
+    auth_failed: bool,
+    now: float | None = None,
+) -> None:
+    if bool(auth_failed) or result in FAILURE_RESULTS:
+        record_auth_failure(ip, now=now)
+        return
+
+    if result == StepResult.SUCCESS and opcode_name in (
+        "AUTH_LOGON_PROOF_C",
+        "AUTH_RECONNECT_CHALLENGE_C",
+    ):
+        reset_auth_failures(ip)
 
 
 def next_state(state: str) -> str:
@@ -355,6 +421,7 @@ def process_packet(
     data: bytes,
     sock: socket.socket,
 ) -> tuple[StepResult, bytes | None]:
+    conn_ctx.last_auth_failed = False
     if not data:
         conn_ctx.last_error = "empty packet"
         Logger.warning("[AuthServer] empty client packet")
@@ -406,6 +473,7 @@ def process_packet(
 
         return StepResult.FATAL, None
 
+    conn_ctx.last_auth_failed = bool(conn_ctx.auth_failed)
     username = extract_username(decoded)
     if username and not conn_ctx.auth_failed:
         conn_ctx.username = username
@@ -526,27 +594,19 @@ def handle_client(sock: socket.socket, addr: tuple[str, int]) -> None:
                 break
 
             ip = addr[0]
-            now = time.time()
-            exceeded = False
-
-            with RATE_LIMIT_LOCK:
-                bucket = AUTH_RATE_LIMIT.get(ip, [])
-                bucket = [
-                    t for t in bucket if now - t < AUTH_RATE_WINDOW
-                ]
-
-                if len(bucket) >= AUTH_RATE_MAX:
-                    exceeded = True
-                else:
-                    bucket.append(now)
-                    AUTH_RATE_LIMIT[ip] = bucket
-
-            if exceeded:
+            if auth_rate_limit_exceeded(ip):
                 Logger.warning("[AUTH] rate limit exceeded ip=%s", ip)
                 terminate_connection(sock, conn_ctx, "rate limit")
                 return
 
+            opcode_name = AUTH_CLIENT_OPCODES.get(data[0]) if data else None
             result, response = process_packet(conn_ctx, data, sock)
+            apply_auth_rate_result(
+                ip,
+                str(opcode_name or ""),
+                result,
+                auth_failed=conn_ctx.last_auth_failed,
+            )
 
             if response:
                 server_name = send_server_response(

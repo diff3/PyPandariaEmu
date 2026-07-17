@@ -67,6 +67,7 @@ def apply_map_transfer(
     keep_transport: bool = False,
     source_map_id: int | None = None,
     transport_entry: int | None = None,
+    allow_imprisoned: bool = False,
 ) -> list[tuple[str, bytes]]:
     target = TeleportDestination(
         map_id=int(destination.map_id),
@@ -81,12 +82,22 @@ def apply_map_transfer(
 
     from server.modules.handlers.world.teleport.lifecycle import get_teleport_lifecycle
 
-    responses = get_teleport_lifecycle().teleport(
+    from server.modules.handlers.world.teleport.imprisonment import can_player_teleport
+
+    lifecycle = get_teleport_lifecycle()
+    teleport_allowed = can_player_teleport(
+        session,
+        allow_imprisoned=bool(allow_imprisoned),
+    )
+    responses = lifecycle.teleport(
         session,
         target,
         reason=reason,
         keep_transport=bool(keep_transport),
+        allow_imprisoned=bool(allow_imprisoned),
     )
+    if not teleport_allowed:
+        return responses
     _reset_movement_for_teleport(session, target)
     from server.modules.handlers.world.teleport.area_trigger import (
         synchronize_area_trigger_state,

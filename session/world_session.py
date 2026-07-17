@@ -85,6 +85,7 @@ class WorldSession:
     # --------------------------------------------------
     active_mover_guid: Optional[int] = None
     phase_mask: int = 0
+    imprisoned: bool = False
 
     # --------------------------------------------------
     # Weather / world state

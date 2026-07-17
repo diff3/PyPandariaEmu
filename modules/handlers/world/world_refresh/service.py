@@ -150,7 +150,18 @@ class WorldRefreshService:
         _object_streamer=None,
         _visibility_sync=None,
         _object_refresh=None,
+        _area_trigger_sync=None,
     ) -> list[tuple[str, bytes]]:
+        # Login establishes a discontinuous world position rather than a
+        # movement segment. Seed containment silently so the first real
+        # movement cannot be mistaken for an AreaTrigger enter event.
+        if _area_trigger_sync is None:
+            from server.modules.handlers.world.teleport.area_trigger import (
+                synchronize_area_trigger_state,
+            )
+
+            _area_trigger_sync = synchronize_area_trigger_state
+        _area_trigger_sync(session)
         return self.refresh_player_world(
             session,
             context=context,

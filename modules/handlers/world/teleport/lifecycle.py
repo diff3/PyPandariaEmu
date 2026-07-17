@@ -26,6 +26,15 @@ class TeleportLifecycle:
     transport, login, and visibility services.
     """
 
+    @staticmethod
+    def can_begin_player_teleport(session, *, allow_imprisoned: bool = False) -> bool:
+        from server.modules.handlers.world.teleport.imprisonment import can_player_teleport
+
+        return can_player_teleport(
+            session,
+            allow_imprisoned=allow_imprisoned,
+        )
+
     def begin_transition(
         self,
         session,
@@ -315,7 +324,18 @@ class TeleportLifecycle:
         resync_multiplayer: bool = True,
         _object_refresh=None,
         _teleport_resync=None,
+        _area_trigger_sync=None,
     ) -> list[tuple[str, bytes]]:
+        # The destination position (including any transport/worldport
+        # reconstruction) is final at this boundary. Rebuild containment
+        # without executing enter scripts before normal movement resumes.
+        if _area_trigger_sync is None:
+            from server.modules.handlers.world.teleport.area_trigger import (
+                synchronize_area_trigger_state,
+            )
+
+            _area_trigger_sync = synchronize_area_trigger_state
+        _area_trigger_sync(session)
         from server.modules.handlers.world.teleport.transition import complete_world_transition
 
         complete_world_transition(session)
@@ -364,7 +384,25 @@ class TeleportLifecycle:
         keep_transport: bool = False,
         same_map_resync: bool = True,
         release_chair: bool = True,
+        allow_imprisoned: bool = False,
     ) -> list[tuple[str, bytes]]:
+        if not self.can_begin_player_teleport(
+            session,
+            allow_imprisoned=allow_imprisoned,
+        ):
+            from server.modules.handlers.world.chat.codec import (
+                encode_skyfire_messagechat_system_payload,
+            )
+
+            return [
+                (
+                    "SMSG_MESSAGECHAT",
+                    encode_skyfire_messagechat_system_payload(
+                        "You are imprisoned and cannot teleport until released by a Game Master."
+                    ),
+                )
+            ]
+
         transition = self.begin_transition(
             session,
             destination,
