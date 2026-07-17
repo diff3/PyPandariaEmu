@@ -1926,6 +1926,42 @@ class DatabaseConnection:
             return False
 
     @staticmethod
+    def remove_character_achievement_progress(
+        char_guid: int,
+        realm_id: int,
+        achievement_id: int,
+        criteria_ids: tuple[int, ...] = (),
+    ) -> bool:
+        if not DatabaseConnection.ensure_character_achievement_tables():
+            return False
+        session = DatabaseConnection.chars()
+        try:
+            session.execute(
+                text("""
+                    DELETE FROM character_achievement_completed
+                    WHERE guid = :guid AND realm = :realm
+                      AND achievement_id = :achievement_id
+                """),
+                {"guid": int(char_guid), "realm": int(realm_id), "achievement_id": int(achievement_id)},
+            )
+            for criteria_id in criteria_ids:
+                session.execute(
+                    text("""
+                        DELETE FROM character_achievement_progress
+                        WHERE guid = :guid AND realm = :realm AND criteria_id = :criteria_id
+                    """),
+                    {"guid": int(char_guid), "realm": int(realm_id), "criteria_id": int(criteria_id)},
+                )
+            session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            Logger.error(
+                f"[DB] remove_character_achievement_progress failed guid={char_guid} "
+                f"realm={realm_id} achievement={achievement_id}: {exc}"
+            )
+            return False
+    @staticmethod
     def save_character_level(char_guid: int, realm_id: int, level: int, *, xp: int = 0) -> bool:
         session = DatabaseConnection.chars()
         try:

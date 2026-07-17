@@ -546,6 +546,31 @@ def _award_achievement(
     return True, build_achievement_earned_payload(session, achievement_id, timestamp)
 
 
+def remove_achievement_by_id(session: Any, achievement_id: int) -> tuple[bool, list[tuple[str, bytes]]]:
+    """Remove one completed achievement and its criteria through the live state."""
+    achievement_id = int(achievement_id)
+    completed = _session_completed_achievements(session)
+    if achievement_id not in completed:
+        return False, []
+    completed.pop(achievement_id, None)
+    criteria_ids = tuple(
+        int(criteria.criteria_id)
+        for criteria in (_criteria_by_achievement().get(achievement_id) or [])
+    )
+    progress = _session_completed_criteria(session)
+    for criteria_id in criteria_ids:
+        progress.pop(criteria_id, None)
+    DatabaseConnection.remove_character_achievement_progress(
+        int(getattr(session, "char_guid", 0) or 0),
+        int(getattr(session, "realm_id", 1) or 1),
+        achievement_id,
+        criteria_ids,
+    )
+    responses = [("SMSG_ACHIEVEMENT_DELETED", struct.pack("<I", achievement_id))]
+    responses.extend(("SMSG_CRITERIA_DELETED", struct.pack("<I", criteria_id)) for criteria_id in criteria_ids)
+    return True, responses
+
+
 def _build_achievement_earned_responses(
     session: Any,
     achievement_id: int,

@@ -213,6 +213,128 @@ def _import_chat_codec():
 
 
 chat_handlers = _import_chat_handlers()
+
+
+def test_gm_obsolete_top_level_commands_are_not_registered():
+    obsolete = {
+        "additem", "addmoney", "addhearthstone", "learnspell", "castspell",
+        "taxi", "mapcheat", "time", "weather", "system", "roll", "mount",
+        "dismount", "testbuff",
+    }
+    assert obsolete.isdisjoint(chat_handlers.chat_commands.COMMANDS)
+
+
+def test_gm_hierarchical_roots_are_in_live_registry():
+    registry = chat_handlers.chat_commands.PRIMARY_COMMANDS
+    assert registry["add"].usage == ".add <item | money | hearthstone | bags> ..."
+    assert registry["learn"].usage == ".learn spell <spell_id>"
+    assert registry["spell"].usage == ".spell <cast | aura> ..."
+    assert registry["cheat"].usage.startswith(".cheat <fly | taxi | map")
+    assert "time | weather | message" in registry["server"].usage
+    assert "world" not in registry
+
+
+def test_help_without_argument_keeps_full_command_list():
+    responses = chat_handlers.chat_commands.cmd_help(SimpleNamespace(), [])
+
+    payloads = [payload for _opcode, payload in responses]
+    assert b"[Help] commands:" in payloads[0]
+    assert any(b".gps" in payload for payload in payloads)
+    assert len(responses) == len(chat_handlers.chat_commands.PRIMARY_COMMANDS) + 1
+
+
+def test_help_for_command_returns_usage_and_short_description():
+    responses = chat_handlers.chat_commands.cmd_help(SimpleNamespace(), ["gps"])
+
+    payloads = [payload for _opcode, payload in responses]
+    assert b"[Help] gps" in payloads[0]
+    assert any(b"Usage: .gps" in payload for payload in payloads)
+    assert any(b"current map, position, and orientation" in payload for payload in payloads)
+
+
+def test_help_for_unknown_command_is_harmless():
+    responses = chat_handlers.chat_commands.cmd_help(SimpleNamespace(), ["does-not-exist"])
+
+    assert len(responses) == 1
+    assert b"unknown command: does-not-exist" in responses[0][1]
+
+
+def test_gm_add_namespace_routes_without_legacy_lookup(monkeypatch):
+    commands = chat_handlers.chat_commands
+    calls = []
+    monkeypatch.setattr(commands, "cmd_additem", lambda session, args: calls.append(("item", args)) or [])
+    monkeypatch.setattr(commands, "cmd_addmoney", lambda session, args: calls.append(("money", args)) or [])
+    monkeypatch.setattr(commands, "cmd_addhearthstone", lambda session, args: calls.append(("hearthstone", args)) or [])
+    monkeypatch.setattr(commands, "cmd_addbags", lambda session, args: calls.append(("bags", args)) or [])
+
+    commands.cmd_add(SimpleNamespace(), ["item", "6948", "2"])
+    commands.cmd_add(SimpleNamespace(), ["money", "1g"])
+    commands.cmd_add(SimpleNamespace(), ["hearthstone"])
+    commands.cmd_add(SimpleNamespace(), ["bags"])
+
+    assert calls == [("item", ["6948", "2"]), ("money", ["1g"]), ("hearthstone", []), ("bags", [])]
+
+
+def test_gm_learn_and_spell_namespaces_route_subcommands(monkeypatch):
+    commands = chat_handlers.chat_commands
+    calls = []
+    monkeypatch.setattr(commands, "cmd_learnspell", lambda session, args: calls.append(("learn", args)) or [])
+    monkeypatch.setattr(commands, "cmd_castspell", lambda session, args: calls.append(("cast", args)) or [])
+    monkeypatch.setattr(commands, "cmd_testbuff", lambda session, args: calls.append(("aura", args)) or [])
+
+    commands.cmd_learn(SimpleNamespace(), ["spell", "123"])
+    commands.cmd_spell(SimpleNamespace(), ["cast", "456"])
+    commands.cmd_spell(SimpleNamespace(), ["aura", "789"])
+
+    assert calls == [("learn", ["123"]), ("cast", ["456"]), ("aura", ["789"])]
+
+
+def test_gm_cheat_namespace_routes_subcommands(monkeypatch):
+    commands = chat_handlers.chat_commands
+    calls = []
+    monkeypatch.setattr(commands, "_cheat_fly", lambda session, args: calls.append(("fly", args)) or [])
+    monkeypatch.setattr(commands, "cmd_taxi", lambda session, args: calls.append(("taxi", args)) or [])
+    monkeypatch.setattr(commands, "cmd_mapcheat", lambda session, args: calls.append(("map", args)) or [])
+
+    commands.cmd_cheat(SimpleNamespace(), ["fly", "on"])
+    commands.cmd_cheat(SimpleNamespace(), ["taxi", "on"])
+    commands.cmd_cheat(SimpleNamespace(), ["map", "on"])
+
+    assert calls == [("fly", ["on"]), ("taxi", ["on"]), ("map", ["on"])]
+
+
+def test_gm_server_namespace_routes_utility_subcommands(monkeypatch):
+    commands = chat_handlers.chat_commands
+    calls = []
+    monkeypatch.setattr(commands, "cmd_time", lambda session, args: calls.append(("time", args)) or [])
+    monkeypatch.setattr(commands, "cmd_weather", lambda session, args: calls.append(("weather", args)) or [])
+    monkeypatch.setattr(commands, "server_msg", lambda session, args: calls.append(("message", args)) or [])
+
+    commands.cmd_server(SimpleNamespace(), ["time", "noon"])
+    commands.cmd_server(SimpleNamespace(), ["weather", "rain", "0.5"])
+    commands.cmd_server(SimpleNamespace(), ["message", "hello", "world"])
+
+    assert calls == [
+        ("time", ["noon"]),
+        ("weather", ["rain", "0.5"]),
+        ("message", ["hello", "world"]),
+    ]
+
+
+def test_achievement_remove_uses_canonical_removal_service(monkeypatch):
+    commands = chat_handlers.chat_commands
+    achievement = SimpleNamespace(achievement_id=42, name="Explore Test")
+    monkeypatch.setattr(commands, "find_achievement_by_name", lambda query, limit=8: [achievement])
+    monkeypatch.setattr(
+        commands,
+        "remove_achievement_by_id",
+        lambda session, achievement_id: (True, [("SMSG_ACHIEVEMENT_DELETED", b"removed")]),
+    )
+
+    responses = commands.cmd_achievement(SimpleNamespace(), ["remove", "Explore Test"])
+
+    assert responses[0] == ("SMSG_ACHIEVEMENT_DELETED", b"removed")
+    assert b"removed: 42 Explore Test" in responses[-1][1]
 chat_codec = _import_chat_codec()
 
 
@@ -248,8 +370,63 @@ def test_addhearthstone_uses_normal_inventory_delta(monkeypatch):
 
     assert calls == [(6948, 1)]
     assert responses[0] == ("SMSG_UPDATE_OBJECT", b"item")
-    assert chat_handlers.chat_commands.COMMANDS["addhearthstone"].handler is chat_handlers.chat_commands.cmd_addhearthstone
+    assert chat_handlers.chat_commands.COMMANDS["add"].handler is chat_handlers.chat_commands.cmd_add
     assert "addheartstone" not in chat_handlers.chat_commands.COMMANDS
+
+
+def test_addbags_adds_four_royal_satchels_through_inventory_delta(monkeypatch):
+    result = SimpleNamespace(ok=True, message="items added")
+    calls = []
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "add_item_to_character",
+        lambda session, entry, count: calls.append((entry, count)) or result,
+    )
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "build_inventory_delta_responses",
+        lambda session, value: [("SMSG_UPDATE_OBJECT", b"bags")],
+    )
+
+    responses = chat_handlers.chat_commands.cmd_addbags(SimpleNamespace(inventory_dirty=False), [])
+
+    assert calls == [(82446, 4)]
+    assert responses[0] == ("SMSG_UPDATE_OBJECT", b"bags")
+
+
+def test_additem_parses_count_and_comma_separated_entries():
+    parse = chat_handlers.chat_commands._parse_add_item_requests
+
+    assert parse(["82446", "count", "4,", "828,", "82342", "count", "2"]) == [
+        (82446, 4),
+        (828, 1),
+        (82342, 2),
+    ]
+    assert parse(["82446", "4"]) is None
+    assert parse(["82446", "ant", "4"]) is None
+
+
+def test_additem_executes_each_validated_list_entry(monkeypatch):
+    calls = []
+
+    def add_item(_session, entry, count):
+        calls.append((entry, count))
+        return SimpleNamespace(ok=True, message=f"added {count}x item {entry}")
+
+    monkeypatch.setattr(chat_handlers.chat_commands, "add_item_to_character", add_item)
+    monkeypatch.setattr(
+        chat_handlers.chat_commands,
+        "build_inventory_delta_responses",
+        lambda _session, result: [("SMSG_UPDATE_OBJECT", result.message.encode())],
+    )
+
+    responses = chat_handlers.chat_commands.cmd_additem(
+        SimpleNamespace(inventory_dirty=False),
+        ["82446", "count", "4,", "828,", "82342", "count", "2"],
+    )
+
+    assert calls == [(82446, 4), (828, 1), (82342, 2)]
+    assert [opcode for opcode, _payload in responses].count("SMSG_UPDATE_OBJECT") == 3
 
 
 def _install_worldserver_stub(monkeypatch, *, running=True, started_at=0.0, active_clients=None):
@@ -1074,33 +1251,12 @@ def test_fly_command_is_removed(monkeypatch):
     ]
 
 
-def test_roll_command_broadcasts_world_system_message(monkeypatch):
-    monkeypatch.setattr(chat_handlers.random, "randint", lambda start, end: 42)
-
+def test_roll_command_is_removed(monkeypatch):
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
-    bob = _make_session(state, "Bob", 1002)
-    sent = []
-
-    def fake_broadcast_system_message(message, **kwargs):
-        responses = [("SMSG_MESSAGECHAT", f"system|{message}".encode())]
-        alice.send_response(responses)
-        bob.send_response(responses)
-        sent.append((message, kwargs))
-
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "broadcast_system_message",
-        fake_broadcast_system_message,
-    )
-
     responses = chat_handlers._handle_chat_command(alice, ".roll")
 
-    assert responses == []
-    expected = [("SMSG_MESSAGECHAT", b"system|Alice rolls 42 (1-100)")]
-    assert sent == [("Alice rolls 42 (1-100)", {"scope": "world"})]
-    assert alice.send_response_log == [expected]
-    assert bob.send_response_log == [expected]
+    assert responses[0][1].endswith(b"Unknown command: .roll")
 
 
 def test_handle_who_lists_all_online_players(monkeypatch):
@@ -1472,7 +1628,7 @@ def test_mapcheat_on_reveals_all_explored_zones_without_saving(monkeypatch):
     alice.realm_id = 1
     alice.explored_zones_raw = "7 0 0"
 
-    responses = chat_handlers._handle_chat_command(alice, "mapcheat on")
+    responses = chat_handlers._handle_chat_command(alice, ".cheat map on")
 
     assert captured["map_cheat_enabled"] is True
     assert captured["explored_zones_raw"] == "7 0 0"
@@ -1522,7 +1678,7 @@ def test_mapcheat_zero_restores_real_explored_zones_without_saving(monkeypatch):
     alice.explored_zones_raw = "7 0 0"
     alice.map_cheat_enabled = True
 
-    responses = chat_handlers._handle_chat_command(alice, "mapcheat 0")
+    responses = chat_handlers._handle_chat_command(alice, ".cheat map 0")
 
     assert captured["map_cheat_enabled"] is False
     assert captured["explored_zones_raw"] == "7 0 0"
@@ -1603,7 +1759,7 @@ def test_invfix_command_is_removed(monkeypatch):
     ]
 
 
-def test_mount_command_updates_visuals_and_speed_without_movement_resync(monkeypatch):
+def test_mount_command_is_removed(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
         "encode_skyfire_messagechat_system_payload",
@@ -1631,16 +1787,12 @@ def test_mount_command_updates_visuals_and_speed_without_movement_resync(monkeyp
 
     responses = chat_handlers._handle_chat_command(alice, ".mount")
 
-    assert responses == [
-        ("SMSG_UPDATE_OBJECT", b"mount-spell|59535"),
-        ("SMSG_MESSAGECHAT", b"system|[Mount] mount requested"),
-    ]
-    assert alice.is_mounted is True
-    assert alice.mount_spell == 59535
-    assert alice.run_speed == 14.0
+    assert responses == [("SMSG_MESSAGECHAT", b"system|Unknown command: .mount")]
+    assert alice.is_mounted is False
+    assert alice.mount_spell is None
 
 
-def test_dismount_command_clears_mount_display_without_movement_resync(monkeypatch):
+def test_dismount_command_is_removed(monkeypatch):
     monkeypatch.setattr(
         chat_handlers,
         "encode_skyfire_messagechat_system_payload",
@@ -1669,14 +1821,11 @@ def test_dismount_command_clears_mount_display_without_movement_resync(monkeypat
 
     responses = chat_handlers._handle_chat_command(alice, ".dismount")
 
-    assert responses == [
-        ("SMSG_UPDATE_OBJECT", b"dismount-spell"),
-        ("SMSG_MESSAGECHAT", b"system|[Mount] dismount requested"),
-    ]
-    assert alice.is_mounted is False
-    assert alice.mount_spell is None
-    assert alice.mount_display_id == 0
-    assert alice.run_speed == 7.0
+    assert responses == [("SMSG_MESSAGECHAT", b"system|Unknown command: .dismount")]
+    assert alice.is_mounted is True
+    assert alice.mount_spell == 123
+    assert alice.mount_display_id == 2404
+    assert alice.run_speed == 14.0
 
 
 def test_morph_command_uses_display_only_update(monkeypatch):
@@ -1871,7 +2020,7 @@ def test_learnspell_adds_runtime_spell_and_returns_known_spells_sync(monkeypatch
     alice.known_spells = [133, 116]
     alice.language = 0
 
-    responses = chat_handlers._handle_chat_command(alice, ".learnspell 668")
+    responses = chat_handlers._handle_chat_command(alice, ".learn spell 668")
 
     assert alice.known_spells == [116, 133, 668]
     assert alice.language == 7
@@ -1898,7 +2047,7 @@ def test_castspell_mount_uses_mount_handler_without_movement_resync(monkeypatch)
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
 
-    responses = chat_handlers._handle_chat_command(alice, ".castspell 59535")
+    responses = chat_handlers._handle_chat_command(alice, ".spell cast 59535")
 
     assert captured == {"spell_id": 59535}
     assert responses == [
@@ -1917,7 +2066,7 @@ def test_castspell_rejects_unknown_runtime_spell(monkeypatch):
     state = GlobalState()
     alice = _make_session(state, "Alice", 1001)
 
-    responses = chat_handlers._handle_chat_command(alice, ".castspell 12345")
+    responses = chat_handlers._handle_chat_command(alice, ".spell cast 12345")
 
     assert [opcode for opcode, _payload in responses] == ["SMSG_CAST_FAILED", "SMSG_MESSAGECHAT"]
     assert responses[-1] == ("SMSG_MESSAGECHAT", b"system|Spell 12345 has no runtime cast handler")

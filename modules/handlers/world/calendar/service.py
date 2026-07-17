@@ -64,6 +64,9 @@ class CalendarService:
         if opcode == "CMSG_CALENDAR_GET_CALENDAR":
             return [("SMSG_CALENDAR_SEND_CALENDAR", self.serialize_empty_calendar())]
         if opcode == "CMSG_CALENDAR_GET_NUM_PENDING":
+            # SkyFire answers this bootstrap request with the pending count
+            # only. The full calendar is sent exclusively in response to
+            # CMSG_CALENDAR_GET_CALENDAR.
             return [("SMSG_CALENDAR_SEND_NUM_PENDING", self.serialize_num_pending())]
         if opcode == "CMSG_CALENDAR_GET_EVENT":
             self.parse_event_id(payload)

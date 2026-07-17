@@ -50,8 +50,8 @@ def test_every_defined_calendar_request_is_registered_and_answered():
         assert opcode in HANDLERS
         status, responses = dispatch(session, opcode, _ctx(opcode, bytes(8)))
         assert status == 0
-        assert responses and len(responses) == 1
-        assert responses[0][0].startswith("SMSG_CALENDAR_")
+        assert responses
+        assert all(response[0].startswith("SMSG_CALENDAR_") for response in responses)
     assert session.disconnected is False
 
 
@@ -61,3 +61,11 @@ def test_invalid_event_returns_valid_empty_parameter_command_result():
     responses = service.handle_request("CMSG_CALENDAR_GET_EVENT", struct.pack("<Q", 42))
 
     assert responses == [("SMSG_CALENDAR_COMMAND_RESULT", bytes.fromhex("00000006"))]
+
+
+def test_pending_bootstrap_does_not_send_unsolicited_full_calendar():
+    service = CalendarService(clock=lambda: 1_720_000_000)
+
+    responses = service.handle_request("CMSG_CALENDAR_GET_NUM_PENDING")
+
+    assert responses == [("SMSG_CALENDAR_SEND_NUM_PENDING", bytes(4))]

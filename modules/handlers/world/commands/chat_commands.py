@@ -6,7 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import math
-import random
 import re
 import time
 from types import SimpleNamespace
@@ -30,6 +29,7 @@ from server.modules.handlers.world.chat.codec import (
 from server.modules.handlers.world.achievement_service import (
     find_achievement_by_name,
     grant_achievement_by_id,
+    remove_achievement_by_id,
     repair_achievement_visibility,
 )
 from server.modules.handlers.world.inventory_sync import (
@@ -71,12 +71,12 @@ CommandHandler = Callable[[Any, list[str]], list[tuple[str, bytes]]]
 class Command:
     handler: CommandHandler
     usage: str
+    description: str = ""
     allow_args: bool = True
     require_args: bool = False
 
 
 PRIMARY_COMMANDS: dict[str, Command] = {}
-ALIASES: dict[str, str] = {}
 COMMANDS: dict[str, Command] = {}
 HELPERS: dict[str, Any] = {}
 _OBJECT_END = 0x8
@@ -159,7 +159,6 @@ def register_command(
     *,
     allow_args: bool = True,
     require_args: bool = False,
-    aliases: tuple[str, ...] = (),
 ) -> Callable[[CommandHandler], CommandHandler]:
     """Keep command metadata next to the handler definition."""
     def decorator(func: CommandHandler) -> CommandHandler:
@@ -173,7 +172,6 @@ def register_command(
                 require_args=bool(require_args),
             ),
         )
-        setattr(func, "_chat_aliases", tuple(aliases))
         setattr(func, "_chat_command_name", name)
         return func
 
@@ -414,8 +412,6 @@ def dump_command_map() -> None:
     """Log the command map in a simple name -> usage format."""
     for name, command in PRIMARY_COMMANDS.items():
         Logger.info("[CHAT][COMMAND] %s -> %s", name, command.usage)
-    for alias, name in ALIASES.items():
-        Logger.info("[CHAT][COMMAND] %s -> %s", alias, PRIMARY_COMMANDS[name].usage)
 
 
 def handle_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
@@ -442,22 +438,26 @@ def handle_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
     return command.handler(session, args)
 
 
-@register_command("help", ".help")
 def cmd_help(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Return a compact list of available commands."""
+    """Return the command list or focused help for one command."""
+    if args:
+        if len(args) != 1:
+            return _notification_response("Usage: .help [command]")
+        requested = str(args[0]).strip().lower().lstrip(".")
+        canonical_name = requested
+        command = PRIMARY_COMMANDS.get(requested)
+        if command is None:
+            return _notification_response(f"[Help] unknown command: {requested}")
+        responses = _notification_response(f"[Help] {canonical_name}")
+        responses.extend(_notification_response(f"Usage: {command.usage}"))
+        if command.description:
+            responses.extend(_notification_response(command.description))
+        return responses
+
     responses = _notification_response("[Help] commands:")
     for usage in _help_lines():
         responses.extend(_notification_response(usage))
     return responses
-
-
-@register_command("roll", ".roll")
-def cmd_roll(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Roll 1-100 and broadcast the result as a system message."""
-    roll = random.randint(1, 100)
-    message = f"{session.player_name} rolls {roll} (1-100)"
-    broadcast_system_message(message, scope="world")
-    return []
 
 
 @register_command("gps", ".gps", allow_args=False)
@@ -1200,7 +1200,6 @@ def world_boat_status(session, _args):
     return _notification_response("[WorldBoat] manual_loaded=0 disabled=1")
 
 
-@register_command("taxi", ".taxi <on|off|status>")
 def cmd_taxi(session, args: list[str]) -> list[tuple[str, bytes]]:
     if not args:
         enabled = bool(getattr(session, "taxi_cheat_enabled", False))
@@ -1216,53 +1215,30 @@ def cmd_taxi(session, args: list[str]) -> list[tuple[str, bytes]]:
     if sub == "status":
         enabled = bool(getattr(session, "taxi_cheat_enabled", False))
         return _notification_response(f"[Taxi] cheat={int(enabled)}")
-    return _notification_response("Usage: .taxi <on|off|status>")
+    return _notification_response("Usage: .cheat taxi <on|off|status>")
 
 
-@register_command("world", ".world <go|npc|lift|boat> <hide|show|status|on|off|test|clear>")
 def cmd_world(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Legacy internal visibility handler; intentionally not registered as a command."""
     if len(args) < 2:
-        return _notification_response("Usage: .world <go|npc|lift|boat> <hide|show|status|on|off|test|clear>")
+        return _notification_response("Usage: .world <go | npc> <hide | show | status | on | off>")
 
     kind = args[0].lower()
     sub = args[1].lower()
-    if kind == "go":
-        if sub == "hide":
-            return world_go_hide(session, args[2:])
-        if sub == "show":
-            return world_go_show(session, args[2:])
-        if sub == "status":
-            return world_go_status(session, args[2:])
-    if kind == "npc":
-        if sub == "hide":
-            return world_npc_hide(session, args[2:])
-        if sub == "show":
-            return world_npc_show(session, args[2:])
-        if sub == "status":
-            return world_npc_status(session, args[2:])
-        if sub == "on":
-            return world_npc_on(session, args[2:])
-        if sub == "off":
-            return world_npc_off(session, args[2:])
-    if kind == "lift":
-        if sub == "hide":
-            return world_lift_hide(session, args[2:])
-        if sub == "show":
-            return world_lift_show(session, args[2:])
-        if sub == "status":
-            return world_lift_status(session, args[2:])
-        if sub == "on":
-            return world_lift_on(session, args[2:])
-        if sub == "off":
-            return world_lift_off(session, args[2:])
-    if kind == "boat":
-        if sub == "test":
-            return world_boat_test(session, args[2:])
-        if sub == "clear":
-            return world_boat_clear(session, args[2:])
-        if sub == "status":
-            return world_boat_status(session, args[2:])
-    return _notification_response("Usage: .world <go|npc|lift|boat> <hide|show|status|on|off|test|clear>")
+    handlers = {
+        ("go", "hide"): world_go_hide,
+        ("go", "show"): world_go_show,
+        ("go", "status"): world_go_status,
+        ("npc", "hide"): world_npc_hide,
+        ("npc", "show"): world_npc_show,
+        ("npc", "status"): world_npc_status,
+        ("npc", "on"): world_npc_on,
+        ("npc", "off"): world_npc_off,
+    }
+    handler = handlers.get((kind, sub))
+    if handler is None:
+        return _notification_response("Usage: .world <go | npc> <hide | show | status | on | off>")
+    return handler(session, args[2:])
 
 
 @register_command("level", ".level [delta]|set <level>")
@@ -1345,11 +1321,10 @@ def cmd_speed(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
-@register_command("weather", ".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
 def cmd_weather(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Broadcast region weather to nearby players."""
     if len(args) not in (1, 2):
-        Logger.info("[Weather] Usage: .weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
+        Logger.info("[Weather] Usage: .server weather <clear|rain|snow|storm|sand|id> [0.0-1.0]")
         return []
 
     weather_key = str(args[0]).strip().lower()
@@ -1387,11 +1362,10 @@ def cmd_weather(session, args: list[str]) -> list[tuple[str, bytes]]:
     return _notification_response(f"[Weather] type={int(weather_type)} density={float(density):.2f}")
 
 
-@register_command("time", ".time <HH:MM|day|night|dawn|dusk|noon|midnight>")
 def cmd_time(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Set the world time override."""
     if len(args) != 1:
-        Logger.info("[Time] Usage: .time <HH:MM|day|night|dawn|dusk|noon|midnight>")
+        Logger.info("[Time] Usage: .server time <HH:MM|day|night|dawn|dusk|noon|midnight>")
         return []
 
     arg = str(args[0]).strip().lower()
@@ -1448,30 +1422,18 @@ def cmd_time(session, args: list[str]) -> list[tuple[str, bytes]]:
     return _notification_response(f"[Time] {hour:02d}:{minute:02d}")
 
 
-@register_command("system", ".system <message>", require_args=True)
-def cmd_system(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Broadcast a system message."""
-    message = " ".join(args).strip()
-    if not message:
-        return _notification_response("Usage: .system <message>")
-    Logger.info("[SystemChat] message=%r", message)
-    broadcast_system_message(message, scope="world")
-    return _notification_response(f"[System] sent: {message}")
-
-
-@register_command("learnspell", ".learnspell <spell_id>", require_args=True)
 def cmd_learnspell(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Learn one runtime-only spell for the current session."""
     if len(args) != 1:
-        return _notification_response("Usage: .learnspell <spell_id>")
+        return _notification_response("Usage: .learn spell <spell_id>")
 
     try:
         spell_id = int(args[0], 0)
     except ValueError:
-        return _notification_response("Usage: .learnspell <spell_id>")
+        return _notification_response("Usage: .learn spell <spell_id>")
 
     if spell_id <= 0:
-        return _notification_response("Usage: .learnspell <spell_id>")
+        return _notification_response("Usage: .learn spell <spell_id>")
 
     spells_handlers.ensure_spell_known(session, spell_id)
     player_name = (
@@ -1485,19 +1447,18 @@ def cmd_learnspell(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
-@register_command("castspell", ".castspell <spell_id>", require_args=True)
 def cmd_castspell(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Cast one runtime test spell through the existing spell path."""
     if len(args) != 1:
-        return _notification_response("Usage: .castspell <spell_id>")
+        return _notification_response("Usage: .spell cast <spell_id>")
 
     try:
         spell_id = int(args[0], 0)
     except ValueError:
-        return _notification_response("Usage: .castspell <spell_id>")
+        return _notification_response("Usage: .spell cast <spell_id>")
 
     if spell_id <= 0:
-        return _notification_response("Usage: .castspell <spell_id>")
+        return _notification_response("Usage: .spell cast <spell_id>")
 
     player_name = (
         str(getattr(session, "player_name", "") or "").strip()
@@ -1518,51 +1479,19 @@ def cmd_castspell(session, args: list[str]) -> list[tuple[str, bytes]]:
     responses.extend(_notification_response(message))
     return responses
 
-@register_command("mount", ".mount", allow_args=False)
-def cmd_mount(session, args: list[str]) -> list[tuple[str, bytes]]:
-    mount_spell_id = int(_helper("chat_mount_spell_id"))
-    Logger.info("[Mount] spell_id=%s", mount_spell_id)
-    from server.modules.handlers.world.spell_cast import SpellSource
-    from server.modules.handlers.world.spell_cast.service import get_spell_cast_service
-
-    responses = list(get_spell_cast_service().begin_cast(session, spell_id=mount_spell_id, source=SpellSource.SPELL))
-    Logger.info(
-        "[Mount] speed=%.2f mounted=%s",
-        float(getattr(session, "run_speed", 0.0) or 0.0),
-        bool(getattr(session, "is_mounted", False)),
-    )
-    Logger.info("[Mount] committed")
-    return _append_feedback_response(responses, "[Mount] mount requested")
-
-@register_command("dismount", ".dismount", allow_args=False)
-def cmd_dismount(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Clear the debug mount display."""
-    Logger.info("[Mount] .dismount -> clear display")
-    responses = list(spells_handlers.dismount(session))
-    Logger.info(
-        "[Mount] spell_id=%s speed=%.2f",
-        int(getattr(session, "mount_spell", 0) or 0),
-        float(getattr(session, "run_speed", 0.0) or 0.0),
-    )
-    Logger.info("[Mount] committed")
-    Logger.info("[Mount][Debug] chat .dismount responses=%s", len(responses))
-    return _append_feedback_response(responses, "[Mount] dismount requested")
-
-
 _DEFAULT_TEST_BUFF_SPELL_ID = 21562  # Power Word: Fortitude; stable client icon.
 
 
-@register_command("testbuff", ".testbuff [spell_id]")
 def cmd_testbuff(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Toggle a removable, icon-visible test aura without combat effects."""
     if len(args) > 1:
-        return _notification_response("Usage: .testbuff [spell_id]")
+        return _notification_response("Usage: .spell aura <spell_id>")
     try:
         spell_id = int(args[0], 0) if args else _DEFAULT_TEST_BUFF_SPELL_ID
     except ValueError:
-        return _notification_response("Usage: .testbuff [spell_id]")
+        return _notification_response("Usage: .spell aura <spell_id>")
     if spell_id <= 0:
-        return _notification_response("Usage: .testbuff [spell_id]")
+        return _notification_response("Usage: .spell aura <spell_id>")
 
     aura = spells_handlers.find_by_spell(session, spell_id)
     if aura is not None:
@@ -1587,17 +1516,30 @@ def cmd_testbuff(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
-@register_command(
-    "addhearthstone",
-    ".addhearthstone",
-    allow_args=False,
-)
 def cmd_addhearthstone(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Add item 6948 (Hearthstone) through normal inventory sync."""
     if bool(getattr(session, "inventory_dirty", False)):
         persist_session_inventory(session)
     result = add_item_to_character(session, 6948, 1)
-    Logger.info("[Inventory] .addhearthstone entry=6948 result=%s", result.message)
+    Logger.info("[Inventory] .add hearthstone entry=6948 result=%s", result.message)
+    responses = build_inventory_delta_responses(session, result) if result.ok else []
+    responses.extend(_notification_response(f"[Inventory] {result.message}"))
+    return responses
+
+
+def cmd_addbags(session, args: list[str]) -> list[tuple[str, bytes]]:
+    """Add four Royal Satchels through normal inventory sync."""
+    if args:
+        return _notification_response("Usage: .add bags")
+    if bool(getattr(session, "inventory_dirty", False)):
+        persist_session_inventory(session)
+    result = add_item_to_character(session, CHEAT_BAG_ENTRY, CHEAT_BAG_COUNT)
+    Logger.info(
+        "[Inventory] .add bags entry=%s count=%s result=%s",
+        CHEAT_BAG_ENTRY,
+        CHEAT_BAG_COUNT,
+        result.message,
+    )
     responses = build_inventory_delta_responses(session, result) if result.ok else []
     responses.extend(_notification_response(f"[Inventory] {result.message}"))
     return responses
@@ -1629,7 +1571,6 @@ def _parse_money_delta(raw: str) -> int | None:
     return sign * copper
 
 
-@register_command("addmoney", ".addmoney", allow_args=True)
 def cmd_addmoney(session, args: list[str]):
     from server.modules.handlers.world.bootstrap.playerobjects import build_multi_u32_update_object_payload
     from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
@@ -1638,7 +1579,7 @@ def cmd_addmoney(session, args: list[str]):
         return [("SMSG_MESSAGECHAT", encode_skyfire_messagechat_system_payload(text))]
 
     if not args or not args[0].strip():
-        return msg("Usage: .addmoney <copper | 10g10s10c>")
+        return msg("Usage: .add money <copper | 10g10s10c>")
 
     raw = args[0].lower().strip()
     copper = _parse_money_delta(raw)
@@ -1711,7 +1652,7 @@ def cmd_title(session, args: list[str]) -> list[tuple[str, bytes]]:
 
 @register_command(
     "achievement",
-    ".achievement <add|fix> [name]",
+    ".achievement <add|remove|fix> [id|name]",
     require_args=True,
 )
 def cmd_achievement(session, args: list[str]) -> list[tuple[str, bytes]]:
@@ -1722,8 +1663,8 @@ def cmd_achievement(session, args: list[str]) -> list[tuple[str, bytes]]:
         responses.extend(_notification_response("[Achievement] fixed visible progress"))
         return responses
 
-    if len(args) < 2 or subcommand != "add":
-        return _notification_response("Usage: .achievement <add|fix> [name]")
+    if len(args) < 2 or subcommand not in {"add", "remove"}:
+        return _notification_response("Usage: .achievement <add|remove|fix> [id|name]")
 
     query = " ".join(args[1:]).strip()
     matches = find_achievement_by_name(query, limit=8)
@@ -1740,8 +1681,12 @@ def cmd_achievement(session, args: list[str]) -> list[tuple[str, bytes]]:
         return _notification_response(f"[Achievement] matches: {summary}")
 
     achievement = exact_matches[0] if exact_matches else matches[0]
-    earned, responses = grant_achievement_by_id(session, achievement.achievement_id)
-    status = "added" if earned else "already complete"
+    if subcommand == "remove":
+        removed, responses = remove_achievement_by_id(session, achievement.achievement_id)
+        status = "removed" if removed else "not complete"
+    else:
+        earned, responses = grant_achievement_by_id(session, achievement.achievement_id)
+        status = "added" if earned else "already complete"
     responses.extend(
         _notification_response(
             f"[Achievement] {status}: {achievement.achievement_id} {achievement.name}"
@@ -1813,31 +1758,56 @@ def cmd_demorph(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
-@register_command("additem", ".additem <itemEntry> [count]")
+_ADD_ITEM_USAGE = ".add item <itemEntry> [count <amount>] [, <itemEntry> [count <amount>]] ..."
+
+
+def _parse_add_item_requests(args: list[str]) -> list[tuple[int, int]] | None:
+    raw = " ".join(str(arg) for arg in args).strip()
+    if not raw:
+        return None
+    requests: list[tuple[int, int]] = []
+    for segment in raw.split(","):
+        parts = segment.strip().split()
+        if not parts:
+            return None
+        try:
+            item_entry = int(parts[0], 0)
+            if len(parts) == 1:
+                item_count = 1
+            elif len(parts) == 3 and parts[1].casefold() == "count":
+                item_count = int(parts[2], 0)
+            else:
+                return None
+        except ValueError:
+            return None
+        if item_entry <= 0 or item_count <= 0:
+            return None
+        requests.append((item_entry, item_count))
+    return requests
+
+
 def cmd_additem(session, args: list[str]) -> list[tuple[str, bytes]]:
-    """Add an item and run the normal inventory sync."""
-    if len(args) not in (1, 2):
-        return _notification_response("Usage: .additem <itemEntry> [count]")
-    try:
-        item_entry = int(args[0], 0)
-        item_count = int(args[1], 0) if len(args) == 2 else 1
-    except ValueError:
-        return _notification_response("Usage: .additem <itemEntry> [count]")
+    """Add one or more item entries through the normal inventory sync."""
+    requests = _parse_add_item_requests(args)
+    if requests is None:
+        return _notification_response(f"Usage: {_ADD_ITEM_USAGE}")
 
     if bool(getattr(session, "inventory_dirty", False)):
         persist_session_inventory(session)
 
-    result = add_item_to_character(session, item_entry, item_count)
-    level = "info" if result.ok else "warning"
-    getattr(Logger, level)(
-        "[Inventory] .additem entry=%s count=%s result=%s",
-        item_entry,
-        item_count,
-        result.message,
-    )
-
-    responses = build_inventory_delta_responses(session, result) if result.ok else []
-    responses.extend(_notification_response(f"[Inventory] {result.message}"))
+    responses: list[tuple[str, bytes]] = []
+    for item_entry, item_count in requests:
+        result = add_item_to_character(session, item_entry, item_count)
+        level = "info" if result.ok else "warning"
+        getattr(Logger, level)(
+            "[Inventory] .add item entry=%s count=%s result=%s",
+            item_entry,
+            item_count,
+            result.message,
+        )
+        if result.ok:
+            responses.extend(build_inventory_delta_responses(session, result))
+        responses.extend(_notification_response(f"[Inventory] {result.message}"))
     return responses
 
 
@@ -1880,7 +1850,7 @@ def cmd_addtier(session, args: list[str]) -> list[tuple[str, bytes]]:
     responses: list[tuple[str, bytes]] = []
 
     for item_entry in item_entries:
-        responses.extend(_call_command("additem", session, [str(int(item_entry)), "1"]))
+        responses.extend(cmd_additem(session, [str(int(item_entry)), "1"]))
 
     responses.extend(_build_login_inventory_sync(session))
 
@@ -1893,8 +1863,7 @@ def cmd_addtier(session, args: list[str]) -> list[tuple[str, bytes]]:
     return responses
 
 
-@register_command("cheat", ".cheat")
-def cmd_cheat(session, args: list[str]) -> list[tuple[str, bytes]]:
+def cmd_cheat_boost(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Boost the current character with map reveal, bags, tier gear and mount buttons."""
     if args:
         return _notification_response("Usage: .cheat")
@@ -1913,9 +1882,7 @@ def cmd_cheat(session, args: list[str]) -> list[tuple[str, bytes]]:
 
     inventory_game.refresh_session_inventory(session)
 
-    map_command = COMMANDS.get("mapcheat")
-    if map_command:
-        responses.extend(map_command.handler(session, ["on"]))
+    responses.extend(cmd_mapcheat(session, ["on"]))
 
     removed_items = 0
     for slot in CHEAT_EQUIPMENT_SLOTS:
@@ -2238,7 +2205,6 @@ def cmd_tel(session, args: list[str]) -> list[tuple[str, bytes]]:
     )
 
 
-@register_command("mapcheat", ".mapcheat <on|0>")
 def cmd_mapcheat(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Toggle temporary explored-zone visibility for the current player."""
     from server.modules.handlers.world.feature_config import map_cheat_enabled
@@ -2263,7 +2229,7 @@ def cmd_mapcheat(session, args: list[str]) -> list[tuple[str, bytes]]:
         )
         responses.append(_notification_response("[MapCheat] real exploration restored")[0])
         return responses
-    return _notification_response("Usage: mapcheat <on|0>")
+    return _notification_response("Usage: .cheat map <on|off>")
 
 
 @register_command("pvg", ".pvg <start|stop|status|plant <lane 1-5> <spitter|rocknut>>")
@@ -2562,12 +2528,12 @@ def server_msg(session, args):
 
 @register_command(
     "server",
-    ".server <info|status|restart|motd [set <message>]|msg <message>>"
+    ".server <info|status|restart|motd|time|weather|message> ..."
 )
 def cmd_server(session, args):
     if not args:
         return _notification_response(
-            "Usage: .server <info|status|restart|motd [set <message>]|msg <message>>"
+            "Usage: .server <info|status|restart|motd|time|weather|message> ..."
         )
 
     subcommands = {
@@ -2576,6 +2542,9 @@ def cmd_server(session, args):
         "restart": (server_restart, False),
         "motd": (server_motd, None),  # special case (handles its own args)
         "msg": (server_msg, True),
+        "message": (server_msg, True),
+        "time": (cmd_time, True),
+        "weather": (cmd_weather, True),
     }
 
     sub = args[0].lower()
@@ -2595,89 +2564,117 @@ def cmd_server(session, args):
     return handler(session, sub_args)
 
 
-@register_command("time", ".time")
-def cmd_time(session, args: list[str]) -> list[tuple[str, bytes]]:
-    unix_ms = int(time.time() * 1000.0)
-    monotonic_ms = int(time.monotonic() * 1000.0)
+def _namespace_usage(usage: str) -> list[tuple[str, bytes]]:
+    return _notification_response(f"Usage: {usage}")
 
-    message = (
-        f"unix_ms={unix_ms} "
-        f"monotonic_ms={monotonic_ms}"
-    )
 
-    broadcast_system_message(
-        message,
-        scope="world"
-    )
+def cmd_add(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args:
+        return _namespace_usage(".add <item | money | hearthstone | bags> ...")
+    handlers = {
+        "item": cmd_additem,
+        "money": cmd_addmoney,
+        "hearthstone": cmd_addhearthstone,
+        "bags": cmd_addbags,
+    }
+    handler = handlers.get(str(args[0]).lower())
+    return handler(session, args[1:]) if handler else _namespace_usage(".add <item | money | hearthstone | bags> ...")
 
-    return []
+
+def cmd_learn(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args or str(args[0]).lower() != "spell":
+        return _namespace_usage(".learn spell <spell_id>")
+    return cmd_learnspell(session, args[1:])
+
+
+def cmd_spell(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args:
+        return _namespace_usage(".spell <cast|aura> ...")
+    subcommand = str(args[0]).lower()
+    if subcommand == "cast":
+        return cmd_castspell(session, args[1:])
+    if subcommand == "aura":
+        if len(args) != 2:
+            return _namespace_usage(".spell aura <spell_id>")
+        return cmd_testbuff(session, args[1:])
+    return _namespace_usage(".spell <cast|aura> ...")
+
+
+def _cheat_fly(session, args: list[str]) -> list[tuple[str, bytes]]:
+    action = str(args[0]).lower() if args else "status"
+    if action == "status":
+        return _notification_response(f"[Cheat] fly={int(bool(getattr(session, 'can_fly', False)))}")
+    if action not in {"on", "off"}:
+        return _namespace_usage(".cheat fly <on|off|status>")
+    responses = spells_handlers.apply_fly_aura(session) if action == "on" else spells_handlers.remove_fly_aura(session)
+    spells_handlers._set_flying_capability_state(session, action == "on")
+    return _append_feedback_response(responses, f"[Cheat] fly {action}")
+
+
+def cmd_cheat(session, args: list[str]) -> list[tuple[str, bytes]]:
+    if not args:
+        return _namespace_usage(".cheat <fly|taxi|map|boost> ...")
+    subcommand = str(args[0]).lower()
+    handlers = {
+        "fly": _cheat_fly,
+        "taxi": cmd_taxi,
+        "map": cmd_mapcheat,
+        "boost": cmd_cheat_boost,
+    }
+    handler = handlers.get(subcommand)
+    return handler(session, args[1:]) if handler else _namespace_usage(".cheat <fly|taxi|map|boost> ...")
 
 
 
 
 # Real commands live here for quick scanning.
 PRIMARY_COMMANDS = {
-    "achievement": Command(handler=cmd_achievement, usage=".achievement <add|fix> [name]", require_args=True),
-    "addhearthstone": Command(handler=cmd_addhearthstone, usage=".addhearthstone", allow_args=False),
-    "additem": Command(handler=cmd_additem, usage=".additem <itemEntry> [count]"),
-    "addmoney": Command(handler=cmd_addmoney, usage=".addmoney <copper | 10g10s10c>", require_args=False),
-    "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>"),
-    "castspell": Command(handler=cmd_castspell, usage=".castspell <spell_id>", require_args=True),
-    "cheat": Command(handler=cmd_cheat, usage=".cheat", allow_args=False),
-    "demorph": Command(handler=cmd_demorph, usage=".demorph", allow_args=False),
-    "dismount": Command(handler=cmd_dismount, usage=".dismount", allow_args=False),
-    "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", require_args=True),
+    "achievement": Command(handler=cmd_achievement, usage=".achievement <add | remove | fix> [id | name]", description="Adds, removes, or repairs achievement progress.", require_args=True),
+    "add": Command(handler=cmd_add, usage=".add <item | money | hearthstone | bags> ...", description="Adds items (including comma-separated lists), money, a Hearthstone, or four Royal Satchels.", require_args=True),
+    "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>", description="Adds a class tier equipment set."),
+    "cheat": Command(handler=cmd_cheat, usage=".cheat <fly | taxi | map | boost> ...", description="Controls GM fly, taxi, map, and boost cheats.", require_args=True),
+    "demorph": Command(handler=cmd_demorph, usage=".demorph", description="Restores your normal character model.", allow_args=False),
+    "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", description="Teleports another player to your position.", require_args=True),
     # "fixplayer": Command(handler=cmd_fixplayer, usage=".fixplayer [teleport]"),
     # "fixspeed": Command(handler=cmd_fixspeed, usage=".fixspeed", allow_args=False),
     "go": Command(
         handler=cmd_go,
-        usage=".go <info|list|search|add|select|current|clear|del|undo|move|rotate|scale|reload|copy|place|history>",
+        usage=".go <info | list | search | add | select | current | clear | del | undo | move | rotate | scale | reload | copy | place | history>",
+        description="Manages persistent GameObject spawns.",
         require_args=True,
     ),
-    "gocollision": Command(handler=cmd_gocollision, usage=".gocollision <show <guid>|around <radius>|clear>"),
-    "goto": Command(handler=cmd_goto, usage=".goto <player>", require_args=True),
-    "gps": Command(handler=cmd_gps, usage=".gps", allow_args=False),
-    "help": Command(handler=cmd_help, usage=".help"),
-    "learnspell": Command(handler=cmd_learnspell, usage=".learnspell <spell_id>", require_args=True),
-    "level": Command(handler=cmd_level, usage=".level [delta]|set <level>"),
-    "mapcheat": Command(handler=cmd_mapcheat, usage=".mapcheat <on|0>"),
-    "morph": Command(handler=cmd_morph, usage=".morph <displayId|namel|list>", require_args=True),
-    "mount": Command(handler=cmd_mount, usage=".mount", allow_args=False),
+    "gocollision": Command(handler=cmd_gocollision, usage=".gocollision <show <guid> | around <radius> | clear>", description="Displays or clears GameObject collision diagnostics."),
+    "goto": Command(handler=cmd_goto, usage=".goto <player>", description="Teleports you to another player.", require_args=True),
+    "gps": Command(handler=cmd_gps, usage=".gps", description="Shows your current map, position, and orientation.", allow_args=False),
+    "help": Command(handler=cmd_help, usage=".help [command]", description="Lists commands or shows help for one command."),
+    "learn": Command(handler=cmd_learn, usage=".learn spell <spell_id>", description="Teaches your character a spell.", require_args=True),
+    "level": Command(handler=cmd_level, usage=".level [delta] | set <level>", description="Changes your character level."),
+    "morph": Command(handler=cmd_morph, usage=".morph <displayId | name | list>", description="Changes your visible character model.", require_args=True),
     "npc": Command(
         handler=cmd_npc,
-        usage=".npc <info|list|search|add|select|current|clear|del|undo|move|rotate|copy|place|history>",
+        usage=".npc <info | list | search | add | select | current | clear | del | undo | move | rotate | copy | place | history>",
+        description="Manages persistent NPC spawns.",
         require_args=True,
     ),
-    "petbattle": Command(handler=cmd_petbattle, usage=".petbattle <start|stop|status>"),
-    "pvg": Command(handler=cmd_plants_vs_ghouls, usage=".pvg <start|stop|status|plant <lane 1-5> <spitter|rocknut>>"),
-    "roll": Command(handler=cmd_roll, usage=".roll"),
-    "save": Command(handler=cmd_save, usage=".save", allow_args=False),
+    "petbattle": Command(handler=cmd_petbattle, usage=".petbattle <start | stop | status>", description="Controls the pet-battle test mode."),
+    "pvg": Command(handler=cmd_plants_vs_ghouls, usage=".pvg <start | stop | status | plant <lane 1-5> <spitter | rocknut>>", description="Controls the Plants vs. Ghouls test event."),
+    "save": Command(handler=cmd_save, usage=".save", description="Saves the current character state.", allow_args=False),
     "server": Command(
         handler=cmd_server,
-        usage=".server  <info|status|restart|motd [set <message>]|msg <message>>",
+        usage=".server <info | status | restart | motd | time | weather | message> ...",
+        description="Shows server information or controls server utilities.",
     ),
     # "spawngo": Command(handler=cmd_spawngo, usage=".spawngo", allow_args=False),
-    "speed": Command(handler=cmd_speed, usage=".speed <multiplier|default>"),
-    "system": Command(handler=cmd_system, usage=".system <message>", require_args=True),
-    "taxi": Command(handler=cmd_taxi, usage=".taxi <on|off|status>"),
-    "testbuff": Command(handler=cmd_testbuff, usage=".testbuff [spell_id]"),
-    "time": Command(handler=cmd_time, usage=".time", allow_args=False),
-    "title": Command(handler=cmd_title, usage=".title <bitIndex|explorer|off>", require_args=True),
-    "world": Command(handler=cmd_world, usage=".world <go|npc|lift|boat> <hide|show|status|on|off|test|clear>"),
+    "speed": Command(handler=cmd_speed, usage=".speed <multiplier | default>", description="Changes your movement-speed multiplier."),
+    "spell": Command(handler=cmd_spell, usage=".spell <cast | aura> ...", description="Casts a spell or applies a removable test aura.", require_args=True),
+    "title": Command(handler=cmd_title, usage=".title <bitIndex | explorer | off>", description="Grants, selects, or clears a character title.", require_args=True),
     # "telxyz": Command(handler=cmd_telxyz, usage=".telxyz <map> <x> <y> <z> <orientation>"),
     "tel": Command(
         handler=cmd_tel,
         usage=".tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel coord <map> <x> <y> <z> <orientation>",
+        description="Uses and manages named teleport locations.",
     ),
-    "time": Command(handler=cmd_time, usage=".time <HH:MM|day|night|dawn|dusk|noon|midnight>"),
-    "weather": Command(handler=cmd_weather, usage=".weather <clear|rain|snow|storm|sand|id> [0.0-1.0]"),
 }
-
-# Aliases resolve to names in PRIMARY_COMMANDS.
-ALIASES = {}
-
 
 # COMMANDS is the runtime lookup map used by handle_command().
 COMMANDS = dict(PRIMARY_COMMANDS)
-for alias, name in ALIASES.items():
-    COMMANDS[alias] = PRIMARY_COMMANDS[name]

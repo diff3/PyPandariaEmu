@@ -557,6 +557,7 @@ def add_item_to_character(session, item_entry: int, count: int = 1) -> Inventory
     changed_items: list[InventoryItem] = []
     created_item_guids: list[int] = []
     refreshed_for_space = False
+    next_item_guid: Optional[int] = None
 
     def _track_changed(item: InventoryItem, *, created: bool = False) -> None:
         if all(int(existing.item_guid) != int(item.item_guid) for existing in changed_items):
@@ -605,7 +606,10 @@ def add_item_to_character(session, item_entry: int, count: int = 1) -> Inventory
                 break
 
             chunk_count = min(remaining, int(template.stackable))
-            item_guid = _allocate_item_instance_guid(db_session)
+            if next_item_guid is None:
+                next_item_guid = _allocate_item_instance_guid(db_session)
+            item_guid = int(next_item_guid)
+            next_item_guid += 1
             row = ItemInstance(
                 guid=item_guid,
                 itemEntry=item_entry,
