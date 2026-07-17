@@ -73,8 +73,10 @@ class WorldRefreshService:
         _object_streamer=None,
         _teleport_resync=None,
         _object_refresh=None,
+        reset_object_tracking: bool = True,
     ) -> list[tuple[str, bytes]]:
-        self._reset_world_object_tracking(session)
+        if reset_object_tracking:
+            self._reset_world_object_tracking(session)
         return self.refresh_player_world(
             session,
             context=context,

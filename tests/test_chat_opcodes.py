@@ -3152,7 +3152,9 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     assert alice.movement_state.transport_x == 0.0
     assert alice.movement_state.transport_y == 0.0
     assert alice.movement_state.transport_z == 0.0
-    assert visibility_positions == []
+    assert visibility_positions == [
+        ("near-teleport-start", 1, 0, (10.0, 20.0, 30.0), 1.5)
+    ]
     assert alice.near_teleport_pending is True
     assert alice.teleport_pending is False
     assert saved == {}
@@ -3162,7 +3164,7 @@ def test_apply_player_state_change_same_map_position_queues_near_teleport(monkey
     player_store.clear()
 
 
-def test_same_map_teleport_does_not_stream_world_objects_before_ack(monkeypatch):
+def test_same_map_teleport_streams_world_objects_in_transfer_batch(monkeypatch):
     calls: list[str] = []
     movement_module = _install_movement_stub(
         monkeypatch,
@@ -3190,14 +3192,14 @@ def test_same_map_teleport_does_not_stream_world_objects_before_ack(monkeypatch)
         map_id=1,
     )
 
-    assert calls == []
-    assert ("SMSG_UPDATE_OBJECT", b"transport-create") not in responses
-    assert 11 not in alice.loaded_gameobjects
-    assert 11 not in alice.loaded_transport_entries
+    assert calls == ["near-teleport-start"]
+    assert ("SMSG_UPDATE_OBJECT", b"transport-create") in responses
+    assert 11 in alice.loaded_gameobjects
+    assert 11 in alice.loaded_transport_entries
     assert alice.near_teleport_pending is True
 
 
-def test_same_map_teleport_streams_once_at_ack_completion(monkeypatch):
+def test_same_map_teleport_does_not_duplicate_initial_stream_at_ack(monkeypatch):
     transport_guid = 11
     create_count = 0
 
@@ -3237,10 +3239,8 @@ def test_same_map_teleport_streams_once_at_ack_completion(monkeypatch):
         context="near-teleport-ack",
     )
 
-    assert not any(payload.startswith(b"transport-create") for _opcode, payload in responses)
-    assert ack_responses == [
-        ("SMSG_UPDATE_OBJECT", b"transport-create:near-teleport-ack")
-    ]
+    assert ("SMSG_UPDATE_OBJECT", b"transport-create:near-teleport-start") in responses
+    assert ack_responses == []
     assert create_count == 1
     assert alice.loaded_gameobjects == {transport_guid}
     assert alice.loaded_transport_entries == {transport_guid: {"entry": 20808}}

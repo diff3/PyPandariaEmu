@@ -1075,10 +1075,15 @@ def _queue_teleport_world_transition(session, ctx: WorldLoginContext) -> list[tu
     session.teleport_destination = None
     from server.modules.handlers.world.teleport.lifecycle import get_teleport_lifecycle
 
-    get_teleport_lifecycle().complete_transition(
-        session,
-        context="worldport-bootstrap-complete",
-        refresh="deferred",
+    responses.extend(
+        get_teleport_lifecycle().complete_transition(
+            session,
+            context="worldport-bootstrap-complete",
+            refresh="bootstrap",
+            _object_refresh=(
+                movement_handlers.stream_world_objects_after_teleport
+            ),
+        )
     )
     if isinstance(pending_transport, dict):
         try:

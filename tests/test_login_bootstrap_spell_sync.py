@@ -1448,8 +1448,11 @@ def test_far_transport_worldport_omits_verify_world_and_keeps_bootstrap_order(mo
         ("SMSG_UPDATE_OBJECT", b"player-create"),
     ]
     assert ("SMSG_UPDATE_OBJECT", b"transport-values") in responses
-    assert not any(payload.startswith(b"visible:") for _opcode, payload in responses)
-    assert session._worldport_destination_visibility_refresh_pending is True
+    assert (
+        "SMSG_UPDATE_OBJECT",
+        b"visible:worldport-bootstrap-complete",
+    ) in responses
+    assert session._worldport_destination_visibility_refresh_pending is False
     assert responses.count(("SMSG_SEND_KNOWN_SPELLS", b"known-spells")) == 1
     assert responses.index(("SMSG_UPDATE_OBJECT", b"transport-values")) > responses.index(
         ("SMSG_QUERY_TIME_RESPONSE", b"query-time")
@@ -1555,9 +1558,9 @@ def test_worldport_loading_completion_streams_world_objects_immediately(monkeypa
     )
     responses = login_handlers._queue_teleport_world_transition(session, ctx)
 
-    assert calls == []
-    assert ("SMSG_UPDATE_OBJECT", b"visible-now") not in responses
-    assert session._worldport_destination_visibility_refresh_pending is True
+    assert calls == ["worldport-bootstrap-complete"]
+    assert ("SMSG_UPDATE_OBJECT", b"visible-now") in responses
+    assert session._worldport_destination_visibility_refresh_pending is False
     assert (session.x, session.y, session.z, session.orientation) == pytest.approx(
         (97.0, 202.0, 14.0, (math.pi / 2.0) + 0.25)
     )

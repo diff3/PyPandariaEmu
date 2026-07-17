@@ -178,6 +178,22 @@ class TeleportLifecycle:
                     session,
                     transfer_packets,
                 )
+            from server.modules.handlers.world.world_refresh import (
+                get_world_refresh_service,
+            )
+
+            refresh_service = get_world_refresh_service()
+            refresh_service._reset_world_object_tracking(session)
+            transfer_packets.extend(
+                refresh_service.refresh_player_world(
+                    session,
+                    context="near-teleport-start",
+                    force_object_stream=True,
+                    _object_refresh=(
+                        movement_handlers.stream_world_objects_after_teleport
+                    ),
+                )
+            )
             return bind_packet_batch_to_current_transition(
                 session,
                 responses + transfer_packets,
@@ -315,6 +331,7 @@ class TeleportLifecycle:
                 resync_multiplayer=resync_multiplayer,
                 _object_refresh=_object_refresh,
                 _teleport_resync=_teleport_resync,
+                reset_object_tracking=False,
             )
         if refresh == "transport":
             return service.refresh_after_transport(
@@ -327,6 +344,15 @@ class TeleportLifecycle:
         if refresh == "deferred":
             session._worldport_destination_visibility_refresh_pending = True
             return []
+        if refresh == "bootstrap":
+            session._worldport_destination_visibility_refresh_pending = False
+            return service.refresh_after_login(
+                session,
+                context=context,
+                synchronize_player_visibility=False,
+                stream_world_objects=True,
+                _object_refresh=_object_refresh,
+            )
         raise ValueError(f"unsupported teleport refresh mode: {refresh}")
 
     def teleport(
