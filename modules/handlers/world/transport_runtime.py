@@ -937,6 +937,18 @@ class WorldTransportManager:
                 position = publish_transport(passenger_session, state, attachment)
                 after_position = (float(position.x), float(position.y), float(position.z))
                 if after_position != before_position:
+                    from server.modules.handlers.world.teleport.area_trigger import (
+                        check_movement_segment_for_area_triggers,
+                    )
+
+                    area_trigger_responses = check_movement_segment_for_area_triggers(
+                        passenger_session,
+                        before_position,
+                        after_position,
+                    )
+                    if area_trigger_responses:
+                        _send_responses(passenger_session, area_trigger_responses)
+                        continue
                     from server.modules.handlers.world.world_refresh import (
                         get_world_refresh_service,
                     )
@@ -2388,7 +2400,10 @@ def cached_transport_runtime_entry(session: Any, entry: dict[str, Any]) -> dict[
         ) & 0xFFFFFFFF
         moved_entry["_transport_create_source_path"] = "bootstrap-runtime"
         moved_entry["_bootstrap_runtime_transform_pinned"] = True
-        moved_entry["_runtime_transport_orientation_authoritative"] = True
+        moved_entry["_runtime_transport_orientation_authoritative"] = not (
+            int(moved_entry.get("type", 0) or 0) == GAMEOBJECT_TYPE_TRANSPORT
+            and bool(moved_entry.get("client_driven_transport_animation"))
+        )
         bootstrap_runtime["transport_create_transform_matched"] = True
         Logger.info(
             "[TransportTransfer] transport_bootstrap_runtime "
@@ -3740,7 +3755,7 @@ def _disabled_legacy_passenger_transport_transfer_impl(
         "none" if forced_destination_map is None else int(forced_destination_map),
     )
     return []
-    attached = _session_is_transport_passenger(session, int(world_guid))
+    attached = session_is_transport_passenger(session, int(world_guid))
     movement_state = getattr(session, "movement_state", None)
     player_guid = int(getattr(session, "char_guid", 0) or 0)
     runtime_state = _runtime_transport_states().get(int(world_guid))
@@ -3910,7 +3925,8 @@ def _log_transport_transfer_readiness(session: Any, world_guid: int, *, reason: 
     )
 
 
-def _session_is_transport_passenger(session: Any, world_guid: int) -> bool:
+def session_is_transport_passenger(session: Any, world_guid: int) -> bool:
+    """Return whether *session* is canonically attached to this transport."""
     movement_state = getattr(session, "movement_state", None)
     if int(getattr(movement_state, "transport_guid", 0) or 0) == int(world_guid):
         return True
@@ -3932,6 +3948,12 @@ def _despawn_loaded_transport(
     map_id: int,
     reason: str,
 ) -> list[tuple[str, bytes]]:
+    if session_is_transport_passenger(session, int(world_guid)):
+        detach_session_transport_passenger(
+            session,
+            reason=f"transport_visibility:{reason}",
+            world_guid=int(world_guid),
+        )
     entry = entries.pop(int(world_guid), None)
     loaded_gameobjects = getattr(session, "loaded_gameobjects", None)
     if isinstance(loaded_gameobjects, set):

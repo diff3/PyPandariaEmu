@@ -1042,6 +1042,35 @@ def test_stream_nearby_gameobjects_despawns_stale_transport(monkeypatch):
     assert transport_guid not in session.loaded_transport_entries
 
 
+def test_stream_nearby_gameobjects_keeps_attached_transport_on_proximity_miss(monkeypatch):
+    session = _FakeSession()
+    session.realm_id = 1
+    transport_guid = int(movement.MoTransportGuid.from_spawn_guid(9))
+    session.movement_state = SimpleNamespace(transport_guid=transport_guid)
+    session.loaded_gameobjects = {transport_guid}
+    session.loaded_gameobject_entries = {transport_guid: {"guid": 9}}
+    session.loaded_transport_entries = {transport_guid: {"guid": 9, "type": 11}}
+
+    monkeypatch.setattr(movement, "build_database_gameobject_responses", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        movement.DatabaseConnection,
+        "get_gameobjects_near",
+        lambda *_args, **_kwargs: [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "server.modules.handlers.world.transport_runtime.synthetic_transport_entries_near",
+        lambda *_args, **_kwargs: [],
+    )
+
+    responses = movement._stream_nearby_gameobjects(session)
+
+    assert responses == []
+    assert transport_guid in session.loaded_gameobjects
+    assert transport_guid in session.loaded_gameobject_entries
+    assert transport_guid in session.loaded_transport_entries
+
+
 def test_stream_nearby_npcs_spawns_new_and_despawns_far(monkeypatch):
     session = _FakeSession()
     session.realm_id = 1

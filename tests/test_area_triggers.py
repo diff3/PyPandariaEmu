@@ -233,7 +233,7 @@ def test_recent_map_transfer_suppresses_movement_scan(monkeypatch):
     ) is None
 
 
-def test_movement_scan_uses_tighter_padding_than_client_validation(monkeypatch):
+def test_movement_scan_uses_exact_dbc_bounds(monkeypatch):
     session = SimpleNamespace(
         char_guid=1001,
         map_id=1,
@@ -264,7 +264,7 @@ def test_movement_scan_uses_tighter_padding_than_client_validation(monkeypatch):
         lambda *args, **kwargs: [("SMSG_NEW_WORLD", b"bad")],
     )
 
-    assert area_trigger._point_inside_trigger(definition, 45.0, 0.0, 0.0)
+    assert not area_trigger._point_inside_trigger(definition, 45.0, 0.0, 0.0)
     assert area_trigger.check_movement_segment_for_area_triggers(
         session,
         (40.0, 0.0, 0.0),
@@ -538,16 +538,19 @@ def test_area_trigger_fires_once_until_player_leaves_and_reenters(monkeypatch):
     assert area_trigger.check_movement_segment_for_area_triggers(
         session, (40.0, 0.0, 0.0), (50.0, 0.0, 0.0)
     ) == [("SMSG_MOVE_TELEPORT", b"area")]
+    session.x = 51.0
     assert area_trigger.check_movement_segment_for_area_triggers(
         session, (50.0, 0.0, 0.0), (51.0, 0.0, 0.0)
     ) is None
     assert activations == [900]
 
+    session.x = 60.0
     assert area_trigger.check_movement_segment_for_area_triggers(
         session, (51.0, 0.0, 0.0), (60.0, 0.0, 0.0)
     ) is None
     assert session.active_area_triggers == set()
 
+    session.x = 50.0
     assert area_trigger.check_movement_segment_for_area_triggers(
         session, (60.0, 0.0, 0.0), (50.0, 0.0, 0.0)
     ) == [("SMSG_MOVE_TELEPORT", b"area")]
@@ -653,3 +656,80 @@ def test_map_transfer_reconciles_active_state_to_destination_volume(monkeypatch)
 
     assert responses == [("SMSG_NEW_WORLD", b"destination")]
     assert session.active_area_triggers == {911}
+
+
+def test_movement_evaluates_published_world_position_not_transport_local(monkeypatch):
+    session = SimpleNamespace(
+        char_guid=1001,
+        map_id=1,
+        x=100.0,
+        y=200.0,
+        z=30.0,
+        movement_state=SimpleNamespace(
+            transport_guid=0x1234,
+            transport_x=1.0,
+            transport_y=2.0,
+            transport_z=3.0,
+        ),
+        near_teleport_pending=False,
+        teleport_pending=False,
+    )
+    definition = area_trigger.AreaTriggerDefinition(
+        trigger_id=920,
+        map_id=1,
+        x=100.0,
+        y=200.0,
+        z=30.0,
+        radius=2.0,
+        box_x=0.0,
+        box_y=0.0,
+        box_z=0.0,
+        box_orientation=0.0,
+    )
+    row = {
+        "id": 920,
+        "target_map": 2,
+        "target_position_x": 5.0,
+        "target_position_y": 6.0,
+        "target_position_z": 7.0,
+        "target_orientation": 0.0,
+    }
+    monkeypatch.setattr(area_trigger, "_area_trigger_definitions", lambda: {920: definition})
+    monkeypatch.setattr(area_trigger, "_teleport_trigger_rows", lambda: {920: row})
+    monkeypatch.setattr(
+        area_trigger.DatabaseConnection,
+        "get_areatrigger_teleport",
+        lambda _trigger_id: row,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        area_trigger,
+        "apply_map_transfer",
+        lambda *_args, **_kwargs: [("SMSG_NEW_WORLD", b"transport-trigger")],
+    )
+
+    responses = area_trigger.check_movement_segment_for_area_triggers(
+        session,
+        (97.0, 200.0, 30.0),
+        (1.0, 2.0, 3.0),
+    )
+
+    assert responses == [("SMSG_NEW_WORLD", b"transport-trigger")]
+
+
+def test_trigger_bounds_have_no_implicit_position_padding():
+    definition = area_trigger.AreaTriggerDefinition(
+        trigger_id=921,
+        map_id=1,
+        x=50.0,
+        y=0.0,
+        z=0.0,
+        radius=1.0,
+        box_x=0.0,
+        box_y=0.0,
+        box_z=0.0,
+        box_orientation=0.0,
+    )
+
+    assert not area_trigger._point_inside_trigger(definition, 45.0, 0.0, 0.0)
+    assert area_trigger._point_inside_trigger(definition, 49.0, 0.0, 0.0)

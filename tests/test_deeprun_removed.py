@@ -104,6 +104,57 @@ def test_deeprun_registers_as_normal_transport_not_elevator():
     transport_runtime.reset_world_transport_manager_for_tests()
 
 
+def test_deeprun_create_preserves_parent_quaternion_instead_of_runtime_yaw():
+    from server.modules.game.guid import MoTransportGuid
+    from server.modules.handlers.world import transport_runtime
+    from server.modules.handlers.world.bootstrap import gameobjects
+    from server.modules.handlers.world.runtime.gameobject import GameObject
+
+    transport_runtime.reset_world_transport_manager_for_tests()
+    entry = transport_runtime.prepare_runtime_transport_entry(
+        {
+            "guid": 18802,
+            "entry": 176080,
+            "map": 369,
+            "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
+            "display_id": 3831,
+            "x": 4.58065,
+            "y": 28.2097,
+            "z": 7.01107,
+            "orientation": 1.5708,
+            "rotation0": 0.0,
+            "rotation1": 0.0,
+            "rotation2": 1.0,
+            "rotation3": 0.0,
+        }
+    )
+    world_guid = int(MoTransportGuid.from_spawn_guid(entry["guid"]))
+    entry["world_guid"] = world_guid
+    state = transport_runtime.get_world_transport_manager().register_transport(
+        entry,
+        source="test",
+    )
+    assert state is not None
+    transport = transport_runtime.get_world_transport_manager().transport_for_guid(world_guid)
+    gameobject = GameObject.from_mapping(entry, runtime_guid=world_guid)
+
+    packet_entry = gameobjects._transport_runtime_packet_entry(
+        entry,
+        gameobject,
+        transport,
+    )
+
+    assert packet_entry["_runtime_transport_orientation_authoritative"] is False
+    assert gameobjects._rotation_components(packet_entry, gameobject) == (
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+    )
+    assert gameobjects._stationary_orientation(packet_entry, gameobject) == gameobject.orientation
+    transport_runtime.reset_world_transport_manager_for_tests()
+
+
 def test_generic_transport_framework_remains_available():
     from server.modules.handlers.world import transport_runtime
     from server.modules.handlers.world.movements.types import MovementKind

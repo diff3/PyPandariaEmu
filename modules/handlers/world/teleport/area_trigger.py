@@ -22,8 +22,6 @@ from server.modules.handlers.world.teleport.map_transfer import (
 _AREA_TRIGGER_DBC_FMT = "nifffxxxfffffxxx"
 _MAP_DBC_FMT = "nxixxsixxixiffxiiii"
 _AREA_TRIGGER_SAFE_DELTA = 5.0
-_AREA_TRIGGER_WORLD_MOVEMENT_SAFE_DELTA = 4.0
-_AREA_TRIGGER_INSTANCE_MOVEMENT_SAFE_DELTA = 1.0
 _AREA_TRIGGER_DEFAULT_RADIUS = 5.0
 _AREA_TRIGGER_MAX_SEGMENT_SCAN_DISTANCE = 120.0
 _AREA_TRIGGER_MISS_LOG_RADIUS = 14.0
@@ -175,7 +173,7 @@ def _point_inside_trigger(
     y: float,
     z: float,
     *,
-    padding: float = _AREA_TRIGGER_SAFE_DELTA,
+    padding: float = 0.0,
 ) -> bool:
     if float(definition.radius) > 0.0:
         radius = float(definition.radius) + float(padding)
@@ -344,11 +342,7 @@ def synchronize_area_trigger_state(session) -> set[int]:
     events from this canonical per-player state.
     """
     map_id = int(getattr(session, "map_id", 0) or 0)
-    position = (
-        float(getattr(session, "x", 0.0) or 0.0),
-        float(getattr(session, "y", 0.0) or 0.0),
-        float(getattr(session, "z", 0.0) or 0.0),
-    )
+    position = effective_world_position(session)
     active = _active_area_triggers(session)
     contained = {
         int(trigger_id)
@@ -365,15 +359,52 @@ def _movement_scan_padding_for_transition(
     current_map_id: int,
     row: dict[str, Any],
 ) -> float:
-    try:
-        target_map_id = int(row["target_map"])
-    except Exception:
-        return _AREA_TRIGGER_WORLD_MOVEMENT_SAFE_DELTA
+    _ = current_map_id, row
+    return 0.0
 
-    if _map_is_instanceable(current_map_id) or _map_is_instanceable(target_map_id):
-        return _AREA_TRIGGER_INSTANCE_MOVEMENT_SAFE_DELTA
 
-    return _AREA_TRIGGER_WORLD_MOVEMENT_SAFE_DELTA
+def effective_world_position(session) -> tuple[float, float, float]:
+    """Read the canonical absolute position committed by position publication."""
+    return (
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+    )
+
+
+def _log_position_evaluation(
+    session,
+    definition: AreaTriggerDefinition,
+    position: tuple[float, float, float],
+) -> None:
+    movement = getattr(session, "movement_state", None)
+    local = None
+    if int(getattr(movement, "transport_guid", 0) or 0) > 0:
+        local = (
+            float(getattr(movement, "transport_x", 0.0) or 0.0),
+            float(getattr(movement, "transport_y", 0.0) or 0.0),
+            float(getattr(movement, "transport_z", 0.0) or 0.0),
+        )
+    distance = math.sqrt(
+        _distance_sq_3d(*position, definition.x, definition.y, definition.z)
+    )
+    Logger.debug(
+        "[AREATRIGGER_POSITION] id=%s center=(%.3f %.3f %.3f) radius=%.3f "
+        "server=(%.3f %.3f %.3f) effective=(%.3f %.3f %.3f) local=%s distance=%.3f",
+        int(definition.trigger_id),
+        float(definition.x),
+        float(definition.y),
+        float(definition.z),
+        float(definition.radius),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        position[0],
+        position[1],
+        position[2],
+        local,
+        distance,
+    )
 
 
 def _movement_activation_radius(definition: AreaTriggerDefinition, padding: float) -> float:
@@ -457,9 +488,7 @@ def activate_area_trigger(
     crossed: bool = False,
 ) -> list[tuple[str, bytes]] | None:
     current_map_id = int(getattr(session, "map_id", 0) or 0)
-    px = float(getattr(session, "x", 0.0) or 0.0)
-    py = float(getattr(session, "y", 0.0) or 0.0)
-    pz = float(getattr(session, "z", 0.0) or 0.0)
+    px, py, pz = effective_world_position(session)
 
     Logger.info(
         "[AREATRIGGER] enter id=%s source=%s map=%s pos=(%.3f %.3f %.3f) crossed=%s",
@@ -478,6 +507,7 @@ def activate_area_trigger(
 
     definition = _definition_for_trigger(int(trigger_id))
     if definition is not None:
+        _log_position_evaluation(session, definition, (px, py, pz))
         if int(definition.map_id) != current_map_id:
             Logger.info(
                 "[AREATRIGGER] failed id=%s reason=map_mismatch trigger_map=%s player_map=%s",
@@ -534,6 +564,9 @@ def check_movement_segment_for_area_triggers(
         return None
 
     current_map_id = int(getattr(session, "map_id", 0) or 0)
+    # The caller supplies the previous effective position. The current endpoint
+    # always comes from the canonical absolute position publication boundary.
+    end = effective_world_position(session)
     active = _active_area_triggers(session)
     segment_length_sq = _distance_sq_3d(*start, *end)
     if segment_length_sq <= 0.000001:

@@ -548,7 +548,13 @@ def _transport_runtime_packet_entry(
         return entry
 
     packet_entry = dict(entry)
-    packet_entry["_runtime_transport_orientation_authoritative"] = True
+    # MO_TRANSPORT routes publish a live server yaw. Local type-11 transports
+    # instead use their authored parent quaternion to transform the client DBC
+    # animation; replacing it with stationary yaw rotates that path in-world.
+    packet_entry["_runtime_transport_orientation_authoritative"] = not (
+        gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT
+        and bool(packet_entry.get("client_driven_transport_animation"))
+    )
     packet_entry["world_guid"] = int(state.guid)
     if (
         gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT

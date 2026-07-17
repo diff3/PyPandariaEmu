@@ -3761,7 +3761,10 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
         limit=400,
     )
     keep_guids = set()
-    from server.modules.handlers.world.transport_runtime import prepare_runtime_transport_entry
+    from server.modules.handlers.world.transport_runtime import (
+        prepare_runtime_transport_entry,
+        session_is_transport_passenger,
+    )
 
     for entry in keep_entries:
         entry = prepare_runtime_transport_entry(entry)
@@ -3795,6 +3798,16 @@ def _stream_nearby_gameobjects(session) -> list[tuple[str, bytes]]:
     stale_guids = sorted(int(guid) for guid in loaded_gameobjects if int(guid) not in keep_guids)
     loaded_transport_entries = getattr(session, "loaded_transport_entries", None)
     for guid in stale_guids:
+        # A passenger's effective position is owned by the attached transport.
+        # A transient proximity miss must therefore never hide that transport
+        # while leaving the canonical attachment alive. Actual lifecycle/map
+        # removal is handled by transport_runtime, which detaches first.
+        if (
+            isinstance(loaded_transport_entries, dict)
+            and int(guid) in loaded_transport_entries
+            and session_is_transport_passenger(session, int(guid))
+        ):
+            continue
         Logger.debug("[GO_STREAM] despawn guid=0x%X", int(guid))
         responses.append(
             (

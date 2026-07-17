@@ -983,6 +983,110 @@ def test_runtime_transport_lifecycle_create_values_destroy_create(monkeypatch):
     assert _payload_update_type(recreated[0]) == 1
 
 
+def test_transport_lifecycle_despawn_detaches_passenger_before_destroy(monkeypatch):
+    world_guid = 0x1234
+    entries = {world_guid: {"entry": 99}}
+    session = SimpleNamespace(char_guid=30, loaded_gameobjects={world_guid})
+    calls = []
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "session_is_transport_passenger",
+        lambda target, guid: calls.append(("attached", guid)) or True,
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "detach_session_transport_passenger",
+        lambda target, **kwargs: calls.append(("detach", kwargs["world_guid"])) or True,
+    )
+
+    responses = transport_runtime._despawn_loaded_transport(
+        session,
+        entries,
+        world_guid,
+        map_id=1,
+        reason="lifecycle",
+    )
+
+    assert calls == [("attached", world_guid), ("detach", world_guid)]
+    assert len(responses) == 1
+    assert _payload_update_type(responses[0]) == 3
+    assert world_guid not in session.loaded_gameobjects
+
+
+def test_transport_tick_evaluates_area_trigger_from_passenger_world_motion(monkeypatch):
+    _reset_transport_states()
+    world_guid = 0xF110000000009200
+    state = transport_runtime.RuntimeTransportState(
+        guid=world_guid,
+        entry=999200,
+        spawn_guid=9200,
+        display_id=360,
+        route=[],
+        node_index=0,
+        x=10.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.0,
+        map_id=1,
+    )
+    transport_runtime._runtime_transport_states()[world_guid] = state
+    assert transport_runtime.attach_transport_passenger(
+        world_guid,
+        42,
+        local_x=2.0,
+        local_y=0.0,
+        local_z=0.0,
+        source_map=1,
+    )
+    session = SimpleNamespace(
+        char_guid=42,
+        map_id=1,
+        instance_id=0,
+        x=12.0,
+        y=20.0,
+        z=30.0,
+        orientation=0.0,
+        movement_state=MovementState(),
+    )
+    observed = []
+    sent = []
+
+    monkeypatch.setattr(
+        transport_runtime,
+        "get_movement_manager",
+        lambda: SimpleNamespace(
+            tick_instance=lambda *_args, **_kwargs: None,
+            get_state=lambda *_args, **_kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "_commit_transport_state_from_movement_cache",
+        lambda target: setattr(target, "x", 15.0),
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "_find_transport_passenger_session",
+        lambda passenger_id: session if int(passenger_id) == 42 else None,
+    )
+    monkeypatch.setattr(
+        "server.modules.handlers.world.teleport.area_trigger.check_movement_segment_for_area_triggers",
+        lambda target, start, end: observed.append((start, end))
+        or [("SMSG_NEW_WORLD", b"triggered")],
+    )
+    monkeypatch.setattr(
+        transport_runtime,
+        "_send_responses",
+        lambda target, responses: sent.extend(responses) or True,
+    )
+
+    transport_runtime.get_world_transport_manager()._tick_transport_state(world_guid, state)
+
+    assert observed == [((12.0, 20.0, 30.0), (17.0, 20.0, 30.0))]
+    assert sent == [("SMSG_NEW_WORLD", b"triggered")]
+
+
 def test_runtime_transport_values_update_is_suppressed_during_world_bootstrap(monkeypatch):
     _reset_transport_states()
     entry = _loaded_mo_transport_entry()
@@ -2073,6 +2177,22 @@ def test_type11_transport_animation_uses_dbc_timed_route(monkeypatch):
     state = transport_runtime._runtime_transport_states()[prepared["world_guid"]]
     assert state.timed_route is True
     assert state.route_period_ms == 10000
+
+    runtime_identity = id(state)
+    now = 21.499
+    _tick_transport_entry(prepared)
+    assert state.path_progress_ms == 9999
+
+    now = 21.5
+    _tick_transport_entry(prepared)
+    wrapped = transport_runtime._runtime_transport_states()[prepared["world_guid"]]
+    assert id(wrapped) == runtime_identity
+    assert wrapped.path_progress_ms == 0
+    movement_runtime = transport_runtime.get_movement_manager().get_state(
+        prepared["world_guid"]
+    )
+    assert movement_runtime is not None
+    assert movement_runtime.spawned is True
 
 
 def test_world_db_elevator_preload_registers_type11_animation_runtime(monkeypatch):
