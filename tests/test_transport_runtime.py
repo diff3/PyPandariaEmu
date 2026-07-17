@@ -4674,76 +4674,14 @@ def test_transport_manager_attach_requires_same_authoritative_map():
     assert manager.can_attach(SimpleNamespace(char_guid=1, map_id=0), state.guid) is False
 
 
-def _static_type11_session(world_guid: int, *, go_type: int = 11, map_id: int = 369):
-    return SimpleNamespace(
-        char_guid=16,
-        map_id=map_id,
-        loaded_gameobjects={world_guid},
-        loaded_gameobject_entries={
-            world_guid: {
-                "guid": 500001,
-                "world_guid": world_guid,
-                "entry": 176082,
-                "map": 369,
-                "type": go_type,
-            }
-        },
-    )
 
 
-def test_static_type11_gameobject_attachment_is_accepted_without_runtime_state():
-    _reset_transport_states()
-    world_guid = 0xF11000000007A121
-    session = _static_type11_session(world_guid)
-
-    assert transport_runtime.can_attach_transport(session, world_guid) is True
-    assert transport_runtime.runtime_transport_state_for_guid(world_guid) is None
 
 
-def test_static_type11_movement_keeps_transport_guid():
-    _reset_transport_states()
-    world_guid = 0xF11000000007A125
-    session = _static_type11_session(world_guid)
-    session.movement_state = SimpleNamespace(transport_guid=0)
-
-    movement._store_transport_state_from_parsed(
-        session,
-        "CMSG_MOVE_HEARTBEAT",
-        {
-            "has_transport_data": True,
-            "transport_guid": world_guid,
-            "transport_x": 1.0,
-            "transport_y": 2.0,
-            "transport_z": 3.0,
-            "transport_orientation": 0.25,
-            "transport_time": 100,
-            "transport_seat": -1,
-        },
-    )
-
-    assert session.movement_state.has_transport_data is True
-    assert session.movement_state.transport_guid == world_guid
-    assert transport_runtime.runtime_transport_state_for_guid(world_guid) is None
 
 
-def test_static_type11_gameobject_attachment_requires_same_map():
-    _reset_transport_states()
-    world_guid = 0xF11000000007A126
-
-    assert transport_runtime.can_attach_transport(
-        _static_type11_session(world_guid, map_id=0),
-        world_guid,
-    ) is False
 
 
-def test_static_non_type11_gameobject_attachment_is_rejected():
-    _reset_transport_states()
-    world_guid = 0xF11000000007A122
-
-    assert transport_runtime.can_attach_transport(
-        _static_type11_session(world_guid, go_type=5),
-        world_guid,
-    ) is False
 
 
 def test_unknown_static_gameobject_attachment_is_rejected():
@@ -4759,18 +4697,6 @@ def test_unknown_static_gameobject_attachment_is_rejected():
     assert transport_runtime.can_attach_transport(session, world_guid) is False
 
 
-def test_static_type11_gameobject_does_not_start_cross_map_transfer():
-    _reset_transport_states()
-    world_guid = 0xF11000000007A124
-    session = _static_type11_session(world_guid)
-    session.transport_transfer_pending = False
-    session.teleport_pending = False
-    session.worldport_ack_pending = False
-    session.near_teleport_pending = False
-    session.movement_state = SimpleNamespace(transport_guid=world_guid)
-
-    assert movement._maybe_start_transport_route_transfer(session, "CMSG_MOVE_HEARTBEAT") == []
-    assert transport_runtime.runtime_transport_state_for_guid(world_guid) is None
 
 
 def _loaded_canonical_world_db_transport_after_map_change(
@@ -5629,45 +5555,6 @@ def test_20808_boundary_active_pending_still_blocks_duplicate_transfer(monkeypat
     assert responses == []
     assert session.transport_transfer_pending is True
     assert session.pending_transport_transfer["destination_map"] == 0
-
-
-def test_collision_rejection_preserves_complete_transport_transition(monkeypatch):
-    session, _state, world_guid = _transport_boundary_transfer_session(
-        monkeypatch,
-        source_map=1,
-        destination_map=0,
-        passenger=True,
-    )
-    pending = {
-        "transfer_id": "boundary-test",
-        "source_guid": world_guid,
-        "destination_guid": world_guid,
-        "source_map": 1,
-        "destination_map": 0,
-    }
-    session.transport_transfer_pending = True
-    session.pending_transport_transfer = pending
-    session.teleport_pending = True
-    session.worldport_ack_pending = True
-    session.near_teleport_pending = False
-    session.teleport_destination = "transport:20808:1->0"
-    session.world_transition_owner = "transport_worldport"
-    session._last_movement_rejection = "gameobject_collision"
-    monkeypatch.setattr(
-        movement,
-        "build_same_map_teleport_self_resync_responses",
-        lambda _session: [],
-    )
-    monkeypatch.setattr(movement, "resync_movement", lambda _session: [])
-
-    movement._build_collision_reject_responses(session, "MSG_MOVE_HEARTBEAT")
-
-    assert session.teleport_pending is True
-    assert session.worldport_ack_pending is True
-    assert session.teleport_destination == "transport:20808:1->0"
-    assert session.transport_transfer_pending is True
-    assert session.pending_transport_transfer is pending
-    assert session.world_transition_owner == "transport_worldport"
 
 
 def test_movement_after_boundary_cannot_wake_or_restart_worldport(monkeypatch):
@@ -6990,89 +6877,10 @@ def test_transport_rehydrate_preserves_shared_clock_phase(monkeypatch):
     assert state.x == 75.0
 
 
-def test_deeprun_tram_without_dbc_template_does_not_spawn(monkeypatch):
-    _reset_transport_states()
-    monkeypatch.setattr(transport_runtime, "_load_world_db_transports", lambda: ())
-    monkeypatch.setattr(transport_runtime, "_shared_route_phase_ms", lambda *_args: 0)
-    transport_runtime.get_world_transport_manager().start()
-
-    deeprun_session = SimpleNamespace(
-        gameobjects_visible=True,
-        map_id=transport_runtime._DEEPRUN_TRAM_MAP_ID,
-        x=23.0,
-        y=20.0,
-        realm_id=1,
-    )
-    entries = transport_runtime.synthetic_transport_entries_near(deeprun_session, loaded_guids=set())
-
-    assert entries == []
-
-    ironforge_session = SimpleNamespace(
-        gameobjects_visible=True,
-        map_id=transport_runtime._DEEPRUN_TRAM_MAP_ID,
-        x=-20.0,
-        y=2488.0,
-        realm_id=1,
-    )
-    ironforge_entries = transport_runtime.synthetic_transport_entries_near(ironforge_session, loaded_guids=set())
-    assert ironforge_entries == []
-
-    instance_session = SimpleNamespace(
-        gameobjects_visible=True,
-        map_id=603,
-        x=2307.0,
-        y=284.0,
-        realm_id=1,
-    )
-    assert transport_runtime.synthetic_transport_entries_near(instance_session, loaded_guids=set()) == []
 
 
-def test_deeprun_runtime_registration_is_silent(monkeypatch):
-    logged: list[str] = []
-
-    def _capture(message, *args, **kwargs):
-        logged.append(str(message) % args if args else str(message))
-
-    monkeypatch.setattr(transport_runtime.Logger, "warning", _capture)
-
-    transport_runtime.get_world_transport_manager()._register_deeprun_trams_locked()
-
-    assert logged == []
 
 
-def test_uld_instance_tram_entry_is_not_deeprun_special_case(monkeypatch):
-    _reset_transport_states()
-    animation = transport_runtime.TransportAnimationPath(
-        entry=transport_runtime._DEEPRUN_TRAM_ENTRY,
-        nodes=(
-            transport_runtime.TransportAnimationNode(0, 0.0, 0.0, 0.0),
-            transport_runtime.TransportAnimationNode(66000, 0.0, 10.0, 0.0),
-        ),
-        period_ms=66000,
-    )
-    monkeypatch.setattr(
-        transport_runtime,
-        "_transport_animation_for_entry",
-        lambda entry_id: animation if int(entry_id) == transport_runtime._DEEPRUN_TRAM_ENTRY else None,
-    )
-
-    entry = {
-        "guid": 34057,
-        "world_guid": 0xF110000000008509,
-        "entry": transport_runtime._DEEPRUN_TRAM_ENTRY,
-        "map": 603,
-        "type": transport_runtime.GAMEOBJECT_TYPE_TRANSPORT,
-        "display_id": transport_runtime._DEEPRUN_TRAM_DISPLAY_ID,
-        "x": 2307.0,
-        "y": 284.632,
-        "z": 424.288,
-        "orientation": 0.0,
-    }
-
-    prepared = transport_runtime.prepare_runtime_transport_entry(entry)
-    assert transport_runtime.is_deeprun_tram_entry(prepared) is False
-    assert prepared.get("deeprun_tram") is None
-    assert prepared["transport_period"] == 66000
 
 
 def test_autonomous_transport_visibility_creates_then_updates_stationary_player(monkeypatch):

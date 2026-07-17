@@ -29,26 +29,9 @@ CONFIG_ENABLE_NPCS = "World.EnableNPCs"
 CONFIG_ENABLE_NPC_AUTO_STREAM = "World.EnableNPCAutoStream"
 CONFIG_DEBUG_NPC_ORIENTATION = "World.DebugNPCOrientation"
 CONFIG_DEBUG_PLAYER_MOVEMENT = "World.DebugMovement"
-CONFIG_ENABLE_GAMEOBJECT_COLLISION = "World.EnableGameObjectCollision"
-CONFIG_DEBUG_GAMEOBJECT_COLLISION = "World.DebugGameObjectCollision"
-CONFIG_EXPERIMENTAL_GEOMETRY_SHADOW = "World.ExperimentalGeometryShadow"
-CONFIG_GAMEOBJECT_COLLISION_MODE = "World.GameObjectCollisionMode"
-CONFIG_GEOMETRY_CONTACT_SEPARATION_EPSILON = "World.GeometryContactSeparationEpsilon"
-DEFAULT_GEOMETRY_CONTACT_SEPARATION_EPSILON = 0.05
 DEFAULT_TRANSPORT_ATTACHMENT_HORIZONTAL_TOLERANCE = 25.0
 DEFAULT_TRANSPORT_ATTACHMENT_VERTICAL_TOLERANCE = 12.0
 DEFAULT_TRANSPORT_ATTACHMENT_MAX_LOCAL_RADIUS = 150.0
-
-GAMEOBJECT_COLLISION_MODE_LEGACY = "legacy"
-GAMEOBJECT_COLLISION_MODE_SHADOW_COMPARE = "shadow_compare"
-GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE = "shadow_authoritative"
-GAMEOBJECT_COLLISION_MODES = frozenset(
-    {
-        GAMEOBJECT_COLLISION_MODE_LEGACY,
-        GAMEOBJECT_COLLISION_MODE_SHADOW_COMPARE,
-        GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE,
-    }
-)
 
 _DEFAULTS: dict[str, bool] = {
     CONFIG_ENABLE_ELEVATORS: True,
@@ -68,9 +51,6 @@ _DEFAULTS: dict[str, bool] = {
     CONFIG_ENABLE_NPC_AUTO_STREAM: False,
     CONFIG_DEBUG_NPC_ORIENTATION: False,
     CONFIG_DEBUG_PLAYER_MOVEMENT: False,
-    CONFIG_ENABLE_GAMEOBJECT_COLLISION: True,
-    CONFIG_DEBUG_GAMEOBJECT_COLLISION: False,
-    CONFIG_EXPERIMENTAL_GEOMETRY_SHADOW: False,
 }
 
 
@@ -204,46 +184,6 @@ def player_movement_debug_enabled() -> bool:
     return feature_enabled(CONFIG_DEBUG_PLAYER_MOVEMENT)
 
 
-def gameobject_collision_enabled() -> bool:
-    return feature_enabled(CONFIG_ENABLE_GAMEOBJECT_COLLISION)
-
-
-def gameobject_collision_debug_enabled() -> bool:
-    return feature_enabled(CONFIG_DEBUG_GAMEOBJECT_COLLISION)
-
-
-def experimental_geometry_shadow_enabled() -> bool:
-    return feature_enabled(CONFIG_EXPERIMENTAL_GEOMETRY_SHADOW)
-
-
-def gameobject_collision_mode() -> str:
-    config = ConfigLoader.get_config() or {}
-    value = _lookup_key(config, CONFIG_GAMEOBJECT_COLLISION_MODE)
-    normalized = str(value or GAMEOBJECT_COLLISION_MODE_LEGACY).strip().lower()
-    if normalized not in GAMEOBJECT_COLLISION_MODES:
-        Logger.warning(
-            "[Config] Invalid GameObject collision mode %r; using %s",
-            value,
-            GAMEOBJECT_COLLISION_MODE_LEGACY,
-        )
-        return GAMEOBJECT_COLLISION_MODE_LEGACY
-    return normalized
-
-
-def geometry_contact_separation_epsilon() -> float:
-    config = ConfigLoader.get_config() or {}
-    value = _lookup_key(config, CONFIG_GEOMETRY_CONTACT_SEPARATION_EPSILON)
-    try:
-        epsilon = float(
-            DEFAULT_GEOMETRY_CONTACT_SEPARATION_EPSILON if value is None else value
-        )
-    except (TypeError, ValueError):
-        return DEFAULT_GEOMETRY_CONTACT_SEPARATION_EPSILON
-    if not math.isfinite(epsilon) or epsilon <= 0.0:
-        return DEFAULT_GEOMETRY_CONTACT_SEPARATION_EPSILON
-    return epsilon
-
-
 def log_effective_world_feature_config() -> None:
     Logger.info("[Config] Elevators: %s", "enabled" if elevators_enabled() else "disabled")
     Logger.info("[Config] Moving transports: %s", "enabled" if moving_transports_enabled() else "disabled")
@@ -288,12 +228,4 @@ def log_effective_world_feature_config() -> None:
     Logger.info(
         "[Config] Player movement debug: %s",
         "enabled" if player_movement_debug_enabled() else "disabled",
-    )
-    Logger.info("[Config] GameObject collision: %s", "enabled" if gameobject_collision_enabled() else "disabled")
-    Logger.info("[Config] GameObject collision debug: %s", "enabled" if gameobject_collision_debug_enabled() else "disabled")
-    Logger.info("[Config] Experimental geometry shadow: %s", "enabled" if experimental_geometry_shadow_enabled() else "disabled")
-    Logger.info("[Config] GameObject collision mode: %s", gameobject_collision_mode())
-    Logger.info(
-        "[Config] Geometry contact separation epsilon: %.6f",
-        geometry_contact_separation_epsilon(),
     )

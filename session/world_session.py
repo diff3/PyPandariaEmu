@@ -6,14 +6,6 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
 
-@dataclass(frozen=True)
-class GeometryWallContact:
-    object_guid: int
-    hit_normal: tuple[float, float, float]
-    corrected_position: tuple[float, float, float]
-    created_at: float
-
-
 class LoginState(str, Enum):
     AUTHED = "AUTHED"
     CHAR_SCREEN = "CHAR_SCREEN"
@@ -42,7 +34,6 @@ class MovementState:
     fall_horizontal_speed: float = 0.0
     fall_sin_angle: float = 0.0
     fall_cos_angle: float = 0.0
-    geometry_wall_contact: Optional[GeometryWallContact] = None
 
 
 @dataclass(eq=False)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
 import math
 import re
@@ -67,10 +68,25 @@ from server.modules.protocol.packet_batch import preserve_packet_batch_metadata
 CommandHandler = Callable[[Any, list[str]], list[tuple[str, bytes]]]
 
 
+class GMLevel(IntEnum):
+    PLAYER = 0
+    GAME_MASTER = 1
+    ADMINISTRATOR = 3
+
+    @property
+    def display_name(self) -> str:
+        return {
+            GMLevel.PLAYER: "Player",
+            GMLevel.GAME_MASTER: "GameMaster",
+            GMLevel.ADMINISTRATOR: "Administrator",
+        }[self]
+
+
 @dataclass(frozen=True)
 class Command:
     handler: CommandHandler
     usage: str
+    required_level: GMLevel = GMLevel.PLAYER
     description: str = ""
     allow_args: bool = True
     require_args: bool = False
@@ -245,8 +261,6 @@ def _call_command(name: str, session, args: list[str]) -> list[tuple[str, bytes]
 
 
 def _session_gm_level(session) -> int:
-    from server.modules.auth.AuthConnection import AuthConnection
-
     account_id = int(getattr(session, "account_id", 0) or 0)
     cached_account_id = int(getattr(session, "_cached_gm_level_account_id", 0) or 0)
     cached_value = getattr(session, "_cached_gm_level", None)
@@ -255,6 +269,8 @@ def _session_gm_level(session) -> int:
     if account_id <= 0:
         return 0
     try:
+        from server.modules.auth.AuthConnection import AuthConnection
+
         session_factory = AuthConnection.session()
         auth_mode = AuthConnection._resolve_auth_mode()
         if auth_mode == "legacy":
@@ -268,17 +284,11 @@ def _session_gm_level(session) -> int:
         )
         gm_level = max((int(row[0] or 0) for row in rows), default=0)
     except Exception as exc:
-        Logger.warning("[GOCollisionDebug] GM lookup failed account=%s err=%s", account_id, exc)
+        Logger.warning("[GM] account lookup failed account=%s err=%s", account_id, exc)
         gm_level = 0
     session._cached_gm_level_account_id = int(account_id)
     session._cached_gm_level = int(gm_level)
     return int(gm_level)
-
-
-def _require_gm(session) -> list[tuple[str, bytes]] | None:
-    if _session_gm_level(session) > 0:
-        return None
-    return _notification_response("This command is GM-only.")
 
 
 def _parse_int_arg(raw: str) -> int | None:
@@ -430,6 +440,13 @@ def handle_command(session, message: str) -> Optional[list[tuple[str, bytes]]]:
             return _notification_response(f"Unknown command: {str(message or '').strip()}")
         return None
 
+    current_level = _session_gm_level(session)
+    if current_level < int(command.required_level):
+        return _notification_response(
+            "Insufficient permissions. Required GM level: "
+            f"{command.required_level.display_name}."
+        )
+
     if not command.allow_args and args:
         return _notification_response(f"Usage: {command.usage}")
     if command.require_args and not args:
@@ -476,9 +493,6 @@ def cmd_gps(session, args: list[str]) -> list[tuple[str, bytes]]:
 )
 def cmd_worldporttest(session, args: list[str]) -> list[tuple[str, bytes]]:
     """Temporary GM-only direct worldport diagnostic command."""
-    gm_error = _require_gm(session)
-    if gm_error is not None:
-        return gm_error
     if not transport_debug_messages_enabled():
         return _notification_response("Worldport test requires Transport.DebugMessages=true.")
 
@@ -683,163 +697,8 @@ def _current_map_gameobject_entry_by_guid(session, guid: int) -> dict[str, Any] 
     return None
 
 
-def _gocollision_display_bounds_by_display() -> dict[int, Any]:
-    cache = getattr(_gocollision_display_bounds_by_display, "_cache", None)
-    if isinstance(cache, dict):
-        return cache
-    from server.modules.handlers.world.collision.gameobject_collision import load_display_bounds
-
-    cache = load_display_bounds()
-    setattr(_gocollision_display_bounds_by_display, "_cache", cache)
-    return cache
-
-
-def _gocollision_show(session, args: list[str]) -> list[tuple[str, bytes]]:
-    gm_error = _require_gm(session)
-    if gm_error is not None:
-        return gm_error
-    guid = _parse_int_arg(args[0] if args else "")
-    if guid is None or guid <= 0:
-        return _notification_response("Usage: .gocollision show <guid>")
-    from server.modules.handlers.world.collision import gameobject_collision_index
-    from server.modules.handlers.world.collision.debug_visualization import (
-        describe_collision_visualization,
-        render_collision_bounds,
-    )
-    from server.modules.handlers.world.collision.gameobject_collision import gameobject_eligibility_reason
-
-    entry = _current_map_gameobject_entry_by_guid(session, guid)
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    collision = gameobject_collision_index.get(map_id, guid)
-    if collision is None and entry is not None:
-        collision = gameobject_collision_index.get(map_id, int(entry.get("guid", 0) or 0))
-    display_bounds = None
-    eligible = collision is not None
-    eligible_reason = "indexed"
-    if entry is not None:
-        display_bounds = _gocollision_display_bounds_by_display().get(int(entry.get("display_id", 0) or 0))
-        eligible, eligible_reason = gameobject_eligibility_reason(entry, display_bounds)
-    bounds = collision.bounds if collision is not None else None
-    responses: list[tuple[str, bytes]] = []
-    if bounds is not None:
-        handle = render_collision_bounds(session, bounds, duration_ms=10_000)
-        Logger.info(
-            "[GOCollisionDebug] Render guid=%s Eligible=%s Indexed=%s Duration=%sms markers=%s",
-            int(guid),
-            "True" if eligible else "False",
-            "True",
-            10_000,
-            len(handle.world_guids),
-        )
-    elif entry is not None:
-        Logger.info(
-            "[GOCollisionDebug] Render guid=%s Eligible=%s Indexed=%s Duration=%sms",
-            int(guid),
-            "True" if eligible else "False",
-            "False",
-            0,
-        )
-    lines = describe_collision_visualization(
-        entry,
-        bounds,
-        eligible=eligible,
-        eligible_reason=eligible_reason,
-        indexed=collision is not None,
-    )
-    for line in lines:
-        responses.extend(_notification_response(line))
-    if bounds is None:
-        responses.extend(_notification_response("No active collision bounds to render."))
-    return responses
-
-
-def _gocollision_around(session, args: list[str]) -> list[tuple[str, bytes]]:
-    gm_error = _require_gm(session)
-    if gm_error is not None:
-        return gm_error
-    radius = None
-    try:
-        radius = float(args[0] if args else "")
-    except (TypeError, ValueError):
-        radius = None
-    if radius is None or radius <= 0.0:
-        return _notification_response("Usage: .gocollision around <radius>")
-    from server.modules.handlers.world.collision import gameobject_collision_index
-    from server.modules.handlers.world.collision.debug_visualization import render_collision_bounds
-
-    map_id = int(getattr(session, "map_id", 0) or 0)
-    point = (
-        float(getattr(session, "x", 0.0) or 0.0),
-        float(getattr(session, "y", 0.0) or 0.0),
-        float(getattr(session, "z", 0.0) or 0.0),
-    )
-    collisions = list(gameobject_collision_index.nearby_point(map_id, point, radius=float(radius)))
-    rendered = 0
-    markers = 0
-    for collision in collisions:
-        handle = render_collision_bounds(session, collision.bounds, duration_ms=10_000)
-        rendered += 1
-        markers += len(handle.world_guids)
-        Logger.info(
-            "[GOCollisionDebug] Render guid=%s Eligible=True Indexed=True Duration=%sms",
-            collision.guid,
-            10_000,
-        )
-    return _notification_response(
-        f"[GOCollision] rendered {rendered} indexed objects within {float(radius):.1f} yards ({markers} markers)"
-    )
-
-
-def _gocollision_clear(session, _args: list[str]) -> list[tuple[str, bytes]]:
-    gm_error = _require_gm(session)
-    if gm_error is not None:
-        return gm_error
-    from server.modules.handlers.world.collision.debug_visualization import clear_debug_visualizations
-
-    responses = clear_debug_visualizations(session)
-    responses.extend(_notification_response("[GOCollision] cleared debug visuals"))
-    return responses
-
-
-def _gocollision_shadowstats(session, _args: list[str]) -> list[tuple[str, bytes]]:
-    gm_error = _require_gm(session)
-    if gm_error is not None:
-        return gm_error
-    from server.modules.handlers.world.collision.geometry_shadow import format_geometry_shadow_stats_lines
-
-    responses: list[tuple[str, bytes]] = []
-    for line in format_geometry_shadow_stats_lines():
-        responses.extend(_notification_response(line))
-    return responses
-
-
-@register_command("gocollision", ".gocollision <show <guid>|around <radius>|clear|shadowstats>")
-def cmd_gocollision(session, args: list[str]) -> list[tuple[str, bytes]]:
-    if not args:
-        return _notification_response("Usage: .gocollision <show <guid>|around <radius>|clear|shadowstats>")
-    subcommands = {
-        "show": (_gocollision_show, True),
-        "around": (_gocollision_around, True),
-        "clear": (_gocollision_clear, False),
-        "shadowstats": (_gocollision_shadowstats, False),
-    }
-    sub = str(args[0] or "").casefold()
-    if sub not in subcommands:
-        return _notification_response(f"Unknown subcommand: {sub}")
-    handler, needs_args = subcommands[sub]
-    sub_args = args[1:]
-    if needs_args and not sub_args:
-        return _notification_response(f"Missing arguments for '{sub}'")
-    if not needs_args and sub_args:
-        return _notification_response(f"'{sub}' takes no arguments")
-    return handler(session, sub_args)
-
-
 @register_command("go", ".go <info|list|search|add|select|current|clear|del|undo|move|rotate|scale|reload|copy|place|history>", require_args=True)
 def cmd_go(session, args: list[str]) -> list[tuple[str, bytes]]:
-    gm_error = _require_gm(session)
-    if gm_error is not None:
-        return gm_error
     if not args:
         return _notification_response("Usage: .go <info|list|search|add|select|current|clear|del|undo|move|rotate|scale|reload|copy|place|history>")
 
@@ -906,9 +765,6 @@ def cmd_go(session, args: list[str]) -> list[tuple[str, bytes]]:
 
 @register_command("npc", ".npc <info|list|search|add|select|current|clear|del|undo|move|rotate|copy|place|history>", require_args=True)
 def cmd_npc(session, args: list[str]) -> list[tuple[str, bytes]]:
-    gm_error = _require_gm(session)
-    if gm_error is not None:
-        return gm_error
     if not args:
         return _notification_response("Usage: .npc <info|list|search|add|select|current|clear|del|undo|move|rotate|copy|place|history>")
 
@@ -2629,49 +2485,52 @@ def cmd_cheat(session, args: list[str]) -> list[tuple[str, bytes]]:
 
 # Real commands live here for quick scanning.
 PRIMARY_COMMANDS = {
-    "achievement": Command(handler=cmd_achievement, usage=".achievement <add | remove | fix> [id | name]", description="Adds, removes, or repairs achievement progress.", require_args=True),
-    "add": Command(handler=cmd_add, usage=".add <item | money | hearthstone | bags> ...", description="Adds items (including comma-separated lists), money, a Hearthstone, or four Royal Satchels.", require_args=True),
-    "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>", description="Adds a class tier equipment set."),
-    "cheat": Command(handler=cmd_cheat, usage=".cheat <fly | taxi | map | boost> ...", description="Controls GM fly, taxi, map, and boost cheats.", require_args=True),
-    "demorph": Command(handler=cmd_demorph, usage=".demorph", description="Restores your normal character model.", allow_args=False),
-    "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", description="Teleports another player to your position.", require_args=True),
+    "achievement": Command(handler=cmd_achievement, usage=".achievement <add | remove | fix> [id | name]", required_level=GMLevel.GAME_MASTER, description="Adds, removes, or repairs achievement progress.", require_args=True),
+    "add": Command(handler=cmd_add, usage=".add <item | money | hearthstone | bags> ...", required_level=GMLevel.GAME_MASTER, description="Adds items (including comma-separated lists), money, a Hearthstone, or four Royal Satchels.", require_args=True),
+    "addtier": Command(handler=cmd_addtier, usage=".addtier <class> <tier>", required_level=GMLevel.GAME_MASTER, description="Adds a class tier equipment set."),
+    "cheat": Command(handler=cmd_cheat, usage=".cheat <fly | taxi | map | boost> ...", required_level=GMLevel.GAME_MASTER, description="Controls GM fly, taxi, map, and boost cheats.", require_args=True),
+    "demorph": Command(handler=cmd_demorph, usage=".demorph", required_level=GMLevel.GAME_MASTER, description="Restores your normal character model.", allow_args=False),
+    "fetch": Command(handler=cmd_fetch, usage=".fetch <player>", required_level=GMLevel.GAME_MASTER, description="Teleports another player to your position.", require_args=True),
     # "fixplayer": Command(handler=cmd_fixplayer, usage=".fixplayer [teleport]"),
     # "fixspeed": Command(handler=cmd_fixspeed, usage=".fixspeed", allow_args=False),
     "go": Command(
         handler=cmd_go,
         usage=".go <info | list | search | add | select | current | clear | del | undo | move | rotate | scale | reload | copy | place | history>",
+        required_level=GMLevel.ADMINISTRATOR,
         description="Manages persistent GameObject spawns.",
         require_args=True,
     ),
-    "gocollision": Command(handler=cmd_gocollision, usage=".gocollision <show <guid> | around <radius> | clear>", description="Displays or clears GameObject collision diagnostics."),
-    "goto": Command(handler=cmd_goto, usage=".goto <player>", description="Teleports you to another player.", require_args=True),
-    "gps": Command(handler=cmd_gps, usage=".gps", description="Shows your current map, position, and orientation.", allow_args=False),
-    "help": Command(handler=cmd_help, usage=".help [command]", description="Lists commands or shows help for one command."),
-    "learn": Command(handler=cmd_learn, usage=".learn spell <spell_id>", description="Teaches your character a spell.", require_args=True),
-    "level": Command(handler=cmd_level, usage=".level [delta] | set <level>", description="Changes your character level."),
-    "morph": Command(handler=cmd_morph, usage=".morph <displayId | name | list>", description="Changes your visible character model.", require_args=True),
+    "goto": Command(handler=cmd_goto, usage=".goto <player>", required_level=GMLevel.GAME_MASTER, description="Teleports you to another player.", require_args=True),
+    "gps": Command(handler=cmd_gps, usage=".gps", required_level=GMLevel.GAME_MASTER, description="Shows your current map, position, and orientation.", allow_args=False),
+    "help": Command(handler=cmd_help, usage=".help [command]", required_level=GMLevel.PLAYER, description="Lists commands or shows help for one command."),
+    "learn": Command(handler=cmd_learn, usage=".learn spell <spell_id>", required_level=GMLevel.GAME_MASTER, description="Teaches your character a spell.", require_args=True),
+    "level": Command(handler=cmd_level, usage=".level [delta] | set <level>", required_level=GMLevel.GAME_MASTER, description="Changes your character level."),
+    "morph": Command(handler=cmd_morph, usage=".morph <displayId | name | list>", required_level=GMLevel.GAME_MASTER, description="Changes your visible character model.", require_args=True),
     "npc": Command(
         handler=cmd_npc,
         usage=".npc <info | list | search | add | select | current | clear | del | undo | move | rotate | copy | place | history>",
+        required_level=GMLevel.ADMINISTRATOR,
         description="Manages persistent NPC spawns.",
         require_args=True,
     ),
-    "petbattle": Command(handler=cmd_petbattle, usage=".petbattle <start | stop | status>", description="Controls the pet-battle test mode."),
-    "pvg": Command(handler=cmd_plants_vs_ghouls, usage=".pvg <start | stop | status | plant <lane 1-5> <spitter | rocknut>>", description="Controls the Plants vs. Ghouls test event."),
-    "save": Command(handler=cmd_save, usage=".save", description="Saves the current character state.", allow_args=False),
+    "petbattle": Command(handler=cmd_petbattle, usage=".petbattle <start | stop | status>", required_level=GMLevel.GAME_MASTER, description="Controls the pet-battle test mode."),
+    "pvg": Command(handler=cmd_plants_vs_ghouls, usage=".pvg <start | stop | status | plant <lane 1-5> <spitter | rocknut>>", required_level=GMLevel.GAME_MASTER, description="Controls the Plants vs. Ghouls test event."),
+    "save": Command(handler=cmd_save, usage=".save", required_level=GMLevel.PLAYER, description="Saves the current character state.", allow_args=False),
     "server": Command(
         handler=cmd_server,
         usage=".server <info | status | restart | motd | time | weather | message> ...",
+        required_level=GMLevel.ADMINISTRATOR,
         description="Shows server information or controls server utilities.",
     ),
     # "spawngo": Command(handler=cmd_spawngo, usage=".spawngo", allow_args=False),
-    "speed": Command(handler=cmd_speed, usage=".speed <multiplier | default>", description="Changes your movement-speed multiplier."),
-    "spell": Command(handler=cmd_spell, usage=".spell <cast | aura> ...", description="Casts a spell or applies a removable test aura.", require_args=True),
-    "title": Command(handler=cmd_title, usage=".title <bitIndex | explorer | off>", description="Grants, selects, or clears a character title.", require_args=True),
+    "speed": Command(handler=cmd_speed, usage=".speed <multiplier | default>", required_level=GMLevel.GAME_MASTER, description="Changes your movement-speed multiplier."),
+    "spell": Command(handler=cmd_spell, usage=".spell <cast | aura> ...", required_level=GMLevel.GAME_MASTER, description="Casts a spell or applies a removable test aura.", require_args=True),
+    "title": Command(handler=cmd_title, usage=".title <bitIndex | explorer | off>", required_level=GMLevel.GAME_MASTER, description="Grants, selects, or clears a character title.", require_args=True),
     # "telxyz": Command(handler=cmd_telxyz, usage=".telxyz <map> <x> <y> <z> <orientation>"),
     "tel": Command(
         handler=cmd_tel,
         usage=".tel <name> | .tel search <name> | .tel add <name> | .tel rm <name> | .tel coord <map> <x> <y> <z> <orientation>",
+        required_level=GMLevel.ADMINISTRATOR,
         description="Uses and manages named teleport locations.",
     ),
 }

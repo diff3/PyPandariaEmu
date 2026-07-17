@@ -52,7 +52,6 @@ from server.modules.handlers.world.state.runtime import (
     refresh_region_weather,
 )
 from server.modules.handlers.world.login.packets import build_login_packet
-from server.modules.handlers.world.features.deeprun_collision import clamp_deeprun_player_z
 from server.modules.handlers.world.transport_debug import (
     TransportDebugEvent,
     log_transport_event,
@@ -3670,138 +3669,18 @@ def _movement_debug_log(session, message: str, *args) -> None:
     Logger.info(message, *args)
 
 
-def _gameobject_collision_debug_log(message: str, *args) -> None:
-    try:
-        from server.modules.handlers.world.feature_config import gameobject_collision_debug_enabled
-
-        if gameobject_collision_debug_enabled():
-            Logger.info(message, *args)
-    except Exception:
-        return
-
-
-def _consume_geometry_shadow_contact_probe(
-    session,
-    opcode_name: str,
-    next_start: tuple[float, float, float],
-    *,
-    flags: int,
-    flags2: int,
-) -> None:
-    probe = getattr(session, "_geometry_shadow_contact_probe", None)
-    if not isinstance(probe, dict):
-        return
-    session._geometry_shadow_contact_probe = None
-    corrected = tuple(float(value) for value in probe["corrected_position"])
-    hit_position = tuple(float(value) for value in probe["hit_position"])
-    _gameobject_collision_debug_log(
-        "[GeometryShadow] correction_next collision_id=%s guid=%s entry=%s displayId=%s mesh=%s "
-        "next_opcode=%s next_flags=0x%X next_flags2=0x%X next_start=(%.6f %.6f %.6f) "
-        "distance_to_corrected=%.6f distance_to_hit=%.6f",
-        str(probe["collision_id"]),
-        int(probe["guid"]),
-        int(probe["entry"]),
-        int(probe["display_id"]),
-        str(probe["mesh"]),
-        str(opcode_name),
-        int(flags),
-        int(flags2),
-        float(next_start[0]),
-        float(next_start[1]),
-        float(next_start[2]),
-        math.dist(next_start, corrected),
-        math.dist(next_start, hit_position),
-    )
-
-
-def _active_geometry_wall_contact(
-    session,
-    current_position: tuple[float, float, float],
-    requested_position: tuple[float, float, float],
-    *,
-    now: float | None = None,
-):
-    state = _movement_state(session)
-    contact = getattr(state, "geometry_wall_contact", None)
-    if contact is None:
-        return None, None
-
-    current_time = float(time.monotonic() if now is None else now)
-    if current_time - float(contact.created_at) >= _GEOMETRY_WALL_CONTACT_TIMEOUT_SECONDS:
-        state.geometry_wall_contact = None
-        return None, "expired"
-    if math.dist(current_position, contact.corrected_position) > _GEOMETRY_WALL_CONTACT_POSITION_TOLERANCE:
-        state.geometry_wall_contact = None
-        return None, "diverged"
-
-    requested_delta = tuple(
-        float(requested_position[index]) - float(current_position[index])
-        for index in range(3)
-    )
-    contact_dot = sum(
-        float(contact.hit_normal[index]) * requested_delta[index]
-        for index in range(3)
-    )
-    if contact_dot >= 0.0:
-        state.geometry_wall_contact = None
-        return None, "released"
-    return contact, float(contact_dot)
-
-
-def _install_pending_geometry_wall_contact(session, *, now: float | None = None) -> None:
-    pending = getattr(session, "_pending_geometry_wall_contact", None)
-    session._pending_geometry_wall_contact = None
-    if not isinstance(pending, dict):
-        return
-    from server.session.world_session import GeometryWallContact
-
-    state = _movement_state(session)
-    state.geometry_wall_contact = GeometryWallContact(
-        object_guid=int(pending["object_guid"]),
-        hit_normal=tuple(float(value) for value in pending["hit_normal"]),
-        corrected_position=tuple(float(value) for value in pending["corrected_position"]),
-        created_at=float(time.monotonic() if now is None else now),
-    )
-
-
-def _sanitize_collision_reject_movement_state(session) -> tuple[int, int]:
-    state = _movement_state(session)
-    flags_before = int(getattr(state, "flags", 0) or 0)
-    flags2_before = int(getattr(state, "flags2", 0) or 0)
-    flags_after = flags_before & ~_GO_COLLISION_STOP_FLAGS
-    flags2_after = flags2_before & ~_MOVEMENTFLAG2_CIRCLE_RUN_SYNC
-    state.flags = int(flags_after)
-    state.flags2 = int(flags2_after)
-    state.is_ascending = False
-    state.is_descending = False
-    return int(flags_before), int(flags_after)
-
-
 _MAX_MOVEMENT_POSITION_DELTA = 200.0
 _MAX_MOVEMENT_Z_DELTA = 100.0
 _STALE_MOVEMENT_TIMESTAMP_REJECT_MS = 10000
 _POSITION_SAVE_INTERVAL_SECONDS = 30.0
 _STATIONARY_EPSILON = 0.01
-_GEOMETRY_WALL_CONTACT_TIMEOUT_SECONDS = 1.0
-_GEOMETRY_WALL_CONTACT_POSITION_TOLERANCE = 0.10
 _SIM_TURN_RATE_RAD_PER_SEC = math.pi
 _GAMEOBJECT_STREAM_LOAD_RADIUS = 120.0
 _GAMEOBJECT_STREAM_UNLOAD_RADIUS = 150.0
 _GAMEOBJECT_STREAM_INTERVAL_SECONDS = 0.5
 _NPC_STREAM_UNLOAD_RADIUS = 150.0
 _NPC_STREAM_INTERVAL_SECONDS = 0.5
-_GAMEOBJECT_COLLISION_CONTACT_BACKOFF = 0.05
 _TRANSPORT_METADATA_MISSING_CONFIRMATION_PACKETS = 2
-_GO_COLLISION_STOP_FLAGS = (
-    _MOVEMENTFLAG_FORWARD
-    | _MOVEMENTFLAG_BACKWARD
-    | _MOVEMENTFLAG_STRAFE_LEFT
-    | _MOVEMENTFLAG_STRAFE_RIGHT
-    | _MOVEMENTFLAG_TURN_LEFT
-    | _MOVEMENTFLAG_TURN_RIGHT
-    | _MOVEMENTFLAG_ASCENDING
-    | _MOVEMENTFLAG_DESCENDING
-)
 def _player_guid(session) -> int:
     return int(getattr(session, "world_guid", 0) or getattr(session, "player_guid", 0) or 0)
 
@@ -5098,15 +4977,8 @@ def _accept_movement_update(
     orientation: float,
 ) -> bool:
     session._last_movement_rejection = None
-    session._last_collision_correction = None
-    session._last_collision_flags_in = None
-    session._pending_geometry_wall_contact = None
     if not all(math.isfinite(value) for value in (x, y, z)):
         session._last_movement_rejection = "nonfinite_position"
-        _gameobject_collision_debug_log(
-            "[GOCollision] bypass player=%s opcode=%s reason=nonfinite_position",
-            int(getattr(session, "char_guid", 0) or 0), opcode_name,
-        )
         _movement_debug_log(
             session,
             "MOVE_DEBUG guid=Player-%s opcode=%s rejection=nonfinite_position",
@@ -5118,23 +4990,13 @@ def _accept_movement_update(
     current_x = float(getattr(session, "x", 0.0) or 0.0)
     current_y = float(getattr(session, "y", 0.0) or 0.0)
     current_z = float(getattr(session, "z", 0.0) or 0.0)
-
     if current_x == 0.0 and current_y == 0.0 and current_z == 0.0:
-        _gameobject_collision_debug_log(
-            "[GOCollision] bypass player=%s opcode=%s reason=unset_authoritative_position",
-            int(getattr(session, "char_guid", 0) or 0), opcode_name,
-        )
         return True
 
     planar_delta = math.hypot(x - current_x, y - current_y)
     vertical_delta = abs(z - current_z)
-
     if planar_delta > _MAX_MOVEMENT_POSITION_DELTA or vertical_delta > _MAX_MOVEMENT_Z_DELTA:
         session._last_movement_rejection = "implausible_delta"
-        _gameobject_collision_debug_log(
-            "[GOCollision] bypass player=%s opcode=%s reason=implausible_delta",
-            int(getattr(session, "char_guid", 0) or 0), opcode_name,
-        )
         log = Logger.debug if opcode_name in {"MSG_MOVE_FALL_LAND", "MSG_MOVE_HEARTBEAT"} else Logger.warning
         log(
             f"[Movement] ignoring implausible {opcode_name} update "
@@ -5151,330 +5013,7 @@ def _accept_movement_update(
             float(z - current_z),
         )
         return False
-
-    from server.modules.handlers.world.feature_config import (
-        GAMEOBJECT_COLLISION_MODE_LEGACY,
-        GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE,
-        gameobject_collision_debug_enabled,
-        gameobject_collision_enabled,
-        gameobject_collision_mode,
-    )
-    collision_mode = gameobject_collision_mode()
-    shadow_enabled = collision_mode != GAMEOBJECT_COLLISION_MODE_LEGACY
-    active_wall_contact = None
-    active_wall_contact_dot = None
-    if collision_mode == GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE:
-        active_wall_contact, active_wall_contact_dot = _active_geometry_wall_contact(
-            session,
-            (current_x, current_y, current_z),
-            (float(x), float(y), float(z)),
-        )
-    Logger.info(
-        "[GeometryShadow] config_enabled=%s authoritative_mode=%s player=%s opcode=%s",
-        "true" if shadow_enabled else "false",
-        collision_mode,
-        int(getattr(session, "char_guid", 0) or 0),
-        opcode_name,
-    )
-    if gameobject_collision_enabled():
-        from server.modules.handlers.world.query import WorldQuery
-        state = _movement_state(session)
-        session._last_collision_flags_in = (
-            int(getattr(state, "flags", 0) or 0),
-            int(getattr(state, "flags2", 0) or 0),
-        )
-        _gameobject_collision_debug_log(
-            "[GOCollision] query player=%s opcode=%s map=%s from=(%.3f %.3f %.3f) "
-            "to=(%.3f %.3f %.3f) registered=%s",
-            int(getattr(session, "char_guid", 0) or 0), opcode_name,
-            int(getattr(session, "map_id", 0) or 0),
-            current_x, current_y, current_z, float(x), float(y), float(z),
-            WorldQuery.registered_collision_objects(),
-        )
-        collision_query = WorldQuery.query_collision(
-            map_id=int(getattr(session, "map_id", 0) or 0),
-            start=(current_x, current_y, current_z),
-            end=(float(x), float(y), float(z)),
-        )
-        collision = collision_query.collision
-        legacy_resolved_end = (float(x), float(y), float(z))
-        collision_fraction = None
-        if collision is not None:
-            collision_fraction = collision.bounds.segment_intersection_fraction(
-                (current_x, current_y, current_z),
-                (float(x), float(y), float(z)),
-            )
-            dx = float(x) - current_x
-            dy = float(y) - current_y
-            dz = float(z) - current_z
-            segment_length = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
-            if collision_fraction is not None and segment_length > 1e-6:
-                backoff_fraction = min(
-                    float(collision_fraction),
-                    _GAMEOBJECT_COLLISION_CONTACT_BACKOFF / segment_length,
-                )
-                contact_fraction = max(0.0, float(collision_fraction) - backoff_fraction)
-                corrected_x = current_x + (dx * contact_fraction)
-                corrected_y = current_y + (dy * contact_fraction)
-                corrected_z = current_z + (dz * contact_fraction)
-            else:
-                corrected_x = current_x
-                corrected_y = current_y
-                corrected_z = current_z
-            legacy_resolved_end = (float(corrected_x), float(corrected_y), float(corrected_z))
-            if gameobject_collision_debug_enabled():
-                Logger.info(
-                    "[GOCollision] %s player=%s guid=%s entry=%s reason=segment_intersection "
-                    "contact=(%.3f %.3f %.3f %.3f) fraction=%s",
-                    (
-                        "legacy_hit"
-                        if collision_mode == GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE
-                        else "block"
-                    ),
-                    int(getattr(session, "char_guid", 0) or 0),
-                    collision.guid,
-                    collision.entry,
-                    float(corrected_x),
-                    float(corrected_y),
-                    float(corrected_z),
-                    float(orientation),
-                    (
-                        "none"
-                        if collision_fraction is None
-                        else f"{float(collision_fraction):.4f}"
-                    ),
-                )
-        else:
-            _gameobject_collision_debug_log(
-                "[GOCollision] query clear player=%s opcode=%s",
-                int(getattr(session, "char_guid", 0) or 0), opcode_name,
-            )
-
-        shadow_comparison = None
-        if shadow_enabled:
-            shadow_comparison = WorldQuery.query_geometry_shadow(
-                player_guid=int(getattr(session, "char_guid", 0) or 0),
-                opcode_name=opcode_name,
-                map_id=int(getattr(session, "map_id", 0) or 0),
-                start=(current_x, current_y, current_z),
-                end=(float(x), float(y), float(z)),
-                legacy_collision=collision,
-                legacy_resolved_end=legacy_resolved_end,
-                authoritative_mode=collision_mode,
-            )
-            session._last_geometry_shadow_comparison = shadow_comparison
-        else:
-            Logger.info("[GeometryShadow] skipped reason=config_disabled")
-
-        if collision_mode == GAMEOBJECT_COLLISION_MODE_SHADOW_AUTHORITATIVE:
-            authoritative_hit = bool(shadow_comparison is not None and shadow_comparison.new_hit)
-            authoritative_resolved_end = (
-                (float(x), float(y), float(z))
-                if shadow_comparison is None
-                else tuple(float(value) for value in shadow_comparison.new_resolved_end)
-            )
-            if shadow_comparison is not None and not shadow_comparison.agreed:
-                Logger.info(
-                    "[GeometryShadow] authoritative_mode=shadow_authoritative diagnostic_only=true "
-                    "legacy_hit=%s shadow_hit=%s",
-                    "true" if shadow_comparison.old_hit else "false",
-                    "true" if shadow_comparison.new_hit else "false",
-                )
-            hit_instance_id = int(getattr(shadow_comparison, "new_instance_id", 0) or 0)
-            if active_wall_contact is not None and (
-                not authoritative_hit
-                or hit_instance_id == int(active_wall_contact.object_guid)
-            ):
-                session._last_movement_rejection = "gameobject_wall_contact"
-                _gameobject_collision_debug_log(
-                    "[GeometryShadow] wall_contact ignore object=%s dot=%.6f opcode=%s",
-                    int(active_wall_contact.object_guid),
-                    float(active_wall_contact_dot),
-                    str(opcode_name),
-                )
-                return False
-            if authoritative_hit:
-                hit_normal = getattr(shadow_comparison, "new_hit_normal", None)
-                if hit_normal is not None:
-                    session._pending_geometry_wall_contact = {
-                        "object_guid": hit_instance_id,
-                        "hit_normal": tuple(float(value) for value in hit_normal),
-                        "corrected_position": tuple(
-                            float(value) for value in authoritative_resolved_end
-                        ),
-                    }
-            if authoritative_hit and gameobject_collision_debug_enabled():
-                probe = WorldQuery.build_collision_contact_probe(
-                    map_id=int(getattr(session, "map_id", 0) or 0),
-                    comparison=shadow_comparison,
-                )
-                if probe is not None:
-                    sequence = int(getattr(session, "_geometry_shadow_collision_sequence", 0) or 0) + 1
-                    session._geometry_shadow_collision_sequence = sequence
-                    probe["collision_id"] = f"{int(getattr(session, 'char_guid', 0) or 0)}-{sequence}"
-                    session._geometry_shadow_contact_probe = probe
-                    hit_position = probe["hit_position"]
-                    hit_normal = probe["hit_normal"]
-                    corrected_position = probe["corrected_position"]
-                    Logger.info(
-                        "[GeometryShadow] authoritative_correction collision_id=%s guid=%s entry=%s "
-                        "displayId=%s mesh=%s hit=(%.6f %.6f %.6f) normal=(%.6f %.6f %.6f) "
-                        "corrected=(%.6f %.6f %.6f) separation_distance=%.6f "
-                        "corrected_inside_world_aabb=%s corrected_inside_legacy_obb=%s",
-                        str(probe["collision_id"]),
-                        int(probe["guid"]),
-                        int(probe["entry"]),
-                        int(probe["display_id"]),
-                        str(probe["mesh"]),
-                        *hit_position,
-                        *hit_normal,
-                        *corrected_position,
-                        float(probe["separation_distance"]),
-                        "true" if probe["corrected_inside_world_aabb"] else "false",
-                        "true" if probe["corrected_inside_legacy_obb"] else "false",
-                    )
-        else:
-            authoritative_hit = collision is not None
-            authoritative_resolved_end = legacy_resolved_end
-
-        if authoritative_hit:
-            session._last_movement_rejection = "gameobject_collision"
-            session._last_collision_correction = (
-                float(authoritative_resolved_end[0]),
-                float(authoritative_resolved_end[1]),
-                float(authoritative_resolved_end[2]),
-                float(orientation),
-            )
-            return False
-    else:
-        Logger.info("[GeometryShadow] skipped reason=authoritative_collision_disabled")
-        _gameobject_collision_debug_log(
-            "[GOCollision] bypass player=%s opcode=%s reason=feature_disabled",
-            int(getattr(session, "char_guid", 0) or 0), opcode_name,
-        )
-
     return True
-
-
-def _build_collision_reject_responses(session, opcode_name: str) -> list[tuple[str, bytes]]:
-    if str(getattr(session, "_last_movement_rejection", "") or "") != "gameobject_collision":
-        return []
-
-    old_x = float(getattr(session, "x", 0.0) or 0.0)
-    old_y = float(getattr(session, "y", 0.0) or 0.0)
-    old_z = float(getattr(session, "z", 0.0) or 0.0)
-    old_o = float(getattr(session, "orientation", 0.0) or 0.0)
-    attempted = getattr(session, "_last_collision_attempt", None)
-    correction = getattr(session, "_last_collision_correction", None)
-    flags_in = getattr(session, "_last_collision_flags_in", None)
-    state = _movement_state(session)
-    counter_before = int(getattr(state, "counter", 0) or 0) & 0xFFFFFFFF
-    mover_guid = int(_movement_sync_guid(session) or 0)
-    correction_x = old_x
-    correction_y = old_y
-    correction_z = old_z
-    correction_o = old_o
-    if isinstance(correction, tuple) and len(correction) == 4:
-        correction_x = float(correction[0])
-        correction_y = float(correction[1])
-        correction_z = float(correction[2])
-        correction_o = float(correction[3])
-        from server.modules.handlers.world.position.publication import (
-            publish_from_movement,
-        )
-
-        publish_from_movement(
-            session,
-            x=correction_x,
-            y=correction_y,
-            z=correction_z,
-            orientation=correction_o,
-        )
-        _install_pending_geometry_wall_contact(session)
-    flags_before_reject = int(getattr(state, "flags", 0) or 0)
-    flags_before_reject2 = int(getattr(state, "flags2", 0) or 0)
-    flags_out_before, flags_out = _sanitize_collision_reject_movement_state(session)
-    flags2_out = int(getattr(state, "flags2", 0) or 0)
-    if not _has_active_transport_transition(session):
-        session.teleport_pending = False
-        session.worldport_ack_pending = False
-        session.near_teleport_pending = False
-        session.teleport_destination = None
-    _gameobject_collision_debug_log(
-        "[GOCollision] reject flags_in=0x%X flags2_in=0x%X flags_pre_correction=0x%X flags2_pre_correction=0x%X",
-        int(flags_in[0]) if isinstance(flags_in, tuple) and len(flags_in) == 2 else 0,
-        int(flags_in[1]) if isinstance(flags_in, tuple) and len(flags_in) == 2 else 0,
-        int(flags_before_reject),
-        int(flags_before_reject2),
-    )
-    _gameobject_collision_debug_log(
-        "[GOCollision] correction flags_out=0x%X flags2_out=0x%X cleared_directional=%s pos=(%.3f %.3f %.3f %.3f)",
-        int(flags_out),
-        int(flags2_out),
-        "yes" if int(flags_out) != int(flags_out_before) or int(flags2_out) != int(flags_before_reject2) else "no",
-        float(correction_x),
-        float(correction_y),
-        float(correction_z),
-        float(correction_o),
-    )
-    session._last_collision_stop_probe = (
-        float(correction_x),
-        float(correction_y),
-        float(correction_z),
-        float(correction_o),
-        int(flags_out),
-        int(flags2_out),
-    )
-    Logger.info(
-        "[GOCollision] correcting player=%s opcode=%s authoritative_old=(%.3f %.3f %.3f %.3f) "
-        "attempted=(%s) current_before_correction=(%.3f %.3f %.3f %.3f)",
-        int(getattr(session, "char_guid", 0) or 0),
-        str(opcode_name),
-        old_x,
-        old_y,
-        old_z,
-        old_o,
-        (
-            "none"
-            if not isinstance(attempted, tuple)
-            else "%.3f %.3f %.3f %.3f"
-            % (
-                float(attempted[0]),
-                float(attempted[1]),
-                float(attempted[2]),
-                float(attempted[3]),
-            )
-        ),
-        float(getattr(session, "x", 0.0) or 0.0),
-        float(getattr(session, "y", 0.0) or 0.0),
-        float(getattr(session, "z", 0.0) or 0.0),
-        float(getattr(session, "orientation", 0.0) or 0.0),
-    )
-    responses = list(build_same_map_teleport_self_resync_responses(session))
-    if not any(opcode == "SMSG_PLAYER_MOVE" for opcode, _payload in responses):
-        responses.extend(resync_movement(session))
-    Logger.info(
-        "[GOCollision] correction_dispatch player=%s opcode=%s mover_guid=0x%X "
-        "counter_before=%u packets=%s expected_ack=none pending=(near=%s world=%s teleport=%s)",
-        int(getattr(session, "char_guid", 0) or 0),
-        str(opcode_name),
-        mover_guid,
-        counter_before,
-        ",".join(opcode for opcode, _payload in responses) or "none",
-        bool(getattr(session, "near_teleport_pending", False)),
-        bool(getattr(session, "worldport_ack_pending", False)),
-        bool(getattr(session, "teleport_pending", False)),
-    )
-    Logger.info(
-        "[GOCollision] snapback player=%s opcode=%s correction=(%.3f %.3f %.3f %.3f)",
-        int(getattr(session, "char_guid", 0) or 0),
-        str(opcode_name),
-        correction_x,
-        correction_y,
-        correction_z,
-        correction_o,
-    )
-    return responses
 
 
 def parse_movement_info(
@@ -5719,15 +5258,6 @@ def _store_authoritative_movement(session, opcode_name: str, payload: bytes, mov
         )
     if movement is not None and not older_movement_packet:
         x, y, z, orientation = movement
-        clamped, clamped_z = clamp_deeprun_player_z(
-            map_id=int(getattr(session, "map_id", 0) or 0),
-            world_x=float(x),
-            world_y=float(y),
-            world_z=float(z),
-        )
-        if clamped:
-            z = float(clamped_z)
-            _clear_falling_state(state)
         _log_orientation_write(
             session,
             writer="_store_authoritative_movement",
@@ -6144,10 +5674,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             "MSG_MOVE_START_TURN_RIGHT",
             "MSG_MOVE_STOP_TURN",
         }:
-            _gameobject_collision_debug_log(
-                "[GOCollision] bypass player=%s opcode=%s reason=state_only_packet",
-                int(getattr(session, "char_guid", 0) or 0), opcode_name,
-            )
             if not _store_authoritative_movement(session, opcode_name, ctx.payload, None):
                 return 0, None
             state = _movement_state(session)
@@ -6189,10 +5715,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
             f"[Movement] failed to parse {opcode_name} guid=0x{_player_guid(session):X} "
             f"payload_len={len(ctx.payload)}"
         )
-        _gameobject_collision_debug_log(
-            "[GOCollision] bypass player=%s opcode=%s reason=movement_parse_failed",
-            int(getattr(session, "char_guid", 0) or 0), opcode_name,
-        )
         return 0, None
 
     x, y, z, orientation = movement
@@ -6202,95 +5724,8 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     previous_orientation = float(getattr(session, "orientation", 0.0) or 0.0)
     previous_normalized_orientation = _normalize_orientation(previous_orientation)
     state = _movement_state(session)
-    from server.modules.handlers.world.feature_config import (
-        gameobject_collision_enabled,
-    )
-    _consume_geometry_shadow_contact_probe(
-        session,
-        opcode_name,
-        (previous_x, previous_y, previous_z),
-        flags=int(getattr(state, "flags", 0) or 0),
-        flags2=int(getattr(state, "flags2", 0) or 0),
-    )
-    next_packet_probe = getattr(session, "_last_collision_stop_probe", None)
-    if isinstance(next_packet_probe, tuple) and len(next_packet_probe) == 6:
-        _gameobject_collision_debug_log(
-            "[GOCollision] next_packet pos=(%.3f %.3f %.3f %.3f) flags=0x%X flags2=0x%X opcode=%s",
-            float(previous_x),
-            float(previous_y),
-            float(previous_z),
-            float(previous_orientation),
-            int(getattr(state, "flags", 0) or 0),
-            int(getattr(state, "flags2", 0) or 0),
-            opcode_name,
-        )
-        session._last_collision_stop_probe = None
-    session._last_collision_attempt = (float(x), float(y), float(z), float(orientation))
-    go_collision_enabled = gameobject_collision_enabled()
-    _gameobject_collision_debug_log(
-        "[GOCollision] packet opcode=%s opcode_id=0x%04X player=%s name=%s "
-        "old=(%.3f %.3f %.3f %.3f) attempted=(%.3f %.3f %.3f %.3f) map=%s "
-        "flags=0x%X flags2=0x%X go_collision_enabled=%s query_will_execute=%s",
-        opcode_name,
-        int(ctx.opcode) & 0xFFFF,
-        int(getattr(session, "char_guid", 0) or 0),
-        str(getattr(session, "player_name", "") or ""),
-        previous_x,
-        previous_y,
-        previous_z,
-        previous_orientation,
-        float(x),
-        float(y),
-        float(z),
-        float(orientation),
-        int(getattr(session, "map_id", 0) or 0),
-        int(getattr(state, "flags", 0) or 0),
-        int(getattr(state, "flags2", 0) or 0),
-        "yes" if go_collision_enabled else "no",
-        "yes" if go_collision_enabled else "no",
-    )
-
-    next_packet_probe = getattr(session, "_last_collision_stop_probe", None)
-    if next_packet_probe is not None:
-        _gameobject_collision_debug_log(
-            "[GOCollision] next_packet pos=(%.3f %.3f %.3f %.3f) flags=0x%X flags2=0x%X opcode=%s",
-            float(previous_x),
-            float(previous_y),
-            float(previous_z),
-            float(previous_orientation),
-            int(getattr(state, "flags", 0) or 0),
-            int(getattr(state, "flags2", 0) or 0),
-            opcode_name,
-        )
-        session._last_collision_stop_probe = None
-
     if not _accept_movement_update(session, opcode_name, x, y, z, orientation):
-        reject_responses = _build_collision_reject_responses(session, opcode_name)
-        _gameobject_collision_debug_log(
-            "[GOCollision] reject_result opcode=%s return=false authoritative_final=(%.3f %.3f %.3f %.3f) "
-            "equals_old=%s equals_attempted=%s responses=%s",
-            opcode_name,
-            float(getattr(session, "x", 0.0) or 0.0),
-            float(getattr(session, "y", 0.0) or 0.0),
-            float(getattr(session, "z", 0.0) or 0.0),
-            float(getattr(session, "orientation", 0.0) or 0.0),
-            "yes"
-            if (
-                math.isclose(float(getattr(session, "x", 0.0) or 0.0), previous_x, abs_tol=1e-6)
-                and math.isclose(float(getattr(session, "y", 0.0) or 0.0), previous_y, abs_tol=1e-6)
-                and math.isclose(float(getattr(session, "z", 0.0) or 0.0), previous_z, abs_tol=1e-6)
-            )
-            else "no",
-            "yes"
-            if (
-                math.isclose(float(getattr(session, "x", 0.0) or 0.0), float(x), abs_tol=1e-6)
-                and math.isclose(float(getattr(session, "y", 0.0) or 0.0), float(y), abs_tol=1e-6)
-                and math.isclose(float(getattr(session, "z", 0.0) or 0.0), float(z), abs_tol=1e-6)
-            )
-            else "no",
-            len(reject_responses),
-        )
-        return 0, (reject_responses or None)
+        return 0, None
 
     adjusted_movement = (x, y, z, orientation)
 
@@ -6546,39 +5981,6 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
     Logger.debug(
         f"[MOVE] guid=0x{_player_guid(session):X} "
         f"pos=({session.x:.3f}, {session.y:.3f}, {session.z:.3f}) facing={session.orientation:.3f}"
-    )
-    _gameobject_collision_debug_log(
-        "[GOCollision] finish opcode=%s player=%s start=(%.3f %.3f %.3f %.3f) "
-        "attempted=(%.3f %.3f %.3f %.3f) final=(%.3f %.3f %.3f %.3f) "
-        "equals_start=%s equals_attempted=%s",
-        opcode_name,
-        int(getattr(session, "char_guid", 0) or 0),
-        starting_x,
-        starting_y,
-        starting_z,
-        starting_o,
-        float(x),
-        float(y),
-        float(z),
-        float(orientation),
-        float(getattr(session, "x", 0.0) or 0.0),
-        float(getattr(session, "y", 0.0) or 0.0),
-        float(getattr(session, "z", 0.0) or 0.0),
-        float(getattr(session, "orientation", 0.0) or 0.0),
-        "yes"
-        if (
-            math.isclose(float(getattr(session, "x", 0.0) or 0.0), starting_x, abs_tol=1e-6)
-            and math.isclose(float(getattr(session, "y", 0.0) or 0.0), starting_y, abs_tol=1e-6)
-            and math.isclose(float(getattr(session, "z", 0.0) or 0.0), starting_z, abs_tol=1e-6)
-        )
-        else "no",
-        "yes"
-        if (
-            math.isclose(float(getattr(session, "x", 0.0) or 0.0), float(x), abs_tol=1e-6)
-            and math.isclose(float(getattr(session, "y", 0.0) or 0.0), float(y), abs_tol=1e-6)
-            and math.isclose(float(getattr(session, "z", 0.0) or 0.0), float(z), abs_tol=1e-6)
-        )
-        else "no",
     )
     stream_responses = _maybe_stream_world_objects(session)
     if stream_responses:

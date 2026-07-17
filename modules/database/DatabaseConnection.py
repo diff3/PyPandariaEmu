@@ -190,7 +190,6 @@ class DatabaseConnection:
 
     @staticmethod
     def _reset_caches() -> None:
-        from server.modules.handlers.world.collision import clear_gameobject_collision_index
         from server.modules.handlers.world.runtime.gameobject_store import (
             get_gameobject_runtime_store,
         )
@@ -198,7 +197,6 @@ class DatabaseConnection:
             get_creature_runtime_store,
         )
 
-        clear_gameobject_collision_index()
         get_creature_runtime_store().clear()
         get_gameobject_runtime_store().clear()
         DatabaseConnection._world_cache_loaded = False
@@ -579,8 +577,6 @@ class DatabaseConnection:
                     )
 
                     get_gameobject_runtime_store().clear()
-                from server.modules.handlers.world.collision import build_gameobject_collision_index
-                build_gameobject_collision_index(by_map)
                 Logger.info(
                     "[DB] preloaded %s gameobjects across %s maps",
                     sum(len(entries) for entries in by_map.values()),
@@ -595,8 +591,6 @@ class DatabaseConnection:
                 )
 
                 get_gameobject_runtime_store().clear()
-                from server.modules.handlers.world.collision import clear_gameobject_collision_index
-                clear_gameobject_collision_index()
         else:
             DatabaseConnection._cache_gameobjects_by_map = {}
             DatabaseConnection._cache_gameobjects_loaded = False
@@ -605,8 +599,6 @@ class DatabaseConnection:
             )
 
             get_gameobject_runtime_store().clear()
-            from server.modules.handlers.world.collision import clear_gameobject_collision_index
-            clear_gameobject_collision_index()
             Logger.info("[DB] gameobject preload disabled by config")
 
         if item_entries:

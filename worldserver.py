@@ -71,7 +71,6 @@ from server.modules.handlers.world.feature_config import (
     log_effective_world_feature_config,
     taxi_movement_debug_enabled,
 )
-from server.modules.handlers.world.collision.geometry_shadow import log_geometry_shadow_initialization
 from server.modules.opcodes.WorldOpcodes import (
     WORLD_CLIENT_OPCODES,
     WORLD_SERVER_OPCODES,
@@ -109,7 +108,6 @@ WORLD_HANDLERS = opcode_handlers
 HOST = config["worldserver"]["host"]
 PORT = config["worldserver"]["port"]
 log_effective_world_feature_config()
-log_geometry_shadow_initialization()
 STARTED_AT = time.time()
 running = True
 restart_requested = False

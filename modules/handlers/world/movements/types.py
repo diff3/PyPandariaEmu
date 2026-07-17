@@ -20,7 +20,6 @@ class InterpolationMode(str, Enum):
 class MovementKind(str, Enum):
     TRANSPORT = "transport"
     ELEVATOR = "elevator"
-    TRAM = "tram"
     TAXI = "taxi"
 
 

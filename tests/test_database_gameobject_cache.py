@@ -295,16 +295,6 @@ def test_world_cache_preload_populates_gameobject_runtime_store(monkeypatch):
         def query(self, *fields):
             return Query(fields)
 
-    collision_module = types.ModuleType(
-        "server.modules.handlers.world.collision"
-    )
-    collision_module.build_gameobject_collision_index = lambda _entries: 0
-    collision_module.clear_gameobject_collision_index = lambda: None
-    monkeypatch.setitem(
-        sys.modules,
-        "server.modules.handlers.world.collision",
-        collision_module,
-    )
     monkeypatch.setattr(
         DatabaseConnection,
         "_ensure_gameobject_scale_column",

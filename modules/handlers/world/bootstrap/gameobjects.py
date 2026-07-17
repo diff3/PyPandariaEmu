@@ -36,7 +36,6 @@ for _definition_name in gameobject_defs.__all__:
     globals()[f"_{_definition_name}"] = getattr(gameobject_defs, _definition_name)
 
 _OBJECT_FIELD_SCALE = gameobject_defs.OBJECT_FIELD_SCALE_X
-_DEEPRUN_VISIBLE_ENTRY_IDS = frozenset({176080, 176081, 176082, 176083, 176084, 176085})
 
 
 def _entry_int(entry: Mapping[str, Any], key: str, default: int = 0) -> int:
@@ -375,28 +374,6 @@ def _gameobject_movement_block_uint32(
     if gameobject_type in (_GAMEOBJECT_TYPE_TRANSPORT, _GAMEOBJECT_TYPE_MO_TRANSPORT):
         return _effective_transport_path_progress(entry)
     return _GAMEOBJECT_MOVEMENT_BLOCK_UINT32
-
-
-def _is_deeprun_visible_subway_entry(
-    entry: Mapping[str, Any],
-    gameobject: GameObject | None = None,
-) -> bool:
-    map_id = int(gameobject.map_id) if gameobject is not None else _entry_map_id(entry)
-    gameobject_type = (
-        int(gameobject.gameobject_type)
-        if gameobject is not None
-        else _entry_int(entry, "type")
-    )
-    gameobject_entry = (
-        int(gameobject.entry)
-        if gameobject is not None
-        else _entry_int(entry, "entry")
-    )
-    return (
-        map_id == 369
-        and gameobject_type == _GAMEOBJECT_TYPE_TRANSPORT
-        and gameobject_entry in _DEEPRUN_VISIBLE_ENTRY_IDS
-    )
 
 
 def _client_transport_period(
@@ -825,16 +802,6 @@ def _build_gameobject_update_payload(
         packet_orientation=stationary_orientation,
     )
     movement_block_uint32 = _gameobject_movement_block_uint32(entry, gameobject)
-    _log_deeprun_create_audit(
-        entry,
-        gameobject=gameobject,
-        world_guid=world_guid,
-        packet_map_id=int(packet_map_id),
-        update_flags=update_flags,
-        create_flags=create_flags,
-        movement_block_uint32=movement_block_uint32,
-        field_values=field_values,
-    )
     return EncoderHandler.encode_packet(
         "GAMEOBJECT_CREATE",
         {
@@ -1017,49 +984,6 @@ def _log_mo_transport_create_debug(
         float(packet_orientation),
         int(phase_ms),
         int(packet_progress),
-    )
-
-
-def _log_deeprun_create_audit(
-    entry: Mapping[str, Any],
-    *,
-    gameobject: GameObject | None = None,
-    world_guid: int,
-    packet_map_id: int,
-    update_flags: int,
-    create_flags: bytes,
-    movement_block_uint32: int,
-    field_values: Mapping[int, int],
-) -> None:
-    if not _is_deeprun_visible_subway_entry(entry, gameobject):
-        return
-
-    Logger.info(
-        "[DEEPRUN_CREATE_AUDIT] entry=%s guid=%s world_guid=0x%016X map=%s "
-        "displayId=%s type=%s update_flags=0x%04X create_flags=%s "
-        "transport_block=%s stationary_block=%s rotation_block=%s "
-        "data0=%s data1=%s go_state=%s transport_period=%s movement_block=%s dynamic_flags=0x%08X",
-        _entry_int(entry, "entry"),
-        _entry_int(entry, "guid"),
-        int(world_guid) & 0xFFFFFFFFFFFFFFFF,
-        int(packet_map_id),
-        int(gameobject.display_id)
-        if gameobject is not None
-        else _entry_int(entry, "display_id"),
-        int(gameobject.gameobject_type)
-        if gameobject is not None
-        else _entry_int(entry, "type"),
-        int(update_flags) & 0xFFFF,
-        bytes(create_flags).hex(),
-        "yes" if (update_flags & _UPDATEFLAG_TRANSPORT) else "no",
-        "yes" if (update_flags & _UPDATEFLAG_STATIONARY_POSITION) else "no",
-        "yes" if (update_flags & _UPDATEFLAG_ROTATION) else "no",
-        _entry_int(entry, "data0"),
-        _entry_int(entry, "data1"),
-        _effective_gameobject_state(entry, gameobject),
-        _entry_int(entry, "transport_period", _entry_int(entry, "data0")),
-        int(movement_block_uint32) & 0xFFFFFFFF,
-        int(field_values.get(_OBJECT_FIELD_DYNAMIC_FLAGS, 0)) & 0xFFFFFFFF,
     )
 
 

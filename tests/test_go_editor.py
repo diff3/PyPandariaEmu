@@ -136,9 +136,6 @@ def _patch_packets(monkeypatch):
         "build_database_gameobject_responses",
         lambda *_args, **_kwargs: [("SMSG_UPDATE_OBJECT", b"create")],
     )
-    monkeypatch.setattr(gameobject_editor.gameobject_runtime, "_create_collision", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(gameobject_editor.gameobject_runtime, "_remove_collision", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(gameobject_editor.gameobject_runtime, "_invalidate_geometry_caches", lambda: None)
 
 
 def _mark_gameobject_loaded(session, entry):
@@ -515,7 +512,6 @@ def test_go_move_broadcasts_live_recreate_to_loaded_peer(monkeypatch):
             b"destroy",
         ),
     )
-    monkeypatch.setattr(gameobject_editor.gameobject_runtime, "_invalidate_geometry_caches", lambda: None)
     def fake_visibility(target, loaded_guids=None):
         loaded_guids.add(world_guid)
         target.loaded_gameobject_entries[world_guid] = dict(updated)
@@ -555,7 +551,6 @@ def test_go_move_visibility_refresh_runs_for_nearby_peer_without_old_load(monkey
             b"destroy",
         ),
     )
-    monkeypatch.setattr(gameobject_editor.gameobject_runtime, "_invalidate_geometry_caches", lambda: None)
     refresh_sessions: list[object] = []
 
     def fake_visibility(target, loaded_guids=None):
@@ -747,7 +742,6 @@ def test_go_reload_recreates_selected_runtime_from_database(monkeypatch):
             b"destroy",
         ),
     )
-    monkeypatch.setattr(gameobject_editor.gameobject_runtime, "_invalidate_geometry_caches", lambda: None)
     def fake_visibility(target, loaded_guids=None):
         loaded_guids.add(world_guid)
         target.loaded_gameobject_entries[world_guid] = dict(reloaded)

@@ -292,20 +292,6 @@ def _remove_runtime_references(session, world_guid: int, spawn_id: int, map_id: 
         transports = getattr(target, "loaded_transport_entries", None)
         if isinstance(transports, dict):
             transports.pop(int(world_guid), None)
-    try:
-        from server.modules.handlers.world.collision import gameobject_collision_index
-
-        gameobject_collision_index.remove(int(map_id), int(spawn_id))
-        gameobject_collision_index.remove(int(map_id), int(world_guid))
-    except Exception as exc:
-        Logger.warning("[GoDel] collision index remove failed guid=%s err=%s", int(world_guid), exc)
-    try:
-        from server.modules.handlers.world.collision import geometry_shadow
-
-        geometry_shadow._world_cache = None
-        geometry_shadow._world_cache_signature = None
-    except Exception:
-        pass
     get_gameobject_runtime_store().remove(int(world_guid))
 
 
@@ -335,30 +321,6 @@ def _add_runtime_references(session, entry: dict[str, Any], world_guid: int) -> 
                 runtime_guid=int(world_guid),
             )
         )
-    try:
-        from server.modules.handlers.world.collision.gameobject_collision import (
-            build_gameobject_collision,
-            load_display_bounds,
-        )
-        from server.modules.handlers.world.collision import gameobject_collision_index
-
-        bounds = load_display_bounds().get(_entry_int(restored, "display_id"))
-        collision = build_gameobject_collision(
-            restored,
-            bounds,
-            runtime_object,
-        )
-        if collision is not None:
-            gameobject_collision_index.register(collision)
-    except Exception as exc:
-        Logger.warning("[GoDel] collision index restore failed guid=%s err=%s", int(world_guid), exc)
-    try:
-        from server.modules.handlers.world.collision import geometry_shadow
-
-        geometry_shadow._world_cache = None
-        geometry_shadow._world_cache_signature = None
-    except Exception:
-        pass
 
 
 def _dispatch_destroy(session, response: tuple[str, bytes], world_guid: int) -> None:

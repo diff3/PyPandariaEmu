@@ -32,8 +32,6 @@ class GameObjectSpawnRuntimeResult:
     affected_sessions: int = 0
     destroy_sent: int = 0
     create_sent: int = 0
-    collision_removed: bool = False
-    collision_created: bool = False
 
 
 def _entry_int(entry: dict[str, Any] | None, key: str, default: int = 0) -> int:
@@ -140,70 +138,6 @@ def _remove_session_visibility(target, runtime_object: GameObject) -> None:
         transports.pop(int(runtime_guid), None)
 
 
-def _invalidate_geometry_caches() -> None:
-    try:
-        from server.modules.handlers.world.collision import geometry_shadow
-
-        geometry_shadow._world_cache = None
-        geometry_shadow._world_cache_signature = None
-    except Exception:
-        pass
-
-
-def _remove_collision(runtime_object: GameObject) -> bool:
-    try:
-        from server.modules.handlers.world.collision import gameobject_collision_index
-
-        gameobject_collision_index.remove(
-            int(runtime_object.map_id),
-            int(runtime_object.spawn_id),
-        )
-        gameobject_collision_index.remove(
-            int(runtime_object.map_id),
-            int(runtime_object.runtime_guid),
-        )
-        return True
-    except Exception as exc:
-        Logger.warning(
-            "[PersistentGameObject] collision remove failed guid=%s err=%s",
-            int(runtime_object.runtime_guid),
-            exc,
-        )
-        return False
-
-
-def _create_collision(
-    runtime_object: GameObject,
-    entry: dict[str, Any],
-) -> bool:
-    restored = dict(entry)
-    restored["world_guid"] = int(runtime_object.runtime_guid)
-    try:
-        from server.modules.handlers.world.collision.gameobject_collision import (
-            build_gameobject_collision,
-            load_display_bounds,
-        )
-        from server.modules.handlers.world.collision import gameobject_collision_index
-
-        bounds = load_display_bounds().get(_entry_int(restored, "display_id"))
-        collision = build_gameobject_collision(
-            restored,
-            bounds,
-            runtime_object,
-        )
-        if collision is None:
-            return False
-        gameobject_collision_index.register(collision)
-        return True
-    except Exception as exc:
-        Logger.warning(
-            "[PersistentGameObject] collision create failed guid=%s err=%s",
-            int(runtime_object.runtime_guid),
-            exc,
-        )
-        return False
-
-
 def _visibility_refresh_for_session(target) -> list[tuple[str, bytes]]:
     loaded = getattr(target, "loaded_gameobjects", None)
     if not isinstance(loaded, set):
@@ -234,8 +168,6 @@ def _log_result(
     new_runtime_object: GameObject | None = None,
     destroy_sent: int = 0,
     create_sent: int = 0,
-    collision_removed: bool = False,
-    collision_created: bool = False,
 ) -> None:
     old_transform = old_runtime_object.transform if old_runtime_object else (
         (0.0, 0.0, 0.0),
@@ -253,7 +185,7 @@ def _log_result(
         "[PersistentGameObject] operation=%s spawn_id=%s entry=%s runtime_guid=0x%016X "
         "affected_sessions=%s old_position=(%.3f,%.3f,%.3f) new_position=(%.3f,%.3f,%.3f) "
         "old_orientation=%.6f new_orientation=%.6f old_scale=%.3f new_scale=%.3f "
-        "destroy_sent=%s create_sent=%s collision_removed=%s collision_created=%s",
+        "destroy_sent=%s create_sent=%s",
         str(operation),
         int(runtime_object.spawn_id) if runtime_object else 0,
         int(runtime_object.entry) if runtime_object else 0,
@@ -273,8 +205,6 @@ def _log_result(
         new_scale,
         int(destroy_sent),
         int(create_sent),
-        str(bool(collision_removed)).lower(),
-        str(bool(collision_created)).lower(),
     )
 
 
@@ -290,9 +220,6 @@ def spawn_persistent_gameobject(session, spawn_id: int) -> GameObjectSpawnRuntim
     entry["world_guid"] = runtime_guid
     get_gameobject_runtime_store().add(runtime_object)
     sessions = _same_map_sessions(session, runtime_object)
-    collision_created = _create_collision(runtime_object, entry)
-    _invalidate_geometry_caches()
-
     responses: list[tuple[str, bytes]] = []
     create_sent = 0
     for target in sessions:
@@ -305,7 +232,6 @@ def spawn_persistent_gameobject(session, spawn_id: int) -> GameObjectSpawnRuntim
         affected_sessions=len(set(id(target) for target in sessions)),
         new_runtime_object=runtime_object,
         create_sent=create_sent,
-        collision_created=collision_created,
     )
     return GameObjectSpawnRuntimeResult(
         "spawn",
@@ -315,7 +241,6 @@ def spawn_persistent_gameobject(session, spawn_id: int) -> GameObjectSpawnRuntim
         responses=responses,
         affected_sessions=len(set(id(target) for target in sessions)),
         create_sent=create_sent,
-        collision_created=collision_created,
     )
 
 
@@ -354,15 +279,12 @@ def despawn_persistent_gameobject(
         responses.extend(_send_or_return(session, target, [destroy]))
     for target in sessions:
         _remove_session_visibility(target, runtime_object)
-    collision_removed = _remove_collision(runtime_object)
-    _invalidate_geometry_caches()
     _log_result(
         operation="despawn",
         runtime_object=runtime_object,
         affected_sessions=len(set(id(target) for target in sessions)),
         old_runtime_object=runtime_object,
         destroy_sent=destroy_sent,
-        collision_removed=collision_removed,
     )
     return GameObjectSpawnRuntimeResult(
         "despawn",
@@ -372,7 +294,6 @@ def despawn_persistent_gameobject(
         responses=responses,
         affected_sessions=len(set(id(target) for target in sessions)),
         destroy_sent=destroy_sent,
-        collision_removed=collision_removed,
     )
 
 
@@ -418,11 +339,7 @@ def replace_persistent_gameobject(
         responses.extend(_send_or_return(session, target, [destroy]))
     for target in sessions:
         _remove_session_visibility(target, old_runtime_object)
-    collision_removed = _remove_collision(old_runtime_object)
-    _invalidate_geometry_caches()
     get_gameobject_runtime_store().add(new_runtime_object)
-    collision_created = _create_collision(new_runtime_object, new_entry)
-    _invalidate_geometry_caches()
 
     create_sent = 0
     for target in sessions:
@@ -437,8 +354,6 @@ def replace_persistent_gameobject(
         new_runtime_object=new_runtime_object,
         destroy_sent=destroy_sent,
         create_sent=create_sent,
-        collision_removed=collision_removed,
-        collision_created=collision_created,
     )
     return GameObjectSpawnRuntimeResult(
         "replace",
@@ -449,6 +364,4 @@ def replace_persistent_gameobject(
         affected_sessions=len(set(id(target) for target in sessions)),
         destroy_sent=destroy_sent,
         create_sent=create_sent,
-        collision_removed=collision_removed,
-        collision_created=collision_created,
     )

@@ -82,9 +82,6 @@ _TRANSPORT_SEND_DISTANCE = 2.0
 _TRANSPORT_CROSS_MAP_HOLD_SECONDS = 15.0
 _TRANSPORT_CROSS_MAP_DISTANCE = 0.0
 _WORLD_DB_TRANSPORT_VISIBILITY_RADIUS = 900.0
-_DEEPRUN_TRAM_MAP_ID = 369
-_DEEPRUN_TRAM_ENTRY = 194675
-_DEEPRUN_TRAM_DISPLAY_ID = 8587
 _ORGRIMMAR_ELEVATOR_ENTRIES = frozenset({
     219175, 219176, 219177, 220364,
 })
@@ -514,34 +511,10 @@ class WorldTransportManager:
         world_guid = int(world_guid)
         state = self.state_for_guid(world_guid)
         if state is None:
-            player_guid = int(getattr(session, "char_guid", 0) or 0)
-            loaded_guids = getattr(session, "loaded_gameobjects", None)
-            loaded_entries = getattr(session, "loaded_gameobject_entries", None)
-            entry = loaded_entries.get(world_guid) if isinstance(loaded_entries, dict) else None
-            if not isinstance(loaded_guids, set) or world_guid not in loaded_guids:
-                reason = "unknown_guid"
-            elif not isinstance(entry, dict):
-                reason = "missing_loaded_entry"
-            elif int(entry.get("map", entry.get("map_id", -1)) or 0) != int(
-                getattr(session, "map_id", 0) or 0
-            ):
-                reason = "wrong_map"
-            elif int(entry.get("type", 0) or 0) != GAMEOBJECT_TYPE_TRANSPORT:
-                reason = "wrong_type"
-            else:
-                Logger.info(
-                    "[TransportAttach] static_type11 accepted transport=0x%016X player=%s map=%s entry=%s",
-                    world_guid & 0xFFFFFFFFFFFFFFFF,
-                    player_guid,
-                    int(getattr(session, "map_id", 0) or 0),
-                    int(entry.get("entry", 0) or 0),
-                )
-                return True
             Logger.warning(
-                "[TransportAttach] static_type11 denied reason=%s transport=0x%016X player=%s map=%s",
-                reason,
+                "[TransportAttach] denied reason=unknown_runtime transport=0x%016X player=%s map=%s",
                 world_guid & 0xFFFFFFFFFFFFFFFF,
-                player_guid,
+                int(getattr(session, "char_guid", 0) or 0),
                 int(getattr(session, "map_id", 0) or 0),
             )
             return False
@@ -971,14 +944,8 @@ class WorldTransportManager:
         write_world_runtime_snapshot(states)
 
     def _register_builtin_transports_locked(self) -> None:
-        self._register_deeprun_trams_locked()
         self._register_world_db_transports_locked()
         self._register_world_db_elevators_locked()
-
-    def _register_deeprun_trams_locked(self) -> None:
-        # Deeprun Tram on map 369 is represented by DB-spawned type 11 gameobjects,
-        # not by a runtime hardcoded transport registration.
-        return
 
     def _register_world_db_transports_locked(self) -> None:
         for spec in _load_world_db_transports():
@@ -1132,20 +1099,8 @@ def _has_transport_animation(entry: dict[str, Any] | None) -> bool:
     return _transport_animation_for_entry(int(entry.get("entry", 0) or 0)) is not None
 
 
-def is_deeprun_tram_entry(entry: dict[str, Any] | None) -> bool:
-    if not isinstance(entry, dict):
-        return False
-    return bool(
-        entry.get("deeprun_tram")
-        and int(entry.get("map", entry.get("map_id", -1)) or -1) == _DEEPRUN_TRAM_MAP_ID
-        and int(entry.get("entry", 0) or 0) == _DEEPRUN_TRAM_ENTRY
-    )
-
-
 def is_cross_map_boat_entry(entry: dict[str, Any] | None) -> bool:
     if not isinstance(entry, dict):
-        return False
-    if is_deeprun_tram_entry(entry):
         return False
     if int(entry.get("type", 0) or 0) != GAMEOBJECT_TYPE_MO_TRANSPORT:
         return False
@@ -1178,8 +1133,6 @@ def is_cross_map_boat_entry(entry: dict[str, Any] | None) -> bool:
 def is_cross_map_zeppelin_entry(entry: dict[str, Any] | None) -> bool:
     """Identify cross-map zeppelins for diagnostics without changing runtime policy."""
     if not isinstance(entry, dict):
-        return False
-    if is_deeprun_tram_entry(entry):
         return False
     if int(entry.get("type", 0) or 0) != GAMEOBJECT_TYPE_MO_TRANSPORT:
         return False
@@ -4186,8 +4139,6 @@ def _movement_template_from_route(entry: dict[str, Any], route: list[TransportRo
 
 
 def _movement_kind_for_entry(entry: dict[str, Any]) -> MovementKind:
-    if is_deeprun_tram_entry(entry):
-        return MovementKind.TRAM
     if _has_transport_animation(entry):
         return MovementKind.ELEVATOR
     return MovementKind.TRANSPORT

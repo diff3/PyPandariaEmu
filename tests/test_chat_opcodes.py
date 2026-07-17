@@ -220,6 +220,7 @@ def test_gm_obsolete_top_level_commands_are_not_registered():
         "additem", "addmoney", "addhearthstone", "learnspell", "castspell",
         "taxi", "mapcheat", "time", "weather", "system", "roll", "mount",
         "dismount", "testbuff",
+        "gocollision",
     }
     assert obsolete.isdisjoint(chat_handlers.chat_commands.COMMANDS)
 
@@ -232,6 +233,64 @@ def test_gm_hierarchical_roots_are_in_live_registry():
     assert registry["cheat"].usage.startswith(".cheat <fly | taxi | map")
     assert "time | weather | message" in registry["server"].usage
     assert "world" not in registry
+
+
+def test_every_live_command_declares_a_gm_level():
+    commands = chat_handlers.chat_commands
+
+    assert commands.GMLevel.PLAYER == 0
+    assert commands.GMLevel.GAME_MASTER == 1
+    assert commands.GMLevel.ADMINISTRATOR == 3
+    assert all(
+        isinstance(command.required_level, commands.GMLevel)
+        for command in commands.PRIMARY_COMMANDS.values()
+    )
+
+
+def test_dispatcher_rejects_insufficient_gm_level_without_calling_handler(monkeypatch):
+    commands = chat_handlers.chat_commands
+    calls = []
+    command = commands.Command(
+        handler=lambda session, args: calls.append((session, args)) or [],
+        usage=".restricted",
+        required_level=commands.GMLevel.ADMINISTRATOR,
+        allow_args=False,
+    )
+    monkeypatch.setitem(commands.COMMANDS, "restricted", command)
+    monkeypatch.setattr(commands, "_session_gm_level", lambda _session: 1)
+
+    responses = commands.handle_command(SimpleNamespace(), ".restricted")
+
+    assert calls == []
+    assert b"Insufficient permissions" in responses[0][1]
+    assert b"Administrator" in responses[0][1]
+
+
+def test_dispatcher_allows_matching_gm_level(monkeypatch):
+    commands = chat_handlers.chat_commands
+    calls = []
+    command = commands.Command(
+        handler=lambda session, args: calls.append((session, args)) or [("TEST", b"ok")],
+        usage=".restricted",
+        required_level=commands.GMLevel.GAME_MASTER,
+    )
+    monkeypatch.setitem(commands.COMMANDS, "restricted", command)
+    monkeypatch.setattr(commands, "_session_gm_level", lambda _session: 1)
+    session = SimpleNamespace()
+
+    responses = commands.handle_command(session, ".restricted value")
+
+    assert calls == [(session, ["value"])]
+    assert responses == [("TEST", b"ok")]
+
+
+def test_player_level_command_does_not_require_gm_access(monkeypatch):
+    commands = chat_handlers.chat_commands
+    monkeypatch.setattr(commands, "_session_gm_level", lambda _session: 0)
+
+    responses = commands.handle_command(SimpleNamespace(), ".help gps")
+
+    assert b"[Help] gps" in responses[0][1]
 
 
 def test_help_without_argument_keeps_full_command_list():
@@ -460,6 +519,9 @@ def _install_worldserver_stub(monkeypatch, *, running=True, started_at=0.0, acti
 
 def _make_session(state: GlobalState, name: str, guid: int):
     session = WorldSession()
+    session.account_id = int(guid)
+    session._cached_gm_level_account_id = int(guid)
+    session._cached_gm_level = 3
     session.global_state = state
     session.player_name = name
     session.char_guid = guid
@@ -2425,36 +2487,6 @@ def test_world_go_show_spawns_nearby_gameobjects(monkeypatch):
     ]
 
 
-def test_gocollision_show_requires_gm(monkeypatch):
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_notification_response",
-        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
-    )
-    monkeypatch.setattr(chat_handlers.chat_commands, "_session_gm_level", lambda session: 0)
-
-    state = GlobalState()
-    alice = _make_session(state, "Alice", 1001)
-
-    responses = chat_handlers.chat_commands.cmd_gocollision(alice, ["show", "12"])
-
-    assert responses == [("SMSG_MESSAGECHAT", b"system|This command is GM-only.")]
-
-
-def test_worldporttest_requires_gm(monkeypatch):
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_notification_response",
-        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
-    )
-    monkeypatch.setattr(chat_handlers.chat_commands, "_session_gm_level", lambda session: 0)
-
-    state = GlobalState()
-    alice = _make_session(state, "Alice", 1001)
-
-    responses = chat_handlers.chat_commands.cmd_worldporttest(alice, ["0", "1", "2", "3", "4"])
-
-    assert responses == [("SMSG_MESSAGECHAT", b"system|This command is GM-only.")]
 
 
 def test_worldporttest_requires_transport_debug_messages(monkeypatch):
@@ -2478,7 +2510,6 @@ def test_worldporttest_requires_transport_debug_messages(monkeypatch):
 
 def test_worldporttest_selects_single_bootstrap_variant(monkeypatch):
     alice = SimpleNamespace(is_gm=True, char_guid=1, map_id=1)
-    monkeypatch.setattr(chat_handlers.chat_commands, "_require_gm", lambda _session: None)
     monkeypatch.setattr(chat_handlers.chat_commands, "transport_debug_messages_enabled", lambda: True)
     monkeypatch.setattr(
         chat_handlers.chat_commands,
@@ -2597,267 +2628,6 @@ def test_worldporttest_transport_uses_runtime_transform_and_keep_transport(monke
     assert alice.movement_state.transport_z == pytest.approx(4.0)
     assert alice.movement_state.transport_orientation == pytest.approx(0.5)
     assert alice.movement_state.transport_time == 12345
-
-
-def test_gocollision_show_renders_indexed_bounds_and_reports_details(monkeypatch):
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_notification_response",
-        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
-    )
-    monkeypatch.setattr(chat_handlers.chat_commands, "_session_gm_level", lambda session: 3)
-
-    from server.modules.handlers.world.collision.bounds import DisplayBounds, build_oriented_bounds
-    from server.modules.handlers.world.collision.gameobject_collision import (
-        GameObjectCollision,
-        gameobject_collision_index,
-    )
-    from server.modules.handlers.world.collision import debug_visualization
-
-    gameobject_collision_index.clear()
-    entry = {
-        "guid": 48216,
-        "entry": 179881,
-        "map_id": 1,
-        "display_id": 5951,
-        "type": 1,
-        "state": 1,
-        "flags": 32,
-        "size": 1.25,
-        "x": 100.0,
-        "y": 200.0,
-        "z": 15.0,
-        "orientation": 1.5,
-        "name": "The Severed Head of Onyxia",
-    }
-    bounds = build_oriented_bounds(
-        DisplayBounds((-4.0, -2.0, 0.0), (4.0, 2.0, 10.0)),
-        position=(100.0, 200.0, 15.0),
-        orientation=1.5,
-        scale=1.25,
-    )
-    assert bounds is not None
-    gameobject_collision_index.register(GameObjectCollision(1, 48216, 179881, 5951, bounds, entry["name"]))
-    monkeypatch.setattr(
-        chat_handlers.DatabaseConnection,
-        "_cache_gameobjects_by_map",
-        {1: [dict(entry)]},
-        raising=False,
-    )
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_gocollision_display_bounds_by_display",
-        lambda: {5951: DisplayBounds((-4.0, -2.0, 0.0), (4.0, 2.0, 10.0))},
-    )
-
-    captured = {}
-
-    def _fake_render(session, rendered_bounds, *, duration_ms=0, color="green"):
-        captured["session"] = session
-        captured["bounds"] = rendered_bounds
-        captured["duration_ms"] = duration_ms
-        captured["color"] = color
-        return SimpleNamespace(world_guids=(7001, 7002))
-
-    monkeypatch.setattr(debug_visualization, "render_collision_bounds", _fake_render)
-
-    state = GlobalState()
-    alice = _make_session(state, "Alice", 1001)
-
-    responses = chat_handlers.chat_commands.cmd_gocollision(alice, ["show", "48216"])
-
-    assert captured["session"] is alice
-    assert captured["bounds"] is bounds
-    assert captured["duration_ms"] == 10000
-    rendered_lines = [payload for opcode, payload in responses if opcode == "SMSG_MESSAGECHAT"]
-    assert any(b"system|GO 48216" == payload for payload in rendered_lines)
-    assert any(b"system|Eligible: True" == payload for payload in rendered_lines)
-    assert any(b"system|Indexed: True" == payload for payload in rendered_lines)
-    assert any(b"system|Extents:" in payload for payload in rendered_lines)
-
-
-def test_gocollision_around_renders_each_indexed_object_in_radius(monkeypatch):
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_notification_response",
-        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
-    )
-    monkeypatch.setattr(chat_handlers.chat_commands, "_session_gm_level", lambda session: 3)
-
-    from server.modules.handlers.world.collision import debug_visualization
-
-    rendered = []
-
-    def _fake_render(session, rendered_bounds, *, duration_ms=0, color="green"):
-        rendered.append((session, rendered_bounds, duration_ms, color))
-        return SimpleNamespace(world_guids=(1, 2, 3))
-
-    monkeypatch.setattr(debug_visualization, "render_collision_bounds", _fake_render)
-
-    class _Collision:
-        def __init__(self, guid):
-            self.guid = guid
-            self.bounds = object()
-
-    monkeypatch.setattr(
-        "server.modules.handlers.world.collision.gameobject_collision.gameobject_collision_index.nearby_point",
-        lambda map_id, point, radius: [_Collision(11), _Collision(12)],
-    )
-
-    state = GlobalState()
-    alice = _make_session(state, "Alice", 1001)
-    alice.x = 1.0
-    alice.y = 2.0
-    alice.z = 3.0
-
-    responses = chat_handlers.chat_commands.cmd_gocollision(alice, ["around", "25"])
-
-    assert len(rendered) == 2
-    assert all(item[0] is alice for item in rendered)
-    assert responses == [
-        ("SMSG_MESSAGECHAT", b"system|[GOCollision] rendered 2 indexed objects within 25.0 yards (6 markers)")
-    ]
-
-
-def test_gocollision_clear_despawns_active_debug_visuals(monkeypatch):
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_notification_response",
-        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
-    )
-    monkeypatch.setattr(chat_handlers.chat_commands, "_session_gm_level", lambda session: 3)
-
-    from server.modules.handlers.world.collision import debug_visualization
-
-    monkeypatch.setattr(
-        debug_visualization,
-        "clear_debug_visualizations",
-        lambda session: [("SMSG_UPDATE_OBJECT", b"clear-me")],
-    )
-
-    state = GlobalState()
-    alice = _make_session(state, "Alice", 1001)
-
-    responses = chat_handlers.chat_commands.cmd_gocollision(alice, ["clear"])
-
-    assert responses == [
-        ("SMSG_UPDATE_OBJECT", b"clear-me"),
-        ("SMSG_MESSAGECHAT", b"system|[GOCollision] cleared debug visuals"),
-    ]
-
-
-def test_gocollision_shadowstats_reports_geometry_shadow_counters(monkeypatch):
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_notification_response",
-        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
-    )
-    monkeypatch.setattr(chat_handlers.chat_commands, "_session_gm_level", lambda session: 3)
-    monkeypatch.setattr(
-        "server.modules.handlers.world.collision.geometry_shadow.format_geometry_shadow_stats_lines",
-        lambda: ["[GeometryShadow] statistics", "comparisons=4 agreements=3 disagreements=1"],
-    )
-
-    state = GlobalState()
-    alice = _make_session(state, "Alice", 1001)
-
-    responses = chat_handlers.chat_commands.cmd_gocollision(alice, ["shadowstats"])
-
-    assert responses == [
-        ("SMSG_MESSAGECHAT", b"system|[GeometryShadow] statistics"),
-        ("SMSG_MESSAGECHAT", b"system|comparisons=4 agreements=3 disagreements=1"),
-    ]
-
-
-def test_world_lift_on_loads_nearby_elevator_gameobjects(monkeypatch):
-    monkeypatch.setattr(
-        chat_handlers.chat_commands,
-        "_notification_response",
-        lambda message: [("SMSG_MESSAGECHAT", f"system|{message}".encode())],
-    )
-    monkeypatch.setattr(
-        chat_handlers.chat_commands.DatabaseConnection,
-        "get_gameobjects_near",
-        lambda map_id, x, y, radius, limit: [
-            {
-                "guid": 873,
-                "entry": 11899,
-                "map_id": int(map_id),
-                "x": float(x) + 1.0,
-                "y": float(y) + 2.0,
-                "z": 321.0,
-                "orientation": 0.0,
-                "rotation0": 0.0,
-                "rotation1": 0.0,
-                "rotation2": 0.0,
-                "rotation3": 1.0,
-                "animprogress": 0,
-                "state": 1,
-                "type": 11,
-                "display_id": 360,
-                "name": "Mesa Elevator",
-                "faction": 0,
-                "flags": 40,
-                "size": 1.0,
-                "data0": 0,
-                "data1": 0,
-                "data2": 0,
-                "data3": 0,
-            },
-            {
-                "guid": 69967,
-                "entry": 3195,
-                "map_id": int(map_id),
-                "x": float(x) + 3.0,
-                "y": float(y) + 4.0,
-                "z": 18.0,
-                "orientation": 0.0,
-                "rotation0": 0.0,
-                "rotation1": 0.0,
-                "rotation2": 0.0,
-                "rotation3": 1.0,
-                "animprogress": 0,
-                "state": 1,
-                "type": 5,
-                "display_id": 308,
-                "name": "Thunder Bluff",
-                "faction": 0,
-                "flags": 0,
-                "size": 1.0,
-                "data0": 0,
-                "data1": 0,
-                "data2": 0,
-                "data3": 0,
-            },
-        ],
-        raising=False,
-    )
-
-    gameobjects_module = sys.modules["server.modules.handlers.world.bootstrap.gameobjects"]
-    monkeypatch.setattr(
-        gameobjects_module,
-        "_build_gameobject_update_payload",
-        lambda **kwargs: f"lift-{kwargs['entry']['entry']}".encode(),
-        raising=False,
-    )
-
-    state = GlobalState()
-    alice = _make_session(state, "Alice", 1001)
-    alice.realm_id = 1
-    alice.map_id = 1
-    alice.x = -1300.0
-    alice.y = 180.0
-
-    responses = chat_handlers.chat_commands.cmd_world(alice, ["lift", "on"])
-
-    assert responses == [
-        (
-            "SMSG_MESSAGECHAT",
-            b"system|[TransportElevator] legacy lift controls removed; use WorldTransportManager",
-        )
-    ]
-    assert not hasattr(alice, "loaded_lifts")
-    assert not hasattr(alice, "loaded_lift_entries")
 
 
 def test_world_lift_on_keeps_already_streamed_elevator(monkeypatch):
