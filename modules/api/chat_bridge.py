@@ -62,6 +62,16 @@ class ChatBridgeRuntime:
             except FileNotFoundError:
                 pass
 
+    def clear_commands(self) -> int:
+        """Discard commands left from an earlier WorldServer process."""
+        path = self.commands_path()
+        count = len(self._read_jsonl(path))
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return count
+
     def _append_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:

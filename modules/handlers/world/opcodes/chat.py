@@ -1307,7 +1307,13 @@ def _build_field_update_responses(session, field_updates: dict[int, int]) -> lis
     return []
 
 
-def _clear_loaded_world_objects_for_teleport(session, movement_handlers, *, map_id: int) -> list[tuple[str, bytes]]:
+def _clear_loaded_world_objects_for_teleport(
+    session,
+    movement_handlers,
+    *,
+    map_id: int,
+    send_out_of_range: bool = True,
+) -> list[tuple[str, bytes]]:
     responses: list[tuple[str, bytes]] = []
     builder = getattr(movement_handlers, "_build_out_of_range_update_object_payload", None)
     loaded_sets = (
@@ -1320,7 +1326,11 @@ def _clear_loaded_world_objects_for_teleport(session, movement_handlers, *, map_
         if not isinstance(loaded_guids, set):
             continue
         is_gameobject_set = loaded_guids is loaded_sets[0]
-        if builder is not None:
+        # A worldport replaces the entire client map and therefore already
+        # discards the source map's objects.  Sending source-map removals in
+        # the same batch as SMSG_NEW_WORLD can arrive after destination CREATEs
+        # and remove objects whose low GUIDs are reused on the destination.
+        if send_out_of_range and builder is not None:
             for guid in sorted(int(value) for value in loaded_guids):
                 if int(guid) <= 0:
                     continue
@@ -1500,12 +1510,13 @@ def apply_player_state_change(
         ):
             pre_position_responses.extend(spells_handlers.dismount(session))
 
-        if not suppress_worldport_cleanup:
+        if not suppress_worldport_cleanup and not same_map:
             pre_position_responses.extend(
                 _clear_loaded_world_objects_for_teleport(
                     session,
                     movement_handlers,
                     map_id=old_map_id,
+                    send_out_of_range=False,
                 )
             )
             force_player_visibility_destroy(

@@ -108,6 +108,41 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(rows[0]["id"], command["id"])
         self.assertEqual(rows[0]["kind"], "world_broadcast")
 
+    def test_clear_commands_discards_only_pending_command_queue(self):
+        chat_bridge_runtime.record_event(
+            channel="say",
+            player_name="Alice",
+            message="keep event",
+        )
+        chat_bridge_runtime.publish_status_snapshot()
+        chat_bridge_runtime.broadcast_external_message(message="discard command")
+
+        self.assertEqual(chat_bridge_runtime.clear_commands(), 1)
+        self.assertEqual(chat_bridge_runtime.read_commands(after_id=0), [])
+        self.assertEqual(len(chat_bridge_runtime.get_events(after_id=0)), 1)
+        self.assertTrue(chat_bridge_runtime.status_path().exists())
+
+    def test_bridge_startup_discards_commands_from_previous_process(self):
+        chat_bridge_runtime.broadcast_external_message(message="stale")
+
+        class _FakeThread:
+            def __init__(self, **_kwargs):
+                self.started = False
+
+            def start(self):
+                self.started = True
+
+            def is_alive(self):
+                return self.started
+
+            def join(self, timeout=None):
+                self.started = False
+
+        with patch("server.modules.api.bridge_worker.threading.Thread", _FakeThread):
+            self.assertTrue(bridge_worker.start_world_api_bridge())
+
+        self.assertEqual(chat_bridge_runtime.read_commands(after_id=0), [])
+
     def test_bridge_worker_dispatches_world_broadcast(self):
         alice = _FakeSession("Alice", 1)
         global_state.sessions.add(alice)

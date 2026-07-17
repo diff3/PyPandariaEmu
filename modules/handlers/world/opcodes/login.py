@@ -872,12 +872,14 @@ def _queue_world_bootstrap_transition_unchecked(
             Logger.info("[WorldLoginExperiment] sending TIME_SYNC_REQUEST")
         responses.append((opcode_name, payload))
 
+    from server.modules.handlers.world.world_refresh import get_world_refresh_service
     from server.modules.handlers.world.opcodes import movement as movement_handlers
 
     responses.extend(
-        movement_handlers.stream_world_objects_after_teleport(
+        get_world_refresh_service().refresh_after_login(
             session,
             context="login-bootstrap-complete",
+            _object_refresh=movement_handlers.stream_world_objects_after_teleport,
         )
     )
 
@@ -1969,23 +1971,39 @@ def handle_set_active_mover(session, ctx: PacketContext):
     complete_login_world_attachment(session)
     _set_login_state(session, LoginState.IN_WORLD)
     player = get_player_runtime_store().add(Player.from_session(session))
-    sync_player_visibility(session)
-    sync_all_players_on_map(int(player.map_id))
     responses: list[tuple[str, bytes]] = []
-    if bool(
+    destination_refresh_pending = bool(
         getattr(
             session,
             "_worldport_destination_visibility_refresh_pending",
             False,
         )
-    ):
+    )
+    if destination_refresh_pending:
         session._worldport_destination_visibility_refresh_pending = False
-        from server.modules.handlers.world.opcodes import movement as movement_handlers
+    from server.modules.handlers.world.world_refresh import get_world_refresh_service
+    from server.modules.handlers.world.opcodes import movement as movement_handlers
 
+    responses.extend(
+        get_world_refresh_service().refresh_after_login(
+            session,
+            context="login-active-mover-visibility",
+            synchronize_player_visibility=True,
+            stream_world_objects=False,
+            _visibility_sync=sync_player_visibility,
+        )
+    )
+    sync_all_players_on_map(int(player.map_id))
+    if destination_refresh_pending:
         responses.extend(
-            movement_handlers.stream_world_objects_after_teleport(
+            get_world_refresh_service().refresh_after_login(
                 session,
                 context="worldport-active-mover-commit",
+                synchronize_player_visibility=False,
+                stream_world_objects=True,
+                _object_refresh=(
+                    movement_handlers.stream_world_objects_after_teleport
+                ),
             )
         )
     responses.extend(_build_pending_cinematic_response(session))

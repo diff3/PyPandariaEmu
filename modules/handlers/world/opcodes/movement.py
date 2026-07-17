@@ -3636,11 +3636,13 @@ def _complete_owned_near_teleport_from_movement(
     session.near_teleport_pending = False
     session.worldport_ack_pending = False
     complete_world_transition(session)
-    responses = list(
-        stream_world_objects_after_teleport(
-            session,
-            context="near-teleport-movement-fallback",
-        )
+    from server.modules.handlers.world.world_refresh import get_world_refresh_service
+
+    responses = get_world_refresh_service().refresh_after_teleport(
+        session,
+        context="near-teleport-movement-fallback",
+        resync_multiplayer=False,
+        _object_refresh=stream_world_objects_after_teleport,
     )
     session.teleport_destination = None
     Logger.info(
@@ -3926,38 +3928,25 @@ def stream_world_objects_after_teleport(
     *,
     context: str,
 ) -> list[tuple[str, bytes]]:
-    before_gameobjects = set(getattr(session, "loaded_gameobjects", set()) or set())
-    before_npcs = set(getattr(session, "loaded_npcs", set()) or set())
-    before_transports = set((getattr(session, "loaded_transport_entries", {}) or {}).keys())
+    """Compatibility entry point; new transitions use WorldRefreshService."""
+    from server.modules.handlers.world.world_refresh import get_world_refresh_service
 
-    session.last_gameobject_stream_at = 0.0
-    session.last_npc_stream_at = 0.0
-    responses = _maybe_stream_world_objects(
+    return get_world_refresh_service().refresh_player_world(
         session,
-        transition_bootstrap=True,
+        context=context,
+        force_object_stream=True,
+        _object_streamer=_maybe_stream_world_objects,
     )
 
-    after_gameobjects = set(getattr(session, "loaded_gameobjects", set()) or set())
-    after_npcs = set(getattr(session, "loaded_npcs", set()) or set())
-    after_transports = set((getattr(session, "loaded_transport_entries", {}) or {}).keys())
-    transports_sent = len(after_transports - before_transports)
-    gameobjects_sent = len((after_gameobjects - before_gameobjects) - after_transports)
-    npcs_sent = len(after_npcs - before_npcs)
 
-    Logger.info(
-        "[TELEPORT_VISIBILITY_STREAM] context=%s player_guid=%s map=%s "
-        "pos=(%.3f,%.3f,%.3f) gameobjects_sent=%s npcs_sent=%s transports_sent=%s",
-        str(context),
-        int(getattr(session, "char_guid", 0) or getattr(session, "player_guid", 0) or 0),
-        int(getattr(session, "map_id", 0) or 0),
-        float(getattr(session, "x", 0.0) or 0.0),
-        float(getattr(session, "y", 0.0) or 0.0),
-        float(getattr(session, "z", 0.0) or 0.0),
-        int(gameobjects_sent),
-        int(npcs_sent),
-        int(transports_sent),
+def _refresh_after_movement(session, *, context: str) -> list[tuple[str, bytes]]:
+    from server.modules.handlers.world.world_refresh import get_world_refresh_service
+
+    return get_world_refresh_service().refresh_player_world(
+        session,
+        context=context,
+        _object_streamer=_maybe_stream_world_objects,
     )
-    return responses
 
 
 def _maybe_move_companion_pet(session) -> list[tuple[str, bytes]]:
@@ -5700,7 +5689,10 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
                 float(getattr(session, "orientation", 0.0) or 0.0),
                 int(_movement_state(session).flags),
             )
-            stream_responses = _maybe_stream_world_objects(session)
+            stream_responses = _refresh_after_movement(
+                session,
+                context=f"movement:{opcode_name}",
+            )
             companion_responses = _maybe_move_companion_pet_for_opcode(session, opcode_name)
             responses = []
             enter_response = _flying_speed_enter_response(session, was_flying)
@@ -5982,7 +5974,10 @@ def handle_movement_packet(session, ctx: PacketContext) -> Tuple[int, Optional[b
         f"[MOVE] guid=0x{_player_guid(session):X} "
         f"pos=({session.x:.3f}, {session.y:.3f}, {session.z:.3f}) facing={session.orientation:.3f}"
     )
-    stream_responses = _maybe_stream_world_objects(session)
+    stream_responses = _refresh_after_movement(
+        session,
+        context=f"movement:{opcode_name}",
+    )
     if stream_responses:
         movement_responses.extend(stream_responses)
     companion_responses = _maybe_move_companion_pet_for_opcode(session, opcode_name)
@@ -6045,7 +6040,10 @@ def handle_msg_move_set_facing(session, ctx: PacketContext) -> Tuple[int, Option
         f"facing={session.orientation:.3f}"
     )
     broadcast_player_state_update(session, force=True)
-    stream_responses = _maybe_stream_world_objects(session)
+    stream_responses = _refresh_after_movement(
+        session,
+        context="movement:MSG_MOVE_SET_FACING",
+    )
     responses = []
     responses.extend(discovery_responses)
     responses.extend(stream_responses)
@@ -6134,9 +6132,13 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     _save_session_position(session, reason="near-teleport", online=1, force=True)
-    post_teleport_responses = _post_teleport_multiplayer_resync(
+    from server.modules.handlers.world.world_refresh import get_world_refresh_service
+
+    world_refresh_responses = get_world_refresh_service().refresh_after_teleport(
         session,
-        reason="near-teleport-ack",
+        context="near-teleport-ack",
+        _teleport_resync=_post_teleport_multiplayer_resync,
+        _object_refresh=stream_world_objects_after_teleport,
     )
     if fixspeed_pending:
         self_resync_responses = build_same_map_teleport_self_resync_responses(session)
@@ -6159,8 +6161,7 @@ def handle_move_teleport_ack(session, _ctx: PacketContext) -> Tuple[int, Optiona
         )
     ]
     responses.extend(self_resync_responses)
-    responses.extend(post_teleport_responses)
-    responses.extend(stream_world_objects_after_teleport(session, context="near-teleport-ack"))
+    responses.extend(world_refresh_responses)
     responses.extend(_build_current_weather_response(session, reason="near-teleport-ack"))
     if fixspeed_pending:
         for opcode_name, speed_value in (
@@ -6268,11 +6269,6 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
     _capture_persist_position_from_session(session)
     _mark_position_dirty(session)
     _save_session_position(session, reason="worldport", online=1, force=True)
-    post_teleport_responses = _post_teleport_multiplayer_resync(
-        session,
-        reason="worldport-ack",
-    )
-
     Logger.info(
         "[Teleport] world transfer ack destination=%s pos=(%.2f %.2f %.2f %.2f)",
         destination,
@@ -6290,15 +6286,30 @@ def handle_move_worldport_ack(session, _ctx: PacketContext):
             ),
         )
     ]
-    responses.extend(post_teleport_responses)
     if is_player_world_active(session):
-        streamed_world_responses = stream_world_objects_after_teleport(
+        from server.modules.handlers.world.world_refresh import get_world_refresh_service
+
+        streamed_world_responses = get_world_refresh_service().refresh_after_transport(
             session,
             context="worldport-ack",
+            _teleport_resync=_post_teleport_multiplayer_resync,
+            _object_refresh=stream_world_objects_after_teleport,
         )
         responses.extend(streamed_world_responses)
         responses.extend(
             _build_current_weather_response(session, reason="worldport-ack")
+        )
+    else:
+        from server.modules.handlers.world.world_refresh import get_world_refresh_service
+
+        responses.extend(
+            get_world_refresh_service().refresh_player_world(
+                session,
+                context="worldport-ack-inactive",
+                stream_world_objects=False,
+                teleport_resync_reason="worldport-ack",
+                _teleport_resync=_post_teleport_multiplayer_resync,
+            )
         )
     if isinstance(pending_transport_diagnostics, dict):
         destination_entry = pending_transport_diagnostics.get("destination_entry")

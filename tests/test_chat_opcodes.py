@@ -3246,7 +3246,7 @@ def test_same_map_teleport_streams_once_at_ack_completion(monkeypatch):
     assert alice.loaded_transport_entries == {transport_guid: {"entry": 20808}}
 
 
-def test_apply_player_state_change_clears_loaded_world_objects_before_teleport(monkeypatch):
+def test_same_map_teleport_preserves_loaded_objects_until_ack_refresh(monkeypatch):
     movement_module = _install_movement_stub(
         monkeypatch,
         _build_out_of_range_update_object_payload=lambda *, map_id, guid: f"clear|{map_id}|{guid}".encode(),
@@ -3273,13 +3273,69 @@ def test_apply_player_state_change_clears_loaded_world_objects_before_teleport(m
         map_id=1,
     )
 
-    assert ("SMSG_UPDATE_OBJECT", b"clear|1|11") in responses
-    assert ("SMSG_UPDATE_OBJECT", b"clear|1|22") in responses
+    assert not any(payload.startswith(b"clear|") for _opcode, payload in responses)
+    assert alice.loaded_gameobjects == {11}
+    assert alice.loaded_transport_entries == {
+        11: {"entry": 20808},
+        33: {"entry": 176495},
+    }
+    assert alice.loaded_npcs == {22}
+    assert alice.last_gameobject_stream_at == 123.0
+    assert alice.last_npc_stream_at == 456.0
+
+
+def test_cross_map_teleport_clears_tracking_without_source_despawn_packets(monkeypatch):
+    movement_module = _install_movement_stub(
+        monkeypatch,
+        _build_out_of_range_update_object_payload=lambda *, map_id, guid: (
+            f"clear|{map_id}|{guid}".encode()
+        ),
+    )
+    monkeypatch.setattr(
+        movement_module,
+        "_movement_state",
+        lambda session: SimpleNamespace(flags=1, flags2=2),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        movement_module,
+        "_capture_persist_position_from_session",
+        lambda session: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        movement_module,
+        "_mark_position_dirty",
+        lambda session: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_handlers,
+        "build_login_packet",
+        lambda opcode_name, ctx: f"{opcode_name}|{getattr(ctx, 'map_id', 0)}".encode(),
+    )
+
+    state = GlobalState()
+    alice = _make_session(state, "Alice", 1001)
+    alice.map_id = 1
+    alice.loaded_gameobjects = {11}
+    alice.loaded_transport_entries = {11: {"entry": 20808}}
+    alice.loaded_npcs = {22}
+
+    responses = chat_handlers.apply_player_state_change(
+        alice,
+        position=(10.0, 20.0, 30.0, 1.5),
+        map_id=0,
+    )
+
+    assert not any(payload.startswith(b"clear|") for _opcode, payload in responses)
+    assert responses == [
+        ("SMSG_TRANSFER_PENDING", b"SMSG_TRANSFER_PENDING|0"),
+        ("SMSG_NEW_WORLD", b"SMSG_NEW_WORLD|0"),
+    ]
     assert alice.loaded_gameobjects == set()
     assert alice.loaded_transport_entries == {}
     assert alice.loaded_npcs == set()
-    assert alice.last_gameobject_stream_at == 0.0
-    assert alice.last_npc_stream_at == 0.0
 
 
 def test_ordinary_teleport_cancels_taxi_before_destination_commit(monkeypatch):

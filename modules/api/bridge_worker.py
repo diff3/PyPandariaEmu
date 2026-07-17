@@ -68,6 +68,12 @@ def start_world_api_bridge() -> bool:
         return False
     if _THREAD is not None and _THREAD.is_alive():
         return True
+    discarded = chat_bridge_runtime.clear_commands()
+    if discarded:
+        Logger.info(
+            "[ChatAPI] discarded %s stale queued commands on startup",
+            int(discarded),
+        )
     _STOP.clear()
     _THREAD = threading.Thread(target=_worker_loop, daemon=True, name="world-api-bridge")
     _THREAD.start()
@@ -83,4 +89,3 @@ def stop_world_api_bridge() -> None:
     if thread is not None and thread.is_alive():
         thread.join(timeout=2.0)
     Logger.info("[ChatAPI] bridge worker stopped")
-
