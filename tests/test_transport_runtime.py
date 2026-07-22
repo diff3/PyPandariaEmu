@@ -4770,8 +4770,16 @@ def test_transport_manager_attach_requires_same_authoritative_map():
     transport_runtime._ensure_movement_instance_for_state(state)
     transport_runtime._commit_transport_state_from_movement_cache(state)
 
-    assert manager.can_attach(SimpleNamespace(char_guid=1, map_id=1), state.guid) is True
-    assert manager.can_attach(SimpleNamespace(char_guid=1, map_id=0), state.guid) is False
+    from server.modules.handlers.world.runtime.player_store import resolve_player_runtime
+
+    assert manager.can_attach(
+        resolve_player_runtime(SimpleNamespace(char_guid=1, map_id=1)),
+        state.guid,
+    ) is True
+    assert manager.can_attach(
+        resolve_player_runtime(SimpleNamespace(char_guid=1, map_id=0)),
+        state.guid,
+    ) is False
 
 
 
@@ -4794,7 +4802,12 @@ def test_unknown_static_gameobject_attachment_is_rejected():
         loaded_gameobject_entries={},
     )
 
-    assert transport_runtime.can_attach_transport(session, world_guid) is False
+    from server.modules.handlers.world.runtime.player_store import resolve_player_runtime
+
+    assert transport_runtime.can_attach_transport(
+        resolve_player_runtime(session),
+        world_guid,
+    ) is False
 
 
 

@@ -41,6 +41,7 @@ from server.modules.handlers.world.movements.types import (
     PassengerTransferState,
 )
 from server.modules.handlers.world.runtime.transport import Transport
+from server.modules.handlers.world.runtime.player import Player
 from server.modules.handlers.world.runtime.elevator import Elevator
 from server.modules.handlers.world.runtime.elevator_store import (
     get_elevator_runtime_store,
@@ -516,25 +517,25 @@ class WorldTransportManager:
             TRANSPORT_VISIBILITY_WAITING,
         )
 
-    def can_attach(self, session: Any, world_guid: int) -> bool:
+    def can_attach(self, player: Player, world_guid: int) -> bool:
         world_guid = int(world_guid)
         state = self.state_for_guid(world_guid)
         if state is None:
             Logger.warning(
                 "[TransportAttach] denied reason=unknown_runtime transport=0x%016X player=%s map=%s",
                 world_guid & 0xFFFFFFFFFFFFFFFF,
-                int(getattr(session, "char_guid", 0) or 0),
-                int(getattr(session, "map_id", 0) or 0),
+                int(player.character_guid),
+                int(player.map_id),
             )
             return False
         _sync_transport_state_from_movement_cache(state)
-        if int(getattr(session, "map_id", 0) or 0) != int(state.map_id):
+        if int(player.map_id) != int(state.map_id):
             Logger.warning(
                 "[TransportAttach] denied reason=wrong_map transport=0x%016X player=%s "
                 "player_map=%s transport_map=%s state=%s",
                 world_guid & 0xFFFFFFFFFFFFFFFF,
-                int(getattr(session, "char_guid", 0) or 0),
-                int(getattr(session, "map_id", 0) or 0),
+                int(player.character_guid),
+                int(player.map_id),
                 int(state.map_id),
                 _movement_lifecycle_state(world_guid),
             )
@@ -544,7 +545,7 @@ class WorldTransportManager:
             Logger.warning(
                 "[TransportAttach] denied reason=visibility transport=0x%016X player=%s state=%s visibility=%s",
                 world_guid & 0xFFFFFFFFFFFFFFFF,
-                int(getattr(session, "char_guid", 0) or 0),
+                int(player.character_guid),
                 _movement_lifecycle_state(world_guid),
                 visibility,
             )
@@ -2055,8 +2056,8 @@ def authoritative_transport_entry_for_guid(world_guid: int) -> dict[str, Any] | 
     return get_world_transport_manager().entry_for_guid(int(world_guid))
 
 
-def can_attach_transport(session: Any, world_guid: int) -> bool:
-    return get_world_transport_manager().can_attach(session, int(world_guid))
+def can_attach_transport(player: Player, world_guid: int) -> bool:
+    return get_world_transport_manager().can_attach(player, int(world_guid))
 
 
 def record_transport_attach(session: Any, world_guid: int, *, opcode_name: str = "", **offsets) -> None:

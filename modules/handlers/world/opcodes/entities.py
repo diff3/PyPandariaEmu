@@ -19,6 +19,7 @@ from server.modules.handlers.world.dispatcher import register
 from server.modules.game.guid import GameObjectGuid, GuidHelper
 from server.modules.handlers.world.bootstrap.playerobjects import build_single_u32_update_object_payload
 from server.modules.handlers.world.runtime.player_store import (
+    resolve_player_runtime,
     sync_player_runtime_from_session,
 )
 from server.modules.handlers.world.teleport.gameobject_teleport import (
@@ -485,6 +486,7 @@ def _sit_on_chair(session, entry: dict) -> list[tuple[str, bytes]]:
 @register("CMSG_GAME_OBJ_REPORT_USE")
 @register("CMSG_GAME_OBJ_USE")
 def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[list[tuple[str, bytes]]]]:
+    player = resolve_player_runtime(session)
     opcode_name = str(ctx.name or "")
     guid = _decode_gameobject_use_guid(bytes(ctx.payload or b""), ctx.decoded or {}, opcode_name)
     if guid is None:
@@ -503,7 +505,7 @@ def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[li
             entry = _find_nearest_chair(session)
         if entry is None:
             return 0, None
-        teleport_responses = activate_gameobject_teleport(session, entry)
+        teleport_responses = activate_gameobject_teleport(session, player, entry)
         if teleport_responses is not None:
             return 0, (teleport_responses or None)
         responses = _sit_on_chair(session, entry)
@@ -556,7 +558,7 @@ def handle_gameobject_use(session, ctx: PacketContext) -> Tuple[int, Optional[li
     except Exception as exc:
         Logger.warning("[HalfhillFarm] gameobject use failed: %s", exc)
 
-    teleport_responses = activate_gameobject_teleport(session, entry)
+    teleport_responses = activate_gameobject_teleport(session, player, entry)
     if teleport_responses is not None:
         return 0, (teleport_responses or None)
 

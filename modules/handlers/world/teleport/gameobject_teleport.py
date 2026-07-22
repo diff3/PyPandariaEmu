@@ -11,6 +11,7 @@ from shared.Logger import Logger
 from shared.PathUtils import get_dbc_root
 from server.modules.database.DatabaseConnection import DatabaseConnection
 from server.modules.dbc import read_dbc
+from server.modules.handlers.world.runtime.player import Player
 from server.modules.handlers.world.teleport.map_transfer import (
     TeleportDestination,
     apply_map_transfer,
@@ -286,10 +287,10 @@ def _has_invalid_interaction_flags(entry: dict[str, Any]) -> bool:
     return bool(invalid_flags)
 
 
-def _is_at_interaction_distance(session, entry: dict[str, Any]) -> bool:
-    dx = _entry_float(entry, "x") - float(getattr(session, "x", 0.0) or 0.0)
-    dy = _entry_float(entry, "y") - float(getattr(session, "y", 0.0) or 0.0)
-    dz = _entry_float(entry, "z") - float(getattr(session, "z", 0.0) or 0.0)
+def _is_at_interaction_distance(player: Player, entry: dict[str, Any]) -> bool:
+    dx = _entry_float(entry, "x") - float(player.x)
+    dy = _entry_float(entry, "y") - float(player.y)
+    dz = _entry_float(entry, "z") - float(player.z)
     radius = max(TELEPORT_GAMEOBJECT_USE_RADIUS, float(entry.get("size", 1.0) or 1.0) * 5.0)
     return ((dx * dx) + (dy * dy) + (dz * dz)) <= (radius * radius)
 
@@ -313,7 +314,11 @@ def _spam_guard_allows(session, entry: dict[str, Any]) -> bool:
     return True
 
 
-def activate_gameobject_teleport(session, entry: dict[str, Any]) -> list[tuple[str, bytes]] | None:
+def activate_gameobject_teleport(
+    session,
+    player: Player,
+    entry: dict[str, Any],
+) -> list[tuple[str, bytes]] | None:
     Logger.info(
         "[GO_INTERACT] player=%s guid=%s entry=%s type=%s name=%r",
         int(getattr(session, "char_guid", 0) or 0),
@@ -330,7 +335,7 @@ def activate_gameobject_teleport(session, entry: dict[str, Any]) -> list[tuple[s
     if _has_invalid_interaction_flags(entry):
         return []
 
-    if not _is_at_interaction_distance(session, entry):
+    if not _is_at_interaction_distance(player, entry):
         Logger.info(
             "[GO_TELEPORT] too far player=%s guid=%s entry=%s",
             int(getattr(session, "char_guid", 0) or 0),

@@ -185,4 +185,9 @@ def test_static_type11_gameobject_is_not_an_attachable_transport():
 
     transport_runtime._runtime_transport_states().pop(world_guid, None)
 
-    assert transport_runtime.can_attach_transport(session, world_guid) is False
+    from server.modules.handlers.world.runtime.player_store import resolve_player_runtime
+
+    assert transport_runtime.can_attach_transport(
+        resolve_player_runtime(session),
+        world_guid,
+    ) is False

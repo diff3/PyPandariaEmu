@@ -21,6 +21,7 @@ from server.modules.handlers.world.runtime.gameobject_store import (
 )
 from server.modules.handlers.world.runtime.player import Player
 from server.modules.handlers.world.runtime.player_store import (
+    resolve_player_runtime,
     sync_player_runtime_from_session,
 )
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
@@ -1940,7 +1941,8 @@ def _store_transport_state_from_parsed(session, opcode_name: str, parsed: dict[s
         try:
             from server.modules.handlers.world.transport_runtime import can_attach_transport
 
-            if not can_attach_transport(session, transport_guid):
+            player = resolve_player_runtime(session)
+            if not can_attach_transport(player, transport_guid):
                 try:
                     from server.modules.handlers.world.transport_runtime import detach_session_transport_passenger
 
