@@ -3685,6 +3685,10 @@ def _player_guid(session) -> int:
 
 
 def _visible_peer_targets(session) -> list:
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
     state = getattr(session, "global_state", None)
     if state is None:
         return []
@@ -3699,7 +3703,7 @@ def _visible_peer_targets(session) -> list:
             continue
         if not callable(getattr(target, "send_response", None)):
             continue
-        visible_guids = getattr(target, "visible_guids", set()) or set()
+        visible_guids = get_player_visibility_service().known_guids(target)
         if source_guid not in visible_guids:
             continue
         targets.append(target)

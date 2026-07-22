@@ -77,6 +77,10 @@ PRE_UPDATE_OBJECT_PACKETS = (
     # MOTD goes out as CHAT_MSG_SYSTEM instead of SMSG_MOTD for now.
     # "SMSG_MOTD",
     "SMSG_UPDATE_TALENT_DATA",
+    # SkyFire sends this before world entry. Besides map difficulty it tells
+    # the client that this is not a starter account with restricted level or
+    # money, which is required by native account-gated actions such as mail.
+    "SMSG_WORLD_SERVER_INFO",
     "SMSG_SEND_KNOWN_SPELLS",
     "SMSG_SEND_UNLEARN_SPELLS",
     "SMSG_UPDATE_ACTION_BUTTONS",

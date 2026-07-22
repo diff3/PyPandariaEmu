@@ -62,6 +62,7 @@ def reset_state() -> None:
     session.player_guid = None
     session.world_guid = None
     session.char_guid = None
+    session.selected_character = None
     session.time_sync_seq = 0
     session.last_position_save_at = 0.0
     session.position_dirty = False
@@ -79,7 +80,14 @@ def reset_state() -> None:
     session.last_saved_y = 0.0
     session.last_saved_z = 0.0
     session.last_saved_orientation = 0.0
-    session.visible_guids.clear()
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
+    get_player_visibility_service().clear_player_links(
+        session,
+        list(getattr(global_state, "sessions", set()) or ()),
+    )
     login_handlers._reset_login_flow_state(session)
 
 
@@ -212,11 +220,16 @@ def handle_disconnect_session(target_session) -> None:
             Logger.warning(f"[DISCONNECT] global_state cleanup failed: {exc}")
 
     get_player_runtime_store().remove(guid)
+    target_session.selected_character = None
 
     # --- Clear references ---
     target_session.region = None
     target_session.send_response = None
-    target_session.visible_guids.clear()
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
+    get_player_visibility_service().clear_player_links(target_session, ())
     target_session.near_teleport_pending = False
     target_session.worldport_ack_pending = False
 

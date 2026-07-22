@@ -40,6 +40,16 @@ def _dispatch_command(command: dict) -> None:
         )
         Logger.info("[ChatAPI] processed command id=%s kind=%s ok=%s", command.get("id"), kind, int(bool(ok)))
         return
+    if kind == "player_chat":
+        ok = chat_bridge_runtime.dispatch_player_message(
+            sender_guid=int(payload.get("sender_guid", 0) or 0),
+            sender_name=str(payload.get("sender_name", "") or ""),
+            chat_type=str(payload.get("chat_type", "") or ""),
+            target_name=str(payload.get("target_name", "") or ""),
+            message=str(payload.get("message", "") or ""),
+        )
+        Logger.info("[ChatAPI] processed command id=%s kind=%s ok=%s", command.get("id"), kind, int(bool(ok)))
+        return
     Logger.warning("[ChatAPI] ignoring unknown command id=%s kind=%s", command.get("id"), kind)
 
 
@@ -73,6 +83,12 @@ def start_world_api_bridge() -> bool:
         Logger.info(
             "[ChatAPI] discarded %s stale queued commands on startup",
             int(discarded),
+        )
+    discarded_events = chat_bridge_runtime.clear_events()
+    if discarded_events:
+        Logger.info(
+            "[ChatAPI] discarded %s chat events from previous server runs",
+            int(discarded_events),
         )
     _STOP.clear()
     _THREAD = threading.Thread(target=_worker_loop, daemon=True, name="world-api-bridge")

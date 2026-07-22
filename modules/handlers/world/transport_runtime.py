@@ -915,6 +915,30 @@ class WorldTransportManager:
             previous_transform=previous_transform,
         )
         self.update_entry_transform_from_state(state)
+        current_transform = (
+            int(state.map_id),
+            float(state.x),
+            float(state.y),
+            float(state.z),
+            float(state.orientation),
+        )
+        if current_transform != previous_transform:
+            from server.modules.handlers.world.world_refresh import (
+                get_world_refresh_service,
+            )
+
+            refresh_service = get_world_refresh_service()
+            refresh_observers = getattr(
+                refresh_service,
+                "refresh_for_moved_transport",
+                None,
+            )
+            if callable(refresh_observers):
+                refresh_observers(
+                    world_guid=int(world_guid),
+                    previous_map_id=int(previous_transform[0]),
+                    current_map_id=int(current_transform[0]),
+                )
         if not bool(getattr(state, "transfer_active", False)):
             from server.modules.handlers.world.position.publication import (
                 publish_transport,

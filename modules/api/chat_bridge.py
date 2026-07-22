@@ -12,6 +12,12 @@ from typing import Any
 from shared.Logger import Logger
 from shared.PathUtils import get_data_root
 from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_system_payload
+from server.modules.handlers.world.chat.codec import (
+    CHAT_MSG_SAY,
+    CHAT_MSG_WHISPER,
+    CHAT_MSG_WHISPER_INFORM,
+    encode_messagechat_payload,
+)
 from server.modules.handlers.world.state.runtime import dispatch_responses_to_sessions, iter_in_world_sessions
 
 _RUNTIME_DIRNAME = "api_bridge"
@@ -72,6 +78,16 @@ class ChatBridgeRuntime:
             pass
         return count
 
+    def clear_events(self) -> int:
+        """Begin each WorldServer run with an unambiguous chat history."""
+        path = self.events_path()
+        count = len(self._read_jsonl(path))
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return count
+
     def _append_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
@@ -109,6 +125,7 @@ class ChatBridgeRuntime:
         target_name: str = "",
         map_id: int = 0,
         char_guid: int = 0,
+        direction: str = "incoming",
     ) -> dict[str, Any] | None:
         normalized_message = _normalize_text(message, limit=400)
         normalized_player = _normalize_text(player_name, limit=64)
@@ -122,6 +139,7 @@ class ChatBridgeRuntime:
             "target_name": _normalize_text(target_name, limit=64),
             "map_id": int(map_id or 0),
             "char_guid": int(char_guid or 0),
+            "direction": _normalize_text(direction, limit=16) or "incoming",
             "created_at": time.time(),
         }
         self._append_jsonl(self.events_path(), event)
@@ -244,11 +262,170 @@ class ChatBridgeRuntime:
             },
         )
 
+    def player_message(
+        self,
+        *,
+        sender_guid: int = 0,
+        sender_name: str,
+        chat_type: str,
+        message: str,
+        target_name: str = "",
+    ) -> dict[str, Any]:
+        normalized_type = _normalize_text(chat_type, limit=16).lower()
+        if normalized_type not in {"say", "world", "whisper"}:
+            raise ValueError("invalid chat type")
+        normalized_sender = _normalize_text(sender_name, limit=64)
+        normalized_message = _normalize_text(message, limit=400)
+        normalized_target = _normalize_text(target_name, limit=64)
+        if not normalized_sender:
+            raise ValueError("sender name is required")
+        if not normalized_message:
+            raise ValueError("message is required")
+        if normalized_type == "whisper" and not normalized_target:
+            raise ValueError("target name is required")
+        return self.queue_command(
+            kind="player_chat",
+            payload={
+                "sender_guid": max(0, int(sender_guid or 0)),
+                "sender_name": normalized_sender,
+                "chat_type": normalized_type,
+                "target_name": normalized_target,
+                "message": normalized_message,
+            },
+        )
+
+    @staticmethod
+    def _online_session(player_name: str):
+        key = _normalize_text(player_name, limit=64).casefold()
+        if not key:
+            return None
+        for session in iter_in_world_sessions():
+            if str(getattr(session, "player_name", "") or "").strip().casefold() == key:
+                return session
+        return None
+
+    def dispatch_player_message(
+        self,
+        *,
+        sender_guid: int = 0,
+        sender_name: str,
+        chat_type: str,
+        message: str,
+        target_name: str = "",
+    ) -> bool:
+        sender = self._online_session(sender_name)
+        normalized_message = _normalize_text(message, limit=400)
+        resolved_sender_guid = int(getattr(sender, "char_guid", 0) or 0)
+        if resolved_sender_guid <= 0:
+            resolved_sender_guid = max(0, int(sender_guid or 0))
+        if resolved_sender_guid <= 0:
+            try:
+                from sqlalchemy import text
+                from server.modules.database.DatabaseConnection import DatabaseConnection
+
+                DatabaseConnection.initialize()
+                row = DatabaseConnection.chars().execute(
+                    text(
+                        "SELECT guid FROM characters "
+                        "WHERE LOWER(name)=LOWER(:name) AND deleteDate IS NULL LIMIT 1"
+                    ),
+                    {"name": str(sender_name)},
+                ).mappings().first()
+                resolved_sender_guid = int((row or {}).get("guid", 0) or 0)
+            except Exception as exc:
+                Logger.warning(
+                    "[ChatAPI] sender identity lookup failed name=%s err=%s",
+                    sender_name,
+                    exc,
+                )
+        if resolved_sender_guid <= 0 or not normalized_message:
+            return False
+        language = 0
+        if sender is not None:
+            language = int(
+                getattr(sender, "current_language", 0)
+                or getattr(sender, "language", 0)
+                or 0
+            )
+        normalized_type = _normalize_text(chat_type, limit=16).lower()
+        if normalized_type in {"say", "world"}:
+            payload = encode_messagechat_payload(
+                chat_type=CHAT_MSG_SAY,
+                language=language,
+                sender_guid=resolved_sender_guid,
+                sender_name=str(getattr(sender, "player_name", "") or sender_name),
+                target_guid=0,
+                target_name="",
+                message=normalized_message,
+            )
+            targets = iter_in_world_sessions()
+            if normalized_type == "say" and sender is not None:
+                from server.modules.handlers.world.chat.router import chat_router
+
+                targets = list(chat_router.get_targets(sender, "say")) or [sender]
+            dispatch_responses_to_sessions(targets, [("SMSG_MESSAGECHAT", payload)])
+            self.record_event(
+                channel="say",
+                player_name=str(getattr(sender, "player_name", "") or sender_name),
+                message=normalized_message,
+                map_id=int(getattr(sender, "map_id", 0) or 0),
+                char_guid=resolved_sender_guid,
+                direction="outgoing",
+            )
+            return True
+        if normalized_type != "whisper":
+            return False
+        target = self._online_session(target_name)
+        if target is None:
+            return False
+        target_guid = int(getattr(target, "char_guid", 0) or 0)
+        sender_label = str(getattr(sender, "player_name", "") or sender_name)
+        target_label = str(getattr(target, "player_name", "") or target_name)
+        recipient_payload = encode_messagechat_payload(
+            chat_type=CHAT_MSG_WHISPER,
+            language=language,
+            sender_guid=resolved_sender_guid,
+            sender_name=sender_label,
+            target_guid=target_guid,
+            target_name=target_label,
+            message=normalized_message,
+        )
+        echo_payload = encode_messagechat_payload(
+            chat_type=CHAT_MSG_WHISPER_INFORM,
+            language=language,
+            sender_guid=resolved_sender_guid,
+            sender_name=sender_label,
+            target_guid=target_guid,
+            target_name=target_label,
+            message=normalized_message,
+        )
+        dispatch_responses_to_sessions([target], [("SMSG_MESSAGECHAT", recipient_payload)])
+        if sender is not None:
+            dispatch_responses_to_sessions([sender], [("SMSG_MESSAGECHAT", echo_payload)])
+        self.record_event(
+            channel="whisper",
+            player_name=sender_label,
+            message=normalized_message,
+            target_name=target_label,
+            map_id=int(getattr(target, "map_id", 0) or 0),
+            char_guid=resolved_sender_guid,
+            direction="outgoing",
+        )
+        return True
+
     def dispatch_world_broadcast(self, *, message: str, author: str = "", source: str = "Discord") -> int:
-        text = _format_external_chat_message(message, author=author, source=source)
+        # API transport metadata must never leak into the in-game presentation.
+        text = _normalize_text(message, limit=400)
         payload = encode_skyfire_messagechat_system_payload(text)
         targets = iter_in_world_sessions()
         dispatch_responses_to_sessions(targets, [("SMSG_MESSAGECHAT", payload)])
+        if targets:
+            self.record_event(
+                channel="world",
+                player_name="Server",
+                message=text,
+                direction="outgoing",
+            )
         return len(targets)
 
     def dispatch_whisper(self, *, target_name: str, message: str, author: str = "", source: str = "Discord") -> bool:
@@ -263,9 +440,17 @@ class ChatBridgeRuntime:
                 break
         if match is None:
             return False
-        text = _format_external_chat_message(message, author=author, source=source)
+        text = _normalize_text(message, limit=400)
         payload = encode_skyfire_messagechat_system_payload(text)
         dispatch_responses_to_sessions([match], [("SMSG_MESSAGECHAT", payload)])
+        self.record_event(
+            channel="system whisper",
+            player_name="Server",
+            message=text,
+            target_name=str(getattr(match, "player_name", "") or normalized_target),
+            map_id=int(getattr(match, "map_id", 0) or 0),
+            direction="outgoing",
+        )
         return True
 
 

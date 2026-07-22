@@ -45,20 +45,19 @@ def _publish(
     state.z = float(position.z)
     state.orientation = float(position.orientation)
 
-    session.map_id = int(position.map_id)
-    session.instance_id = int(position.instance_id)
-    session.x = float(position.x)
-    session.y = float(position.y)
-    session.z = float(position.z)
-    session.orientation = float(position.orientation)
+    player = getattr(session, "selected_character", None)
+    if player is None:
+        from server.modules.handlers.world.runtime.player_store import (
+            attach_selected_character,
+            get_player_runtime_store,
+        )
 
-    from server.modules.handlers.world.runtime.player_store import (
-        get_player_runtime_store,
-    )
+        player = get_player_runtime_store().get(
+            int(getattr(session, "char_guid", 0) or 0)
+        )
+        if player is not None:
+            attach_selected_character(session, player)
 
-    player = get_player_runtime_store().get(
-        int(getattr(session, "char_guid", 0) or 0)
-    )
     if player is not None:
         player.map_id = int(position.map_id)
         player.instance_id = int(position.instance_id)
@@ -66,6 +65,13 @@ def _publish(
         player.y = float(position.y)
         player.z = float(position.z)
         player.orientation = float(position.orientation)
+
+    session.map_id = int(position.map_id)
+    session.instance_id = int(position.instance_id)
+    session.x = float(position.x)
+    session.y = float(position.y)
+    session.z = float(position.z)
+    session.orientation = float(position.orientation)
 
     if resolve_area:
         from server.modules.handlers.world.position.area_service import (

@@ -70,6 +70,7 @@ from server.modules.handlers.world.position.position_service import (
 )
 from server.modules.handlers.world.runtime.player import Player
 from server.modules.handlers.world.runtime.player_store import (
+    attach_selected_character,
     get_player_runtime_store,
     resolve_player_runtime,
 )
@@ -1398,6 +1399,7 @@ def handle_auth_session(session, ctx: PacketContext):
     session.player_guid = None
     session.world_guid = None
     session.char_guid = None
+    session.selected_character = None
     session.player_name = None
     session.addons, session.banned_addons = prepare_session_addons(decoded.get("addons") or [])
     session.addon_trailing_value = int(decoded.get("addons_crc", 0) or 0)
@@ -1554,6 +1556,7 @@ def handle_player_login(session, ctx: PacketContext):
         orientation=float(normalized_loaded_position.orientation),
         resolve_area=True,
     )
+    attach_selected_character(session, Player.from_session(session))
 
     Logger.info(
         "[Position] load guid=%s name=%s map=%s zone=%s area=%s x=%.3f y=%.3f z=%.3f o=%.3f",
@@ -1979,7 +1982,10 @@ def handle_set_active_mover(session, ctx: PacketContext):
 
     complete_login_world_attachment(session)
     _set_login_state(session, LoginState.IN_WORLD)
-    player = get_player_runtime_store().add(Player.from_session(session))
+    player = get_player_runtime_store().add(resolve_player_runtime(session))
+    from server.modules.handlers.world.active_aura import attach_runtime_owner
+
+    attach_runtime_owner(session, player)
     responses: list[tuple[str, bytes]] = []
     destination_refresh_pending = bool(
         getattr(

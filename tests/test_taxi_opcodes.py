@@ -76,6 +76,8 @@ def _taxi_node_status(payload: bytes) -> int:
         (2, 29, True),   # Horde player, Horde flight master
         (1, 35, True),   # Alliance player, neutral flight master
         (2, 35, True),   # Horde player, neutral flight master
+        (1, 474, True),  # Alliance player, neutral-to-all flight master
+        (2, 474, True),  # Horde player, neutral-to-all flight master
         (1, 29, False),  # Alliance player, Horde flight master
         (2, 12, False),  # Horde player, Alliance flight master
     ),

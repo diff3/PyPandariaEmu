@@ -7,6 +7,8 @@ import math
 import struct
 from typing import Any, Optional, Tuple
 
+from sqlalchemy import text
+
 from DSL.modules.EncoderHandler import EncoderHandler
 from DSL.modules.bitsHandler import BitInterPreter
 from DSL.modules.bitsHandler import BitWriter
@@ -1013,17 +1015,30 @@ def handle_name_query(session, ctx: PacketContext) -> Tuple[int, Optional[list[t
         class_id = int(getattr(target_session, "class_id", 0) or 0)
         level = int(getattr(target_session, "level", 0) or 0)
     else:
-        low_guid = int(getattr(session, "char_guid", 0) or 0)
-        player_name = (
-            str(getattr(session, "player_name", "") or "").strip()
-            or f"Player{int(getattr(session, 'char_guid', 0) or 0)}"
-        )
+        low_guid = int(requested_guid_hint or 0) & 0xFFFFFFFF
+        try:
+            row = DatabaseConnection.chars().execute(
+                text(
+                    "SELECT guid, account, name, race, gender, class, level "
+                    "FROM characters WHERE guid=:guid AND deleteDate IS NULL LIMIT 1"
+                ),
+                {"guid": int(low_guid)},
+            ).mappings().first()
+        except Exception as exc:
+            Logger.warning(
+                "[WorldHandlers] offline name query failed guid=%s err=%s",
+                int(low_guid),
+                exc,
+            )
+            row = None
+
+        player_name = str((row or {}).get("name", "") or "").strip()
         realm_id = int(getattr(session, "realm_id", 0) or 0)
-        account_id = int(getattr(session, "account_id", 0) or 0)
-        race = int(getattr(session, "race", 0) or 0)
-        gender = int(getattr(session, "gender", 0) or 0)
-        class_id = int(getattr(session, "class_id", 0) or 0)
-        level = int(getattr(session, "level", 0) or 0)
+        account_id = int((row or {}).get("account", 0) or 0)
+        race = int((row or {}).get("race", 0) or 0)
+        gender = int((row or {}).get("gender", 0) or 0)
+        class_id = int((row or {}).get("class", 0) or 0)
+        level = int((row or {}).get("level", 0) or 0)
 
     response_guid = int(requested_guid_hint or 0)
     if response_guid <= 0:

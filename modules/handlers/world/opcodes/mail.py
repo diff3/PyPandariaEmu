@@ -16,6 +16,7 @@ MAIL_ERR_CANNOT_SEND_TO_SELF = 2
 MAIL_ERR_RECIPIENT_NOT_FOUND = 4
 MAIL_ERR_INTERNAL_ERROR = 6
 MAIL_ERR_TOO_MANY_ATTACHMENTS = 18
+MAIL_ACTION_DELETED = 4
 
 
 def _read_byte_seq(payload: bytes, cursor: int, present: bool) -> tuple[int, int]:
@@ -106,6 +107,11 @@ def _has_mailbox_access(session, mailbox_guid: int) -> bool:
 
 @register("CMSG_SEND_MAIL")
 def handle_send_mail(session, ctx):
+    Logger.info(
+        "[Mail] CMSG_SEND_MAIL player=%s payload_size=%s",
+        int(getattr(session, "char_guid", 0) or 0),
+        len(bytes(getattr(ctx, "payload", b"") or b"")),
+    )
     try:
         request = parse_send_mail_request(bytes(getattr(ctx, "payload", b"") or b""))
     except ValueError as exc:
@@ -114,6 +120,11 @@ def handle_send_mail(session, ctx):
     if request["item_count"] or request["money"] or request["cod"]:
         return 0, [("SMSG_SEND_MAIL_RESULT", build_send_mail_result(error=MAIL_ERR_TOO_MANY_ATTACHMENTS))]
     if not _has_mailbox_access(session, request["mailbox_guid"]):
+        Logger.warning(
+            "[Mail] send rejected player=%s mailbox=0x%016X reason=no_access",
+            int(getattr(session, "char_guid", 0) or 0),
+            int(request["mailbox_guid"]),
+        )
         return 0, None
     try:
         get_mail_service().send_player(
@@ -159,3 +170,22 @@ def handle_mark_mail_read(session, ctx):
     service.mark_read(int(getattr(session, "char_guid", 0) or 0), struct.unpack_from("<I", payload)[0])
     messages = service.list_mail(int(getattr(session, "char_guid", 0) or 0))
     return 0, [("SMSG_MAIL_QUERY_NEXT_TIME_RESULT", build_next_mail_time_packet(messages))]
+
+
+@register("CMSG_MAIL_DELETE")
+def handle_delete_mail(session, ctx):
+    payload = bytes(getattr(ctx, "payload", b"") or b"")
+    if len(payload) < 8:
+        return 0, [("SMSG_SEND_MAIL_RESULT", build_send_mail_result(
+            error=MAIL_ERR_INTERNAL_ERROR,
+            action=MAIL_ACTION_DELETED,
+        ))]
+    mail_id, _mail_template_id = struct.unpack_from("<II", payload)
+    get_mail_service().delete_mail(
+        int(getattr(session, "char_guid", 0) or 0),
+        int(mail_id),
+    )
+    return 0, [("SMSG_SEND_MAIL_RESULT", build_send_mail_result(
+        mail_id=int(mail_id),
+        action=MAIL_ACTION_DELETED,
+    ))]

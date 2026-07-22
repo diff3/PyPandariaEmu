@@ -43,6 +43,10 @@ from server.modules.handlers.world.movements.manager import get_movement_manager
 from server.modules.handlers.world.runtime.lifecycle import handle_disconnect_session
 from server.modules.handlers.world.addons import load_from_db as load_addon_cache
 from server.modules.api.bridge_worker import start_world_api_bridge, stop_world_api_bridge
+from server.modules.mail.notification_runtime import (
+    start_mail_notification_service,
+    stop_mail_notification_service,
+)
 
 try:
     from server.modules.handlers.WorldHandlers import (
@@ -988,6 +992,10 @@ def run_world() -> None:
     except Exception as exc:
         Logger.warning(f"[ChatAPI] bridge startup failed: {exc}")
     try:
+        start_mail_notification_service()
+    except Exception as exc:
+        Logger.warning(f"[Mail] notification service startup failed: {exc}")
+    try:
         preload_cache()
     except Exception:
         pass
@@ -1024,6 +1032,10 @@ def run_world() -> None:
         stop_world_api_bridge()
     except Exception as exc:
         Logger.warning(f"[ChatAPI] bridge shutdown failed: {exc}")
+    try:
+        stop_mail_notification_service()
+    except Exception as exc:
+        Logger.warning(f"[Mail] notification service shutdown failed: {exc}")
     _shutdown_active_clients()
     try:
         stop_world_transport_manager()

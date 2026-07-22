@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from server.modules.handlers.world.runtime.world_object import WorldObject
@@ -22,6 +22,7 @@ class Player(WorldObject):
     """
 
     character_guid: int
+    active_auras: dict[int, Any] = field(default_factory=dict)
 
     @classmethod
     def from_session(cls, session: Any) -> Player:

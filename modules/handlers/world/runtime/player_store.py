@@ -10,6 +10,52 @@ from collections.abc import Iterator
 from server.modules.handlers.world.runtime.player import Player
 
 
+_PLAYER_GEOMETRY_DEFAULTS = {
+    "map_id": 0,
+    "instance_id": 0,
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0,
+    "orientation": 0.0,
+}
+
+
+class PlayerGeometryField:
+    """WorldSession compatibility access to selected Player geometry."""
+
+    def __init__(self, name: str) -> None:
+        self.name = str(name)
+        self.default = _PLAYER_GEOMETRY_DEFAULTS[self.name]
+        self.bootstrap_name = f"_bootstrap_{self.name}"
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self.default
+        player = getattr(instance, "selected_character", None)
+        if isinstance(player, Player):
+            return getattr(player, self.name)
+        return getattr(instance, self.bootstrap_name, self.default)
+
+    def __set__(self, instance, value) -> None:
+        player = getattr(instance, "selected_character", None)
+        if self.name in {"map_id", "instance_id"}:
+            coerced = int(value or 0)
+        else:
+            coerced = float(value or 0.0)
+        if isinstance(player, Player):
+            setattr(player, self.name, coerced)
+            return
+        setattr(instance, self.bootstrap_name, coerced)
+
+
+def attach_selected_character(connection, player: Player) -> Player:
+    """Attach Player and discard temporary pre-runtime geometry."""
+    connection.selected_character = player
+    for name in _PLAYER_GEOMETRY_DEFAULTS:
+        connection.__dict__.pop(f"_bootstrap_{name}", None)
+    return player
+
+
 class PlayerRuntimeStore:
     """Retain one long-lived Player under its character GUID.
 
@@ -55,17 +101,23 @@ def get_player_runtime_store() -> PlayerRuntimeStore:
     return _PLAYER_RUNTIME_STORE
 
 
-def resolve_player_runtime(session) -> Player:
-    """Return the stored Player or an unregistered session snapshot.
+def resolve_player_runtime(connection_or_player) -> Player:
+    """Resolve the runtime Player selected by a connection.
 
-    Resolution does not change store membership. The fallback preserves paths
-    that run before login registration or after runtime cleanup.
+    Resolution does not change store membership. Direct Player and explicit
+    selected-character paths keep gameplay independent of WorldSession. The
+    legacy store/snapshot fallback preserves bootstrap and existing callers.
     """
-    character_guid = int(getattr(session, "char_guid", 0) or 0)
+    if isinstance(connection_or_player, Player):
+        return connection_or_player
+    selected = getattr(connection_or_player, "selected_character", None)
+    if isinstance(selected, Player):
+        return selected
+    character_guid = int(getattr(connection_or_player, "char_guid", 0) or 0)
     player = _PLAYER_RUNTIME_STORE.get(character_guid)
     if player is not None:
         return player
-    return Player.from_session(session)
+    return Player.from_session(connection_or_player)
 
 
 def sync_player_runtime_from_session(session) -> Player | None:
@@ -80,15 +132,25 @@ def sync_player_runtime_from_session(session) -> Player | None:
     if player is None:
         return None
 
+    position = (
+        int(getattr(session, "map_id", 0) or 0),
+        int(getattr(session, "instance_id", 0) or 0),
+        float(getattr(session, "x", 0.0) or 0.0),
+        float(getattr(session, "y", 0.0) or 0.0),
+        float(getattr(session, "z", 0.0) or 0.0),
+        float(getattr(session, "orientation", 0.0) or 0.0),
+    )
+    attach_selected_character(session, player)
+
     from server.modules.handlers.world.position.publication import publish_absolute
 
     publish_absolute(
         session,
-        map_id=int(getattr(session, "map_id", 0) or 0),
-        instance_id=int(getattr(session, "instance_id", 0) or 0),
-        x=float(getattr(session, "x", 0.0) or 0.0),
-        y=float(getattr(session, "y", 0.0) or 0.0),
-        z=float(getattr(session, "z", 0.0) or 0.0),
-        orientation=float(getattr(session, "orientation", 0.0) or 0.0),
+        map_id=position[0],
+        instance_id=position[1],
+        x=position[2],
+        y=position[3],
+        z=position[4],
+        orientation=position[5],
     )
     return player

@@ -131,6 +131,7 @@ def test_pandaren_display_ids_do_not_fallback_to_blood_elf():
 def test_pre_update_object_packets_include_action_buttons_again():
     assert "SMSG_UPDATE_TALENT_DATA" in login_flow.PRE_UPDATE_OBJECT_PACKETS
     assert "SMSG_UPDATE_ACTION_BUTTONS" in login_flow.PRE_UPDATE_OBJECT_PACKETS
+    assert "SMSG_WORLD_SERVER_INFO" in login_flow.PRE_UPDATE_OBJECT_PACKETS
 
 
 def test_post_update_object_packets_include_empty_achievement_state():

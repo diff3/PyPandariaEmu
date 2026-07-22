@@ -67,9 +67,32 @@ API_DOCUMENTATION = {
         },
         {
             "method": "POST",
+            "path": "/api/chat/player",
+            "description": "Send chat using a trusted player identity",
+            "body": {
+                "sender_guid": "character guid",
+                "sender_name": "character name",
+                "chat_type": "say, world or whisper",
+                "target_name": "whisper recipient",
+                "message": "string",
+            },
+        },
+        {
+            "method": "POST",
             "path": "/api/mail/system",
             "description": "Send persisted system mail to a character",
             "body": {
+                "recipient": "character name or guid",
+                "subject": "string",
+                "body": "string",
+            },
+        },
+        {
+            "method": "POST",
+            "path": "/api/mail/player",
+            "description": "Send persisted player mail to a character",
+            "body": {
+                "sender_guid": "character guid",
                 "recipient": "character name or guid",
                 "subject": "string",
                 "body": "string",
@@ -174,6 +197,20 @@ def build_handler(token: str):
                 )
                 _write_json(self, 202, {"ok": True, "queued": command})
                 return
+            if parsed.path == "/api/chat/player":
+                try:
+                    command = chat_bridge_runtime.player_message(
+                        sender_guid=int(payload.get("sender_guid", 0) or 0),
+                        sender_name=str(payload.get("sender_name", "") or ""),
+                        chat_type=str(payload.get("chat_type", "") or ""),
+                        target_name=str(payload.get("target_name", "") or ""),
+                        message=str(payload.get("message", "") or ""),
+                    )
+                except ValueError as exc:
+                    _write_json(self, 400, {"error": str(exc)})
+                    return
+                _write_json(self, 202, {"ok": True, "queued": command})
+                return
             if parsed.path == "/api/mail/system":
                 from server.modules.database.DatabaseConnection import DatabaseConnection
                 from server.modules.mail.api import MailAPI
@@ -185,6 +222,25 @@ def build_handler(token: str):
                         str(payload.get("body", "") or ""),
                     )
                 except ValueError as exc:
+                    _write_json(self, 400, {"error": str(exc)})
+                    return
+                _write_json(self, 201, {"ok": True, "mail_id": int(mail.id)})
+                return
+            if parsed.path == "/api/mail/player":
+                from server.modules.database.DatabaseConnection import DatabaseConnection
+                from server.modules.mail.api import MailAPI
+                try:
+                    DatabaseConnection.initialize()
+                    sender_guid = int(payload.get("sender_guid", 0) or 0)
+                    if sender_guid <= 0:
+                        raise ValueError("sender_required")
+                    mail = MailAPI.send(
+                        payload.get("recipient", ""),
+                        str(payload.get("subject", "") or ""),
+                        str(payload.get("body", "") or ""),
+                        sender_guid=sender_guid,
+                    )
+                except (TypeError, ValueError) as exc:
                     _write_json(self, 400, {"error": str(exc)})
                     return
                 _write_json(self, 201, {"ok": True, "mail_id": int(mail.id)})

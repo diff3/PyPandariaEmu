@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +21,62 @@ POSITION_SUSPICIOUS_Z_DELTA = 20.0
 POSITION_AUTOSAVE_DISTANCE_THRESHOLD = 1.0
 _POSITION_HISTORY_LIMIT = 128
 _POSITION_HISTORY: dict[int, list[dict[str, Any]]] = {}
+
+
+@dataclass
+class PositionPersistenceState:
+    """Persistence bookkeeping for one selected character.
+
+    This state belongs to the position lifecycle, not to the client connection.
+    It remains addressable through compatibility descriptors on ``WorldSession``
+    while handlers migrate to this service explicitly.
+    """
+
+    last_position_save_at: float = 0.0
+    position_dirty: bool = False
+    persist_map_id: int = 0
+    persist_zone: int = 0
+    persist_instance_id: int = 0
+    persist_x: float = 0.0
+    persist_y: float = 0.0
+    persist_z: float = 0.0
+    persist_orientation: float = 0.0
+    last_saved_map_id: int = 0
+    last_saved_zone: int = 0
+    last_saved_instance_id: int = 0
+    last_saved_x: float = 0.0
+    last_saved_y: float = 0.0
+    last_saved_z: float = 0.0
+    last_saved_orientation: float = 0.0
+
+
+_POSITION_PERSISTENCE_STATES: weakref.WeakKeyDictionary[Any, PositionPersistenceState] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def persistence_state_for(session: Any) -> PositionPersistenceState:
+    """Return the position-lifecycle state associated with a connection."""
+    state = _POSITION_PERSISTENCE_STATES.get(session)
+    if state is None:
+        state = PositionPersistenceState()
+        _POSITION_PERSISTENCE_STATES[session] = state
+    return state
+
+
+class PositionPersistenceField:
+    """Backward-compatible view of a position-service state field."""
+
+    def __init__(self, name: str) -> None:
+        self.name = str(name)
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Any:
+        if instance is None:
+            return self
+        return getattr(persistence_state_for(instance), self.name)
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        setattr(persistence_state_for(instance), self.name, value)
 
 
 @dataclass(frozen=True)

@@ -122,6 +122,18 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(len(chat_bridge_runtime.get_events(after_id=0)), 1)
         self.assertTrue(chat_bridge_runtime.status_path().exists())
 
+    def test_clear_events_removes_history_without_touching_commands(self):
+        chat_bridge_runtime.record_event(
+            channel="say",
+            player_name="Alice",
+            message="stale",
+        )
+        chat_bridge_runtime.broadcast_external_message(message="keep command")
+
+        self.assertEqual(chat_bridge_runtime.clear_events(), 1)
+        self.assertEqual(chat_bridge_runtime.get_events(after_id=0), [])
+        self.assertEqual(len(chat_bridge_runtime.read_commands(after_id=0)), 1)
+
     def test_bridge_startup_discards_commands_from_previous_process(self):
         chat_bridge_runtime.broadcast_external_message(message="stale")
 
@@ -153,6 +165,53 @@ class ChatApiTest(unittest.TestCase):
         )
         bridge_worker._dispatch_command(command)
         self.assertEqual(alice.sent[0][0][0], "SMSG_MESSAGECHAT")
+
+    def test_world_broadcast_hides_api_source_metadata_in_game(self):
+        alice = _FakeSession("Alice", 1)
+        global_state.sessions.add(alice)
+        with patch(
+            "server.modules.api.chat_bridge.encode_skyfire_messagechat_system_payload",
+            side_effect=lambda text: text.encode(),
+        ) as encode:
+            delivered = chat_bridge_runtime.dispatch_world_broadcast(
+                message="Server notice",
+                author="Admin",
+                source="Admin Panel",
+            )
+
+        self.assertEqual(delivered, 1)
+        encode.assert_called_once_with("Server notice")
+        event = chat_bridge_runtime.get_events(after_id=0)[-1]
+        self.assertEqual(event["direction"], "outgoing")
+        self.assertEqual(event["player_name"], "Server")
+        self.assertEqual(event["message"], "Server notice")
+
+    def test_player_say_uses_normal_player_identity(self):
+        alice = _FakeSession("Alice", 1)
+        bob = _FakeSession("Bob", 2)
+        alice.global_state = global_state
+        bob.global_state = global_state
+        global_state.sessions.update({alice, bob})
+        global_state.chat_channels["world"].update({alice, bob})
+
+        captured = {}
+        with patch(
+            "server.modules.api.chat_bridge.encode_messagechat_payload",
+            side_effect=lambda **fields: captured.update(fields) or b"say",
+        ):
+            self.assertTrue(
+                chat_bridge_runtime.dispatch_player_message(
+                    sender_guid=1,
+                    sender_name="Alice",
+                    chat_type="say",
+                    message="In-game say",
+                )
+            )
+
+        self.assertEqual(captured["sender_guid"], 1)
+        self.assertEqual(captured["sender_name"], "Alice")
+        self.assertEqual(captured["message"], "In-game say")
+        self.assertEqual(len(bob.sent), 1)
 
     def test_api_server_startup_uses_configured_host_and_port(self):
         fake_server = type(
@@ -214,7 +273,9 @@ class ChatApiTest(unittest.TestCase):
                 ("GET", "/api/chat/events"),
                 ("POST", "/api/chat/world"),
                 ("POST", "/api/chat/whisper"),
+                ("POST", "/api/chat/player"),
                 ("POST", "/api/mail/system"),
+                ("POST", "/api/mail/player"),
             },
         )
 
@@ -249,6 +310,62 @@ class ChatApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 202)
         self.assertTrue(payload["ok"])
+
+        status, payload = self._request(
+            "POST",
+            "/api/chat/player",
+            body={
+                "sender_name": "Alice",
+                "chat_type": "whisper",
+                "target_name": "Bob",
+                "message": "Player whisper",
+            },
+        )
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["ok"])
+
+    def test_player_chat_dispatch_uses_online_player_identity(self):
+        alice = _FakeSession("Alice", 1)
+        bob = _FakeSession("Bob", 2)
+        global_state.sessions.update({alice, bob})
+
+        self.assertTrue(
+            chat_bridge_runtime.dispatch_player_message(
+                sender_name="Alice",
+                chat_type="whisper",
+                target_name="Bob",
+                message="Reply from admin panel",
+            )
+        )
+
+        self.assertEqual(bob.sent[-1][0][0], "SMSG_MESSAGECHAT")
+        self.assertEqual(alice.sent[-1][0][0], "SMSG_MESSAGECHAT")
+
+    def test_player_chat_requires_online_sender(self):
+        self.assertFalse(
+            chat_bridge_runtime.dispatch_player_message(
+                sender_name="Offline",
+                chat_type="world",
+                message="Not delivered",
+            )
+        )
+
+    def test_player_chat_allows_trusted_offline_sender_for_online_recipient(self):
+        bob = _FakeSession("Bob", 2)
+        global_state.sessions.add(bob)
+
+        self.assertTrue(
+            chat_bridge_runtime.dispatch_player_message(
+                sender_guid=77,
+                sender_name="Offline",
+                chat_type="whisper",
+                target_name="Bob",
+                message="Sent from the admin panel",
+            )
+        )
+
+        self.assertEqual(len(bob.sent), 1)
+        self.assertEqual(bob.sent[0][0][0], "SMSG_MESSAGECHAT")
 
         status, payload = self._request(
             "POST",

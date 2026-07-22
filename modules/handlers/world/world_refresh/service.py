@@ -140,6 +140,62 @@ class WorldRefreshService:
             _object_refresh=_object_refresh,
         )
 
+    def refresh_for_moved_transport(
+        self,
+        *,
+        world_guid: int,
+        previous_map_id: int,
+        current_map_id: int,
+    ) -> int:
+        """Refresh clients whose existing transport visibility changed.
+
+        Transport discovery remains the single owner of range decisions.  This
+        method only compares that result with the client's loaded-object set
+        and runs the normal object streamer when a CREATE or REMOVE is due.
+        """
+        from server.modules.handlers.world.state.runtime import (
+            dispatch_responses_to_sessions,
+            iter_in_world_sessions,
+        )
+        from server.modules.handlers.world.transport_runtime import (
+            synthetic_transport_entries_near,
+        )
+
+        sessions = []
+        seen_sessions: set[int] = set()
+        for map_id in {int(previous_map_id), int(current_map_id)}:
+            for session in iter_in_world_sessions(map_id=map_id):
+                identity = id(session)
+                if identity in seen_sessions:
+                    continue
+                seen_sessions.add(identity)
+                sessions.append(session)
+
+        refreshed = 0
+        for session in sessions:
+            loaded = int(world_guid) in set(
+                getattr(session, "loaded_gameobjects", set()) or set()
+            )
+            discoverable = any(
+                int(entry.get("world_guid", 0) or 0) == int(world_guid)
+                for entry in synthetic_transport_entries_near(
+                    session,
+                    context="movement:autonomous-transport-notification",
+                )
+            )
+            if loaded == discoverable:
+                continue
+
+            responses = self.refresh_player_world(
+                session,
+                context="movement:autonomous-transport",
+                force_object_stream=True,
+            )
+            if responses:
+                dispatch_responses_to_sessions([session], responses)
+            refreshed += 1
+        return refreshed
+
     def refresh_after_login(
         self,
         session,

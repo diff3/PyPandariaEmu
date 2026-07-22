@@ -544,63 +544,38 @@ def build_explored_zones_update_response(
 
 
 def _visible_guid_set(session) -> set[int]:
-    visible = getattr(session, "visible_guids", None)
-    if isinstance(visible, set):
-        return visible
-    normalized = set(int(guid) for guid in (visible or ()) if int(guid or 0) > 0)
-    session.visible_guids = normalized
-    return normalized
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
+    return get_player_visibility_service().known_guids(session)
 
 
 def _clear_session_visibility(session) -> None:
-    visible_guids = _visible_guid_set(session)
-    if not visible_guids:
-        return
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
 
-    session_guid = _session_guid(session)
-    for peer in iter_in_world_sessions():
-        if peer is session:
-            continue
-        if session_guid > 0:
-            _visible_guid_set(peer).discard(session_guid)
-    visible_guids.clear()
+    get_player_visibility_service().clear_player_links(
+        session,
+        iter_in_world_sessions(),
+    )
 
 
 def _sessions_share_phase(left, right) -> bool:
-    left_phase = int(getattr(left, "phase_mask", 0) or 0)
-    right_phase = int(getattr(right, "phase_mask", 0) or 0)
-    return left_phase == 0 or right_phase == 0 or left_phase == right_phase
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
+    return get_player_visibility_service().sessions_share_phase(left, right)
 
 
 def _sessions_in_visibility_range(left, right) -> bool:
-    left_player = resolve_player_runtime(left)
-    right_player = resolve_player_runtime(right)
-    if int(left_player.map_id) != int(right_player.map_id):
-        return False
-    if int(left_player.instance_id) != int(right_player.instance_id):
-        return False
-    if not _sessions_share_phase(left, right):
-        return False
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
 
-    left_position = Position(
-        map=int(left_player.map_id),
-        x=float(left_player.x),
-        y=float(left_player.y),
-        z=float(left_player.z),
-        orientation=float(left_player.orientation),
-    )
-    right_position = Position(
-        map=int(right_player.map_id),
-        x=float(right_player.x),
-        y=float(right_player.y),
-        z=float(right_player.z),
-        orientation=float(right_player.orientation),
-    )
-    delta = position_delta(left_position, right_position)
-    return (
-        math.isfinite(float(delta.distance_3d))
-        and float(delta.distance_3d) <= float(PLAYER_VISIBILITY_DISTANCE)
-    )
+    return get_player_visibility_service().should_observe(left, right)
 
 
 def attach_session_to_world_state(target_session, *, map_id: int) -> None:
@@ -623,7 +598,6 @@ def attach_session_to_world_state(target_session, *, map_id: int) -> None:
     target_session._multiplayer_last_broadcast_key = None
     target_session._multiplayer_last_resync_at = 0.0
     target_session._multiplayer_last_resync_key = None
-    target_session.visible_guids.clear()
     target_session.time_offset = int(getattr(target_session.global_state, "time_offset", 0) or 0)
     target_session.time_speed = float(getattr(target_session.global_state, "time_speed", 0.01666667) or 0.01666667)
     target_session.server_time = int(time.time())
@@ -635,26 +609,60 @@ def attach_session_to_world_state(target_session, *, map_id: int) -> None:
 
 def dispatch_responses_to_sessions(targets, responses) -> None:
     normalized_targets = list(targets or [])
-    if not normalized_targets or not responses:
+    normalized_responses = responses if isinstance(responses, list) else list(responses or ())
+    if not normalized_targets or not normalized_responses:
         return
     for target in normalized_targets:
         sender = getattr(target, "send_response", None)
         if callable(sender):
+            packet_count = len(normalized_responses)
+            target._packet_queue_depth = int(getattr(target, "_packet_queue_depth", 0) or 0) + packet_count
             try:
-                sender(responses)
+                from server.modules.handlers.world.player_diagnostics import log_player_event
+
+                log_player_event(
+                    "packet_queued",
+                    target,
+                    packets=[str(item[0]) for item in normalized_responses],
+                    packet_count=packet_count,
+                )
+                sender(normalized_responses)
+                log_player_event(
+                    "packet_sent",
+                    target,
+                    packets=[str(item[0]) for item in normalized_responses],
+                    packet_count=packet_count,
+                )
             except Exception as exc:
                 Logger.warning(
                     f"[MULTI] send failed player={int(getattr(target, 'char_guid', 0) or 0)} "
                     f"guid=0x{int(getattr(target, 'world_guid', 0) or 0):016X} err={exc}"
                 )
-                region = getattr(target, "region", None)
-                if region is not None:
-                    region.players.discard(target)
-                state = getattr(target, "global_state", None)
-                if state is not None:
-                    state.chat_channels.setdefault("world", set()).discard(target)
-                    getattr(state, "sessions", set()).discard(target)
-                target.send_response = None
+                try:
+                    log_player_event(
+                        "packet_send_failed",
+                        target,
+                        packets=[str(item[0]) for item in normalized_responses],
+                        packet_count=packet_count,
+                        error=str(exc),
+                    )
+                except Exception:
+                    pass
+
+                # A failed socket publication is a disconnect lifecycle event.
+                # Removing only the membership entries here used to leave the
+                # player's bilateral known-object links behind and bypassed all
+                # other canonical logout cleanup.
+                from server.modules.handlers.world.runtime.lifecycle import (
+                    handle_disconnect_session,
+                )
+
+                handle_disconnect_session(target)
+            finally:
+                target._packet_queue_depth = max(
+                    0,
+                    int(getattr(target, "_packet_queue_depth", 0) or 0) - packet_count,
+                )
 
 
 def _filtered_targets(targets: Iterable, *, exclude=None) -> list:
@@ -981,14 +989,10 @@ def _build_player_create_responses(source_session) -> list[tuple[str, bytes]]:
     return responses
 
 
-def _send_player_create(observer_session, source_session) -> bool:
+def _publish_player_create(observer_session, source_session) -> bool:
     source_player = resolve_player_runtime(source_session)
     source_guid = int(source_player.character_guid)
     if source_guid <= 0:
-        return False
-
-    visible_guids = _visible_guid_set(observer_session)
-    if source_guid in visible_guids:
         return False
 
     from server.modules.handlers.world.inventory_sync import build_self_visible_item_update_responses
@@ -1044,26 +1048,46 @@ def _send_player_create(observer_session, source_session) -> bool:
             Logger.warning(f"[CREATE LOG ERROR] {exc}")
 
     dispatch_responses_to_sessions([observer_session], responses)
-    visible_guids.add(source_guid)
     return True
 
 
-def _send_player_remove(observer_session, source_session) -> bool:
+def _publish_player_remove(observer_session, source_session) -> bool:
     source_guid = int(resolve_player_runtime(source_session).character_guid)
     if source_guid <= 0:
         return False
 
-    visible_guids = _visible_guid_set(observer_session)
-    if source_guid not in visible_guids:
-        return False
-
     remove_response = _build_player_remove_update_response(source_session)
-    visible_guids.discard(source_guid)
     if remove_response is None:
         return False
 
     dispatch_responses_to_sessions([observer_session], [remove_response])
     return True
+
+
+def _send_player_create(observer_session, source_session) -> bool:
+    """Compatibility entry point; known-link ownership lives in the service."""
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
+    return get_player_visibility_service().ensure_observer(
+        observer_session,
+        source_session,
+        create=_publish_player_create,
+    )
+
+
+def _send_player_remove(observer_session, source_session) -> bool:
+    """Compatibility entry point; known-link ownership lives in the service."""
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
+    return get_player_visibility_service().remove_observer(
+        observer_session,
+        source_session,
+        remove=_publish_player_remove,
+    )
 
 
 def force_player_visibility_destroy(
@@ -1079,32 +1103,15 @@ def force_player_visibility_destroy(
         return
 
     remove_response = _build_player_remove_update_response(target_session, map_id=map_id)
-    removed_for_observers = 0
-    cleared_for_target = 0
-    target_visible = _visible_guid_set(target_session)
     source_map_id = (
         int(target_player.map_id)
         if map_id is None
         else int(map_id)
     )
 
-    for observer in iter_in_world_sessions():
-        if observer is target_session:
-            continue
-
-        observer_guid = _session_guid(observer)
-        if observer_guid in target_visible:
-            target_visible.discard(observer_guid)
-            cleared_for_target += 1
-
-        observer_visible = _visible_guid_set(observer)
-        if target_guid not in observer_visible:
-            continue
-
-        observer_visible.discard(target_guid)
+    def publish_remove(observer, _source) -> bool:
         if remove_response is None:
-            continue
-
+            return False
         Logger.info(
             "[DESTROY SEND] observer=%s source=%s map=%s reason=%s",
             _session_guid(observer),
@@ -1113,9 +1120,19 @@ def force_player_visibility_destroy(
             str(reason),
         )
         dispatch_responses_to_sessions([observer], [remove_response])
-        removed_for_observers += 1
+        return True
 
-    target_visible.clear()
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
+    removed_for_observers, cleared_for_target = (
+        get_player_visibility_service().clear_player_links(
+            target_session,
+            iter_in_world_sessions(),
+            remove=publish_remove,
+        )
+    )
     Logger.info(
         "[MULTI] forced visibility destroy player=%s map=%s reason=%s "
         "destroyed=%s cleared_for_player=%s",
@@ -1143,11 +1160,23 @@ def _reconcile_session_visibility_pair(
     if source_guid <= 0 or other_guid <= 0:
         return False, False, False
 
-    if _sessions_in_visibility_range(source_session, other_session):
-        created_for_source = _send_player_create(source_session, other_session)
-        created_for_other = _send_player_create(other_session, source_session)
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
+    result = get_player_visibility_service().reconcile_pair(
+        source_session,
+        other_session,
+        # Keep the compatibility publication entry points here for callers
+        # that still invoke this legacy reconciliation wrapper. The canonical
+        # MovementPublisher uses the pure packet publishers directly.
+        create=_send_player_create,
+        remove=_send_player_remove,
+        should_observe=_sessions_in_visibility_range,
+    )
+    if result.other_observes_source:
         updated_for_other = False
-        if not created_for_other and source_guid in _visible_guid_set(other_session):
+        if not result.created_for_other:
             responses = []
             if source_move_response is not None:
                 responses.append(source_move_response)
@@ -1162,11 +1191,9 @@ def _reconcile_session_visibility_pair(
             if responses:
                 updated_for_other = True
                 dispatch_responses_to_sessions([other_session], responses)
-        return created_for_source, created_for_other, updated_for_other
+        return result.created_for_source, result.created_for_other, updated_for_other
 
-    removed_from_source = _send_player_remove(source_session, other_session)
-    removed_from_other = _send_player_remove(other_session, source_session)
-    return removed_from_source, removed_from_other, False
+    return result.removed_from_source, result.removed_from_other, False
 
 
 def sync_player_visibility(target_session) -> None:
@@ -1239,8 +1266,6 @@ def force_bilateral_visibility_resync(target_session, *, reason: str = "manual")
                 removed_links += 1
             if _send_player_remove(other, target_session):
                 removed_links += 1
-            _visible_guid_set(target_session).discard(other_guid)
-            _visible_guid_set(other).discard(target_guid)
             if _send_player_create(target_session, other):
                 created_for_target += 1
             if _send_player_create(other, target_session):
@@ -1357,109 +1382,11 @@ def broadcast_visible_equipment_update(source_session) -> None:
 
 
 def broadcast_player_state_update(source_session, *, force: bool = False) -> None:
-    if not _is_session_in_world(source_session):
-        return
-
-    now = float(time.time())
-    source_player = resolve_player_runtime(source_session)
-    key = (
-        int(source_player.map_id),
-        int(source_player.character_guid),
-        round(float(source_player.x), 5),
-        round(float(source_player.y), 5),
-        round(float(source_player.z), 5),
-        round(float(source_player.orientation), 5),
+    from server.modules.handlers.world.movement_publisher import (
+        get_movement_publisher,
     )
-    last_key = getattr(source_session, "_multiplayer_last_broadcast_key", None)
-    last_at = float(getattr(source_session, "_multiplayer_last_broadcast_at", 0.0) or 0.0)
-    if not force and key == last_key and (now - last_at) < 0.02:
-        _movement_debug_log(
-            "MOVE_DEBUG guid=Player-%s broadcast=false cadence_ms=%.1f reason=dedupe",
-            int(source_player.character_guid),
-            float((now - last_at) * 1000.0),
-        )
-        return
 
-    move_response = _build_player_move_response(source_session)
-    value_responses = []
-    if move_response is None:
-        value_responses = _build_player_value_update_responses(source_session)
-    if move_response is None and not value_responses:
-        return
-
-    resync_responses: list[tuple[str, bytes]] = []
-    last_resync_key = getattr(source_session, "_multiplayer_last_resync_key", None)
-    last_resync_at = float(getattr(source_session, "_multiplayer_last_resync_at", 0.0) or 0.0)
-    if (
-        move_response is None
-        and key != last_resync_key
-        and (force or (now - last_resync_at) >= 0.75)
-    ):
-        remove_response = _build_player_remove_update_response(source_session)
-        create_response = _build_player_create_update_response(source_session)
-        if remove_response is not None:
-            resync_responses.append(remove_response)
-        if create_response is not None:
-            resync_responses.append(create_response)
-
-    peers = [
-        session
-        for session in iter_in_world_sessions(map_id=int(source_player.map_id))
-        if session is not source_session
-    ]
-    if not peers:
-        return
-
-    created = 0
-    updated = 0
-    removed = 0
-    for peer in peers:
-        had_source_before = _session_guid(source_session) in _visible_guid_set(peer)
-        had_peer_before = _session_guid(peer) in _visible_guid_set(source_session)
-        changed_for_source, changed_for_peer, updated_for_peer = _reconcile_session_visibility_pair(
-            source_session,
-            peer,
-            source_move_response=move_response,
-            source_value_responses=value_responses,
-            source_resync_responses=resync_responses,
-        )
-        has_source_now = _session_guid(source_session) in _visible_guid_set(peer)
-        has_peer_now = _session_guid(peer) in _visible_guid_set(source_session)
-        if changed_for_source and has_peer_now:
-            created += 1
-        elif had_peer_before and not has_peer_now:
-            removed += 1
-        if changed_for_peer and has_source_now:
-            created += 1
-        elif had_source_before and not has_source_now:
-            removed += 1
-        updated += int(updated_for_peer)
-
-    source_session._multiplayer_last_broadcast_at = now
-    source_session._multiplayer_last_broadcast_key = key
-    if resync_responses:
-        source_session._multiplayer_last_resync_at = now
-        source_session._multiplayer_last_resync_key = key
-    source_session._multiplayer_removed = False
-    _movement_debug_log(
-        "MOVE_DEBUG guid=Player-%s broadcast=true cadence_ms=%.1f peers=%s "
-        "force=%s move_packet=%s created=%s updated=%s removed=%s",
-        int(source_player.character_guid),
-        float((now - last_at) * 1000.0) if last_at > 0.0 else 0.0,
-        int(len(peers)),
-        bool(force),
-        bool(move_response is not None),
-        int(created),
-        int(updated),
-        int(removed),
-    )
-    if force or created or updated or removed:
-        Logger.debug(
-            f"[MULTI] update player={int(source_player.character_guid)} "
-            f"map={int(source_player.map_id)} peers={len(peers)} "
-            f"created={created} updated={updated} removed={removed} "
-            f"visible={len(_visible_guid_set(source_session))}"
-        )
+    get_movement_publisher().publish(source_session, force=force)
 
 
 def broadcast_player_remove(source_session) -> None:
@@ -1467,23 +1394,20 @@ def broadcast_player_remove(source_session) -> None:
         return
 
     source_player = resolve_player_runtime(source_session)
-    response = _build_player_remove_update_response(source_session)
-    source_guid = int(source_player.character_guid)
     peers = [
         session
         for session in iter_in_world_sessions(map_id=int(source_player.map_id))
         if session is not source_session
     ]
-    removed_from = 0
-    for peer in peers:
-        peer_visible = _visible_guid_set(peer)
-        if source_guid > 0 and source_guid in peer_visible:
-            peer_visible.discard(source_guid)
-            if response is not None:
-                dispatch_responses_to_sessions([peer], [response])
-            removed_from += 1
-        _visible_guid_set(source_session).discard(_session_guid(peer))
-    _visible_guid_set(source_session).clear()
+    from server.modules.handlers.world.player_visibility import (
+        get_player_visibility_service,
+    )
+
+    removed_from, _cleared = get_player_visibility_service().clear_player_links(
+        source_session,
+        peers,
+        remove=_publish_player_remove,
+    )
     if removed_from:
         Logger.info(
             f"[MULTI] removed player={int(source_player.character_guid)} "

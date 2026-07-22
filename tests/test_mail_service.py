@@ -8,13 +8,14 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 from DSL.modules.bitsHandler import BitWriter
 
-from server.modules.handlers.world.opcodes.mail import parse_send_mail_request
+from server.modules.handlers.world.opcodes.mail import handle_delete_mail, parse_send_mail_request
 from server.modules.mail.api import MailAPI
 from server.modules.mail.service import (
     MailService,
     build_mail_list_packet,
     build_next_mail_time_packet,
     build_received_mail_packet,
+    MAIL_SYSTEM_SENDER_ENTRY,
 )
 from server.modules.opcodes.WorldOpcodes import WORLD_SERVER_OPCODES
 
@@ -60,8 +61,9 @@ def test_player_mail_persists_and_tracks_unread(mail_service):
 def test_server_can_send_mail_without_player_session(mail_service):
     created = mail_service.send_system("Receiver", "Welcome", "From the server")
 
-    assert created.sender == 0
+    assert created.sender == MAIL_SYSTEM_SENDER_ENTRY
     assert created.message_type == 3
+    assert created.stationery == 41
     assert mail_service.list_mail(2)[0].subject == "Welcome"
 
 
@@ -72,6 +74,36 @@ def test_marking_last_mail_read_clears_unread_notification(mail_service):
     assert mail_service.unread_count(2) == 0
     packet = build_next_mail_time_packet(mail_service.list_mail(2))
     assert packet[-4:] == struct.pack("<f", -1.0)
+
+
+def test_delete_mail_is_receiver_scoped(mail_service):
+    created = mail_service.send_player(1, 2, "Delete", "Body")
+
+    assert mail_service.delete_mail(1, created.id) is False
+    assert mail_service.delete_mail(2, created.id) is True
+    assert mail_service.list_mail(2) == []
+
+
+def test_delete_mail_handler_uses_skyfire_mail_id_and_action(monkeypatch):
+    deleted = []
+    service = SimpleNamespace(
+        delete_mail=lambda receiver, mail_id: deleted.append((receiver, mail_id)) or True,
+    )
+    monkeypatch.setattr(
+        "server.modules.handlers.world.opcodes.mail.get_mail_service",
+        lambda: service,
+    )
+
+    status, responses = handle_delete_mail(
+        SimpleNamespace(char_guid=30),
+        SimpleNamespace(payload=struct.pack("<II", 5, 0)),
+    )
+
+    assert status == 0
+    assert deleted == [(30, 5)]
+    assert responses == [
+        ("SMSG_SEND_MAIL_RESULT", struct.pack("<6I", 5, 0, 0, 4, 0, 0))
+    ]
 
 
 def test_mail_packets_serialize_canonical_minimal_fields(mail_service):

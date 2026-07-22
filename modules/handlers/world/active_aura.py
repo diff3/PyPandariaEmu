@@ -35,11 +35,21 @@ class ActiveAura:
 
 
 def registry(owner: Any) -> dict[int, ActiveAura]:
-    value = getattr(owner, "active_auras", None)
+    runtime_owner = getattr(owner, "selected_character", None) or owner
+    value = getattr(runtime_owner, "active_auras", None)
     if not isinstance(value, dict):
         value = {}
-        owner.active_auras = value
+        runtime_owner.active_auras = value
     return value
+
+
+def attach_runtime_owner(connection: Any, player: Any) -> None:
+    """Move pre-world aura state from a connection to its runtime Player."""
+    pending = getattr(connection, "active_auras", None)
+    if isinstance(pending, dict) and pending:
+        player.active_auras.update(pending)
+    if "active_auras" in getattr(connection, "__dict__", {}):
+        del connection.active_auras
 
 
 def find_by_spell(owner: Any, spell_id: int) -> ActiveAura | None:

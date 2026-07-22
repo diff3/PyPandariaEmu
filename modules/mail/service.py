@@ -15,6 +15,7 @@ MAIL_NORMAL = 0
 MAIL_CREATURE = 3
 MAIL_STATIONERY_DEFAULT = 41
 MAIL_STATIONERY_GM = 61
+MAIL_SYSTEM_SENDER_ENTRY = 34337  # The Postmaster
 MAIL_CHECK_READ = 0x01
 MAIL_CHECK_HAS_BODY = 0x10
 MAIL_EXPIRE_SECONDS = 30 * 24 * 60 * 60
@@ -118,16 +119,17 @@ class MailService:
 
     def resolve_recipient(self, recipient: str | int) -> dict | None:
         db = self._session()
-        if isinstance(recipient, int) or str(recipient).strip().isdigit():
-            row = db.execute(
-                text("SELECT guid, realm, name FROM characters WHERE guid=:guid AND deleteDate IS NULL LIMIT 1"),
-                {"guid": int(recipient)},
-            ).mappings().first()
-        else:
-            row = db.execute(
-                text("SELECT guid, realm, name FROM characters WHERE LOWER(name)=LOWER(:name) AND deleteDate IS NULL LIMIT 1"),
-                {"name": str(recipient).strip()},
-            ).mappings().first()
+        with db.get_bind().connect() as connection:
+            if isinstance(recipient, int) or str(recipient).strip().isdigit():
+                row = connection.execute(
+                    text("SELECT guid, realm, name FROM characters WHERE guid=:guid AND deleteDate IS NULL LIMIT 1"),
+                    {"guid": int(recipient)},
+                ).mappings().first()
+            else:
+                row = connection.execute(
+                    text("SELECT guid, realm, name FROM characters WHERE LOWER(name)=LOWER(:name) AND deleteDate IS NULL LIMIT 1"),
+                    {"name": str(recipient).strip()},
+                ).mappings().first()
         return dict(row) if row else None
 
     def send_player(self, sender_guid: int, recipient: str | int, subject: str, body: str) -> MailMessage:
@@ -146,8 +148,11 @@ class MailService:
         if target is None:
             raise ValueError("recipient_not_found")
         return self._create(
-            sender=0, receiver=int(target["guid"]), message_type=MAIL_CREATURE,
-            stationery=MAIL_STATIONERY_GM, subject=subject, body=body,
+            sender=MAIL_SYSTEM_SENDER_ENTRY,
+            receiver=int(target["guid"]), message_type=MAIL_CREATURE,
+            # Use the normal readable parchment. The sender type/entry already
+            # identifies this as Postmaster-generated server mail.
+            stationery=MAIL_STATIONERY_DEFAULT, subject=subject, body=body,
         )
 
     def _create(self, *, sender: int, receiver: int, message_type: int, stationery: int, subject: str, body: str) -> MailMessage:
@@ -188,22 +193,43 @@ class MailService:
         return message
 
     def list_mail(self, receiver: int) -> list[MailMessage]:
-        rows = self._session().execute(text("""
-            SELECT id, messageType, sender, receiver, subject, body, deliver_time,
-                   expire_time, checked, stationery
-            FROM mail WHERE receiver=:receiver AND expire_time>:now ORDER BY id
-        """), {"receiver": int(receiver), "now": int(time.time())}).mappings().all()
+        db = self._session()
+        with db.get_bind().connect() as connection:
+            rows = connection.execute(text("""
+                SELECT id, messageType,
+                       CASE
+                           WHEN messageType=:creature_type AND sender=0
+                               THEN :system_sender
+                           ELSE sender
+                       END AS sender,
+                       receiver, subject, body, deliver_time, expire_time, checked,
+                       CASE
+                           WHEN messageType=:creature_type AND stationery=:gm_stationery
+                               THEN :default_stationery
+                           ELSE stationery
+                       END AS stationery
+                FROM mail WHERE receiver=:receiver AND expire_time>:now ORDER BY id
+            """), {
+                "receiver": int(receiver),
+                "now": int(time.time()),
+                "creature_type": MAIL_CREATURE,
+                "system_sender": MAIL_SYSTEM_SENDER_ENTRY,
+                "gm_stationery": MAIL_STATIONERY_GM,
+                "default_stationery": MAIL_STATIONERY_DEFAULT,
+            }).mappings().all()
         return [MailMessage(int(r["id"]), int(r["messageType"]), int(r["sender"]),
                             int(r["receiver"]), str(r["subject"] or ""), str(r["body"] or ""),
                             int(r["deliver_time"]), int(r["expire_time"]), int(r["checked"]),
                             int(r["stationery"])) for r in rows]
 
     def unread_count(self, receiver: int) -> int:
-        return int(self._session().execute(text("""
-            SELECT COUNT(*) FROM mail
-            WHERE receiver=:receiver AND deliver_time<=:now AND expire_time>:now
-              AND (checked & :read_mask)=0
-        """), {"receiver": int(receiver), "now": int(time.time()), "read_mask": MAIL_CHECK_READ}).scalar() or 0)
+        db = self._session()
+        with db.get_bind().connect() as connection:
+            return int(connection.execute(text("""
+                SELECT COUNT(*) FROM mail
+                WHERE receiver=:receiver AND deliver_time<=:now AND expire_time>:now
+                  AND (checked & :read_mask)=0
+            """), {"receiver": int(receiver), "now": int(time.time()), "read_mask": MAIL_CHECK_READ}).scalar() or 0)
 
     def mark_read(self, receiver: int, mail_id: int) -> bool:
         db = self._session()
@@ -218,11 +244,35 @@ class MailService:
             Logger.info("[Mail] unread count changed recipient=%s count=%s", receiver, self.unread_count(receiver))
         return changed
 
+    def delete_mail(self, receiver: int, mail_id: int) -> bool:
+        db = self._session()
+        result = db.execute(
+            text("DELETE FROM mail WHERE id=:id AND receiver=:receiver AND cod=0"),
+            {"id": int(mail_id), "receiver": int(receiver)},
+        )
+        db.commit()
+        changed = int(result.rowcount or 0) > 0
+        if changed:
+            Logger.info("[Mail] deleted id=%s recipient=%s", mail_id, receiver)
+            Logger.info(
+                "[Mail] unread count changed recipient=%s count=%s",
+                receiver,
+                self.unread_count(receiver),
+            )
+        return changed
+
     def notify_recipient(self, receiver: int) -> None:
         from server.modules.handlers.world.state.runtime import dispatch_responses_to_sessions, iter_in_world_sessions
         targets = [s for s in iter_in_world_sessions() if int(getattr(s, "char_guid", 0) or 0) == int(receiver)]
         if targets:
-            dispatch_responses_to_sessions(targets, [("SMSG_RECEIVED_MAIL", build_received_mail_packet())])
+            for target in targets:
+                dispatch_responses_to_sessions(
+                    [target],
+                    self.live_notification_packets(
+                        int(receiver),
+                        realm_id=int(getattr(target, "realm_id", 1) or 1),
+                    ),
+                )
             Logger.info("[Mail] mailbox notification updated recipient=%s unread=%s", receiver, self.unread_count(receiver))
 
     def notification_packets(self, receiver: int) -> list[tuple[str, bytes]]:
@@ -232,6 +282,17 @@ class MailService:
         if unread:
             return [("SMSG_RECEIVED_MAIL", build_received_mail_packet())]
         return [("SMSG_MAIL_QUERY_NEXT_TIME_RESULT", build_next_mail_time_packet(messages))]
+
+    def live_notification_packets(self, receiver: int, *, realm_id: int = 1) -> list[tuple[str, bytes]]:
+        """Build the canonical live icon update when unread state changes."""
+        messages = self.list_mail(receiver)
+        unread = sum(1 for mail in messages if not mail.is_read and mail.deliver_time <= int(time.time()))
+        if unread:
+            packets = [("SMSG_RECEIVED_MAIL", build_received_mail_packet())]
+        else:
+            packets = [("SMSG_MAIL_QUERY_NEXT_TIME_RESULT", build_next_mail_time_packet(messages))]
+        Logger.info("[Mail] mailbox notification updated recipient=%s unread=%s", receiver, unread)
+        return packets
 
 
 _MAIL_SERVICE = MailService()

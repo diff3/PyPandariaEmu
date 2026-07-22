@@ -5,6 +5,14 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
+from server.modules.handlers.world.position.position_service import (
+    PositionPersistenceField,
+)
+from server.modules.handlers.world.player_visibility.service import (
+    VisiblePlayerGuidsField,
+)
+from server.modules.handlers.world.runtime.player_store import PlayerGeometryField
+
 
 class LoginState(str, Enum):
     AUTHED = "AUTHED"
@@ -17,17 +25,40 @@ class LoginState(str, Enum):
 
 @dataclass
 class MovementState:
+    """Connection-local movement protocol snapshot.
+
+    ``Player`` owns absolute character geometry.  The coordinates below are a
+    derived cache of the last accepted/published transform used by movement
+    parsing and serialization.  Transport fields are the wire projection of
+    the authoritative passenger attachment owned by transport runtime.
+
+    No field in this object is authoritative character gameplay state.
+    """
+
+    # Derived cache: last accepted absolute Player transform.
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
     orientation: float = 0.0
+
+    # Protocol state: last accepted movement flags.
     flags: int = 0
     flags2: int = 0
+
+    # Protocol/serialization clocks.  Client time is inbound protocol state;
+    # timestamp_ms and server_movement_timestamp_ms provide monotonic outbound
+    # values for movement serialization.
     timestamp_ms: int = 0
     client_timestamp_ms: int = 0
     server_movement_timestamp_ms: int = 0
+
+    # Derived validation/serialization cache.
     last_valid_orientation: float = 0.0
+
+    # Protocol sequence state.
     counter: int = 0
+
+    # Protocol state: optional fall block from the accepted movement packet.
     has_fall_data: bool = False
     fall_time: int = 0
     fall_vertical_speed: float = 0.0
@@ -35,9 +66,42 @@ class MovementState:
     fall_sin_angle: float = 0.0
     fall_cos_angle: float = 0.0
 
+    # Protocol state and derived flag helpers for vertical movement.
+    pitch: float = 0.0
+    is_ascending: bool = False
+    is_descending: bool = False
+
+    # Transport state: connection-local wire projection of the canonical
+    # RuntimeTransportState passenger attachment.  These fields are consumed
+    # by movement serialization and are not the authoritative attachment.
+    has_transport_data: bool = False
+    transport_guid: int = 0
+    transport_x: float = 0.0
+    transport_y: float = 0.0
+    transport_z: float = 0.0
+    transport_orientation: float = 0.0
+    transport_o: float = 0.0  # compatibility alias for local orientation
+    transport_time: int = 0
+    transport_time2: int = 0
+    transport_time3: int = 0
+    transport_seat: int = -1
+    transport_vehicle_id: int = 0
+
 
 @dataclass(eq=False)
 class WorldSession:
+    """A client connection and its protocol/login state.
+
+    Gameplay services still expose several compatibility attributes on this
+    object. Persistent position bookkeeping is deliberately service-owned and
+    surfaced here only through descriptors while callers are migrated.
+    """
+
+    world_socket: Any = None
+    remote_addr: Any = None
+    selected_character: Any = None
+    active: bool = False
+    last_activity: float = 0.0
     # --------------------------------------------------
     # Identity / auth
     # --------------------------------------------------
@@ -108,15 +172,15 @@ class WorldSession:
     # --------------------------------------------------
     # World / position
     # --------------------------------------------------
-    map_id: int = 0
+    map_id: int = PlayerGeometryField("map_id")
     zone: int = 0
     current_area: int = 0
-    instance_id: int = 0
+    instance_id: int = PlayerGeometryField("instance_id")
 
-    x: float = 0.0
-    y: float = 0.0
-    z: float = 0.0
-    orientation: float = 0.0
+    x: float = PlayerGeometryField("x")
+    y: float = PlayerGeometryField("y")
+    z: float = PlayerGeometryField("z")
+    orientation: float = PlayerGeometryField("orientation")
     movement_state: MovementState = field(default_factory=MovementState)
 
     # --------------------------------------------------
@@ -222,7 +286,7 @@ class WorldSession:
     is_afk: bool = False
     is_dnd: bool = False
     skyfire_login_stage: int = 0
-    visible_guids: set[int] = field(default_factory=set)
+    visible_guids = VisiblePlayerGuidsField()
     gameobjects_visible: bool = True
     loaded_gameobjects: set[int] = field(default_factory=set)
     loaded_gameobject_entries: Dict[int, Dict[str, Any]] = field(default_factory=dict)
@@ -239,19 +303,19 @@ class WorldSession:
     player_travel_state: str = "NORMAL"
     last_gameobject_stream_at: float = 0.0
     last_npc_stream_at: float = 0.0
-    last_position_save_at: float = 0.0
-    position_dirty: bool = False
-    persist_map_id: int = 0
-    persist_zone: int = 0
-    persist_instance_id: int = 0
-    persist_x: float = 0.0
-    persist_y: float = 0.0
-    persist_z: float = 0.0
-    persist_orientation: float = 0.0
-    last_saved_map_id: int = 0
-    last_saved_zone: int = 0
-    last_saved_instance_id: int = 0
-    last_saved_x: float = 0.0
-    last_saved_y: float = 0.0
-    last_saved_z: float = 0.0
-    last_saved_orientation: float = 0.0
+    last_position_save_at = PositionPersistenceField("last_position_save_at")
+    position_dirty = PositionPersistenceField("position_dirty")
+    persist_map_id = PositionPersistenceField("persist_map_id")
+    persist_zone = PositionPersistenceField("persist_zone")
+    persist_instance_id = PositionPersistenceField("persist_instance_id")
+    persist_x = PositionPersistenceField("persist_x")
+    persist_y = PositionPersistenceField("persist_y")
+    persist_z = PositionPersistenceField("persist_z")
+    persist_orientation = PositionPersistenceField("persist_orientation")
+    last_saved_map_id = PositionPersistenceField("last_saved_map_id")
+    last_saved_zone = PositionPersistenceField("last_saved_zone")
+    last_saved_instance_id = PositionPersistenceField("last_saved_instance_id")
+    last_saved_x = PositionPersistenceField("last_saved_x")
+    last_saved_y = PositionPersistenceField("last_saved_y")
+    last_saved_z = PositionPersistenceField("last_saved_z")
+    last_saved_orientation = PositionPersistenceField("last_saved_orientation")

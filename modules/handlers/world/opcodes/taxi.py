@@ -18,7 +18,8 @@ from server.modules.handlers.world.chat.codec import encode_skyfire_messagechat_
 from server.modules.handlers.world.dispatcher import register
 from server.modules.handlers.world.factions import (
     creature_faction_for_player,
-    is_friendly_faction,
+    faction_templates,
+    is_hostile_faction,
 )
 from server.modules.handlers.world.feature_config import (
     flight_paths_enabled,
@@ -610,7 +611,12 @@ def _flight_master_faction_eligible(session, guid: int) -> bool:
             faction_h=int(template.get("faction_H", 0) or 0),
             player_faction_template=player_faction,
         )
-        eligible = is_friendly_faction(flight_master_faction, player_faction)
+        templates = faction_templates()
+        eligible = bool(
+            flight_master_faction in templates
+            and player_faction in templates
+            and not is_hostile_faction(flight_master_faction, player_faction)
+        )
 
     Logger.debug(
         "[TaxiFaction] player_faction=%s flight_master_entry=%s "

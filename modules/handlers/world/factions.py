@@ -43,6 +43,17 @@ class FactionTemplate:
             or (self.our_mask & other.friendly_mask)
         )
 
+    def is_hostile_to(self, other: "FactionTemplate") -> bool:
+        """Match FactionTemplate hostility without treating neutral as hostile."""
+        if self.template_id == other.template_id:
+            return False
+        if other.faction_id:
+            if other.faction_id in self.enemy_factions:
+                return True
+            if other.faction_id in self.friend_factions:
+                return False
+        return bool(self.hostile_mask & other.our_mask)
+
 
 def faction_templates() -> dict[int, FactionTemplate]:
     global _templates
@@ -93,3 +104,10 @@ def is_friendly_faction(source_template_id: int, target_template_id: int) -> boo
     source = templates.get(int(source_template_id))
     target = templates.get(int(target_template_id))
     return bool(source is not None and target is not None and source.is_friendly_to(target))
+
+
+def is_hostile_faction(source_template_id: int, target_template_id: int) -> bool:
+    templates = faction_templates()
+    source = templates.get(int(source_template_id))
+    target = templates.get(int(target_template_id))
+    return bool(source is not None and target is not None and source.is_hostile_to(target))
